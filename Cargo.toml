@@ -1,0 +1,38 @@
+[package]
+name = "shuvarie"
+
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+clap = { version = "4.6.1", features = ["derive"] }
+color-eyre = "0.6.5"
+termina = "0.3.3"
+
+[dependencies.ratatui]
+version = "0.30.2"
+default-features = false
+features = [
+    "all-widgets",
+    "layout-cache",
+    "macros",
+    "std",
+    "termina",
+    "underline-color",
+    "widget-calendar",
+    "unstable-backend-writer",
+]
+
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Charles Dong <chardon_cs@proton.me>"]
+license = "MIT"
+repository = "https://github.com/saikuru-dev/shuvarie.git"

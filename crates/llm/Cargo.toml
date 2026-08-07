@@ -1,0 +1,10 @@
+[package]
+name = "shuvarie-llm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rig = "0.39.0"
