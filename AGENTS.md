@@ -62,7 +62,7 @@ On startup `shuvarie-core` loads config and checks for connected providers. If n
 - **Comments**: do not add comments unless explicitly requested (see project-wide convention).
 - **Formatting/lint**: `cargo fmt` (defaults; `rustfmt.toml` is intentionally empty) and `cargo clippy --all-targets` must pass.
 - **Commits**: follow the `Assisted-By:` trailer convention in `CONTRIBUTING.md` for AI-assisted commits. Do not commit unless explicitly asked.
-- **Skills**: `.agents/skills/` contains `ratatui`, `tokio`, `turso-db`, and `toasty` references — consult them when working on TUI rendering, async, storage, or ORM code. The `ratatui` skill covers Ratatui 0.30.x and the Termina backend this project uses (instead of the default Crossterm backend).
+- **Skills**: `.agents/skills/` contains `ratatui`, `tokio`, `turso-db`, `toasty`, and `rig` references — consult them when working on TUI rendering, async, storage, ORM, or LLM provider/agent code. The `ratatui` skill covers Ratatui 0.30.x and the Termina backend this project uses (instead of the default Crossterm backend). The `rig` skill covers Rig 0.41.x (the `shuvarie-llm` dependency) — provider clients, agents, tools, streaming, RAG, and memory; the root binary never calls `rig` directly.
 
 ## Build & test
 
