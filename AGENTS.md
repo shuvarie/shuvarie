@@ -62,7 +62,7 @@ On startup `shuvarie-core` loads config and checks for connected providers. If n
 - **Comments**: do not add comments unless explicitly requested (see project-wide convention).
 - **Formatting/lint**: `cargo fmt` (defaults; `rustfmt.toml` is intentionally empty) and `cargo clippy --all-targets` must pass.
 - **Commits**: follow the `Assisted-By:` trailer convention in `CONTRIBUTING.md` for AI-assisted commits. Do not commit unless explicitly asked.
-- **Skills**: `.agents/skills/` contains `tokio` and `turso-db` references — consult them when working on async or storage code.
+- **Skills**: `.agents/skills/` contains `tokio`, `turso-db`, and `toasty` references — consult them when working on async, storage, or ORM code.
 
 ## Build & test
 
