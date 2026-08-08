@@ -5,8 +5,8 @@ Shuvarie (シュヴァリエ, "chevalier") is a terminal-based AI agent coding t
 ## Workspace crates
 
 - `./` (binary `shuvarie`) — TUI rendering, event loop, input handling, channel wiring. **No business logic lives here.** Renders state produced by `shuvarie-core`.
-- `./crates/core/` (`shuvarie-core`) — App state, config loading, storage layer (Turso + Toasty ORM), and the async core task that orchestrates LLM and database work. Owns the domain `Message`/`Update` logic.
-- `./crates/llm/` (`shuvarie-llm`) — Thin wrapper over `rig`: `Provider` enum, model listing, streaming completion API, message types. No TUI concerns.
+- `./crates/core/` (`shuvarie-core`) — App state, config loading, storage layer (Turso + Toasty ORM), and the async core task that orchestrates LLM and database work. Owns the domain `Message`/`Update` logic. Depends on `shuvarie-llm` (config holds a `shuvarie_llm::Provider`).
+- `./crates/llm/` (`shuvarie-llm`) — Thin wrapper over `rig`: `Provider` enum (8 variants) with metadata, `ProviderClient` builder, `ModelInfo`, model listing, streaming completion API, message types. No TUI concerns.
 
 When adding a feature: put domain logic in `shuvarie-core`, LLM/SDK glue in `shuvarie-llm`, and only rendering + input dispatch in the root binary.
 
@@ -75,7 +75,8 @@ cargo fmt --check
 
 ## Known issues to resolve
 
-- `shuvarie-core` and `shuvarie-llm` crate roots are minimal stubs (typed errors only) — flesh out as their milestones land (M1+).
+- `shuvarie-llm` implements model listing and `ProviderClient::build` (M1); streaming completion and message types land in M4/M5.
+- `shuvarie-core` implements config load/save and `has_connected_providers()` (M1); the core task, storage layer, and domain `Message`/`Update` logic land in M3/M6.
 - The core task is not yet spawned in `main`; `#[tokio::main]` is in place but only the TUI loop runs. Wire the core task in M3.
 
 ## Tips

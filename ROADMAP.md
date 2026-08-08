@@ -8,9 +8,11 @@ Each milestone is intended to be independently mergeable and to leave the binary
 
 - Working TUI loop (ratatui + termina backend), TEA pattern, renders "Press q to quit", exits on `q`.
 - `shuvarie-core` and `shuvarie-llm` wired as dependencies of the root binary, with real crate roots and typed error enums (`CoreError`, `LlmError` via `thiserror`).
+- `shuvarie-llm` exposes a `Provider` enum (8 variants: OpenAi-compatible, OpenRouter, Groq, Together, DeepSeek, Anthropic, Gemini, Ollama) with metadata (display name, requires-api-key, default base URL), a `ProviderClient` that builds the right `rig` client per kind, and an async `list_models` returning a lightweight `ModelInfo` (rig types stay out of `shuvarie-core`).
+- `shuvarie-core` defines the config schema (`Config`, `ProviderConfig`, `UiPrefs`), loads/saves `~/.config/shuvarie/config.toml` via the `dirs` crate (creates the dir on save, returns a default config when the file is missing), and exposes `has_connected_providers()`. `shuvarie-core` now depends on `shuvarie-llm`.
 - `tokio` (`rt-multi-thread`, `macros`) in the root binary and `shuvarie-core`; `main` is `#[tokio::main]` (core task not yet spawned).
-- `serde` + `toml` in `shuvarie-core` for the upcoming config layer (M1).
-- `rig` declared in `shuvarie-llm`; no config, chat UI, or persistence yet.
+- `serde` + `toml` in `shuvarie-core`; `serde` in `shuvarie-llm` (for the `Provider` enum).
+- No chat UI, model-selection UI, or persistence yet.
 
 ## M0 — Foundations
 
@@ -29,11 +31,11 @@ Wire the pieces together and remove boilerplate. No user-facing change.
 
 Provider abstraction and config persistence, with no UI yet.
 
-- [ ] In `shuvarie-llm`: define a `Provider` enum (`OpenAiCompatible`, `Anthropic`, `Gemini`, `Ollama`) with metadata (display name, requires API key, default base URL).
-- [ ] In `shuvarie-llm`: implement model listing per provider via `rig` (and a static fallback list for Ollama/offline).
-- [ ] In `shuvarie-core`: define the config file schema (`~/.config/shuvarie/config.toml`) — providers (with API key + base URL), active provider, active model, UI prefs.
-- [ ] In `shuvarie-core`: load/save config, create the config dir if missing, and expose `has_connected_providers() -> bool`.
-- [ ] Unit tests for config round-trip serialization and the "no providers" detection.
+- [x] In `shuvarie-llm`: define a `Provider` enum (`OpenAiCompatible`, `Anthropic`, `Gemini`, `Ollama`) with metadata (display name, requires API key, default base URL).
+- [x] In `shuvarie-llm`: implement model listing per provider via `rig` (and a static fallback list for Ollama/offline).
+- [x] In `shuvarie-core`: define the config file schema (`~/.config/shuvarie/config.toml`) — providers (with API key + base URL), active provider, active model, UI prefs.
+- [x] In `shuvarie-core`: load/save config, create the config dir if missing, and expose `has_connected_providers() -> bool`.
+- [x] Unit tests for config round-trip serialization and the "no providers" detection.
 
 ## M2 — Model selection UI
 
