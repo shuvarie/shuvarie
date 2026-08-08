@@ -7,22 +7,23 @@ Each milestone is intended to be independently mergeable and to leave the binary
 ## Current state
 
 - Working TUI loop (ratatui + termina backend), TEA pattern, renders "Press q to quit", exits on `q`.
-- Two placeholder sub-crates (`shuvarie-core`, `shuvarie-llm`) containing only the default `cargo new` boilerplate.
-- `rig` declared in `shuvarie-llm` but unused; no async runtime; no config; no chat UI; no persistence.
-- Root binary does not yet depend on the sub-crates.
+- `shuvarie-core` and `shuvarie-llm` wired as dependencies of the root binary, with real crate roots and typed error enums (`CoreError`, `LlmError` via `thiserror`).
+- `tokio` (`rt-multi-thread`, `macros`) in the root binary and `shuvarie-core`; `main` is `#[tokio::main]` (core task not yet spawned).
+- `serde` + `toml` in `shuvarie-core` for the upcoming config layer (M1).
+- `rig` declared in `shuvarie-llm`; no config, chat UI, or persistence yet.
 
 ## M0 — Foundations
 
 Wire the pieces together and remove boilerplate. No user-facing change.
 
-- [ ] Add `tokio` (with `rt-multi-thread`, `macros`) to the root binary and `shuvarie-core`.
-- [ ] Add `serde` + `toml` to `shuvarie-core` for config loading.
-- [ ] Make `shuvarie-llm` depend on `shuvarie-core` where shared types are needed (or keep them separate; decide here).
-- [ ] Wire `shuvarie-core` and `shuvarie-llm` as dependencies of the root binary.
-- [ ] Replace the `add` boilerplate in both sub-crates with real (possibly near-empty) crate roots and module stubs.
-- [ ] Make `main` async (`#[tokio::main]`) without yet spawning the core task; keep the existing TUI loop working.
-- [ ] Reconcile `Cargo.toml` `license` field with the BSD-3-Clause `LICENSE` file.
-- [ ] Establish typed error enums in library crates (thiserror or manual); keep `color-eyre` only in the binary.
+- [x] Add `tokio` (with `rt-multi-thread`, `macros`) to the root binary and `shuvarie-core`.
+- [x] Add `serde` + `toml` to `shuvarie-core` for config loading.
+- [x] Decide: `shuvarie-llm` and `shuvarie-core` are kept separate for now (no shared types yet); revisit if shared types are needed.
+- [x] Wire `shuvarie-core` and `shuvarie-llm` as dependencies of the root binary.
+- [x] Replace the `add` boilerplate in both sub-crates with real (possibly near-empty) crate roots and module stubs.
+- [x] Make `main` async (`#[tokio::main]`) without yet spawning the core task; keep the existing TUI loop working.
+- [x] Reconcile `Cargo.toml` `license` field with the BSD-3-Clause `LICENSE` file.
+- [x] Establish typed error enums in library crates (thiserror); keep `color-eyre` only in the binary.
 
 ## M1 — Config & provider registry
 

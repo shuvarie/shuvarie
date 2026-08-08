@@ -75,9 +75,8 @@ cargo fmt --check
 
 ## Known issues to resolve
 
-- `Cargo.toml` declares `license = "MIT"` but `LICENSE` is BSD-3-Clause — reconcile before publishing.
-- `crates/core` and `crates/llm` still contain the default `cargo new` `add` boilerplate; replace with real crate roots when implementing their milestones.
-- The root binary does not yet depend on `shuvarie-core` or `shuvarie-llm` — wire them in during M0.
+- `shuvarie-core` and `shuvarie-llm` crate roots are minimal stubs (typed errors only) — flesh out as their milestones land (M1+).
+- The core task is not yet spawned in `main`; `#[tokio::main]` is in place but only the TUI loop runs. Wire the core task in M3.
 
 ## Tips
 

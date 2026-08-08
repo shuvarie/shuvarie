@@ -2,8 +2,8 @@ use std::io::{self, Write};
 
 use ratatui::prelude::*;
 use termina::{
-    event::{KeyCode, KeyEvent},
     Event, PlatformTerminal, Terminal,
+    event::{KeyCode, KeyEvent},
 };
 
 mod escape;
