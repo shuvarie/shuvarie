@@ -16,6 +16,7 @@ mod context;
 mod escape;
 mod model_select;
 mod search;
+mod theme;
 mod widgets;
 
 pub async fn run_tui(cmd_tx: Sender<Command>, mut event_rx: Receiver<Event>) -> io::Result<()> {

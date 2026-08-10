@@ -2,13 +2,14 @@ use std::collections::HashMap;
 
 use ratatui::layout::Constraint::{Fill, Length, Min};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap};
 use shuvarie_core::{Config, ModelInfo, ProviderConfig};
 use shuvarie_llm::Provider;
 use termina::event::{KeyCode, KeyEvent, Modifiers};
 
 use super::context::UpdateCtx;
 use super::search::Search;
+use super::theme;
 use super::widgets::InputBuffer;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -532,41 +533,30 @@ impl ModelSelectScreen {
     }
 
     pub fn view(&mut self, frame: &mut Frame<'_>, area: Rect, config: &Config) {
-        let [help_area, main_area] = Layout::vertical([Length(1), Min(0)]).areas(area);
-
-        let help = if self.add_form.is_some() {
-            "Tab: next field    Enter: submit    Esc: cancel"
-        } else if self.search_active {
-            "Type to filter models    Esc: exit search"
-        } else {
-            "a: add provider    d: remove    Enter: select    Tab: switch pane    /: search models    Ctrl+P: commands    q: quit"
-        };
-        frame.render_widget(Paragraph::new(help).style(Style::new().dim()), help_area);
-
-        let [left, right] = Layout::horizontal([Fill(1), Fill(2)]).areas(main_area);
+        let [left, right] = Layout::horizontal([Fill(1), Fill(2)])
+            .spacing(1)
+            .areas(area);
 
         let names = Self::provider_names(config);
+        let item_fg = if self.focused == Pane::Providers {
+            theme::TEXT
+        } else {
+            theme::TEXT_DIM
+        };
         let provider_items: Vec<ListItem> = names
             .iter()
             .map(|n| {
                 let is_active = config.active_provider.as_deref() == Some(n.as_str());
-                let marker = if is_active { "▶ " } else { "  " };
+                let marker = theme::active_marker(is_active);
                 let pc = &config.providers[n];
-                ListItem::new(format!("{marker}{n}  [{}]", pc.kind.display_name()))
+                ListItem::new(format!("{marker}{n}  [{}]", pc.kind.display_name())).fg(item_fg)
             })
             .collect();
-        let provider_block = Block::default()
-            .borders(Borders::ALL)
-            .title("Providers")
-            .border_style(if self.focused == Pane::Providers {
-                Style::new().cyan()
-            } else {
-                Style::new().dim()
-            });
+        let provider_block = theme::section_block("Providers", self.focused == Pane::Providers);
         frame.render_stateful_widget(
             List::new(provider_items)
                 .block(provider_block)
-                .highlight_style(Style::new().black().on_cyan())
+                .highlight_style(Style::new().bg(theme::ACCENT_BG).fg(theme::TEXT))
                 .highlight_symbol("▶ "),
             left,
             &mut self.providers_state,
@@ -580,12 +570,28 @@ impl ModelSelectScreen {
             .unwrap_or(&[]);
 
         let [search_area, models_area] = Layout::vertical([Length(1), Min(0)]).areas(right);
-        let search_widget = if self.search_active {
-            Paragraph::new(format!("/ {}", self.search.query)).style(Style::new().yellow())
-        } else if self.search.is_empty() {
-            Paragraph::new("/ to search models").style(Style::new().dim())
+
+        let model_title = format!(
+            "Models{}",
+            active_provider
+                .as_ref()
+                .map(|n| format!(" — {n}"))
+                .unwrap_or_default()
+        );
+        let model_item_fg = if self.focused == Pane::Models {
+            theme::TEXT
         } else {
-            Paragraph::new(format!("filter: {}", self.search.query)).style(Style::new().dim())
+            theme::TEXT_DIM
+        };
+
+        let search_widget = if self.search_active {
+            Paragraph::new(format!("/ {}", self.search.query))
+                .bg(theme::SURFACE_FOCUSED)
+                .fg(theme::ACCENT)
+        } else if self.search.is_empty() {
+            Paragraph::new("/ to search models").fg(theme::TEXT_MUTED)
+        } else {
+            Paragraph::new(format!("filter: {}", self.search.query)).fg(theme::TEXT_MUTED)
         };
         frame.render_widget(search_widget, search_area);
 
@@ -595,46 +601,19 @@ impl ModelSelectScreen {
             .map(|&orig| {
                 let m = &models_list[orig];
                 let is_active = config.active_model.as_deref() == Some(m.id.as_str());
-                let marker = if is_active { "▶ " } else { "  " };
-                ListItem::new(format!("{marker}{}", m.display_name()))
+                let marker = theme::active_marker(is_active);
+                ListItem::new(format!("{marker}{}", m.display_name())).fg(model_item_fg)
             })
             .collect();
-        let model_block = Block::default()
-            .borders(Borders::ALL)
-            .title(format!(
-                "Models{}",
-                active_provider
-                    .map(|n| format!(" — {n}"))
-                    .unwrap_or_default()
-            ))
-            .border_style(if self.focused == Pane::Models {
-                Style::new().cyan()
-            } else {
-                Style::new().dim()
-            });
+        let model_block = theme::section_block(&model_title, self.focused == Pane::Models);
         frame.render_stateful_widget(
             List::new(model_items)
                 .block(model_block)
-                .highlight_style(Style::new().black().on_cyan())
+                .highlight_style(Style::new().bg(theme::ACCENT_BG).fg(theme::TEXT))
                 .highlight_symbol("▶ "),
             models_area,
             &mut self.models_state,
         );
-
-        if let Some(msg) = &self.status {
-            let status_area = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
-            frame.render_widget(
-                Paragraph::new(msg.as_str()).style(Style::new().red()),
-                status_area,
-            );
-        }
-        if let Some(loading) = &self.loading {
-            let loading_area = Rect::new(area.x, area.bottom().saturating_sub(2), area.width, 1);
-            frame.render_widget(
-                Paragraph::new(format!("⏳ {loading}")).style(Style::new().yellow()),
-                loading_area,
-            );
-        }
 
         if let Some(form) = &mut self.add_form {
             view_add_form(frame, area, form);
@@ -645,10 +624,7 @@ impl ModelSelectScreen {
 fn view_add_form(frame: &mut Frame<'_>, area: Rect, form: &mut AddProviderForm) {
     let popup = centered_rect(70, 60, area);
     frame.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::new().cyan())
-        .title("Add Provider");
+    let block = theme::overlay_block("Add Provider");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
@@ -656,42 +632,60 @@ fn view_add_form(frame: &mut Frame<'_>, area: Rect, form: &mut AddProviderForm) 
     let needs_key = kind.requires_api_key();
     let default_url = kind.default_base_url().unwrap_or("");
 
+    let label_style = Style::new().fg(theme::TEXT_DIM);
+    let value_style = Style::new().fg(theme::TEXT);
+    let active_value_style = Style::new().fg(theme::ACCENT).bold();
+    let hint_style = Style::new().fg(theme::TEXT_MUTED);
+
+    let make_line = |label: &str, indicator: &str, value: &str, suffix: &str| -> Line {
+        let val_style = if indicator.starts_with('[') {
+            active_value_style
+        } else {
+            value_style
+        };
+        Line::from(vec![
+            Span::styled(format!("{label:<10}"), label_style),
+            Span::styled(value.to_string(), val_style),
+            Span::styled(suffix.to_string(), hint_style),
+        ])
+    };
+
+    let name_ind = form.field_indicator(FormField::Name, &form.name.value);
+    let kind_ind = form.field_indicator(FormField::Kind, kind.display_name());
+    let key_ind = form.field_indicator(FormField::ApiKey, &form.api_key.value);
+    let url_ind = form.field_indicator(FormField::BaseUrl, &form.base_url.value);
+
+    let url_suffix = if form.base_url.is_empty() && !default_url.is_empty() {
+        format!("  (default: {default_url})")
+    } else {
+        String::new()
+    };
+
     let lines = vec![
-        Line::from(format!(
-            "Name:     {}",
-            form.field_indicator(FormField::Name, &form.name.value)
-        )),
-        Line::from(format!(
-            "Kind:     {} (← → to cycle)",
-            form.field_indicator(FormField::Kind, kind.display_name())
-        )),
-        Line::from(format!(
-            "API key:  {}{}",
-            form.field_indicator(FormField::ApiKey, &form.api_key.value),
-            if needs_key { "" } else { "  (not required)" }
-        )),
-        Line::from(format!(
-            "Base URL: {}{}",
-            form.field_indicator(FormField::BaseUrl, &form.base_url.value),
-            if form.base_url.is_empty() && !default_url.is_empty() {
-                format!("  (default: {default_url})")
-            } else {
-                String::new()
-            }
-        )),
+        make_line("Name", &name_ind, &form.name.value, ""),
+        make_line("Kind", &kind_ind, kind.display_name(), "  (← → to cycle)"),
+        make_line(
+            "API key",
+            &key_ind,
+            &form.api_key.value,
+            if needs_key { "" } else { "  (not required)" },
+        ),
+        make_line("Base URL", &url_ind, &form.base_url.value, &url_suffix),
     ];
     let body = Paragraph::new(lines).wrap(Wrap { trim: false });
     let [body_area, error_area, hint_area] =
         Layout::vertical([Min(0), Length(2), Length(1)]).areas(inner);
     frame.render_widget(body, body_area);
     if let Some(e) = &form.error {
-        frame.render_widget(
-            Paragraph::new(e.as_str()).style(Style::new().red()),
-            error_area,
-        );
+        frame.render_widget(Paragraph::new(e.as_str()).fg(theme::ERROR), error_area);
     }
     frame.render_widget(
-        Paragraph::new("Tab: next field    Enter: submit    Esc: cancel").style(Style::new().dim()),
+        Paragraph::new(theme::help_line(&[
+            ("Tab", "next"),
+            ("Enter", "submit"),
+            ("Esc", "cancel"),
+        ]))
+        .fg(theme::TEXT_MUTED),
         hint_area,
     );
 }

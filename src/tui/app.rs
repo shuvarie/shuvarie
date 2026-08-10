@@ -1,4 +1,6 @@
+use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
+use ratatui::widgets::{Block, Paragraph};
 use shuvarie_core::{Config, Event};
 use termina::Event as TermEvent;
 use termina::event::{KeyCode, KeyEvent, KeyEventKind, Modifiers};
@@ -7,6 +9,7 @@ use super::chat::ChatScreen;
 use super::command_menu::{CommandMenu, CommandMenuEffect, CommandMenuMessage};
 use super::context::UpdateCtx;
 use super::model_select::{AddProviderForm, ModelSelectMessage, ModelSelectScreen};
+use super::theme;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Route {
@@ -176,15 +179,91 @@ impl App {
     }
 
     pub fn view(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        frame.render_widget(Block::new().bg(theme::BG), area);
+
+        let [header_area, content_area, footer_area] =
+            Layout::vertical([Length(1), Min(0), Length(1)]).areas(area);
+
+        let route_name = match self.route {
+            Route::ModelSelect => "Models",
+            Route::Chat => "Chat",
+        };
+        let title = theme::title_bar(
+            "shuvarie",
+            route_name,
+            self.ctx.config.active_provider.as_deref(),
+            self.ctx.config.active_model.as_deref(),
+        );
+        frame.render_widget(Paragraph::new(title).bg(theme::SURFACE), header_area);
+
+        let margined = Rect::new(
+            content_area.x + 1,
+            content_area.y,
+            content_area.width.saturating_sub(2),
+            content_area.height,
+        );
         match self.route {
             Route::ModelSelect => {
-                self.model_select.view(frame, area, &self.ctx.config);
+                self.model_select.view(frame, margined, &self.ctx.config);
             }
             Route::Chat => {
-                self.chat.view(frame, area, &self.ctx.config);
+                self.chat.view(frame, margined, &self.ctx.config);
             }
         }
+
+        let footer = self.build_footer();
+        frame.render_widget(Paragraph::new(footer).bg(theme::SURFACE), footer_area);
+
         self.command_menu.view(frame, area);
+    }
+
+    fn build_footer(&self) -> Line<'static> {
+        if self.command_menu.open {
+            return theme::help_line(&[("Enter", "run"), ("Esc", "close"), ("↑↓", "navigate")]);
+        }
+
+        if self.route == Route::ModelSelect && self.model_select.add_form.is_some() {
+            return theme::help_line(&[
+                ("Tab", "next field"),
+                ("Enter", "submit"),
+                ("Esc", "cancel"),
+            ]);
+        }
+
+        if self.route == Route::ModelSelect && self.model_select.search_active {
+            return theme::help_line(&[("Type", "to filter"), ("Esc", "exit search")]);
+        }
+
+        if let Some(err) = &self.model_select.status
+            && (err.starts_with("No models") || err.contains(':'))
+        {
+            return Line::from(vec![
+                Span::raw(" ").fg(theme::TEXT_MUTED),
+                Span::raw(err.clone()).fg(theme::ERROR),
+            ]);
+        }
+
+        if let Some(loading) = &self.model_select.loading {
+            return Line::from(vec![
+                Span::raw(" ").fg(theme::TEXT_MUTED),
+                Span::raw(format!("⏳ {loading}")).fg(theme::WARNING),
+            ]);
+        }
+
+        match self.route {
+            Route::ModelSelect => theme::help_line(&[
+                ("a", "add"),
+                ("d", "remove"),
+                ("Enter", "select"),
+                ("Tab", "switch"),
+                ("/", "search"),
+                ("Ctrl+P", "commands"),
+                ("q", "quit"),
+            ]),
+            Route::Chat => {
+                theme::help_line(&[("Ctrl+P", "commands"), ("Tab", "models"), ("q", "quit")])
+            }
+        }
     }
 }
 

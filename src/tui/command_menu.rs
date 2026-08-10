@@ -1,9 +1,10 @@
 use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph};
 use termina::event::{KeyCode, KeyEvent, Modifiers};
 
 use super::search::Search;
+use super::theme;
 use super::widgets::InputBuffer;
 
 #[derive(Clone, Copy)]
@@ -179,10 +180,7 @@ impl CommandMenu {
         }
         let popup = centered_rect(60, 40, area);
         frame.render_widget(Clear, popup);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::new().cyan())
-            .title("Command Menu");
+        let block = theme::overlay_block("Command Menu");
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
 
@@ -190,9 +188,9 @@ impl CommandMenu {
             Layout::vertical([Length(1), Min(0), Length(1)]).areas(inner);
 
         let prompt = if self.input.value.is_empty() {
-            Paragraph::new("Type to search commands…").style(Style::new().dim())
+            Paragraph::new("Type to search commands…").fg(theme::TEXT_MUTED)
         } else {
-            Paragraph::new(format!("> {}", self.input.value))
+            Paragraph::new(format!("> {}", self.input.value)).fg(theme::TEXT)
         };
         frame.render_widget(prompt, input_area);
 
@@ -201,16 +199,25 @@ impl CommandMenu {
             .iter()
             .map(|&i| {
                 let cmd = &self.commands[i];
-                ListItem::new(format!("{:<20} {}", cmd.name, cmd.description))
+                Line::from(vec![
+                    Span::raw(format!("{:<20} ", cmd.name)).fg(theme::TEXT),
+                    Span::raw(cmd.description.to_string()).fg(theme::TEXT_MUTED),
+                ])
+                .into()
             })
             .collect();
         let list = List::new(items)
-            .highlight_style(Style::new().black().on_cyan())
+            .highlight_style(Style::new().bg(theme::ACCENT_BG).fg(theme::TEXT))
             .highlight_symbol("▶ ");
         frame.render_stateful_widget(list, list_area, &mut self.state);
 
         frame.render_widget(
-            Paragraph::new("Enter: run    Esc: close    ↑↓: navigate").style(Style::new().dim()),
+            Paragraph::new(theme::help_line(&[
+                ("Enter", "run"),
+                ("Esc", "close"),
+                ("↑↓", "navigate"),
+            ]))
+            .fg(theme::TEXT_MUTED),
             hint_area,
         );
     }
