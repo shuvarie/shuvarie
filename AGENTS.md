@@ -93,20 +93,20 @@ All provider access goes through `rig` in `shuvarie-llm`. Supported providers, v
 
 The visual style is defined in `src/tui/theme.rs` and used by all submodel `view` methods. Follow these principles when adding or modifying UI:
 
-**Color palette** — all colors are `Color::Rgb` (true color), Catppuccin Mocha-inspired. Never use pure RGB primaries (`Color::Red`, `Color::Green`, etc.) or the `Stylize` shorthand colors (`.red()`, `.cyan()`, etc.) in UI code — import from `theme` instead. The palette:
+**Color palette** — all colors are `Color::Rgb` (true color), a medieval/heraldic theme: dark iron-and-stone backgrounds, antique gold accent (heraldic *or*), parchment-cream text, and weathered tinctures for semantics. Never use pure RGB primaries (`Color::Red`, `Color::Green`, etc.) or the `Stylize` shorthand colors (`.red()`, `.cyan()`, etc.) in UI code — import from `theme` instead. The palette:
 
 | Constant | Role |
 |---|---|
-| `BG` | App background (deep slate, fills the whole frame) |
-| `SURFACE` | Unfocused pane/section background |
-| `SURFACE_FOCUSED` | Focused pane background (brighter slate) |
-| `OVERLAY` | Popup/modal background |
-| `ACCENT` | Focus color — titles, keybindings, active markers, highlights |
-| `ACCENT_BG` | Selection background (muted blue, not harsh inversion) |
-| `TEXT` | Primary text in focused panes |
-| `TEXT_DIM` | Secondary text, unfocused pane items |
-| `TEXT_MUTED` | Hints, descriptions, placeholders |
-| `SUCCESS` / `WARNING` / `ERROR` | Semantic colors (sage / amber / coral — never pure RGB) |
+| `BG` | App background (forged iron black) |
+| `SURFACE` | Unfocused pane/section background (castle stone) |
+| `SURFACE_FOCUSED` | Focused pane background (polished iron) |
+| `OVERLAY` | Popup/modal background (weathered stone) |
+| `ACCENT` | Heraldic gold — titles, keybindings, active markers, highlights |
+| `ACCENT_BG` | Selection background (dark bronze, not harsh inversion) |
+| `TEXT` | Primary text in focused panes (parchment cream) |
+| `TEXT_DIM` | Secondary text, unfocused pane items (faded vellum) |
+| `TEXT_MUTED` | Hints, descriptions, placeholders (weathered stone) |
+| `SUCCESS` / `WARNING` / `ERROR` | Heraldic tinctures: vert (sage) / amber / gules (weathered red) — never pure RGB |
 
 **Windows and sections** — no borders. Use `theme::section_block(title, focused)` which returns a `Block::new()` with a background fill (`SURFACE` or `SURFACE_FOCUSED`) and the title rendered inside via `.title_top()` in `ACCENT` + bold. The block has `Padding::horizontal(1)` so content is inset from the bg edge. `Block::inner()` reserves the title row, so `List`/`Paragraph` content starts below the title automatically.
 

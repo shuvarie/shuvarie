@@ -2,22 +2,22 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Padding};
 
-pub const BG: Color = Color::Rgb(22, 24, 33);
-pub const SURFACE: Color = Color::Rgb(30, 33, 46);
-pub const SURFACE_FOCUSED: Color = Color::Rgb(38, 42, 60);
-pub const OVERLAY: Color = Color::Rgb(34, 38, 55);
+pub const BG: Color = Color::Rgb(18, 18, 22);
+pub const SURFACE: Color = Color::Rgb(28, 28, 34);
+pub const SURFACE_FOCUSED: Color = Color::Rgb(38, 38, 46);
+pub const OVERLAY: Color = Color::Rgb(34, 34, 42);
 
-pub const ACCENT: Color = Color::Rgb(122, 162, 247);
-pub const ACCENT_BG: Color = Color::Rgb(44, 54, 82);
+pub const ACCENT: Color = Color::Rgb(212, 175, 95);
+pub const ACCENT_BG: Color = Color::Rgb(52, 48, 42);
 
-pub const TEXT: Color = Color::Rgb(205, 214, 244);
-pub const TEXT_DIM: Color = Color::Rgb(108, 112, 134);
-pub const TEXT_MUTED: Color = Color::Rgb(88, 91, 112);
+pub const TEXT: Color = Color::Rgb(224, 216, 196);
+pub const TEXT_DIM: Color = Color::Rgb(128, 120, 104);
+pub const TEXT_MUTED: Color = Color::Rgb(92, 86, 74);
 
 #[allow(dead_code)]
-pub const SUCCESS: Color = Color::Rgb(166, 209, 137);
-pub const WARNING: Color = Color::Rgb(245, 194, 99);
-pub const ERROR: Color = Color::Rgb(237, 135, 150);
+pub const SUCCESS: Color = Color::Rgb(138, 146, 90);
+pub const WARNING: Color = Color::Rgb(192, 152, 72);
+pub const ERROR: Color = Color::Rgb(186, 88, 72);
 
 pub fn section_block<'a>(title: &str, focused: bool) -> Block<'a> {
     let bg = if focused { SURFACE_FOCUSED } else { SURFACE };
