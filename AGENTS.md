@@ -12,23 +12,53 @@ When adding a feature: put domain logic in `shuvarie-core`, LLM/SDK glue in `shu
 
 ## Architecture
 
-### The Elm Architecture (TEA)
+### The Elm Architecture (TEA) — hierarchical
 
 The TUI follows `handle_event → message → update → return`:
 
-- `handle_event` (pure): maps a terminal `Event` (or an async channel message) to a message (e.g. `AppMessage`).
-- `update` (mutates the model): consumes a message and may produce a return (e.g. `AppReturn::Quit`).
-- `view(&self, frame: &mut Frame<'_>, area: Rect)`: draws current state. A TEA model is **not** required to implement `ratatui::Widget`; the dedicated `view` method takes a `Frame` + `Rect` and may compose multiple widgets, so it is not limited to a single widget's render contract.
+- `handle_event` (pure, no side effects): maps a terminal `Event` (or an async channel message) to a message (e.g. `AppMessage`). Takes `&self`/`&App` only — never mutates.
+- `update` (mutates the model): consumes a message and may produce a return (e.g. `AppReturn::Quit`) or an effect for the parent.
+- `view(&self, frame: &mut Frame<'_>, area: Rect)`: draws current state. A TEA model is **not** required to implement `ratatui::Widget`; the dedicated `view` method takes a `Frame` + `Rect` and may compose multiple widgets, so it is not limited to a single widget's render contract. No side effects in `view`.
 
 The root `App` composes **submodels**, each following the same TEA shape with its own message enum, `handle_event`, `update`, and `view`. Submodels own their state and logic; the parent dispatches events, forwards grouped messages, handles routing, and processes core events:
 
-- `ModelSelectScreen` — provider/model lists, add-provider form, model search (`ModelSelectMessage`, takes a shared `UpdateCtx` for config + command sending).
-- `CommandMenu` — Ctrl+P command palette overlay (`CommandMenuMessage`, returns `CommandMenuEffect`s for parent-level actions like route changes or quit).
-- `ChatScreen` — placeholder chat view (will grow its own message enum in M4).
+```
+App (parent)
+├── ModelSelectScreen   — ModelSelectMessage, handle_event, update(&UpdateCtx), view
+├── CommandMenu         — CommandMenuMessage, handle_event, update → Option<CommandMenuEffect>, view
+└── ChatScreen          — (placeholder; grows its own enum in M4)
+```
 
-`AppMessage` groups submodel messages: `ModelSelect(ModelSelectMessage)`, `CommandMenu(CommandMenuMessage)`, plus parent-only variants (`Quit`, `OpenModelSelect`, `OpenCommandMenu`, core events). `UpdateCtx` (in `src/tui/context.rs`) carries the `Config` and `Command` sender shared with submodels.
+**Module layout** (`src/tui/`):
 
-Extend features by adding a message variant to the relevant submodel's enum (and an effect/return if conditional parent actions or feedbacks are necessary), an `update` arm, and `view` logic — do not introduce side effects in `handle_event` or `view`.
+| File | Role |
+|---|---|
+| `tui.rs` | Event loop: `EventStream` + `tokio::select!`, terminal init/deinit, calls `App::view` |
+| `app.rs` | Parent `App`: `AppMessage` (grouped), `handle_event` dispatch, `update`, `view` (title bar + footer + content routing) |
+| `context.rs` | `UpdateCtx` — shared `Config` + `Command` sender passed to submodel `update` calls |
+| `model_select.rs` | `ModelSelectScreen` submodel + `ModelSelectMessage` + `AddProviderForm` |
+| `command_menu.rs` | `CommandMenu` submodel + `CommandMenuMessage` + `CommandMenuEffect` |
+| `chat.rs` | `ChatScreen` placeholder |
+| `search.rs` | `Search` — nucleo fuzzy `filter_indices` helper |
+| `widgets.rs` | `InputBuffer` — char buffer + cursor for forms/search |
+| `theme.rs` | Color palette + style helpers (see UI design below) |
+| `escape.rs` | CSI escape sequences for alt-screen enter/exit |
+
+**Message grouping**: `AppMessage` wraps submodel messages — `ModelSelect(ModelSelectMessage)`, `CommandMenu(CommandMenuMessage)` — plus parent-only variants (`Quit`, `OpenModelSelect`, `OpenCommandMenu`, `Pong`, `ConfigSaved`, `ConfigError`). Core `Event`s are mapped to `AppMessage` via `App::map_core_event`, which wraps `ModelsLoaded`/`ModelsError` into `ModelSelect(...)` and keeps `ConfigSaved`/`ConfigError` at the parent level (the parent reloads config from disk on `ConfigSaved` so submodels see fresh provider data).
+
+**Event dispatch flow** (`App::handle_event`, route-aware):
+
+1. If `CommandMenu` is open → `CommandMenu::handle_event` → `CommandMenuMessage`.
+2. Else if `ModelSelectScreen` add-form is open → `ModelSelectScreen::handle_add_form_event`.
+3. Else if `ModelSelectScreen` search is active → `ModelSelectScreen::handle_search_event`.
+4. Else `Ctrl+P` → `OpenCommandMenu` (parent-level global keybind).
+5. Else route to the active screen's `handle_event` (`q`/`Tab` handled at parent for `Chat`).
+
+**Update forwarding**: `App::update` matches `AppMessage` — parent-only variants are handled in-place; submodel variants are forwarded to `submodel.update(msg, &self.ctx)`. `CommandMenu::update` returns `Option<CommandMenuEffect>`; the parent matches effects (`OpenModelSelect`, `AddProvider`, `Quit`) to perform parent-level actions (route changes, opening the add form, quitting).
+
+**`UpdateCtx`** (`src/tui/context.rs`): carries `config: Config` and `cmd_tx: Sender<Command>`. Passed by shared reference (`&UpdateCtx`) to submodel `update` calls so they can read config and send commands without owning them. The parent owns the `UpdateCtx` and reloads `config` from disk on `ConfigSaved`.
+
+**Adding a feature**: add a message variant to the relevant submodel's enum (and an effect/return if the parent needs to act), an `update` arm, and `view` logic. Keep side effects out of `handle_event` and `view` — send commands via `ctx.send(...)` in `update` only. If a new submodel is needed, add a message enum, `handle_event`, `update(&UpdateCtx)`, and `view`, then compose it in `App` and add a grouped `AppMessage` variant.
 
 ### Async runtime: Tokio
 
@@ -58,6 +88,44 @@ All provider access goes through `rig` in `shuvarie-llm`. Supported providers, v
 ### Rendering stack
 
 `ratatui` with the `termina` backend feature (`default-features = false`, curated feature set in the root `Cargo.toml`). Alternate-screen enter/exit is handled manually via CSI escapes in `src/tui/escape.rs` — do not switch to a backend-managed alt-screen toggle without reason.
+
+### UI design — modern, borderless, muted
+
+The visual style is defined in `src/tui/theme.rs` and used by all submodel `view` methods. Follow these principles when adding or modifying UI:
+
+**Color palette** — all colors are `Color::Rgb` (true color), Catppuccin Mocha-inspired. Never use pure RGB primaries (`Color::Red`, `Color::Green`, etc.) or the `Stylize` shorthand colors (`.red()`, `.cyan()`, etc.) in UI code — import from `theme` instead. The palette:
+
+| Constant | Role |
+|---|---|
+| `BG` | App background (deep slate, fills the whole frame) |
+| `SURFACE` | Unfocused pane/section background |
+| `SURFACE_FOCUSED` | Focused pane background (brighter slate) |
+| `OVERLAY` | Popup/modal background |
+| `ACCENT` | Focus color — titles, keybindings, active markers, highlights |
+| `ACCENT_BG` | Selection background (muted blue, not harsh inversion) |
+| `TEXT` | Primary text in focused panes |
+| `TEXT_DIM` | Secondary text, unfocused pane items |
+| `TEXT_MUTED` | Hints, descriptions, placeholders |
+| `SUCCESS` / `WARNING` / `ERROR` | Semantic colors (sage / amber / coral — never pure RGB) |
+
+**Windows and sections** — no borders. Use `theme::section_block(title, focused)` which returns a `Block::new()` with a background fill (`SURFACE` or `SURFACE_FOCUSED`) and the title rendered inside via `.title_top()` in `ACCENT` + bold. The block has `Padding::horizontal(1)` so content is inset from the bg edge. `Block::inner()` reserves the title row, so `List`/`Paragraph` content starts below the title automatically.
+
+**Overlays** — use `theme::overlay_block(title)` for popups (command menu, add-provider form). It fills with `OVERLAY` bg and has `Padding::uniform(1)` for breathing room. `Clear` is still rendered first to wipe underlying cells before the bg fill.
+
+**Selection** — `highlight_style` uses `Style::new().bg(ACCENT_BG).fg(TEXT)` (no `Modifier::REVERSED`). The `highlight_symbol("▶ ")` stays in `ACCENT` as the cursor marker. Active provider/model items use `theme::active_marker(is_active)` → `●` in `ACCENT` (distinct from the selection cursor `▶`).
+
+**Layout** — `App::view` renders a 3-row vertical layout:
+1. **Title bar** (1 row) — `theme::title_bar(...)` with `SURFACE` bg: app name in `ACCENT` bold, route name in `TEXT_DIM`, active provider:model in `TEXT`.
+2. **Content** (`Min(0)`) — inset by 1 cell left/right (margin between pane edges and screen edge). Delegated to the active submodel's `view`.
+3. **Status footer** (1 row) — `SURFACE` bg: left = contextual help via `theme::help_line(...)` (keybindings as styled `Span`s: keys in `ACCENT`, labels in `TEXT_MUTED`); right = error/loading state in `ERROR`/`WARNING`.
+
+**Pane gutter** — two-pane layouts use `Layout::horizontal(...).spacing(1)` so the `BG` shows through as a 1-cell gap between panes (visual separation without borders).
+
+**Search input pill** — when search is active, the search `Paragraph` gets `SURFACE_FOCUSED` bg + `ACCENT` fg to look like an input field; inactive shows a `TEXT_MUTED` hint.
+
+**Help text** — use `theme::help_line(&[("key", "label"), ...])` to render keybinding rows with keys in `ACCENT` and labels in `TEXT_MUTED`, separated by spacing. Never render help as a flat unstyled string.
+
+When adding a new screen or widget, use the `theme` helpers — do not inline `Block::bordered()`, raw `Color` values, or `Stylize` shorthand colors.
 
 ### Launch flow
 
