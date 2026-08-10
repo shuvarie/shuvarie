@@ -10,9 +10,11 @@ Each milestone is intended to be independently mergeable and to leave the binary
 - `shuvarie-core` and `shuvarie-llm` wired as dependencies of the root binary, with real crate roots and typed error enums (`CoreError`, `LlmError` via `thiserror`).
 - `shuvarie-llm` exposes a `Provider` enum (8 variants: OpenAi-compatible, OpenRouter, Groq, Together, DeepSeek, Anthropic, Gemini, Ollama) with metadata (display name, requires-api-key, default base URL), a `ProviderClient` that builds the right `rig` client per kind, and an async `list_models` returning a lightweight `ModelInfo` (rig types stay out of `shuvarie-core`).
 - `shuvarie-core` defines the config schema (`Config`, `ProviderConfig`, `UiPrefs`), loads/saves `~/.config/shuvarie/config.toml` via the `dirs` crate (creates the dir on save, returns a default config when the file is missing), and exposes `has_connected_providers()`. `shuvarie-core` now depends on `shuvarie-llm`.
-- `tokio` (`rt-multi-thread`, `macros`) in the root binary and `shuvarie-core`; `main` is `#[tokio::main]` (core task not yet spawned).
+- `tokio` (`rt-multi-thread`, `macros`, `sync`) in the root binary and `shuvarie-core`; `main` is `#[tokio::main]` and spawns the core task.
 - `serde` + `toml` in `shuvarie-core`; `serde` in `shuvarie-llm` (for the `Provider` enum).
-- No chat UI, model-selection UI, or persistence yet.
+- The core task (`shuvarie_core::run`) owns the in-memory `Config`, handles `Command`s (ping, list/add/remove/set-active providers, set active model, save config), and emits `Event`s (pong, models loaded/error, config saved/error). The TUI and core communicate via `tokio::sync::mpsc` channels.
+- Model selection UI: two-pane provider/model list with add-provider form, remove, fuzzy model search (nucleo), and Ctrl+P command menu overlay. On launch it routes to this screen when no providers are connected, otherwise to the chat placeholder.
+- Chat view is a placeholder showing active provider + model (M4 will fill it in).
 
 ## M0 — Foundations
 
@@ -41,20 +43,22 @@ Provider abstraction and config persistence, with no UI yet.
 
 The launch gate: if no providers are connected, show this screen first.
 
-- [ ] Add `AppMessage` variants for provider/model selection (e.g. `OpenModelSelect`, `ProviderAdded`, `ProviderRemoved`, `ModelSelected`, `ModelsLoaded`).
-- [ ] Render a provider list with add/remove flows: choose provider kind, enter API key and base URL, fetch and list available models, pick the active model.
-- [ ] Wire selection actions through `shuvarie-core` (which updates config) — the TUI never writes config directly.
-- [ ] On launch: if `has_connected_providers()` is false, route to the model-selection screen; otherwise route to the chat view (placeholder for now).
-- [ ] Make model selection reachable from the chat view via a keybinding (e.g. `Tab` or a `:` command menu stub).
+- [x] Add `AppMessage` variants for provider/model selection (e.g. `OpenModelSelect`, `ProviderAdded`, `ProviderRemoved`, `ModelSelected`, `ModelsLoaded`).
+- [x] Render a provider list with add/remove flows: choose provider kind, enter API key and base URL, fetch and list available models, pick the active model.
+- [x] Wire selection actions through `shuvarie-core` (which updates config) — the TUI never writes config directly.
+- [x] On launch: if `has_connected_providers()` is false, route to the model-selection screen; otherwise route to the chat view (placeholder for now).
+- [x] Make model selection reachable from the chat view via a keybinding (e.g. `Tab` or a `:` command menu stub).
+- [x] Model search: nucleo fuzzy filter over the model list (press `/` in the model pane).
+- [x] Ctrl+P command menu overlay (pulled forward from M7+) with searchable command list.
 
 ## M3 — Tokio bridge & async core task
 
 Stand up the channel plumbing that M4+ depends on, without yet doing LLM calls.
 
-- [ ] Define command and event enums for TUI↔core communication.
-- [ ] Spawn the core task in `main`; hand it a command receiver and an event sender.
-- [ ] On the TUI thread, poll `termina`'s blocking `read` and drain the core→TUI channel each frame (non-blocking try_recv) so async results are folded into `handle_event`.
-- [ ] Verify the bridge with a round-trip echo (e.g. TUI sends a ping, core echoes an event that the TUI renders).
+- [x] Define command and event enums for TUI↔core communication (`shuvarie_core::Command`, `shuvarie_core::Event`).
+- [x] Spawn the core task in `main`; hand it a command receiver and an event sender.
+- [x] On the TUI thread, use termina's `event-stream` feature with `tokio::select!` between `EventStream::next()` and `event_rx.recv()` so the loop wakes on either a key event or a core event (deviates from the original "blocking read + try_recv" wording to support live model-loading and, later, streaming tokens — see AGENTS.md).
+- [x] Verify the bridge with a round-trip echo (e.g. TUI sends a ping, core echoes an event that the TUI renders).
 
 ## M4 — Basic chat UI
 
@@ -92,7 +96,7 @@ These are deliberately left undetailed; expand them into their own milestones wh
 - Multi-turn agent loops with tool-result feedback and a stop condition.
 - Context files / project-aware prompts.
 - RAG over chat history using Turso vector search and full-text search.
-- Theming, command palette (`:` menu), keybinding configuration.
+- Theming, keybinding configuration, and expanding the command palette (the Ctrl+P command menu stub landed in M2).
 - Workspace/checkout integration, diff review, approval prompts for edits.
 - Export/import sessions, multi-agent orchestration.
 

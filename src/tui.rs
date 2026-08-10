@@ -1,81 +1,60 @@
 use std::io::{self, Write};
 
+use futures_util::StreamExt;
 use ratatui::prelude::*;
-use termina::{
-    Event, PlatformTerminal, Terminal,
-    event::{KeyCode, KeyEvent},
-};
+use termina::{EventStream, PlatformTerminal, Terminal as _};
+use tokio::sync::mpsc::{Receiver, Sender};
 
+use shuvarie_core::{Command, Config, Event};
+
+use self::app::{App, AppReturn};
+
+pub mod app;
+mod chat;
+mod command_menu;
+mod context;
 mod escape;
+mod model_select;
+mod search;
+mod widgets;
 
-pub enum AppMessage {
-    Quit,
-}
-
-pub enum AppReturn {
-    Quit,
-}
-
-#[derive(Debug)]
-pub struct App {}
-
-impl App {
-    pub fn new() -> Self {
-        Self {}
-    }
-
-    pub fn handle_event(event: &Event) -> Option<AppMessage> {
-        match &event {
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('q'),
-                ..
-            }) => Some(AppMessage::Quit),
-            _ => None,
-        }
-    }
-
-    pub fn update(&mut self, msg: AppMessage) -> Option<AppReturn> {
-        match msg {
-            AppMessage::Quit => Some(AppReturn::Quit),
-        }
-    }
-
-    pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
-        frame.render_widget("Press q to quit", area);
-    }
-}
-
-pub fn run_tui() -> io::Result<()> {
+pub async fn run_tui(cmd_tx: Sender<Command>, mut event_rx: Receiver<Event>) -> io::Result<()> {
     let mut term = PlatformTerminal::new()?;
     term.enter_raw_mode()?;
 
+    let reader = term.event_reader();
+    let mut event_stream = EventStream::new(reader, |_| true);
+
     let mut rat = ratatui::Terminal::new(TerminaBackend::new(term))?;
-    let mut app = App::new();
-    // Initialize Termina terminal **after** the Ratatui terminal creation
     init_terminal(rat.backend_mut().terminal_mut())?;
 
-    let res: io::Result<()> = {
-        'render_loop: loop {
-            rat.draw(|frame| app.view(frame, frame.area()))?;
+    let config = Config::load().map_err(|e| io::Error::other(e.to_string()))?;
+    let mut app = App::new(config, cmd_tx);
 
-            let term = rat.backend().terminal();
-            'event_listening: loop {
-                let event = term.read(|ev| !ev.is_escape())?;
-                if let Some(msg) = App::handle_event(&event) {
-                    if let Some(ret) = app.update(msg) {
-                        // Handle return
-                        match ret {
-                            AppReturn::Quit => break 'render_loop Ok(()),
-                        }
-                    }
-                    break 'event_listening;
+    let res: io::Result<()> = loop {
+        rat.draw(|frame| app.view(frame, frame.area()))?;
+
+        tokio::select! {
+            ev = event_stream.next() => {
+                let Some(Ok(ev)) = ev else { break Ok(()); };
+                if let Some(msg) = App::handle_event(&ev, &app)
+                    && let Some(AppReturn::Quit) = app.update(msg)
+                {
+                    break Ok(());
+                }
+            }
+            ev = event_rx.recv() => {
+                let Some(ev) = ev else { break Ok(()); };
+                let msg = App::map_core_event(ev);
+                if let Some(AppReturn::Quit) = app.update(msg) {
+                    break Ok(());
                 }
             }
         }
     };
 
-    let deinit_res = deinit_terminal(rat.backend_mut().terminal_mut());
-    res.and(deinit_res)
+    let deinit = deinit_terminal(rat.backend_mut().terminal_mut());
+    res.and(deinit)
 }
 
 fn init_terminal(terminal: &mut PlatformTerminal) -> io::Result<()> {

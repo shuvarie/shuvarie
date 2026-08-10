@@ -20,16 +20,24 @@ The TUI follows `handle_event → message → update → return`:
 - `update` (mutates the model): consumes a message and may produce a return (e.g. `AppReturn::Quit`).
 - `view(&self, frame: &mut Frame<'_>, area: Rect)`: draws current state. A TEA model is **not** required to implement `ratatui::Widget`; the dedicated `view` method takes a `Frame` + `Rect` and may compose multiple widgets, so it is not limited to a single widget's render contract.
 
-Extend features by adding a message variant (and a return if conditional parent actions or feedbacks are necessary), an `update` arm, and `view` logic — do not introduce side effects in `handle_event` or `view`.
+The root `App` composes **submodels**, each following the same TEA shape with its own message enum, `handle_event`, `update`, and `view`. Submodels own their state and logic; the parent dispatches events, forwards grouped messages, handles routing, and processes core events:
+
+- `ModelSelectScreen` — provider/model lists, add-provider form, model search (`ModelSelectMessage`, takes a shared `UpdateCtx` for config + command sending).
+- `CommandMenu` — Ctrl+P command palette overlay (`CommandMenuMessage`, returns `CommandMenuEffect`s for parent-level actions like route changes or quit).
+- `ChatScreen` — placeholder chat view (will grow its own message enum in M4).
+
+`AppMessage` groups submodel messages: `ModelSelect(ModelSelectMessage)`, `CommandMenu(CommandMenuMessage)`, plus parent-only variants (`Quit`, `OpenModelSelect`, `OpenCommandMenu`, core events). `UpdateCtx` (in `src/tui/context.rs`) carries the `Config` and `Command` sender shared with submodels.
+
+Extend features by adding a message variant to the relevant submodel's enum (and an effect/return if conditional parent actions or feedbacks are necessary), an `update` arm, and `view` logic — do not introduce side effects in `handle_event` or `view`.
 
 ### Async runtime: Tokio
 
-`main` is `#[tokio::main]`. The TUI loop runs on the main thread using `termina`'s blocking `read`. All LLM and database work runs on a spawned **core task**. Communication is via `tokio::sync::mpsc` channels:
+`main` is `#[tokio::main]`. The TUI loop runs on the main thread using `termina`'s `EventStream` (the `event-stream` feature) so the loop can `tokio::select!` between terminal key events and core events without blocking. All LLM and database work runs on a spawned **core task** (`shuvarie_core::run`). Communication is via `tokio::sync::mpsc` channels:
 
-- TUI → core: commands (e.g. `SendMessage`, `SelectModel`, `LoadHistory`).
-- Core → TUI: events (e.g. `TokenReceived`, `StreamDone`, `ModelsLoaded`, `HistoryLoaded`) that are converted into `AppMessage` variants and fed into `update`.
+- TUI → core: commands (e.g. `SendMessage`, `SelectModel`, `LoadHistory`) — `shuvarie_core::Command`.
+- Core → TUI: events (e.g. `TokenReceived`, `StreamDone`, `ModelsLoaded`, `HistoryLoaded`) — `shuvarie_core::Event` — that are converted into `AppMessage` variants and fed into `update`.
 
-Keep the TUI thread free of `await`s; offload any blocking work to the core task (or `spawn_blocking`).
+Keep the TUI thread free of `await`s on blocking work; offload any blocking work to the core task (or `spawn_blocking`). The `select!` loop wakes on either a terminal event or a core event, so live updates (model lists, streaming tokens) render without requiring a keypress.
 
 ### Storage: hybrid
 
@@ -76,8 +84,10 @@ cargo fmt --check
 ## Known issues to resolve
 
 - `shuvarie-llm` implements model listing and `ProviderClient::build` (M1); streaming completion and message types land in M4/M5.
-- `shuvarie-core` implements config load/save and `has_connected_providers()` (M1); the core task, storage layer, and domain `Message`/`Update` logic land in M3/M6.
-- The core task is not yet spawned in `main`; `#[tokio::main]` is in place but only the TUI loop runs. Wire the core task in M3.
+- `shuvarie-core` implements config load/save, `has_connected_providers()`, the `Command`/`Event` enums, and the core task (`run`) that owns the in-memory config and orchestrates provider/model listing (M2/M3). The storage layer (Turso + Toasty) and domain `Message`/`Update` logic land in M6.
+- The core task is spawned in `main`; the TUI loop uses `termina`'s `EventStream` + `tokio::select!` to wake on terminal or core events (M3 done).
+- The chat view is a placeholder (M4 will implement message composition and rendering).
+- Model search uses `nucleo` (fuzzy matcher) via `src/tui/search.rs`; the Ctrl+P command menu (`src/tui/command_menu.rs`) is a small extensible registry of `CommandEntry`s.
 
 ## Tips
 
