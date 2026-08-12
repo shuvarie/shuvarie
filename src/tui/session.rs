@@ -175,10 +175,12 @@ impl Default for SessionScreen {
     }
 }
 
+#[inline]
 fn ctrl(key: &KeyEvent) -> bool {
     key.modifiers.contains(Modifiers::CONTROL)
 }
 
+#[inline]
 fn alt(key: &KeyEvent) -> bool {
     key.modifiers.contains(Modifiers::ALT)
 }
