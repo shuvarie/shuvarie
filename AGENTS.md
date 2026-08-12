@@ -6,7 +6,7 @@ Shuvarie (シュヴァリエ, "chevalier") is a terminal-based AI agent coding t
 
 - `./` (binary `shuvarie`) — TUI rendering, event loop, input handling, channel wiring. **No business logic lives here.** Renders state produced by `shuvarie-core`.
 - `./crates/core/` (`shuvarie-core`) — App state, config loading, storage layer (Turso + Toasty ORM), and the async core task that orchestrates LLM and database work. Owns the domain `Message`/`Update` logic. Depends on `shuvarie-llm` (config holds a `shuvarie_llm::Provider`).
-- `./crates/llm/` (`shuvarie-llm`) — Thin wrapper over `rig`: `Provider` enum (8 variants) with metadata, `ProviderClient` builder, `ModelInfo`, model listing, streaming completion API, message types. No TUI concerns.
+- `./crates/llm/` (`shuvarie-llm`) — Thin wrapper over `rig`: `Provider` enum (8 variants) with metadata, `ProviderClient` builder, `ModelInfo`, model listing, non-streaming completion API (`complete` via `rig::completion::Chat`), `ChatMsg`/`Role` message types. No TUI concerns.
 
 When adding a feature: put domain logic in `shuvarie-core`, LLM/SDK glue in `shuvarie-llm`, and only rendering + input dispatch in the root binary.
 
@@ -24,9 +24,13 @@ The root `App` composes **submodels**, each following the same TEA shape with it
 
 ```
 App (parent)
-├── ModelSelectScreen   — ModelSelectMessage, handle_event, update(&UpdateCtx), view
-├── CommandMenu         — CommandMenuMessage, handle_event, update → Option<CommandMenuEffect>, view
-└── ChatScreen          — (placeholder; grows its own enum in M4)
+├── HomeScreen          — HomeMessage, handle_event(&self), update → Option<HomeEffect>, view(&self)
+├── SessionScreen       — SessionMessage, handle_event(&self), update → Option<SessionEffect>, view(&self)
+├── CommandMenu         — CommandMenuMessage, handle_event, update → Option<CommandMenuEffect>, view(&mut self)
+├── AddProviderForm     — AddProviderMessage, handle_event(key, stage), update → AddProviderOutcome, view(&self)
+├── ModelPicker         — ModelPickerMessage, handle_event, update → Option<ModelPickerEffect>, view(&mut self)
+├── Welcome             — WelcomeMessage, handle_event, (no update — parent handles directly), view(&self)
+└── ConfirmQuit         — ConfirmQuitMessage, handle_event, (no update — parent handles directly), view(&self)
 ```
 
 **Module layout** (`src/tui/`):
@@ -34,38 +38,45 @@ App (parent)
 | File | Role |
 |---|---|
 | `tui.rs` | Event loop: `EventStream` + `tokio::select!`, terminal init/deinit, calls `App::view` |
-| `app.rs` | Parent `App`: `AppMessage` (grouped), `handle_event` dispatch, `update`, `view` (title bar + footer + content routing) |
+| `app.rs` | Parent `App`: `Route` (`Home`/`Session`), `Overlay` enum, `AppMessage` (grouped), `handle_event` dispatch, `update`, `view` (content routing + footer + overlays) |
 | `context.rs` | `UpdateCtx` — shared `Config` + `Command` sender passed to submodel `update` calls |
-| `model_select.rs` | `ModelSelectScreen` submodel + `ModelSelectMessage` + `AddProviderForm` |
+| `home.rs` | `HomeScreen` submodel + `HomeMessage` + `HomeEffect` (ASCII art + input) |
+| `session.rs` | `SessionScreen` submodel + `SessionMessage` + `SessionEffect` (sidebar + chat history + input) |
+| `sidebar.rs` | `Sidebar` view widget (Shuvarie+version, Context, LSP, Skills) |
+| `logo.rs` | Double-sword-behind-shield ASCII art for the Home screen |
+| `add_provider.rs` | `AddProviderForm` submodel (two-stage wizard: SelectKind → Details) + `AddProviderMessage` + `AddProviderOutcome` |
+| `model_picker.rs` | `ModelPicker` overlay submodel + `ModelPickerMessage` + `ModelPickerEffect` |
 | `command_menu.rs` | `CommandMenu` submodel + `CommandMenuMessage` + `CommandMenuEffect` |
-| `chat.rs` | `ChatScreen` placeholder |
+| `welcome.rs` | `Welcome` overlay (first-run) + `WelcomeMessage` |
+| `confirm_quit.rs` | `ConfirmQuit` overlay (Ctrl+C) + `ConfirmQuitMessage` |
 | `search.rs` | `Search` — nucleo fuzzy `filter_indices` helper |
-| `widgets.rs` | `InputBuffer` — char buffer + cursor for forms/search |
+| `widgets.rs` | `InputBuffer` — char buffer + cursor (Emacs movement, virtual cursor rendering) |
 | `theme.rs` | Color palette + style helpers (see UI design below) |
 | `escape.rs` | CSI escape sequences for alt-screen enter/exit |
 
-**Message grouping**: `AppMessage` wraps submodel messages — `ModelSelect(ModelSelectMessage)`, `CommandMenu(CommandMenuMessage)` — plus parent-only variants (`Quit`, `OpenModelSelect`, `OpenCommandMenu`, `Pong`, `ConfigSaved`, `ConfigError`). Core `Event`s are mapped to `AppMessage` via `App::map_core_event`, which wraps `ModelsLoaded`/`ModelsError` into `ModelSelect(...)` and keeps `ConfigSaved`/`ConfigError` at the parent level (the parent reloads config from disk on `ConfigSaved` so submodels see fresh provider data).
+**Message grouping**: `AppMessage` wraps submodel messages — `Home(HomeMessage)`, `Session(SessionMessage)`, `AddProvider(AddProviderMessage)`, `ModelPicker(ModelPickerMessage)`, `CommandMenu(CommandMenuMessage)`, `Welcome(WelcomeMessage)` — plus parent-only variants (`OpenCommandMenu`, `RequestQuit`, `ConfirmQuit`, `CancelQuit`, `ConfigSaved`, `ConfigError`, `ModelsLoaded`, `ModelsError`). Core `Event`s are mapped to `AppMessage` via `App::map_core_event`, which wraps `MessageReceived`/`ReplyError`/`Reset` into `Session(...)` and keeps `ConfigSaved`/`ConfigError`/`ModelsLoaded`/`ModelsError` at the parent level (the parent reloads config from disk on `ConfigSaved` so submodels see fresh provider data, and auto-selects a model on `ModelsLoaded`).
 
-**Event dispatch flow** (`App::handle_event`, route-aware):
+**Event dispatch flow** (`App::handle_event`, overlay-aware, then route-aware):
 
-1. If `CommandMenu` is open → `CommandMenu::handle_event` → `CommandMenuMessage`.
-2. Else if `ModelSelectScreen` add-form is open → `ModelSelectScreen::handle_add_form_event`.
-3. Else if `ModelSelectScreen` search is active → `ModelSelectScreen::handle_search_event`.
-4. Else `Ctrl+P` → `OpenCommandMenu` (parent-level global keybind).
-5. Else route to the active screen's `handle_event` (`q`/`Tab` handled at parent for `Chat`).
+1. If an overlay is open → route to that overlay's `handle_event` (CommandMenu, AddProviderForm, ModelPicker, Welcome, ConfirmQuit).
+2. Else `Ctrl+C` → `RequestQuit` (opens ConfirmQuit overlay).
+3. Else `Ctrl+M` → `OpenCommandMenu` (parent-level global keybind).
+4. Else route to the active screen's `handle_event` (`Home` or `Session`).
 
-**Update forwarding**: `App::update` matches `AppMessage` — parent-only variants are handled in-place; submodel variants are forwarded to `submodel.update(msg, &self.ctx)`. `CommandMenu::update` returns `Option<CommandMenuEffect>`; the parent matches effects (`OpenModelSelect`, `AddProvider`, `Quit`) to perform parent-level actions (route changes, opening the add form, quitting).
+**Update forwarding**: `App::update` matches `AppMessage` — parent-only variants are handled in-place; submodel variants are forwarded to `submodel.update(msg, &self.ctx)`. `CommandMenu::update` returns `Option<CommandMenuEffect>`; the parent matches effects (`OpenModelSelect`, `AddProvider`) to perform parent-level actions (opening the ModelPicker overlay, opening the AddProviderForm). `HomeScreen::update` returns `Option<HomeEffect>` (`Submit` → start session); `SessionScreen::update` returns `Option<SessionEffect>` (`SendMessage` → send command to core). `AddProviderForm::update` returns `AddProviderOutcome` (`Submit` → add provider + set active + list models; `Cancel` → close or back to kind list). `ModelPicker::update` returns `Option<ModelPickerEffect>` (`Selected` → set active model).
 
 **`UpdateCtx`** (`src/tui/context.rs`): carries `config: Config` and `cmd_tx: Sender<Command>`. Passed by shared reference (`&UpdateCtx`) to submodel `update` calls so they can read config and send commands without owning them. The parent owns the `UpdateCtx` and reloads `config` from disk on `ConfigSaved`.
 
 **Adding a feature**: add a message variant to the relevant submodel's enum (and an effect/return if the parent needs to act), an `update` arm, and `view` logic. Keep side effects out of `handle_event` and `view` — send commands via `ctx.send(...)` in `update` only. If a new submodel is needed, add a message enum, `handle_event`, `update(&UpdateCtx)`, and `view`, then compose it in `App` and add a grouped `AppMessage` variant.
 
+The `view` method should have immutable `self` reference (`&self`) as parameter, unless mutating the model in `view` is the only way for implementation.
+
 ### Async runtime: Tokio
 
 `main` is `#[tokio::main]`. The TUI loop runs on the main thread using `termina`'s `EventStream` (the `event-stream` feature) so the loop can `tokio::select!` between terminal key events and core events without blocking. All LLM and database work runs on a spawned **core task** (`shuvarie_core::run`). Communication is via `tokio::sync::mpsc` channels:
 
-- TUI → core: commands (e.g. `SendMessage`, `SelectModel`, `LoadHistory`) — `shuvarie_core::Command`.
-- Core → TUI: events (e.g. `TokenReceived`, `StreamDone`, `ModelsLoaded`, `HistoryLoaded`) — `shuvarie_core::Event` — that are converted into `AppMessage` variants and fed into `update`.
+- TUI → core: commands (e.g. `SendMessage`, `StartSession`, `ListModels`, `AddProvider`, `SetActiveModel`) — `shuvarie_core::Command`.
+- Core → TUI: events (e.g. `MessageReceived`, `ReplyError`, `SessionStarted`, `ModelsLoaded`, `ConfigSaved`) — `shuvarie_core::Event` — that are converted into `AppMessage` variants and fed into `update`.
 
 Keep the TUI thread free of `await`s on blocking work; offload any blocking work to the core task (or `spawn_blocking`). The `select!` loop wakes on either a terminal event or a core event, so live updates (model lists, streaming tokens) render without requiring a keypress.
 
@@ -114,14 +125,19 @@ The visual style is defined in `src/tui/theme.rs` and used by all submodel `view
 
 **Selection** — `highlight_style` uses `Style::new().bg(ACCENT_BG).fg(TEXT)` (no `Modifier::REVERSED`). The `highlight_symbol("▶ ")` stays in `ACCENT` as the cursor marker. Active provider/model items use `theme::active_marker(is_active)` → `●` in `ACCENT` (distinct from the selection cursor `▶`).
 
-**Layout** — `App::view` renders a 3-row vertical layout:
-1. **Title bar** (1 row) — `theme::title_bar(...)` with `SURFACE` bg: app name in `ACCENT` bold, route name in `TEXT_DIM`, active provider:model in `TEXT`.
-2. **Content** (`Min(0)`) — inset by 1 cell left/right (margin between pane edges and screen edge). Delegated to the active submodel's `view`.
-3. **Status footer** (1 row) — `SURFACE` bg: left = contextual help via `theme::help_line(...)` (keybindings as styled `Span`s: keys in `ACCENT`, labels in `TEXT_MUTED`); right = error/loading state in `ERROR`/`WARNING`.
+**Layout** — `App::view` renders a 2-row vertical layout (no global title bar; branding lives in the sidebar and Home logo):
+1. **Content** (`Min(0)`) — inset by 1 cell on all sides. Delegated to the active submodel's `view`:
+   - `HomeScreen::view` — centered ASCII art + centered input area (no sidebar).
+   - `SessionScreen::view` — left sidebar (30 cols, `SURFACE` bg) + 1-cell `BG` gutter + content pane with centered title bar atop transparent chat history + input + status row.
+2. **Status footer** (1 row) — `SURFACE` bg: left = contextual help via `theme::help_line(...)` (keybindings as styled `Span`s: keys in `ACCENT`, labels in `TEXT_MUTED`); right = error/loading state in `ERROR`/`WARNING`.
 
 **Pane gutter** — two-pane layouts use `Layout::horizontal(...).spacing(1)` so the `BG` shows through as a 1-cell gap between panes (visual separation without borders).
 
-**Search input pill** — when search is active, the search `Paragraph` gets `SURFACE_FOCUSED` bg + `ACCENT` fg to look like an input field; inactive shows a `TEXT_MUTED` hint.
+**Virtual cursor** — `InputBuffer::cursor_line(text_color, cursor_color)` builds a `Line` with the character at the cursor position rendered with `Modifier::REVERSED` (the char's bg becomes the cursor color). When the cursor is past the last character, a reversed space block is appended. All text input areas (home, session, add-provider details) use this for cursor visualization.
+
+**Emacs keybindings** — all text inputs support `Ctrl+B`/`Ctrl+F` (char left/right), `Alt+B`/`Alt+F` (word left/right), `Ctrl+A`/`Ctrl+E` (home/end), `Ctrl+D` (delete forward), `Ctrl+H` (backspace alias), `Ctrl+K` (kill to end). List navigations support `Ctrl+N`/`Ctrl+P` (next/prev). Arrow keys and physical keys remain alongside.
+
+**Quit** — via `Ctrl+C` → `ConfirmQuit` overlay (Enter or `Ctrl+C` again to confirm, Esc to cancel). `q` no longer quits. The command menu is opened with `Ctrl+M`.
 
 **Help text** — use `theme::help_line(&[("key", "label"), ...])` to render keybinding rows with keys in `ACCENT` and labels in `TEXT_MUTED`, separated by spacing. Never render help as a flat unstyled string.
 
@@ -129,7 +145,7 @@ When adding a new screen or widget, use the `theme` helpers — do not inline `B
 
 ### Launch flow
 
-On startup `shuvarie-core` loads config and checks for connected providers. If none are configured, the TUI opens to the **model selection / connect provider** screen first; otherwise it opens to the chat view. Model selection is also reachable from a menu at any time.
+On startup `shuvarie-core` loads config and checks for connected providers. If none are configured, the TUI opens to the **Home** route with a **Welcome** overlay prompting the user to add a provider; otherwise it opens to the **Home** route directly. Provider/model management is overlay-based (AddProvider wizard, ModelPicker) and reachable at any time via the `Ctrl+M` command menu. When the user submits a message from Home, the app switches to the **Session** route.
 
 ## Conventions
 
@@ -151,11 +167,11 @@ cargo fmt --check
 
 ## Known issues to resolve
 
-- `shuvarie-llm` implements model listing and `ProviderClient::build` (M1); streaming completion and message types land in M4/M5.
-- `shuvarie-core` implements config load/save, `has_connected_providers()`, the `Command`/`Event` enums, and the core task (`run`) that owns the in-memory config and orchestrates provider/model listing (M2/M3). The storage layer (Turso + Toasty) and domain `Message`/`Update` logic land in M6.
-- The core task is spawned in `main`; the TUI loop uses `termina`'s `EventStream` + `tokio::select!` to wake on terminal or core events (M3 done).
-- The chat view is a placeholder (M4 will implement message composition and rendering).
-- Model search uses `nucleo` (fuzzy matcher) via `src/tui/search.rs`; the Ctrl+P command menu (`src/tui/command_menu.rs`) is a small extensible registry of `CommandEntry`s.
+- `shuvarie-llm` implements model listing and non-streaming `ProviderClient::complete` (M4); streaming completion lands in M5.
+- `shuvarie-core` implements config load/save, `has_connected_providers()`, the `Command`/`Event` enums, the in-memory `Session` struct, and the core task (`run`) that orchestrates provider/model listing and non-streaming chat (M4). The storage layer (Turso + Toasty) lands in M6.
+- Token/cost in the sidebar Context panel are zeroed placeholders (M5 will wire real `Usage` data from streaming completions).
+- LSP and Skills sidebar panels show "inactive" placeholders (M7+ will add real LSP/Skills systems).
+- Model search uses `nucleo` (fuzzy matcher) via `src/tui/search.rs`; the Ctrl+M command menu (`src/tui/command_menu.rs`) is a small extensible registry of `CommandEntry`s.
 
 ## Tips
 

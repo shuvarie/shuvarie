@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::message::ChatMsg;
 use crate::{LlmError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -189,5 +190,48 @@ impl ProviderClient {
             .iter()
             .map(crate::model::ModelInfo::from_rig)
             .collect())
+    }
+
+    pub async fn complete(&self, model: &str, prompt: &str, history: &[ChatMsg]) -> Result<String> {
+        use rig::prelude::{AgentClientExt, Chat};
+
+        let user_msg = rig::message::Message::user(prompt.to_string());
+        let mut rig_history: Vec<rig::message::Message> = history
+            .iter()
+            .cloned()
+            .map(rig::message::Message::from)
+            .collect();
+
+        let result = match &self.list {
+            ListImpl::OpenAi(c) => {
+                let agent = c.agent(model).build();
+                agent.chat(user_msg, &mut rig_history).await
+            }
+            ListImpl::OpenRouter(c) => {
+                let agent = c.agent(model).build();
+                agent.chat(user_msg, &mut rig_history).await
+            }
+            ListImpl::DeepSeek(c) => {
+                let agent = c.agent(model).build();
+                agent.chat(user_msg, &mut rig_history).await
+            }
+            ListImpl::Anthropic(c) => {
+                let agent = c.agent(model).build();
+                agent.chat(user_msg, &mut rig_history).await
+            }
+            ListImpl::Gemini(c) => {
+                let agent = c.agent(model).build();
+                agent.chat(user_msg, &mut rig_history).await
+            }
+            ListImpl::Ollama(c) => {
+                let agent = c.agent(model).build();
+                agent.chat(user_msg, &mut rig_history).await
+            }
+        };
+
+        match result {
+            Ok(text) => Ok(text),
+            Err(e) => Err(LlmError::Provider(e.to_string())),
+        }
     }
 }

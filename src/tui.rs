@@ -9,14 +9,20 @@ use shuvarie_core::{Command, Config, Event};
 
 use self::app::{App, AppReturn};
 
-pub mod app;
-mod chat;
+pub mod add_provider;
+mod app;
 mod command_menu;
+mod confirm_quit;
 mod context;
 mod escape;
-mod model_select;
+mod home;
+mod logo;
+mod model_picker;
 mod search;
+mod session;
+mod sidebar;
 mod theme;
+mod welcome;
 mod widgets;
 
 pub async fn run_tui(cmd_tx: Sender<Command>, mut event_rx: Receiver<Event>) -> io::Result<()> {

@@ -20,4 +20,8 @@ pub enum Command {
         model: String,
     },
     SaveConfig,
+    StartSession,
+    SendMessage {
+        content: String,
+    },
 }

@@ -15,4 +15,11 @@ pub enum Event {
     ConfigError {
         error: String,
     },
+    SessionStarted,
+    MessageReceived {
+        content: String,
+    },
+    ReplyError {
+        error: String,
+    },
 }

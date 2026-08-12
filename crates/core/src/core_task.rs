@@ -7,9 +7,11 @@ use shuvarie_llm::ProviderClient;
 use crate::command::Command;
 use crate::config::{Config, ProviderConfig};
 use crate::event::Event;
+use crate::session::Session;
 
 pub async fn run(mut config: Config, mut cmd_rx: Receiver<Command>, event_tx: Sender<Event>) {
     let mut clients: HashMap<String, ProviderClient> = HashMap::new();
+    let mut session: Option<Session> = None;
 
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
@@ -80,6 +82,61 @@ pub async fn run(mut config: Config, mut cmd_rx: Receiver<Command>, event_tx: Se
             }
             Command::SaveConfig => {
                 persist(&config, &event_tx).await;
+            }
+            Command::StartSession => {
+                session = Some(Session::new());
+                let _ = event_tx.send(Event::SessionStarted).await;
+            }
+            Command::SendMessage { content } => {
+                if session.is_none() {
+                    session = Some(Session::new());
+                    let _ = event_tx.send(Event::SessionStarted).await;
+                }
+                let s = session.as_mut().unwrap();
+                s.push_user(content.clone());
+
+                let Some(provider_name) = config.active_provider.clone() else {
+                    let _ = event_tx
+                        .send(Event::ReplyError {
+                            error: "no active provider".into(),
+                        })
+                        .await;
+                    continue;
+                };
+                let Some(model) = config.active_model.clone() else {
+                    let _ = event_tx
+                        .send(Event::ReplyError {
+                            error: "no active model".into(),
+                        })
+                        .await;
+                    continue;
+                };
+
+                let client = match client_for(&mut clients, &mut config, &provider_name) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = event_tx.send(Event::ReplyError { error: e }).await;
+                        continue;
+                    }
+                };
+
+                let prior: Vec<shuvarie_llm::ChatMsg> =
+                    s.messages[..s.messages.len().saturating_sub(1)].to_vec();
+                match client.complete(&model, &content, &prior).await {
+                    Ok(reply) => {
+                        s.push_assistant(reply.clone());
+                        let _ = event_tx
+                            .send(Event::MessageReceived { content: reply })
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = event_tx
+                            .send(Event::ReplyError {
+                                error: e.to_string(),
+                            })
+                            .await;
+                    }
+                }
             }
         }
     }

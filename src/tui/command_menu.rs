@@ -11,7 +11,6 @@ use super::widgets::InputBuffer;
 pub enum CommandAction {
     OpenModelSelect,
     AddProvider,
-    Quit,
 }
 
 #[derive(Clone)]
@@ -33,25 +32,19 @@ pub enum CommandMenuMessage {
 pub enum CommandMenuEffect {
     OpenModelSelect,
     AddProvider,
-    Quit,
 }
 
 pub fn default_commands() -> Vec<CommandEntry> {
     vec![
         CommandEntry {
             name: "Select model",
-            description: "Open the model selection screen",
+            description: "Pick the active model",
             action: CommandAction::OpenModelSelect,
         },
         CommandEntry {
             name: "Add provider",
             description: "Add a new LLM provider",
             action: CommandAction::AddProvider,
-        },
-        CommandEntry {
-            name: "Quit",
-            description: "Exit shuvarie",
-            action: CommandAction::Quit,
         },
     ]
 }
@@ -101,13 +94,20 @@ impl CommandMenu {
     }
 
     pub fn handle_event(key: KeyEvent) -> Option<CommandMenuMessage> {
+        if ctrl(&key) {
+            return match key.code {
+                KeyCode::Char('n') => Some(CommandMenuMessage::Next),
+                KeyCode::Char('p') => Some(CommandMenuMessage::Prev),
+                _ => None,
+            };
+        }
         match key.code {
             KeyCode::Escape => Some(CommandMenuMessage::Close),
             KeyCode::Down => Some(CommandMenuMessage::Next),
             KeyCode::Up => Some(CommandMenuMessage::Prev),
             KeyCode::Enter => Some(CommandMenuMessage::Run),
             KeyCode::Backspace => Some(CommandMenuMessage::Backspace),
-            KeyCode::Char(c) if !ctrl(&key) => Some(CommandMenuMessage::Input(c)),
+            KeyCode::Char(c) => Some(CommandMenuMessage::Input(c)),
             _ => None,
         }
     }
@@ -130,7 +130,6 @@ impl CommandMenu {
                     return match action {
                         CommandAction::OpenModelSelect => Some(CommandMenuEffect::OpenModelSelect),
                         CommandAction::AddProvider => Some(CommandMenuEffect::AddProvider),
-                        CommandAction::Quit => Some(CommandMenuEffect::Quit),
                     };
                 }
             }
