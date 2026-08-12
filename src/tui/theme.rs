@@ -2,6 +2,7 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Padding};
 
+#[allow(dead_code)]
 pub const BG: Color = Color::Rgb(18, 18, 22);
 pub const SURFACE: Color = Color::Rgb(28, 28, 34);
 pub const SURFACE_FOCUSED: Color = Color::Rgb(38, 38, 46);

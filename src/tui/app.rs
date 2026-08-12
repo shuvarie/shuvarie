@@ -394,8 +394,6 @@ impl App {
     }
 
     pub fn view(&mut self, frame: &mut Frame<'_>, area: Rect) {
-        frame.render_widget(Block::new().bg(theme::BG), area);
-
         let [content_area, footer_area] = Layout::vertical([Min(0), Length(1)]).areas(area);
 
         let padded = Rect::new(
