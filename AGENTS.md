@@ -33,6 +33,10 @@ App (parent)
 └── ConfirmQuit         — ConfirmQuitMessage, handle_event, (no update — parent handles directly), view(&self)
 ```
 
+When creating a new component, it's usually expected to be a TEA model, unless such an architecture doesn't fit the requirement.
+
+There should be a `new` and a `view` method, and a `update` method when data updating is required.
+
 **Module layout** (`src/tui/`):
 
 | File | Role |
