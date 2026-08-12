@@ -1,10 +1,10 @@
-use ratatui::layout::Alignment;
+use ratatui::layout::{Alignment, Rect};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
 use super::theme;
 
-pub const LOGO: &[&str] = &[
+const LOGO: &[&str] = &[
     r"     /\      ",
     r"    // \     ",
     r"    || |     ",
@@ -22,14 +22,28 @@ pub const LOGO: &[&str] = &[
     r"    ~~~~     ",
 ];
 
-pub fn render(frame: &mut Frame<'_>, area: Rect) {
-    let lines: Vec<Line> = LOGO
-        .iter()
-        .map(|l| Line::from(*l).fg(theme::ACCENT))
-        .collect();
-    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
+pub struct Logo;
+
+impl Logo {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn height(&self) -> usize {
+        LOGO.len()
+    }
+
+    pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
+        let lines: Vec<Line> = LOGO
+            .iter()
+            .map(|l| Line::from(*l).fg(theme::ACCENT))
+            .collect();
+        frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
+    }
 }
 
-pub fn height() -> usize {
-    LOGO.len()
+impl Default for Logo {
+    fn default() -> Self {
+        Self::new()
+    }
 }

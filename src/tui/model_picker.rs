@@ -5,12 +5,11 @@ use shuvarie_core::ModelInfo;
 use termina::event::{KeyCode, KeyEvent, Modifiers};
 
 use super::add_provider::centered_rect;
-use super::search::Search;
+use super::search::{Search, SearchMessage};
 use super::theme;
 
 pub enum ModelPickerMessage {
-    Input(char),
-    Backspace,
+    Search(SearchMessage),
     Next,
     Prev,
     Select,
@@ -28,7 +27,6 @@ pub struct ModelPicker {
     pub filtered: Vec<usize>,
     pub state: ListState,
     pub search: Search,
-    pub search_active: bool,
 }
 
 impl ModelPicker {
@@ -39,7 +37,6 @@ impl ModelPicker {
             filtered: Vec::new(),
             state: ListState::default(),
             search: Search::new(),
-            search_active: false,
         }
     }
 
@@ -47,7 +44,7 @@ impl ModelPicker {
         self.open = true;
         self.models = models.to_vec();
         self.search.clear();
-        self.search_active = true;
+        self.search.active = true;
         self.refilter();
         self.state.select(Some(0));
     }
@@ -55,7 +52,6 @@ impl ModelPicker {
     pub fn close(&mut self) {
         self.open = false;
         self.search.clear();
-        self.search_active = false;
     }
 
     fn refilter(&mut self) {
@@ -82,8 +78,8 @@ impl ModelPicker {
             KeyCode::Down => Some(ModelPickerMessage::Next),
             KeyCode::Up => Some(ModelPickerMessage::Prev),
             KeyCode::Enter => Some(ModelPickerMessage::Select),
-            KeyCode::Backspace => Some(ModelPickerMessage::Backspace),
-            KeyCode::Char(c) => Some(ModelPickerMessage::Input(c)),
+            KeyCode::Backspace => Some(ModelPickerMessage::Search(SearchMessage::Backspace)),
+            KeyCode::Char(c) => Some(ModelPickerMessage::Search(SearchMessage::Input(c))),
             _ => None,
         }
     }
@@ -113,13 +109,8 @@ impl ModelPicker {
                 }
                 None
             }
-            ModelPickerMessage::Input(c) => {
-                self.search.push(c);
-                self.refilter();
-                None
-            }
-            ModelPickerMessage::Backspace => {
-                self.search.backspace();
+            ModelPickerMessage::Search(m) => {
+                self.search.update(m);
                 self.refilter();
                 None
             }
@@ -149,12 +140,7 @@ impl ModelPicker {
         let [input_area, list_area, hint_area] =
             Layout::vertical([Length(1), Min(0), Length(1)]).areas(inner);
 
-        let search_widget = if self.search.is_empty() {
-            Paragraph::new("/ to search models").fg(theme::TEXT_MUTED)
-        } else {
-            Paragraph::new(format!("/ {}", self.search.query)).fg(theme::ACCENT)
-        };
-        frame.render_widget(search_widget, input_area);
+        self.search.view(frame, input_area, "/ to search models");
 
         let items: Vec<ListItem> = self
             .filtered

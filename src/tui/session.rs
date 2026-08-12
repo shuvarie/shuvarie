@@ -1,125 +1,79 @@
 use ratatui::layout::{Alignment, Constraint::*, Layout, Rect};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph, Wrap};
-use shuvarie_core::{Config, Role};
+use shuvarie_core::Role;
 use termina::event::{KeyCode, KeyEvent, Modifiers};
 
-use super::sidebar;
+use super::sidebar::{Sidebar, SidebarMessage};
 use super::theme;
-use super::widgets::InputBuffer;
+use super::widgets::{TextArea, TextAreaEffect, TextAreaMessage};
 
 pub enum SessionMessage {
-    Input(char),
-    Backspace,
-    Delete,
-    KillToEnd,
-    Left,
-    Right,
-    LeftWord,
-    RightWord,
-    Home,
-    End,
-    Submit,
+    Text(TextAreaMessage),
     ScrollUp,
     ScrollDown,
-    MessageReceived { content: String },
-    ReplyError { error: String },
+    MessageReceived {
+        content: String,
+    },
+    ReplyError {
+        error: String,
+    },
     Reset,
+    UpdateConfig {
+        provider: Option<String>,
+        model: Option<String>,
+    },
 }
 
 pub struct SessionScreen {
-    pub input: InputBuffer,
+    pub input: TextArea,
     pub messages: Vec<(Role, String)>,
     pub scroll: usize,
     pub status: Option<String>,
+    pub sidebar: Sidebar,
 }
 
 impl SessionScreen {
     pub fn new() -> Self {
         Self {
-            input: InputBuffer::new(),
+            input: TextArea::new("Type a message…"),
             messages: Vec::new(),
             scroll: 0,
             status: None,
+            sidebar: Sidebar::new(),
         }
     }
 
     pub fn handle_event(&self, key: KeyEvent) -> Option<SessionMessage> {
         if ctrl(&key) {
             return match key.code {
-                KeyCode::Char('b') => Some(SessionMessage::Left),
-                KeyCode::Char('f') => Some(SessionMessage::Right),
-                KeyCode::Char('a') => Some(SessionMessage::Home),
-                KeyCode::Char('e') => Some(SessionMessage::End),
-                KeyCode::Char('d') => Some(SessionMessage::Delete),
-                KeyCode::Char('h') => Some(SessionMessage::Backspace),
-                KeyCode::Char('k') => Some(SessionMessage::KillToEnd),
                 KeyCode::Char('n') => Some(SessionMessage::ScrollDown),
                 KeyCode::Char('p') => Some(SessionMessage::ScrollUp),
-                _ => None,
+                _ => self.input.handle_event(key).map(SessionMessage::Text),
             };
         }
         if alt(&key) {
-            return match key.code {
-                KeyCode::Char('b') => Some(SessionMessage::LeftWord),
-                KeyCode::Char('f') => Some(SessionMessage::RightWord),
-                _ => None,
-            };
+            return self.input.handle_event(key).map(SessionMessage::Text);
         }
         match key.code {
-            KeyCode::Enter => Some(SessionMessage::Submit),
-            KeyCode::Backspace => Some(SessionMessage::Backspace),
-            KeyCode::Left => Some(SessionMessage::Left),
-            KeyCode::Right => Some(SessionMessage::Right),
-            KeyCode::Home => Some(SessionMessage::Home),
-            KeyCode::End => Some(SessionMessage::End),
             KeyCode::Up => Some(SessionMessage::ScrollUp),
             KeyCode::Down => Some(SessionMessage::ScrollDown),
-            KeyCode::Char(c) => Some(SessionMessage::Input(c)),
-            _ => None,
+            _ => self.input.handle_event(key).map(SessionMessage::Text),
         }
     }
 
     pub fn update(&mut self, msg: SessionMessage) -> Option<SessionEffect> {
         match msg {
-            SessionMessage::Input(c) => {
-                self.input.push(c);
-                None
-            }
-            SessionMessage::Backspace => {
-                self.input.backspace();
-                None
-            }
-            SessionMessage::Delete => {
-                self.input.delete();
-                None
-            }
-            SessionMessage::KillToEnd => {
-                self.input.kill_to_end();
-                None
-            }
-            SessionMessage::Left => {
-                self.input.left();
-                None
-            }
-            SessionMessage::Right => {
-                self.input.right();
-                None
-            }
-            SessionMessage::LeftWord => {
-                self.input.left_word();
-                None
-            }
-            SessionMessage::RightWord => {
-                self.input.right_word();
-                None
-            }
-            SessionMessage::Home => {
-                self.input.home();
-                None
-            }
-            SessionMessage::End => {
-                self.input.end();
+            SessionMessage::Text(m) => {
+                if let Some(effect) = self.input.update(m) {
+                    match effect {
+                        TextAreaEffect::Submit { content } => {
+                            self.messages.push((Role::User, content.clone()));
+                            self.status = Some("thinking…".to_string());
+                            return Some(SessionEffect::SendMessage { content });
+                        }
+                    }
+                }
                 None
             }
             SessionMessage::ScrollUp => {
@@ -129,16 +83,6 @@ impl SessionScreen {
             SessionMessage::ScrollDown => {
                 self.scroll = self.scroll.saturating_sub(1);
                 None
-            }
-            SessionMessage::Submit => {
-                let content = self.input.value.trim().to_string();
-                if content.is_empty() {
-                    return None;
-                }
-                self.input.clear();
-                self.messages.push((Role::User, content.clone()));
-                self.status = Some("thinking…".to_string());
-                Some(SessionEffect::SendMessage { content })
             }
             SessionMessage::MessageReceived { content } => {
                 self.messages.push((Role::Assistant, content));
@@ -154,30 +98,25 @@ impl SessionScreen {
                 self.status = None;
                 None
             }
+            SessionMessage::UpdateConfig { provider, model } => {
+                self.sidebar
+                    .update(SidebarMessage::UpdateConfig { provider, model });
+                None
+            }
         }
     }
 
-    pub fn view(&self, frame: &mut Frame<'_>, area: Rect, config: &Config) {
+    pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
         let [sidebar_area, content_area] = Layout::horizontal([Length(30), Min(0)])
             .spacing(1)
             .areas(area);
 
-        sidebar::render(
-            frame,
-            sidebar_area,
-            sidebar::SidebarData {
-                version: env!("CARGO_PKG_VERSION"),
-                tokens: 0,
-                cost: 0.0,
-                provider: config.active_provider.as_deref(),
-                model: config.active_model.as_deref(),
-            },
-        );
+        self.sidebar.view(frame, sidebar_area);
 
         let title = format!(
             "Shuvarie · {}:{}",
-            config.active_provider.as_deref().unwrap_or("?"),
-            config.active_model.as_deref().unwrap_or("?")
+            self.sidebar.provider.as_deref().unwrap_or("?"),
+            self.sidebar.model.as_deref().unwrap_or("?")
         );
         let [title_area, history_area, input_area, status_area] =
             Layout::vertical([Length(1), Min(0), Length(3), Length(1)]).areas(content_area);
@@ -215,22 +154,7 @@ impl SessionScreen {
             .scroll((self.scroll as u16, 0));
         frame.render_widget(history, history_inner);
 
-        let input_block = Block::new()
-            .bg(theme::SURFACE)
-            .padding(Padding::horizontal(2));
-        let input_inner = input_block.inner(input_area);
-        frame.render_widget(input_block, input_area);
-        if self.input.value.is_empty() {
-            let mut placeholder = self.input.cursor_line(theme::TEXT_MUTED, theme::ACCENT);
-            placeholder.push_span(Span::raw(" Type a message…").fg(theme::TEXT_MUTED));
-            frame.render_widget(
-                Paragraph::new(placeholder).alignment(Alignment::Left),
-                input_inner,
-            );
-        } else {
-            let line = self.input.cursor_line(theme::TEXT, theme::ACCENT);
-            frame.render_widget(Paragraph::new(line).alignment(Alignment::Left), input_inner);
-        }
+        self.input.view(frame, input_area);
 
         if let Some(status) = &self.status {
             frame.render_widget(

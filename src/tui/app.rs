@@ -11,13 +11,14 @@ use super::add_provider::{
     AddProviderForm, AddProviderMessage, AddProviderOutcome, AddProviderStage,
 };
 use super::command_menu::{CommandMenu, CommandMenuEffect, CommandMenuMessage};
-use super::confirm_quit::{ConfirmQuit, ConfirmQuitMessage};
+use super::confirm_quit::{ConfirmQuit, ConfirmQuitEffect, ConfirmQuitMessage};
 use super::context::UpdateCtx;
 use super::home::{HomeEffect, HomeMessage, HomeScreen};
 use super::model_picker::{ModelPicker, ModelPickerEffect, ModelPickerMessage};
 use super::session::{SessionEffect, SessionMessage, SessionScreen};
+use super::sidebar::SidebarMessage;
 use super::theme;
-use super::welcome::{Welcome, WelcomeMessage};
+use super::welcome::{Welcome, WelcomeEffect, WelcomeMessage};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Route {
@@ -86,6 +87,8 @@ impl App {
         if !config.has_connected_providers() {
             welcome.open();
         }
+        let initial_provider = config.active_provider.clone();
+        let initial_model = config.active_model.clone();
         Self {
             ctx: UpdateCtx::new(config, cmd_tx),
             route,
@@ -95,7 +98,14 @@ impl App {
                 Overlay::None
             },
             home: HomeScreen::new(),
-            session: SessionScreen::new(),
+            session: {
+                let mut s = SessionScreen::new();
+                s.sidebar.update(SidebarMessage::UpdateConfig {
+                    provider: initial_provider,
+                    model: initial_model,
+                });
+                s
+            },
             command_menu: CommandMenu::new(),
             welcome,
             confirm_quit: ConfirmQuit::new(),
@@ -195,11 +205,14 @@ impl App {
                 self.overlay = Overlay::ConfirmQuit;
             }
             AppMessage::ConfirmQuit => {
-                self.confirm_quit.close();
-                return Some(AppReturn::Quit);
+                if let Some(ConfirmQuitEffect::Confirm) =
+                    self.confirm_quit.update(ConfirmQuitMessage::Confirm)
+                {
+                    return Some(AppReturn::Quit);
+                }
             }
             AppMessage::CancelQuit => {
-                self.confirm_quit.close();
+                self.confirm_quit.update(ConfirmQuitMessage::Cancel);
                 self.overlay = Overlay::None;
             }
             AppMessage::Home(m) => {
@@ -287,13 +300,18 @@ impl App {
                     self.overlay = Overlay::None;
                 }
             }
-            AppMessage::Welcome(m) => match m {
-                WelcomeMessage::AddProvider => {
-                    let names: Vec<String> = self.ctx.config.providers.keys().cloned().collect();
-                    self.add_provider_form = Some(AddProviderForm::new(&names));
-                    self.overlay = Overlay::AddProvider;
+            AppMessage::Welcome(m) => {
+                if let Some(effect) = self.welcome.update(m) {
+                    match effect {
+                        WelcomeEffect::AddProvider => {
+                            let names: Vec<String> =
+                                self.ctx.config.providers.keys().cloned().collect();
+                            self.add_provider_form = Some(AddProviderForm::new(&names));
+                            self.overlay = Overlay::AddProvider;
+                        }
+                    }
                 }
-            },
+            }
             AppMessage::ConfigSaved => {
                 self.reload_config();
             }
@@ -368,6 +386,10 @@ impl App {
                 self.welcome.close();
                 self.overlay = Overlay::None;
             }
+            self.session.update(SessionMessage::UpdateConfig {
+                provider: self.ctx.config.active_provider.clone(),
+                model: self.ctx.config.active_model.clone(),
+            });
         }
     }
 
@@ -384,7 +406,7 @@ impl App {
         );
         match self.route {
             Route::Home => self.home.view(frame, padded),
-            Route::Session => self.session.view(frame, padded, &self.ctx.config),
+            Route::Session => self.session.view(frame, padded),
         }
 
         let footer = self.build_footer();

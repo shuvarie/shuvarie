@@ -1,5 +1,8 @@
+use ratatui::layout::{Alignment, Rect};
 use ratatui::prelude::*;
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::widgets::{Block, Paragraph};
+use termina::event::{KeyCode, KeyEvent, Modifiers};
 
 pub struct InputBuffer {
     pub value: String,
@@ -156,6 +159,171 @@ impl Default for InputBuffer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+pub enum TextAreaMessage {
+    Input(char),
+    Backspace,
+    Delete,
+    KillToEnd,
+    Left,
+    Right,
+    LeftWord,
+    RightWord,
+    Home,
+    End,
+    Submit,
+}
+
+pub enum TextAreaEffect {
+    Submit { content: String },
+}
+
+pub struct TextArea {
+    pub buffer: InputBuffer,
+    pub placeholder: &'static str,
+}
+
+impl TextArea {
+    pub fn new(placeholder: &'static str) -> Self {
+        Self {
+            buffer: InputBuffer::new(),
+            placeholder,
+        }
+    }
+
+    pub fn handle_event(&self, key: KeyEvent) -> Option<TextAreaMessage> {
+        if ctrl(&key) {
+            return match key.code {
+                KeyCode::Char('b') => Some(TextAreaMessage::Left),
+                KeyCode::Char('f') => Some(TextAreaMessage::Right),
+                KeyCode::Char('a') => Some(TextAreaMessage::Home),
+                KeyCode::Char('e') => Some(TextAreaMessage::End),
+                KeyCode::Char('d') => Some(TextAreaMessage::Delete),
+                KeyCode::Char('h') => Some(TextAreaMessage::Backspace),
+                KeyCode::Char('k') => Some(TextAreaMessage::KillToEnd),
+                _ => None,
+            };
+        }
+        if alt(&key) {
+            return match key.code {
+                KeyCode::Char('b') => Some(TextAreaMessage::LeftWord),
+                KeyCode::Char('f') => Some(TextAreaMessage::RightWord),
+                _ => None,
+            };
+        }
+        match key.code {
+            KeyCode::Enter => Some(TextAreaMessage::Submit),
+            KeyCode::Backspace => Some(TextAreaMessage::Backspace),
+            KeyCode::Left => Some(TextAreaMessage::Left),
+            KeyCode::Right => Some(TextAreaMessage::Right),
+            KeyCode::Home => Some(TextAreaMessage::Home),
+            KeyCode::End => Some(TextAreaMessage::End),
+            KeyCode::Char(c) => Some(TextAreaMessage::Input(c)),
+            _ => None,
+        }
+    }
+
+    pub fn update(&mut self, msg: TextAreaMessage) -> Option<TextAreaEffect> {
+        match msg {
+            TextAreaMessage::Input(c) => {
+                self.buffer.push(c);
+                None
+            }
+            TextAreaMessage::Backspace => {
+                self.buffer.backspace();
+                None
+            }
+            TextAreaMessage::Delete => {
+                self.buffer.delete();
+                None
+            }
+            TextAreaMessage::KillToEnd => {
+                self.buffer.kill_to_end();
+                None
+            }
+            TextAreaMessage::Left => {
+                self.buffer.left();
+                None
+            }
+            TextAreaMessage::Right => {
+                self.buffer.right();
+                None
+            }
+            TextAreaMessage::LeftWord => {
+                self.buffer.left_word();
+                None
+            }
+            TextAreaMessage::RightWord => {
+                self.buffer.right_word();
+                None
+            }
+            TextAreaMessage::Home => {
+                self.buffer.home();
+                None
+            }
+            TextAreaMessage::End => {
+                self.buffer.end();
+                None
+            }
+            TextAreaMessage::Submit => {
+                let content = self.buffer.value.trim().to_string();
+                if content.is_empty() {
+                    return None;
+                }
+                self.buffer.clear();
+                Some(TextAreaEffect::Submit { content })
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn value(&self) -> &str {
+        &self.buffer.value
+    }
+
+    #[allow(dead_code)]
+    pub fn clear(&mut self) {
+        self.buffer.clear();
+    }
+
+    #[allow(dead_code)]
+    pub fn set(&mut self, s: &str) {
+        self.buffer.set(s);
+    }
+
+    pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
+        let block = Block::new()
+            .bg(crate::tui::theme::SURFACE)
+            .padding(ratatui::widgets::Padding::horizontal(2));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        if self.buffer.value.is_empty() {
+            let mut placeholder_line = self
+                .buffer
+                .cursor_line(crate::tui::theme::TEXT_MUTED, crate::tui::theme::ACCENT);
+            let ph = format!(" {}", self.placeholder);
+            placeholder_line.push_span(Span::raw(ph).fg(crate::tui::theme::TEXT_MUTED));
+            frame.render_widget(
+                Paragraph::new(placeholder_line).alignment(Alignment::Left),
+                inner,
+            );
+        } else {
+            let line = self
+                .buffer
+                .cursor_line(crate::tui::theme::TEXT, crate::tui::theme::ACCENT);
+            frame.render_widget(Paragraph::new(line).alignment(Alignment::Left), inner);
+        }
+    }
+}
+
+fn ctrl(key: &KeyEvent) -> bool {
+    key.modifiers.contains(Modifiers::CONTROL)
+}
+
+fn alt(key: &KeyEvent) -> bool {
+    key.modifiers.contains(Modifiers::ALT)
 }
 
 #[cfg(test)]

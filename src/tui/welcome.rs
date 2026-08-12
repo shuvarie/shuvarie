@@ -10,6 +10,10 @@ pub enum WelcomeMessage {
     AddProvider,
 }
 
+pub enum WelcomeEffect {
+    AddProvider,
+}
+
 pub struct Welcome {
     pub open: bool,
 }
@@ -34,6 +38,12 @@ impl Welcome {
         }
     }
 
+    pub fn update(&mut self, msg: WelcomeMessage) -> Option<WelcomeEffect> {
+        match msg {
+            WelcomeMessage::AddProvider => Some(WelcomeEffect::AddProvider),
+        }
+    }
+
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
         if !self.open {
             return;
@@ -48,7 +58,7 @@ impl Welcome {
             Line::from(""),
             Line::from("Connect an LLM provider to begin.").style(Style::new().fg(theme::TEXT)),
             Line::from(""),
-            Line::from("Press Enter to add a provider, or q to quit.")
+            Line::from("Press Enter to add a provider, or Ctrl+C to quit.")
                 .style(Style::new().fg(theme::TEXT_MUTED)),
         ];
 

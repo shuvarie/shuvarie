@@ -11,6 +11,11 @@ pub enum ConfirmQuitMessage {
     Cancel,
 }
 
+pub enum ConfirmQuitEffect {
+    Confirm,
+    Cancel,
+}
+
 pub struct ConfirmQuit {
     pub open: bool,
 }
@@ -40,6 +45,19 @@ impl ConfirmQuit {
                 Some(ConfirmQuitMessage::Cancel)
             }
             _ => None,
+        }
+    }
+
+    pub fn update(&mut self, msg: ConfirmQuitMessage) -> Option<ConfirmQuitEffect> {
+        match msg {
+            ConfirmQuitMessage::Confirm => {
+                self.close();
+                Some(ConfirmQuitEffect::Confirm)
+            }
+            ConfirmQuitMessage::Cancel => {
+                self.close();
+                Some(ConfirmQuitEffect::Cancel)
+            }
         }
     }
 

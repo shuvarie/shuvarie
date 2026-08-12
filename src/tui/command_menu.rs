@@ -3,9 +3,8 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph};
 use termina::event::{KeyCode, KeyEvent, Modifiers};
 
-use super::search::Search;
+use super::search::{Search, SearchMessage};
 use super::theme;
-use super::widgets::InputBuffer;
 
 #[derive(Clone, Copy)]
 pub enum CommandAction {
@@ -21,8 +20,7 @@ pub struct CommandEntry {
 }
 
 pub enum CommandMenuMessage {
-    Input(char),
-    Backspace,
+    Search(SearchMessage),
     Next,
     Prev,
     Run,
@@ -54,7 +52,6 @@ pub struct CommandMenu {
     pub commands: Vec<CommandEntry>,
     pub filtered: Vec<usize>,
     pub state: ListState,
-    pub input: InputBuffer,
     pub search: Search,
 }
 
@@ -67,14 +64,12 @@ impl CommandMenu {
             commands,
             filtered,
             state: ListState::default(),
-            input: InputBuffer::new(),
             search: Search::new(),
         }
     }
 
     pub fn open(&mut self) {
         self.open = true;
-        self.input.clear();
         self.search.clear();
         self.search.active = true;
         self.refilter();
@@ -83,7 +78,6 @@ impl CommandMenu {
 
     pub fn close(&mut self) {
         self.open = false;
-        self.input.clear();
         self.search.clear();
     }
 
@@ -91,6 +85,11 @@ impl CommandMenu {
         self.filtered = self
             .search
             .filter_indices(self.commands.len(), |i| self.commands[i].name.to_string());
+        if !self.filtered.is_empty() {
+            self.state.select(Some(0));
+        } else {
+            self.state.select(None);
+        }
     }
 
     pub fn handle_event(key: KeyEvent) -> Option<CommandMenuMessage> {
@@ -106,8 +105,8 @@ impl CommandMenu {
             KeyCode::Down => Some(CommandMenuMessage::Next),
             KeyCode::Up => Some(CommandMenuMessage::Prev),
             KeyCode::Enter => Some(CommandMenuMessage::Run),
-            KeyCode::Backspace => Some(CommandMenuMessage::Backspace),
-            KeyCode::Char(c) => Some(CommandMenuMessage::Input(c)),
+            KeyCode::Backspace => Some(CommandMenuMessage::Search(SearchMessage::Backspace)),
+            KeyCode::Char(c) => Some(CommandMenuMessage::Search(SearchMessage::Input(c))),
             _ => None,
         }
     }
@@ -122,8 +121,10 @@ impl CommandMenu {
             }
             CommandMenuMessage::Next => self.next(),
             CommandMenuMessage::Prev => self.prev(),
-            CommandMenuMessage::Input(c) => self.push_char(c),
-            CommandMenuMessage::Backspace => self.backspace(),
+            CommandMenuMessage::Search(m) => {
+                self.search.update(m);
+                self.refilter();
+            }
             CommandMenuMessage::Run => {
                 if let Some(action) = self.selected_action() {
                     self.close();
@@ -135,20 +136,6 @@ impl CommandMenu {
             }
         }
         None
-    }
-
-    fn push_char(&mut self, c: char) {
-        self.input.push(c);
-        self.search.query = self.input.value.clone();
-        self.refilter();
-        self.state.select(Some(0));
-    }
-
-    fn backspace(&mut self) {
-        self.input.backspace();
-        self.search.query = self.input.value.clone();
-        self.refilter();
-        self.state.select(Some(0));
     }
 
     fn next(&mut self) {
@@ -186,12 +173,8 @@ impl CommandMenu {
         let [input_area, list_area, hint_area] =
             Layout::vertical([Length(1), Min(0), Length(1)]).areas(inner);
 
-        let prompt = if self.input.value.is_empty() {
-            Paragraph::new("Type to search commands…").fg(theme::TEXT_MUTED)
-        } else {
-            Paragraph::new(format!("> {}", self.input.value)).fg(theme::TEXT)
-        };
-        frame.render_widget(prompt, input_area);
+        self.search
+            .view(frame, input_area, "Type to search commands…");
 
         let items: Vec<ListItem> = self
             .filtered
