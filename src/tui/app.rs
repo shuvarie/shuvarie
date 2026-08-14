@@ -449,7 +449,7 @@ impl App {
         }
 
         let footer = self.build_footer();
-        frame.render_widget(Paragraph::new(footer).bg(theme::SURFACE), footer_area);
+        frame.render_widget(Paragraph::new(footer), footer_area);
 
         self.welcome.view(frame, area);
         if let Some(form) = &self.add_provider_form {
