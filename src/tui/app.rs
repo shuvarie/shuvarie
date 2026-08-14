@@ -6,6 +6,7 @@ use ratatui::widgets::Paragraph;
 use shuvarie_core::{Config, Event, ModelInfo};
 use termina::Event as TermEvent;
 use termina::event::{KeyCode, KeyEvent, KeyEventKind, Modifiers};
+use tokio::sync::mpsc::Sender;
 
 use super::add_provider::{
     AddProviderForm, AddProviderMessage, AddProviderOutcome, AddProviderStage,
@@ -81,7 +82,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(config: Config, cmd_tx: tokio::sync::mpsc::Sender<shuvarie_core::Command>) -> Self {
+    pub fn new(config: Config, cmd_tx: Sender<shuvarie_core::Command>) -> Self {
         let route = Route::Home;
         let mut welcome = Welcome::new();
         if !config.has_connected_providers() {
