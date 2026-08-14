@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::Paragraph;
 use shuvarie_core::{Config, Event, ModelInfo};
 use termina::Event as TermEvent;
 use termina::event::{KeyCode, KeyEvent, KeyEventKind, Modifiers};
