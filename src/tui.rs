@@ -24,6 +24,7 @@ mod sidebar;
 mod theme;
 mod welcome;
 mod widgets;
+mod utils;
 
 pub async fn run_tui(cmd_tx: Sender<Command>, mut event_rx: Receiver<Event>) -> io::Result<()> {
     let mut term = PlatformTerminal::new()?;

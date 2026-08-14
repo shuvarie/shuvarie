@@ -1,7 +1,9 @@
 use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
 use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph};
-use termina::event::{KeyCode, KeyEvent, Modifiers};
+use termina::event::{KeyCode, KeyEvent};
+
+use crate::tui::utils::ctrl;
 
 use super::search::{Search, SearchMessage};
 use super::theme;
@@ -203,10 +205,6 @@ impl CommandMenu {
             hint_area,
         );
     }
-}
-
-fn ctrl(key: &KeyEvent) -> bool {
-    key.modifiers.contains(Modifiers::CONTROL)
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {

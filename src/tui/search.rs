@@ -2,7 +2,9 @@ use ratatui::layout::Rect;
 use ratatui::prelude::*;
 use ratatui::style::Modifier;
 use ratatui::widgets::Paragraph;
-use termina::event::{KeyCode, KeyEvent, Modifiers};
+use termina::event::{KeyCode, KeyEvent};
+
+use crate::tui::utils::ctrl;
 
 use super::theme;
 
@@ -117,11 +119,6 @@ impl Default for Search {
     fn default() -> Self {
         Self::new()
     }
-}
-
-#[allow(dead_code)]
-fn ctrl(key: &KeyEvent) -> bool {
-    key.modifiers.contains(Modifiers::CONTROL)
 }
 
 #[cfg(test)]

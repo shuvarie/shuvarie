@@ -2,7 +2,9 @@ use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
 use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph};
 use shuvarie_core::ModelInfo;
-use termina::event::{KeyCode, KeyEvent, Modifiers};
+use termina::event::{KeyCode, KeyEvent};
+
+use crate::tui::utils::ctrl;
 
 use super::add_provider::centered_rect;
 use super::search::{Search, SearchMessage};
@@ -171,8 +173,4 @@ impl Default for ModelPicker {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn ctrl(key: &KeyEvent) -> bool {
-    key.modifiers.contains(Modifiers::CONTROL)
 }

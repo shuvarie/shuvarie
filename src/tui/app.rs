@@ -5,8 +5,10 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 use shuvarie_core::{Config, Event, ModelInfo};
 use termina::Event as TermEvent;
-use termina::event::{KeyCode, KeyEvent, KeyEventKind, Modifiers};
+use termina::event::{KeyCode, KeyEventKind};
 use tokio::sync::mpsc::Sender;
+
+use crate::tui::utils::ctrl;
 
 use super::add_provider::{
     AddProviderForm, AddProviderMessage, AddProviderOutcome, AddProviderStage,
@@ -479,8 +481,4 @@ impl App {
             ]),
         }
     }
-}
-
-fn ctrl(key: &KeyEvent) -> bool {
-    key.modifiers.contains(Modifiers::CONTROL)
 }

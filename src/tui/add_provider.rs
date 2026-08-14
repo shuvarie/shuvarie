@@ -3,7 +3,9 @@ use ratatui::prelude::*;
 use ratatui::style::Modifier;
 use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap};
 use shuvarie_llm::Provider;
-use termina::event::{KeyCode, KeyEvent, Modifiers};
+use termina::event::{KeyCode, KeyEvent};
+
+use crate::tui::utils::{alt, ctrl};
 
 use super::theme;
 use super::widgets::InputBuffer;
@@ -461,14 +463,6 @@ impl Default for AddProviderForm {
     fn default() -> Self {
         Self::new(&[])
     }
-}
-
-fn ctrl(key: &KeyEvent) -> bool {
-    key.modifiers.contains(Modifiers::CONTROL)
-}
-
-fn alt(key: &KeyEvent) -> bool {
-    key.modifiers.contains(Modifiers::ALT)
 }
 
 pub fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {

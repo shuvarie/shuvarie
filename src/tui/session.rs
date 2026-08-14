@@ -2,7 +2,9 @@ use ratatui::layout::{Alignment, Constraint::*, Layout, Rect};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph, Wrap};
 use shuvarie_core::Role;
-use termina::event::{KeyCode, KeyEvent, Modifiers};
+use termina::event::{KeyCode, KeyEvent};
+
+use crate::tui::utils::{alt, ctrl};
 
 use super::sidebar::{Sidebar, SidebarMessage};
 use super::theme;
@@ -173,14 +175,4 @@ impl Default for SessionScreen {
     fn default() -> Self {
         Self::new()
     }
-}
-
-#[inline]
-fn ctrl(key: &KeyEvent) -> bool {
-    key.modifiers.contains(Modifiers::CONTROL)
-}
-
-#[inline]
-fn alt(key: &KeyEvent) -> bool {
-    key.modifiers.contains(Modifiers::ALT)
 }

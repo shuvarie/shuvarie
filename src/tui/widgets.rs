@@ -2,7 +2,9 @@ use ratatui::layout::{Alignment, Rect};
 use ratatui::prelude::*;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Paragraph};
-use termina::event::{KeyCode, KeyEvent, Modifiers};
+use termina::event::{KeyCode, KeyEvent};
+
+use crate::tui::utils::{alt, ctrl};
 
 pub struct InputBuffer {
     pub value: String,
@@ -316,14 +318,6 @@ impl TextArea {
             frame.render_widget(Paragraph::new(line).alignment(Alignment::Left), inner);
         }
     }
-}
-
-fn ctrl(key: &KeyEvent) -> bool {
-    key.modifiers.contains(Modifiers::CONTROL)
-}
-
-fn alt(key: &KeyEvent) -> bool {
-    key.modifiers.contains(Modifiers::ALT)
 }
 
 #[cfg(test)]
