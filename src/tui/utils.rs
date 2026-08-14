@@ -1,11 +1,3 @@
-use termina::event::{KeyEvent, Modifiers};
+pub use keys::{ctrl, alt};
 
-#[inline]
-pub fn ctrl(key: &KeyEvent) -> bool {
-    key.modifiers.contains(Modifiers::CONTROL)
-}
-
-#[inline]
-pub fn alt(key: &KeyEvent) -> bool {
-    key.modifiers.contains(Modifiers::ALT)
-}
+mod keys;
