@@ -16,15 +16,16 @@ mod confirm_quit;
 mod context;
 mod escape;
 mod home;
+mod list;
 mod logo;
 mod model_picker;
 mod search;
 mod session;
 mod sidebar;
 mod theme;
+mod utils;
 mod welcome;
 mod widgets;
-mod utils;
 
 pub async fn run_tui(cmd_tx: Sender<Command>, mut event_rx: Receiver<Event>) -> io::Result<()> {
     let mut term = PlatformTerminal::new()?;
@@ -39,25 +40,38 @@ pub async fn run_tui(cmd_tx: Sender<Command>, mut event_rx: Receiver<Event>) -> 
     let config = Config::load().map_err(|e| io::Error::other(e.to_string()))?;
     let mut app = App::new(config, cmd_tx);
 
-    let res: io::Result<()> = loop {
+    let res: io::Result<()> = 'render_loop: loop {
+        // Draw frame
         rat.draw(|frame| app.view(frame, frame.area()))?;
 
-        tokio::select! {
-            ev = event_stream.next() => {
-                let Some(Ok(ev)) = ev else { break Ok(()); };
-                if let Some(msg) = App::handle_event(&ev, &app)
-                    && let Some(AppReturn::Quit) = app.update(msg)
-                {
-                    break Ok(());
+        'event_listening: loop {
+            // Listen to event and map message
+            let msg = tokio::select! {
+                // Terminal event
+                ev = event_stream.next() => {
+                    let Some(Ok(ev)) = ev else { break 'render_loop Ok(()); };
+                    App::map_event(&ev, &app)
                 }
-            }
-            ev = event_rx.recv() => {
-                let Some(ev) = ev else { break Ok(()); };
-                let msg = App::map_core_event(ev);
-                if let Some(AppReturn::Quit) = app.update(msg) {
-                    break Ok(());
+                // Shuvarie core event
+                ev = event_rx.recv() => {
+                    let Some(ev) = ev else { break 'render_loop Ok(()); };
+                    Some(App::map_core_event(ev))
                 }
+            };
+
+            // Handle message
+            if let Some(msg) = msg {
+                // Update model and catch return
+                if let Some(ret) = app.update(msg) {
+                    // Match return
+                    match ret {
+                        AppReturn::Quit => break 'render_loop Ok(()),
+                    }
+                }
+                // Model updated. Rendering the next frame is required.
+                break 'event_listening;
             }
+            // Nothing changed. Keep listening.
         }
     };
 

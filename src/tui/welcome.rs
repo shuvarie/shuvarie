@@ -31,7 +31,7 @@ impl Welcome {
         self.open = false;
     }
 
-    pub fn handle_event(key: KeyEvent) -> Option<WelcomeMessage> {
+    pub fn map_event(key: &KeyEvent) -> Option<WelcomeMessage> {
         match key.code {
             KeyCode::Enter => Some(WelcomeMessage::AddProvider),
             _ => None,

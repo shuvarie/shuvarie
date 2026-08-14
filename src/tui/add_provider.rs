@@ -1,12 +1,13 @@
 use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
 use ratatui::style::Modifier;
-use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Clear, List, ListItem, Paragraph, Wrap};
 use shuvarie_llm::Provider;
 use termina::event::{KeyCode, KeyEvent};
 
 use crate::tui::utils::{alt, ctrl};
 
+use super::list::{render_list_item, scroll_offset_for};
 use super::theme;
 use super::widgets::InputBuffer;
 
@@ -41,6 +42,7 @@ pub enum AddProviderMessage {
     End,
     Submit,
     Cancel,
+    Resize { viewport_height: u16 },
 }
 
 pub enum AddProviderOutcome {
@@ -56,7 +58,9 @@ pub enum AddProviderOutcome {
 
 pub struct AddProviderForm {
     pub stage: AddProviderStage,
-    pub kind_state: ListState,
+    pub kind_selected: usize,
+    pub kind_offset: usize,
+    kind_viewport_height: u16,
     pub name: InputBuffer,
     pub api_key: InputBuffer,
     pub base_url: InputBuffer,
@@ -67,11 +71,11 @@ pub struct AddProviderForm {
 
 impl AddProviderForm {
     pub fn new(existing_names: &[String]) -> Self {
-        let mut kind_state = ListState::default();
-        kind_state.select(Some(0));
         Self {
             stage: AddProviderStage::SelectKind,
-            kind_state,
+            kind_selected: 0,
+            kind_offset: 0,
+            kind_viewport_height: 0,
             name: InputBuffer::new(),
             api_key: InputBuffer::new(),
             base_url: InputBuffer::new(),
@@ -82,7 +86,13 @@ impl AddProviderForm {
     }
 
     fn kind(&self) -> Provider {
-        Provider::ALL[self.kind_state.selected().unwrap_or(0)]
+        Provider::ALL[self.kind_selected.min(Provider::ALL.len() - 1)]
+    }
+
+    fn recompute_kind_offset(&mut self) {
+        let vh = self.kind_viewport_height as usize;
+        let len = Provider::ALL.len();
+        self.kind_offset = scroll_offset_for(self.kind_selected, self.kind_offset, vh, len);
     }
 
     fn compute_default_name(&self, base: &str) -> String {
@@ -129,10 +139,10 @@ impl AddProviderForm {
         };
     }
 
-    pub fn handle_event(key: KeyEvent, stage: AddProviderStage) -> Option<AddProviderMessage> {
+    pub fn map_event(key: &KeyEvent, stage: AddProviderStage) -> Option<AddProviderMessage> {
         match stage {
             AddProviderStage::SelectKind => {
-                if ctrl(&key) {
+                if ctrl(key) {
                     return match key.code {
                         KeyCode::Char('n') => Some(AddProviderMessage::NextKind),
                         KeyCode::Char('p') => Some(AddProviderMessage::PrevKind),
@@ -148,7 +158,7 @@ impl AddProviderForm {
                 }
             }
             AddProviderStage::Details => {
-                if ctrl(&key) {
+                if ctrl(key) {
                     return match key.code {
                         KeyCode::Char('b') => Some(AddProviderMessage::Left),
                         KeyCode::Char('f') => Some(AddProviderMessage::Right),
@@ -160,7 +170,7 @@ impl AddProviderForm {
                         _ => None,
                     };
                 }
-                if alt(&key) {
+                if alt(key) {
                     return match key.code {
                         KeyCode::Char('b') => Some(AddProviderMessage::LeftWord),
                         KeyCode::Char('f') => Some(AddProviderMessage::RightWord),
@@ -197,13 +207,13 @@ impl AddProviderForm {
             }
             AddProviderMessage::NextKind => {
                 let len = Provider::ALL.len();
-                let i = self.kind_state.selected().unwrap_or(0);
-                self.kind_state.select(Some((i + 1).min(len - 1)));
+                self.kind_selected = (self.kind_selected + 1).min(len - 1);
+                self.recompute_kind_offset();
                 AddProviderOutcome::None
             }
             AddProviderMessage::PrevKind => {
-                let i = self.kind_state.selected().unwrap_or(0);
-                self.kind_state.select(Some(i.saturating_sub(1)));
+                self.kind_selected = self.kind_selected.saturating_sub(1);
+                self.recompute_kind_offset();
                 AddProviderOutcome::None
             }
             AddProviderMessage::SelectKind => {
@@ -299,6 +309,13 @@ impl AddProviderForm {
                 AddProviderOutcome::None
             }
             AddProviderMessage::Submit => self.submit(),
+            AddProviderMessage::Resize { viewport_height } => {
+                if self.kind_viewport_height != viewport_height {
+                    self.kind_viewport_height = viewport_height;
+                    self.recompute_kind_offset();
+                }
+                AddProviderOutcome::None
+            }
         }
     }
 
@@ -402,15 +419,14 @@ impl AddProviderForm {
             heading_area,
         );
 
-        let items: Vec<ListItem> = Provider::ALL
+        let visible: Vec<ListItem> = Provider::ALL
             .iter()
-            .map(|&p| ListItem::new(p.display_name()).fg(theme::TEXT))
+            .enumerate()
+            .skip(self.kind_offset)
+            .take(list_area.height as usize)
+            .map(|(i, &p)| render_list_item(p.display_name().to_string(), i == self.kind_selected))
             .collect();
-        let list = List::new(items)
-            .highlight_style(Style::new().bg(theme::ACCENT_BG).fg(theme::TEXT))
-            .highlight_symbol("▶ ");
-        let mut state = self.kind_state;
-        frame.render_stateful_widget(list, list_area, &mut state);
+        frame.render_widget(List::new(visible), list_area);
 
         frame.render_widget(
             Paragraph::new(theme::help_line(&[

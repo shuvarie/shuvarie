@@ -14,23 +14,23 @@ When adding a feature: put domain logic in `shuvarie-core`, LLM/SDK glue in `shu
 
 ### The Elm Architecture (TEA) — hierarchical
 
-The TUI follows `handle_event → message → update → return`:
+The TUI follows `map_event → message → update → return`:
 
-- `handle_event` (pure, no side effects): maps a terminal `Event` (or an async channel message) to a message (e.g. `AppMessage`). Takes `&self`/`&App` only — never mutates.
+- `map_event` (pure, no side effects): maps a terminal `Event` (or an async channel message) to a message (e.g. `AppMessage`). Takes `&self`/`&App` only — never mutates.
 - `update` (mutates the model): consumes a message and may produce a return (e.g. `AppReturn::Quit`) or an effect for the parent.
 - `view(&self, frame: &mut Frame<'_>, area: Rect)`: draws current state. A TEA model is **not** required to implement `ratatui::Widget`; the dedicated `view` method takes a `Frame` + `Rect` and may compose multiple widgets, so it is not limited to a single widget's render contract. No side effects in `view`.
 
-The root `App` composes **submodels**, each following the same TEA shape with its own message enum, `handle_event`, `update`, and `view`. Submodels own their state and logic; the parent dispatches events, forwards grouped messages, handles routing, and processes core events:
+The root `App` composes **submodels**, each following the same TEA shape with its own message enum, `map_event`, `update`, and `view`. Submodels own their state and logic; the parent dispatches events, forwards grouped messages, handles routing, and processes core events:
 
 ```
 App (parent)
-├── HomeScreen          — HomeMessage, handle_event(&self), update → Option<HomeEffect>, view(&self)
-├── SessionScreen       — SessionMessage, handle_event(&self), update → Option<SessionEffect>, view(&self)
-├── CommandMenu         — CommandMenuMessage, handle_event, update → Option<CommandMenuEffect>, view(&mut self)
-├── AddProviderForm     — AddProviderMessage, handle_event(key, stage), update → AddProviderOutcome, view(&self)
-├── ModelPicker         — ModelPickerMessage, handle_event, update → Option<ModelPickerEffect>, view(&mut self)
-├── Welcome             — WelcomeMessage, handle_event, (no update — parent handles directly), view(&self)
-└── ConfirmQuit         — ConfirmQuitMessage, handle_event, (no update — parent handles directly), view(&self)
+├── HomeScreen          — HomeMessage, map_event(&self), update → Option<HomeEffect>, view(&self)
+├── SessionScreen       — SessionMessage, map_event(&self), update → Option<SessionEffect>, view(&self)
+├── CommandMenu         — CommandMenuMessage, map_event, update → Option<CommandMenuEffect>, view(&self)
+├── AddProviderForm     — AddProviderMessage, map_event(key, stage), update → AddProviderOutcome, view(&self)
+├── ModelPicker         — ModelPickerMessage, map_event, update → Option<ModelPickerEffect>, view(&self)
+├── Welcome             — WelcomeMessage, map_event, (no update — parent handles directly), view(&self)
+└── ConfirmQuit         — ConfirmQuitMessage, map_event, (no update — parent handles directly), view(&self)
 ```
 
 When creating a new component, it's usually expected to be a TEA model, unless such an architecture doesn't fit the requirement.
@@ -42,7 +42,7 @@ There should be a `new` and a `view` method, and a `update` method when data upd
 | File | Role |
 |---|---|
 | `tui.rs` | Event loop: `EventStream` + `tokio::select!`, terminal init/deinit, calls `App::view` |
-| `app.rs` | Parent `App`: `Route` (`Home`/`Session`), `Overlay` enum, `AppMessage` (grouped), `handle_event` dispatch, `update`, `view` (content routing + footer + overlays) |
+| `app.rs` | Parent `App`: `Route` (`Home`/`Session`), `Overlay` enum, `AppMessage` (grouped), `map_event` dispatch, `update`, `view` (content routing + footer + overlays) |
 | `context.rs` | `UpdateCtx` — shared `Config` + `Command` sender passed to submodel `update` calls |
 | `home.rs` | `HomeScreen` submodel + `HomeMessage` + `HomeEffect` (ASCII art + input) |
 | `session.rs` | `SessionScreen` submodel + `SessionMessage` + `SessionEffect` (sidebar + chat history + input) |
@@ -54,26 +54,27 @@ There should be a `new` and a `view` method, and a `update` method when data upd
 | `welcome.rs` | `Welcome` overlay (first-run) + `WelcomeMessage` |
 | `confirm_quit.rs` | `ConfirmQuit` overlay (Ctrl+C) + `ConfirmQuitMessage` |
 | `search.rs` | `Search` — nucleo fuzzy `filter_indices` helper |
+| `list.rs` | Stateless list rendering helpers — `scroll_offset_for` (scroll-into-view computed in `update`), `render_list_item`/`render_list_item_line` (bake selection `▶ ` prefix + `ACCENT_BG` row style into `ListItem`) |
 | `widgets.rs` | `InputBuffer` — char buffer + cursor (Emacs movement, virtual cursor rendering) |
 | `theme.rs` | Color palette + style helpers (see UI design below) |
 | `escape.rs` | CSI escape sequences for alt-screen enter/exit |
 
-**Message grouping**: `AppMessage` wraps submodel messages — `Home(HomeMessage)`, `Session(SessionMessage)`, `AddProvider(AddProviderMessage)`, `ModelPicker(ModelPickerMessage)`, `CommandMenu(CommandMenuMessage)`, `Welcome(WelcomeMessage)` — plus parent-only variants (`OpenCommandMenu`, `RequestQuit`, `ConfirmQuit`, `CancelQuit`, `ConfigSaved`, `ConfigError`, `ModelsLoaded`, `ModelsError`). Core `Event`s are mapped to `AppMessage` via `App::map_core_event`, which wraps `MessageReceived`/`ReplyError`/`Reset` into `Session(...)` and keeps `ConfigSaved`/`ConfigError`/`ModelsLoaded`/`ModelsError` at the parent level (the parent reloads config from disk on `ConfigSaved` so submodels see fresh provider data, and auto-selects a model on `ModelsLoaded`).
+**Message grouping**: `AppMessage` wraps submodel messages — `Home(HomeMessage)`, `Session(SessionMessage)`, `AddProvider(AddProviderMessage)`, `ModelPicker(ModelPickerMessage)`, `CommandMenu(CommandMenuMessage)`, `Welcome(WelcomeMessage)` — plus parent-only variants (`OpenCommandMenu`, `RequestQuit`, `ConfirmQuit`, `CancelQuit`, `Resized { rows, cols }`, `ConfigSaved`, `ConfigError`, `ModelsLoaded`, `ModelsError`). Core `Event`s are mapped to `AppMessage` via `App::map_core_event`, which wraps `MessageReceived`/`ReplyError`/`Reset` into `Session(...)` and keeps `ConfigSaved`/`ConfigError`/`ModelsLoaded`/`ModelsError` at the parent level (the parent reloads config from disk on `ConfigSaved` so submodels see fresh provider data, and auto-selects a model on `ModelsLoaded`). `Resized` is sent from the `tui.rs` event loop when the terminal size changes and dispatched in `App::update` to the open overlay's `Resize { viewport_height }` submessage (computed from the popup rect + overlay block inner layout) so the overlay can recompute its scroll offset.
 
-**Event dispatch flow** (`App::handle_event`, overlay-aware, then route-aware):
+**Event dispatch flow** (`App::map_event`, overlay-aware, then route-aware):
 
-1. If an overlay is open → route to that overlay's `handle_event` (CommandMenu, AddProviderForm, ModelPicker, Welcome, ConfirmQuit).
+1. If an overlay is open → route to that overlay's `map_event` (CommandMenu, AddProviderForm, ModelPicker, Welcome, ConfirmQuit).
 2. Else `Ctrl+C` → `RequestQuit` (opens ConfirmQuit overlay).
 3. Else `Ctrl+M` → `OpenCommandMenu` (parent-level global keybind).
-4. Else route to the active screen's `handle_event` (`Home` or `Session`).
+4. Else route to the active screen's `map_event` (`Home` or `Session`).
 
 **Update forwarding**: `App::update` matches `AppMessage` — parent-only variants are handled in-place; submodel variants are forwarded to `submodel.update(msg, &self.ctx)`. `CommandMenu::update` returns `Option<CommandMenuEffect>`; the parent matches effects (`OpenModelSelect`, `AddProvider`) to perform parent-level actions (opening the ModelPicker overlay, opening the AddProviderForm). `HomeScreen::update` returns `Option<HomeEffect>` (`Submit` → start session); `SessionScreen::update` returns `Option<SessionEffect>` (`SendMessage` → send command to core). `AddProviderForm::update` returns `AddProviderOutcome` (`Submit` → add provider + set active + list models; `Cancel` → close or back to kind list). `ModelPicker::update` returns `Option<ModelPickerEffect>` (`Selected` → set active model).
 
 **`UpdateCtx`** (`src/tui/context.rs`): carries `config: Config` and `cmd_tx: Sender<Command>`. Passed by shared reference (`&UpdateCtx`) to submodel `update` calls so they can read config and send commands without owning them. The parent owns the `UpdateCtx` and reloads `config` from disk on `ConfigSaved`.
 
-**Adding a feature**: add a message variant to the relevant submodel's enum (and an effect/return if the parent needs to act), an `update` arm, and `view` logic. Keep side effects out of `handle_event` and `view` — send commands via `ctx.send(...)` in `update` only. If a new submodel is needed, add a message enum, `handle_event`, `update(&UpdateCtx)`, and `view`, then compose it in `App` and add a grouped `AppMessage` variant.
+**Adding a feature**: add a message variant to the relevant submodel's enum (and an effect/return if the parent needs to act), an `update` arm, and `view` logic. Keep side effects out of `map_event` and `view` — send commands via `ctx.send(...)` in `update` only. If a new submodel is needed, add a message enum, `map_event`, `update(&UpdateCtx)`, and `view`, then compose it in `App` and add a grouped `AppMessage` variant.
 
-The `view` method should have immutable `self` reference (`&self`) as parameter, unless mutating the model in `view` is the only way for implementation.
+The `view` method must have an immutable `self` reference (`&self`) as parameter — it never mutates the model.
 
 ### Async runtime: Tokio
 
@@ -127,7 +128,9 @@ The visual style is defined in `src/tui/theme.rs` and used by all submodel `view
 
 **Overlays** — use `theme::overlay_block(title)` for popups (command menu, add-provider form). It fills with `OVERLAY` bg and has `Padding::uniform(1)` for breathing room. `Clear` is still rendered first to wipe underlying cells before the bg fill.
 
-**Selection** — `highlight_style` uses `Style::new().bg(ACCENT_BG).fg(TEXT)` (no `Modifier::REVERSED`). The `highlight_symbol("▶ ")` stays in `ACCENT` as the cursor marker. Active provider/model items use `theme::active_marker(is_active)` → `●` in `ACCENT` (distinct from the selection cursor `▶`).
+**Selection** — selection is **baked into the `ListItem`** (not via `List::highlight_style`/`highlight_symbol` or `ListState`). `list::render_list_item`/`render_list_item_line` prepend a `▶ ` prefix `Span` in `ACCENT` for the selected row (`  ` for unselected) and set `ListItem::style` to `Style::new().bg(ACCENT_BG).fg(TEXT)` for the selected row (so the full row width gets the `ACCENT_BG` fill, matching the old `highlight_style` behavior) or `Style::new()` for unselected. Lists are rendered statelessly via `frame.render_widget(List::new(visible), area)` — never `render_stateful_widget`. The selected index (`selected: usize`) and scroll `offset` live as plain fields on the model, mutated in `update`. Active provider/model items use `theme::active_marker(is_active)` → `●` in `ACCENT` (distinct from the selection cursor `▶`).
+
+**Stateless widgets & scroll-into-view** — `ratatui-widgets` implements `Widget` for `&Widget` references (e.g. `&List`, `&Paragraph`, `&Block`), so widgets are rendered by reference without state. Scroll-into-view is **not** handled by a stateful widget at render time; instead the model tracks `selected`, `offset`, and `viewport_height`, and `update` calls `list::scroll_offset_for(selected, offset, viewport_height, len)` to recompute the offset whenever selection or viewport size changes. The viewport height arrives via a `Resize { viewport_height }` submodel message that `App::update` dispatches on `AppMessage::Resized { rows, cols }` (sent from the `tui.rs` event loop when the terminal size changes, computed from the popup rect + overlay block inner layout). `view` then slices the visible items with `.skip(offset).take(list_area.height)` before building the `List`. Do not introduce `ListState`/`TableState`/`ScrollbarState` — use this pattern instead.
 
 **Layout** — `App::view` renders a 2-row vertical layout (no global title bar; branding lives in the sidebar and Home logo):
 1. **Content** (`Min(0)`) — inset by 1 cell on all sides. Delegated to the active submodel's `view`:

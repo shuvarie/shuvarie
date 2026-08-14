@@ -46,21 +46,21 @@ impl SessionScreen {
         }
     }
 
-    pub fn handle_event(&self, key: KeyEvent) -> Option<SessionMessage> {
-        if ctrl(&key) {
+    pub fn map_event(&self, key: &KeyEvent) -> Option<SessionMessage> {
+        if ctrl(key) {
             return match key.code {
                 KeyCode::Char('n') => Some(SessionMessage::ScrollDown),
                 KeyCode::Char('p') => Some(SessionMessage::ScrollUp),
-                _ => self.input.handle_event(key).map(SessionMessage::Text),
+                _ => self.input.map_event(key).map(SessionMessage::Text),
             };
         }
-        if alt(&key) {
-            return self.input.handle_event(key).map(SessionMessage::Text);
+        if alt(key) {
+            return self.input.map_event(key).map(SessionMessage::Text);
         }
         match key.code {
             KeyCode::Up => Some(SessionMessage::ScrollUp),
             KeyCode::Down => Some(SessionMessage::ScrollDown),
-            _ => self.input.handle_event(key).map(SessionMessage::Text),
+            _ => self.input.map_event(key).map(SessionMessage::Text),
         }
     }
 

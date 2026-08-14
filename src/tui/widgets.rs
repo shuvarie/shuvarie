@@ -194,8 +194,8 @@ impl TextArea {
         }
     }
 
-    pub fn handle_event(&self, key: KeyEvent) -> Option<TextAreaMessage> {
-        if ctrl(&key) {
+    pub fn map_event(&self, key: &KeyEvent) -> Option<TextAreaMessage> {
+        if ctrl(key) {
             return match key.code {
                 KeyCode::Char('b') => Some(TextAreaMessage::Left),
                 KeyCode::Char('f') => Some(TextAreaMessage::Right),
@@ -207,7 +207,7 @@ impl TextArea {
                 _ => None,
             };
         }
-        if alt(&key) {
+        if alt(key) {
             return match key.code {
                 KeyCode::Char('b') => Some(TextAreaMessage::LeftWord),
                 KeyCode::Char('f') => Some(TextAreaMessage::RightWord),

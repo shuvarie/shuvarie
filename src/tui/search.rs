@@ -33,10 +33,10 @@ impl Search {
     }
 
     #[allow(dead_code)]
-    pub fn handle_event(key: KeyEvent) -> Option<SearchMessage> {
+    pub fn map_event(key: &KeyEvent) -> Option<SearchMessage> {
         match key.code {
             KeyCode::Backspace => Some(SearchMessage::Backspace),
-            KeyCode::Char(c) if !ctrl(&key) => Some(SearchMessage::Input(c)),
+            KeyCode::Char(c) if !ctrl(key) => Some(SearchMessage::Input(c)),
             _ => None,
         }
     }

@@ -33,7 +33,7 @@ impl ConfirmQuit {
         self.open = false;
     }
 
-    pub fn handle_event(key: KeyEvent) -> Option<ConfirmQuitMessage> {
+    pub fn map_event(key: &KeyEvent) -> Option<ConfirmQuitMessage> {
         if key.modifiers.contains(Modifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Some(ConfirmQuitMessage::Confirm);
         }

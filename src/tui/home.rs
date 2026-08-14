@@ -26,8 +26,8 @@ impl HomeScreen {
         }
     }
 
-    pub fn handle_event(&self, key: KeyEvent) -> Option<HomeMessage> {
-        self.input.handle_event(key).map(HomeMessage::Input)
+    pub fn map_event(&self, key: &KeyEvent) -> Option<HomeMessage> {
+        self.input.map_event(key).map(HomeMessage::Input)
     }
 
     pub fn update(&mut self, msg: HomeMessage) -> Option<HomeEffect> {

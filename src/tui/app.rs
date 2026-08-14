@@ -44,6 +44,10 @@ pub enum AppMessage {
     RequestQuit,
     ConfirmQuit,
     CancelQuit,
+    Resized {
+        rows: u16,
+        cols: u16,
+    },
     Home(HomeMessage),
     Session(SessionMessage),
     AddProvider(AddProviderMessage),
@@ -147,53 +151,62 @@ impl App {
         }
     }
 
-    pub fn handle_event(event: &TermEvent, app: &App) -> Option<AppMessage> {
-        let TermEvent::Key(key) = event else {
-            return None;
-        };
-        if key.kind != KeyEventKind::Press {
-            return None;
-        }
-        let key = *key;
+    pub fn map_event(event: &TermEvent, app: &App) -> Option<AppMessage> {
+        match event {
+            TermEvent::WindowResized(size) => Some(AppMessage::Resized {
+                rows: size.rows,
+                cols: size.cols,
+            }),
+            TermEvent::Key(key) => {
+                // Overlay events
+                match app.overlay {
+                    Overlay::CommandMenu => {
+                        return CommandMenu::map_event(key).map(AppMessage::CommandMenu);
+                    }
+                    Overlay::AddProvider => {
+                        let stage = app
+                            .add_provider_form
+                            .as_ref()
+                            .map(|f| f.stage)
+                            .unwrap_or(AddProviderStage::SelectKind);
+                        return AddProviderForm::map_event(key, stage).map(AppMessage::AddProvider);
+                    }
+                    Overlay::ModelPicker => {
+                        return ModelPicker::map_event(key).map(AppMessage::ModelPicker);
+                    }
+                    Overlay::Welcome => {
+                        return Welcome::map_event(key).map(AppMessage::Welcome);
+                    }
+                    Overlay::ConfirmQuit => {
+                        return ConfirmQuit::map_event(key).map(|m| match m {
+                            ConfirmQuitMessage::Confirm => AppMessage::ConfirmQuit,
+                            ConfirmQuitMessage::Cancel => AppMessage::CancelQuit,
+                        });
+                    }
+                    Overlay::None => {}
+                }
 
-        match app.overlay {
-            Overlay::CommandMenu => {
-                return CommandMenu::handle_event(key).map(AppMessage::CommandMenu);
-            }
-            Overlay::AddProvider => {
-                let stage = app
-                    .add_provider_form
-                    .as_ref()
-                    .map(|f| f.stage)
-                    .unwrap_or(AddProviderStage::SelectKind);
-                return AddProviderForm::handle_event(key, stage).map(AppMessage::AddProvider);
-            }
-            Overlay::ModelPicker => {
-                return ModelPicker::handle_event(key).map(AppMessage::ModelPicker);
-            }
-            Overlay::Welcome => {
-                return Welcome::handle_event(key).map(AppMessage::Welcome);
-            }
-            Overlay::ConfirmQuit => {
-                return ConfirmQuit::handle_event(key).map(|m| match m {
-                    ConfirmQuitMessage::Confirm => AppMessage::ConfirmQuit,
-                    ConfirmQuitMessage::Cancel => AppMessage::CancelQuit,
-                });
-            }
-            Overlay::None => {}
-        }
+                // App key event
+                #[allow(clippy::single_match)]
+                match key.kind {
+                    KeyEventKind::Press => match key.code {
+                        KeyCode::Char('c') if ctrl(key) => {
+                            return Some(AppMessage::RequestQuit);
+                        }
+                        KeyCode::Char('m') if ctrl(key) => {
+                            return Some(AppMessage::OpenCommandMenu);
+                        }
+                        _ => {}
+                    },
+                    _ => {}
+                }
 
-        if ctrl(&key) && key.code == KeyCode::Char('c') {
-            return Some(AppMessage::RequestQuit);
-        }
-
-        if ctrl(&key) && key.code == KeyCode::Char('m') {
-            return Some(AppMessage::OpenCommandMenu);
-        }
-
-        match app.route {
-            Route::Home => app.home.handle_event(key).map(AppMessage::Home),
-            Route::Session => app.session.handle_event(key).map(AppMessage::Session),
+                match app.route {
+                    Route::Home => app.home.map_event(key).map(AppMessage::Home),
+                    Route::Session => app.session.map_event(key).map(AppMessage::Session),
+                }
+            }
+            _ => None,
         }
     }
 
@@ -315,6 +328,31 @@ impl App {
                     }
                 }
             }
+            AppMessage::Resized { rows, cols } => {
+                let area = Rect::new(0, 0, cols, rows);
+                match self.overlay {
+                    Overlay::CommandMenu => {
+                        if let Some(h) = command_menu_list_height(area) {
+                            self.command_menu
+                                .update(CommandMenuMessage::Resize { viewport_height: h });
+                        }
+                    }
+                    Overlay::ModelPicker => {
+                        if let Some(h) = model_picker_list_height(area) {
+                            self.model_picker
+                                .update(ModelPickerMessage::Resize { viewport_height: h });
+                        }
+                    }
+                    Overlay::AddProvider => {
+                        if let Some(h) = add_provider_kind_list_height(area)
+                            && let Some(form) = &mut self.add_provider_form
+                        {
+                            form.update(AddProviderMessage::Resize { viewport_height: h });
+                        }
+                    }
+                    Overlay::None | Overlay::Welcome | Overlay::ConfirmQuit => {}
+                }
+            }
             AppMessage::ConfigSaved => {
                 self.reload_config();
             }
@@ -396,7 +434,7 @@ impl App {
         }
     }
 
-    pub fn view(&mut self, frame: &mut Frame<'_>, area: Rect) {
+    pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
         let [content_area, footer_area] = Layout::vertical([Min(0), Length(1)]).areas(area);
 
         let padded = Rect::new(
@@ -481,4 +519,46 @@ impl App {
             ]),
         }
     }
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let pop_w = area.width * percent_x / 100;
+    let pop_h = area.height * percent_y / 100;
+    let x = area.x + (area.width.saturating_sub(pop_w)) / 2;
+    let y = area.y + (area.height.saturating_sub(pop_h)) / 2;
+    Rect::new(x, y, pop_w, pop_h)
+}
+
+fn overlay_inner_list_height(
+    area: Rect,
+    percent_x: u16,
+    percent_y: u16,
+    heading_len: u16,
+) -> Option<u16> {
+    let popup = centered_rect(percent_x, percent_y, area);
+    if popup.width < 2 || popup.height < 2 {
+        return None;
+    }
+    let inner = Rect::new(
+        popup.x + 1,
+        popup.y + 1,
+        popup.width.saturating_sub(2),
+        popup.height.saturating_sub(2),
+    );
+    if inner.height <= heading_len + 1 {
+        return None;
+    }
+    Some(inner.height.saturating_sub(heading_len + 1))
+}
+
+fn command_menu_list_height(area: Rect) -> Option<u16> {
+    overlay_inner_list_height(area, 60, 40, 1)
+}
+
+fn model_picker_list_height(area: Rect) -> Option<u16> {
+    overlay_inner_list_height(area, 55, 50, 1)
+}
+
+fn add_provider_kind_list_height(area: Rect) -> Option<u16> {
+    overlay_inner_list_height(area, 50, 55, 2)
 }

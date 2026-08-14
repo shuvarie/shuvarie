@@ -47,7 +47,7 @@ impl Sidebar {
     }
 
     #[allow(dead_code)]
-    pub fn handle_event(&self, _key: KeyEvent) -> Option<SidebarMessage> {
+    pub fn map_event(&self, _key: &KeyEvent) -> Option<SidebarMessage> {
         None
     }
 

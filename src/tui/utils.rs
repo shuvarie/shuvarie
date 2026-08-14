@@ -1,3 +1,3 @@
-pub use keys::{ctrl, alt};
+pub use keys::{alt, ctrl};
 
 mod keys;

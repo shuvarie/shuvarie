@@ -1,10 +1,11 @@
 use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
-use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Clear, ListItem, Paragraph};
 use termina::event::{KeyCode, KeyEvent};
 
 use crate::tui::utils::ctrl;
 
+use super::list::{render_list_item_line, scroll_offset_for};
 use super::search::{Search, SearchMessage};
 use super::theme;
 
@@ -27,6 +28,7 @@ pub enum CommandMenuMessage {
     Prev,
     Run,
     Close,
+    Resize { viewport_height: u16 },
 }
 
 pub enum CommandMenuEffect {
@@ -53,7 +55,9 @@ pub struct CommandMenu {
     pub open: bool,
     pub commands: Vec<CommandEntry>,
     pub filtered: Vec<usize>,
-    pub state: ListState,
+    pub selected: usize,
+    pub offset: usize,
+    viewport_height: u16,
     pub search: Search,
 }
 
@@ -65,7 +69,9 @@ impl CommandMenu {
             open: false,
             commands,
             filtered,
-            state: ListState::default(),
+            selected: 0,
+            offset: 0,
+            viewport_height: 0,
             search: Search::new(),
         }
     }
@@ -75,7 +81,6 @@ impl CommandMenu {
         self.search.clear();
         self.search.active = true;
         self.refilter();
-        self.state.select(Some(0));
     }
 
     pub fn close(&mut self) {
@@ -87,15 +92,39 @@ impl CommandMenu {
         self.filtered = self
             .search
             .filter_indices(self.commands.len(), |i| self.commands[i].name.to_string());
+        self.selected = 0;
+        self.offset = 0;
+        self.recompute_offset();
+    }
+
+    fn next(&mut self) {
         if !self.filtered.is_empty() {
-            self.state.select(Some(0));
-        } else {
-            self.state.select(None);
+            self.selected = (self.selected + 1).min(self.filtered.len() - 1);
+            self.recompute_offset();
         }
     }
 
-    pub fn handle_event(key: KeyEvent) -> Option<CommandMenuMessage> {
-        if ctrl(&key) {
+    fn prev(&mut self) {
+        if !self.filtered.is_empty() {
+            self.selected = self.selected.saturating_sub(1);
+            self.recompute_offset();
+        }
+    }
+
+    fn recompute_offset(&mut self) {
+        let vh = self.viewport_height as usize;
+        let len = self.filtered.len();
+        self.offset = scroll_offset_for(self.selected, self.offset, vh, len);
+    }
+
+    fn selected_action(&self) -> Option<CommandAction> {
+        let idx = self.selected;
+        let cmd_idx = self.filtered.get(idx)?;
+        Some(self.commands[*cmd_idx].action)
+    }
+
+    pub fn map_event(key: &KeyEvent) -> Option<CommandMenuMessage> {
+        if ctrl(key) {
             return match key.code {
                 KeyCode::Char('n') => Some(CommandMenuMessage::Next),
                 KeyCode::Char('p') => Some(CommandMenuMessage::Prev),
@@ -136,33 +165,17 @@ impl CommandMenu {
                     };
                 }
             }
+            CommandMenuMessage::Resize { viewport_height } => {
+                if self.viewport_height != viewport_height {
+                    self.viewport_height = viewport_height;
+                    self.recompute_offset();
+                }
+            }
         }
         None
     }
 
-    fn next(&mut self) {
-        if !self.filtered.is_empty() {
-            let i = self.state.selected().unwrap_or(0);
-            let next = (i + 1).min(self.filtered.len() - 1);
-            self.state.select(Some(next));
-        }
-    }
-
-    fn prev(&mut self) {
-        if !self.filtered.is_empty() {
-            let i = self.state.selected().unwrap_or(0);
-            let prev = i.saturating_sub(1);
-            self.state.select(Some(prev));
-        }
-    }
-
-    fn selected_action(&self) -> Option<CommandAction> {
-        let idx = self.state.selected()?;
-        let cmd_idx = self.filtered.get(idx)?;
-        Some(self.commands[*cmd_idx].action)
-    }
-
-    pub fn view(&mut self, frame: &mut Frame<'_>, area: Rect) {
+    pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
         if !self.open {
             return;
         }
@@ -178,22 +191,22 @@ impl CommandMenu {
         self.search
             .view(frame, input_area, "Type to search commands…");
 
-        let items: Vec<ListItem> = self
+        let visible: Vec<ListItem> = self
             .filtered
             .iter()
-            .map(|&i| {
+            .enumerate()
+            .skip(self.offset)
+            .take(list_area.height as usize)
+            .map(|(idx, &i)| {
                 let cmd = &self.commands[i];
-                Line::from(vec![
+                let line = Line::from(vec![
                     Span::raw(format!("{:<20} ", cmd.name)).fg(theme::TEXT),
                     Span::raw(cmd.description.to_string()).fg(theme::TEXT_MUTED),
-                ])
-                .into()
+                ]);
+                render_list_item_line(line, idx == self.selected)
             })
             .collect();
-        let list = List::new(items)
-            .highlight_style(Style::new().bg(theme::ACCENT_BG).fg(theme::TEXT))
-            .highlight_symbol("▶ ");
-        frame.render_stateful_widget(list, list_area, &mut self.state);
+        frame.render_widget(ratatui::widgets::List::new(visible), list_area);
 
         frame.render_widget(
             Paragraph::new(theme::help_line(&[

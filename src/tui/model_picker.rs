@@ -1,12 +1,13 @@
 use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
-use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Clear, List, ListItem, Paragraph};
 use shuvarie_core::ModelInfo;
 use termina::event::{KeyCode, KeyEvent};
 
 use crate::tui::utils::ctrl;
 
 use super::add_provider::centered_rect;
+use super::list::{render_list_item, scroll_offset_for};
 use super::search::{Search, SearchMessage};
 use super::theme;
 
@@ -16,6 +17,7 @@ pub enum ModelPickerMessage {
     Prev,
     Select,
     Close,
+    Resize { viewport_height: u16 },
 }
 
 pub enum ModelPickerEffect {
@@ -27,7 +29,9 @@ pub struct ModelPicker {
     pub open: bool,
     pub models: Vec<ModelInfo>,
     pub filtered: Vec<usize>,
-    pub state: ListState,
+    pub selected: usize,
+    pub offset: usize,
+    viewport_height: u16,
     pub search: Search,
 }
 
@@ -37,7 +41,9 @@ impl ModelPicker {
             open: false,
             models: Vec::new(),
             filtered: Vec::new(),
-            state: ListState::default(),
+            selected: 0,
+            offset: 0,
+            viewport_height: 0,
             search: Search::new(),
         }
     }
@@ -48,7 +54,6 @@ impl ModelPicker {
         self.search.clear();
         self.search.active = true;
         self.refilter();
-        self.state.select(Some(0));
     }
 
     pub fn close(&mut self) {
@@ -60,15 +65,19 @@ impl ModelPicker {
         self.filtered = self
             .search
             .filter_indices(self.models.len(), |i| self.models[i].id.clone());
-        if !self.filtered.is_empty() {
-            self.state.select(Some(0));
-        } else {
-            self.state.select(None);
-        }
+        self.selected = 0;
+        self.offset = 0;
+        self.recompute_offset();
     }
 
-    pub fn handle_event(key: KeyEvent) -> Option<ModelPickerMessage> {
-        if ctrl(&key) {
+    fn recompute_offset(&mut self) {
+        let vh = self.viewport_height as usize;
+        let len = self.filtered.len();
+        self.offset = scroll_offset_for(self.selected, self.offset, vh, len);
+    }
+
+    pub fn map_event(key: &KeyEvent) -> Option<ModelPickerMessage> {
+        if ctrl(key) {
             return match key.code {
                 KeyCode::Char('n') => Some(ModelPickerMessage::Next),
                 KeyCode::Char('p') => Some(ModelPickerMessage::Prev),
@@ -97,17 +106,15 @@ impl ModelPicker {
             }
             ModelPickerMessage::Next => {
                 if !self.filtered.is_empty() {
-                    let i = self.state.selected().unwrap_or(0);
-                    let next = (i + 1).min(self.filtered.len() - 1);
-                    self.state.select(Some(next));
+                    self.selected = (self.selected + 1).min(self.filtered.len() - 1);
+                    self.recompute_offset();
                 }
                 None
             }
             ModelPickerMessage::Prev => {
                 if !self.filtered.is_empty() {
-                    let i = self.state.selected().unwrap_or(0);
-                    let prev = i.saturating_sub(1);
-                    self.state.select(Some(prev));
+                    self.selected = self.selected.saturating_sub(1);
+                    self.recompute_offset();
                 }
                 None
             }
@@ -117,19 +124,24 @@ impl ModelPicker {
                 None
             }
             ModelPickerMessage::Select => {
-                if let Some(idx) = self.state.selected()
-                    && let Some(&orig) = self.filtered.get(idx)
-                {
+                if let Some(&orig) = self.filtered.get(self.selected) {
                     let model = self.models[orig].id.clone();
                     self.close();
                     return Some(ModelPickerEffect::Selected { model });
                 }
                 None
             }
+            ModelPickerMessage::Resize { viewport_height } => {
+                if self.viewport_height != viewport_height {
+                    self.viewport_height = viewport_height;
+                    self.recompute_offset();
+                }
+                None
+            }
         }
     }
 
-    pub fn view(&mut self, frame: &mut Frame<'_>, area: Rect) {
+    pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
         if !self.open {
             return;
         }
@@ -144,18 +156,18 @@ impl ModelPicker {
 
         self.search.view(frame, input_area, "/ to search models");
 
-        let items: Vec<ListItem> = self
+        let visible: Vec<ListItem> = self
             .filtered
             .iter()
-            .map(|&orig| {
+            .enumerate()
+            .skip(self.offset)
+            .take(list_area.height as usize)
+            .map(|(idx, &orig)| {
                 let m = &self.models[orig];
-                ListItem::new(m.display_name().to_string()).fg(theme::TEXT)
+                render_list_item(m.display_name().to_string(), idx == self.selected)
             })
             .collect();
-        let list = List::new(items)
-            .highlight_style(Style::new().bg(theme::ACCENT_BG).fg(theme::TEXT))
-            .highlight_symbol("▶ ");
-        frame.render_stateful_widget(list, list_area, &mut self.state);
+        frame.render_widget(List::new(visible), list_area);
 
         frame.render_widget(
             Paragraph::new(theme::help_line(&[
