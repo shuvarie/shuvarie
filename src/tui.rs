@@ -49,8 +49,8 @@ pub async fn run_tui(cmd_tx: Sender<Command>, mut event_rx: Receiver<Event>) -> 
             let msg = tokio::select! {
                 // Terminal event
                 ev = event_stream.next() => {
-                    let Some(Ok(ev)) = ev else { break 'render_loop Ok(()); };
-                    App::map_event(&ev, &app)
+                    let Some(ev_result) = ev else { break 'render_loop Ok(()); };
+                    App::map_event(&ev_result?, &app)
                 }
                 // Shuvarie core event
                 ev = event_rx.recv() => {
