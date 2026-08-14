@@ -24,4 +24,5 @@ pub enum Command {
     SendMessage {
         content: String,
     },
+    CancelStream,
 }

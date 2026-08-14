@@ -1,4 +1,4 @@
-use shuvarie_llm::ModelInfo;
+use shuvarie_llm::{ModelInfo, TokenUsage};
 
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -16,10 +16,19 @@ pub enum Event {
         error: String,
     },
     SessionStarted,
-    MessageReceived {
+    TokenReceived {
         content: String,
     },
-    ReplyError {
+    StreamDone {
+        text: String,
+        usage: TokenUsage,
+    },
+    StreamError {
         error: String,
+    },
+    StreamCancelled,
+    UsageUpdate {
+        usage: TokenUsage,
+        cost: f64,
     },
 }

@@ -2,6 +2,7 @@ use ratatui::layout::{Alignment, Constraint::*, Layout, Rect};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph, Wrap};
 use shuvarie_core::Role;
+use shuvarie_llm::TokenUsage;
 use termina::event::{KeyCode, KeyEvent};
 
 use crate::tui::utils::{alt, ctrl};
@@ -14,22 +15,32 @@ pub enum SessionMessage {
     Text(TextAreaMessage),
     ScrollUp,
     ScrollDown,
-    MessageReceived {
+    TokenReceived {
         content: String,
     },
-    ReplyError {
+    StreamDone,
+    StreamError {
         error: String,
+    },
+    StreamCancelled,
+    CancelRequested,
+    UsageUpdate {
+        usage: TokenUsage,
+        cost: f64,
     },
     Reset,
     UpdateConfig {
         provider: Option<String>,
         model: Option<String>,
+        context_length: Option<u64>,
     },
 }
 
 pub struct SessionScreen {
     pub input: TextArea,
     pub messages: Vec<(Role, String)>,
+    pub streaming: bool,
+    pub pending: String,
     pub scroll: usize,
     pub status: Option<String>,
     pub sidebar: Sidebar,
@@ -40,6 +51,8 @@ impl SessionScreen {
         Self {
             input: TextArea::new("Type a message…"),
             messages: Vec::new(),
+            streaming: false,
+            pending: String::new(),
             scroll: 0,
             status: None,
             sidebar: Sidebar::new(),
@@ -86,23 +99,64 @@ impl SessionScreen {
                 self.scroll = self.scroll.saturating_sub(1);
                 None
             }
-            SessionMessage::MessageReceived { content } => {
-                self.messages.push((Role::Assistant, content));
+            SessionMessage::TokenReceived { content } => {
+                if !self.streaming {
+                    self.streaming = true;
+                    self.pending.clear();
+                }
+                self.pending.push_str(&content);
+                self.status = Some("streaming…".to_string());
+                None
+            }
+            SessionMessage::StreamDone => {
+                if self.streaming {
+                    self.messages
+                        .push((Role::Assistant, std::mem::take(&mut self.pending)));
+                    self.streaming = false;
+                }
                 self.status = None;
                 None
             }
-            SessionMessage::ReplyError { error } => {
+            SessionMessage::StreamError { error } => {
+                self.streaming = false;
+                self.pending.clear();
                 self.status = Some(format!("error: {error}"));
+                None
+            }
+            SessionMessage::StreamCancelled => {
+                self.streaming = false;
+                self.pending.clear();
+                self.status = None;
+                None
+            }
+            SessionMessage::CancelRequested => {
+                if self.streaming {
+                    return Some(SessionEffect::CancelStream);
+                }
+                None
+            }
+            SessionMessage::UsageUpdate { usage, cost } => {
+                self.sidebar
+                    .update(SidebarMessage::UpdateUsage { usage, cost });
                 None
             }
             SessionMessage::Reset => {
                 self.messages.clear();
+                self.streaming = false;
+                self.pending.clear();
                 self.status = None;
                 None
             }
-            SessionMessage::UpdateConfig { provider, model } => {
-                self.sidebar
-                    .update(SidebarMessage::UpdateConfig { provider, model });
+            SessionMessage::UpdateConfig {
+                provider,
+                model,
+                context_length,
+            } => {
+                self.sidebar.update(SidebarMessage::UpdateConfig {
+                    provider,
+                    model,
+                    context_length,
+                });
                 None
             }
         }
@@ -134,8 +188,11 @@ impl SessionScreen {
         let history_inner = history_block.inner(history_area);
         frame.render_widget(history_block, history_area);
 
-        let lines: Vec<Line> = self
-            .messages
+        let mut rendered_messages: Vec<(Role, String)> = self.messages.clone();
+        if self.streaming {
+            rendered_messages.push((Role::Assistant, self.pending.clone()));
+        }
+        let lines: Vec<Line> = rendered_messages
             .iter()
             .flat_map(|(role, content)| {
                 let (label, label_fg) = match role {
@@ -169,6 +226,7 @@ impl SessionScreen {
 
 pub enum SessionEffect {
     SendMessage { content: String },
+    CancelStream,
 }
 
 impl Default for SessionScreen {

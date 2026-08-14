@@ -175,9 +175,9 @@ cargo fmt --check
 
 ## Known issues to resolve
 
-- `shuvarie-llm` implements model listing and non-streaming `ProviderClient::complete` (M4); streaming completion lands in M5.
-- `shuvarie-core` implements config load/save, `has_connected_providers()`, the `Command`/`Event` enums, the in-memory `Session` struct, and the core task (`run`) that orchestrates provider/model listing and non-streaming chat (M4). The storage layer (Turso + Toasty) lands in M6.
-- Token/cost in the sidebar Context panel are zeroed placeholders (M5 will wire real `Usage` data from streaming completions).
+- `shuvarie-llm` implements model listing and streaming completion (`ProviderClient::stream` via `rig::streaming::StreamingChat`, M5).
+- `shuvarie-core` implements config load/save, `has_connected_providers()`, the `Command`/`Event` enums (including `CancelStream` and stream events), the in-memory `Session` struct, and the core task (`run`) that orchestrates provider/model listing and streaming chat (M5). The storage layer (Turso + Toasty) lands in M6.
+- Cost estimates in the sidebar Context panel use a built-in per-provider price table (`shuvarie-llm::pricing`); token counts are real `Usage` data. Provider-specific pricing/configurable rates land later.
 - LSP and Skills sidebar panels show "inactive" placeholders (M7+ will add real LSP/Skills systems).
 - Model search uses `nucleo` (fuzzy matcher) via `src/tui/search.rs`; the Ctrl+M command menu (`src/tui/command_menu.rs`) is a small extensible registry of `CommandEntry`s.
 

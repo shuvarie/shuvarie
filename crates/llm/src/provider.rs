@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::message::ChatMsg;
+use crate::stream::{StreamItem, StreamStream};
+use crate::usage::TokenUsage;
 use crate::{LlmError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -192,46 +194,55 @@ impl ProviderClient {
             .collect())
     }
 
-    pub async fn complete(&self, model: &str, prompt: &str, history: &[ChatMsg]) -> Result<String> {
-        use rig::prelude::{AgentClientExt, Chat};
+    pub async fn stream(&self, model: &str, prompt: &str, history: &[ChatMsg]) -> StreamStream {
+        use futures_util::StreamExt;
+        use rig::prelude::AgentClientExt;
+        use rig::streaming::StreamingChat;
 
         let user_msg = rig::message::Message::user(prompt.to_string());
-        let mut rig_history: Vec<rig::message::Message> = history
+        let rig_history: Vec<rig::message::Message> = history
             .iter()
             .cloned()
             .map(rig::message::Message::from)
             .collect();
 
-        let result = match &self.list {
-            ListImpl::OpenAi(c) => {
-                let agent = c.agent(model).build();
-                agent.chat(user_msg, &mut rig_history).await
-            }
-            ListImpl::OpenRouter(c) => {
-                let agent = c.agent(model).build();
-                agent.chat(user_msg, &mut rig_history).await
-            }
-            ListImpl::DeepSeek(c) => {
-                let agent = c.agent(model).build();
-                agent.chat(user_msg, &mut rig_history).await
-            }
-            ListImpl::Anthropic(c) => {
-                let agent = c.agent(model).build();
-                agent.chat(user_msg, &mut rig_history).await
-            }
-            ListImpl::Gemini(c) => {
-                let agent = c.agent(model).build();
-                agent.chat(user_msg, &mut rig_history).await
-            }
-            ListImpl::Ollama(c) => {
-                let agent = c.agent(model).build();
-                agent.chat(user_msg, &mut rig_history).await
-            }
-        };
-
-        match result {
-            Ok(text) => Ok(text),
-            Err(e) => Err(LlmError::Provider(e.to_string())),
+        async fn build<M>(
+            agent: rig::agent::Agent<M>,
+            prompt: rig::message::Message,
+            history: Vec<rig::message::Message>,
+        ) -> StreamStream
+        where
+            M: rig::completion::CompletionModel + 'static,
+        {
+            let stream = agent.stream_chat(prompt, history).await;
+            Box::pin(stream.map(|item| match item {
+                Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
+                    rig::streaming::StreamedAssistantContent::Text(t),
+                )) => StreamItem::Delta { text: t.text },
+                Ok(rig::agent::MultiTurnStreamItem::FinalResponse(resp)) => StreamItem::Done {
+                    text: resp.output,
+                    usage: TokenUsage::from_rig(resp.usage),
+                },
+                Ok(_) => StreamItem::Delta {
+                    text: String::new(),
+                },
+                Err(e) => StreamItem::Error {
+                    message: e.to_string(),
+                },
+            }))
         }
+
+        match &self.list {
+            ListImpl::OpenAi(c) => build(c.agent(model).build(), user_msg, rig_history).await,
+            ListImpl::OpenRouter(c) => build(c.agent(model).build(), user_msg, rig_history).await,
+            ListImpl::DeepSeek(c) => build(c.agent(model).build(), user_msg, rig_history).await,
+            ListImpl::Anthropic(c) => build(c.agent(model).build(), user_msg, rig_history).await,
+            ListImpl::Gemini(c) => build(c.agent(model).build(), user_msg, rig_history).await,
+            ListImpl::Ollama(c) => build(c.agent(model).build(), user_msg, rig_history).await,
+        }
+    }
+
+    pub fn estimate_cost(&self, usage: &TokenUsage) -> f64 {
+        crate::pricing::estimate_cost(self.kind, usage)
     }
 }

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub struct ModelInfo {
     pub id: String,
     pub name: Option<String>,
+    pub context_length: Option<u64>,
 }
 
 impl ModelInfo {
@@ -11,6 +12,7 @@ impl ModelInfo {
         Self {
             id: m.id.clone(),
             name: m.name.clone(),
+            context_length: m.context_length.map(u64::from),
         }
     }
 

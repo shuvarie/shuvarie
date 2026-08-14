@@ -6574,6 +6574,7 @@ name = "shuvarie-core"
 version = "0.1.0"
 dependencies = [
  "dirs",
+ "futures-util",
  "serde",
  "shuvarie-llm",
  "thiserror 2.0.20",
@@ -6585,6 +6586,8 @@ dependencies = [
 name = "shuvarie-llm"
 version = "0.1.0"
 dependencies = [
+ "futures-core",
+ "futures-util",
  "rig",
  "serde",
  "thiserror 2.0.20",

@@ -1,25 +1,36 @@
 use ratatui::layout::{Alignment, Rect};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph};
+use shuvarie_llm::TokenUsage;
 use termina::event::KeyEvent;
+
+use crate::tui::utils::locale::ToDecSepNum;
 
 use super::theme;
 
 pub struct Sidebar {
     pub version: String,
     pub tokens: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cached_tokens: u64,
     pub cost: f64,
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub context_length: Option<u64>,
 }
 
 pub enum SidebarMessage {
     UpdateConfig {
         provider: Option<String>,
         model: Option<String>,
+        context_length: Option<u64>,
     },
-    #[allow(dead_code)]
-    UpdateUsage { tokens: u64, cost: f64 },
+    UpdateUsage {
+        usage: TokenUsage,
+        cost: f64,
+    },
 }
 
 impl Sidebar {
@@ -27,21 +38,36 @@ impl Sidebar {
         Self {
             version: env!("CARGO_PKG_VERSION").to_string(),
             tokens: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: 0,
+            cached_tokens: 0,
             cost: 0.0,
             provider: None,
             model: None,
+            context_length: None,
         }
     }
 
     pub fn update(&mut self, msg: SidebarMessage) {
         match msg {
-            SidebarMessage::UpdateConfig { provider, model } => {
+            SidebarMessage::UpdateConfig {
+                provider,
+                model,
+                context_length,
+            } => {
                 self.provider = provider;
                 self.model = model;
+                self.context_length = context_length;
             }
-            SidebarMessage::UpdateUsage { tokens, cost } => {
-                self.tokens = tokens;
-                self.cost = cost;
+            SidebarMessage::UpdateUsage { usage, cost } => {
+                self.tokens = self.tokens.saturating_add(usage.total_tokens);
+                self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens);
+                self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
+                self.reasoning_tokens =
+                    self.reasoning_tokens.saturating_add(usage.reasoning_tokens);
+                self.cached_tokens = self.cached_tokens.saturating_add(usage.cached_input_tokens);
+                self.cost += cost;
             }
         }
     }
@@ -77,7 +103,40 @@ impl Sidebar {
         }
 
         lines.push(Line::from("Context").fg(theme::ACCENT).bold());
-        lines.push(Line::from(format!("  Tokens: {}", self.tokens)).fg(theme::TEXT_DIM));
+        let tokens_line = match self.context_length {
+            Some(ctx) if ctx > 0 => {
+                let pct = self.tokens as f64 / ctx as f64 * 100.0;
+                format!("  Tokens: {} ({pct:.1}%)", self.tokens)
+            }
+            _ => format!("  Tokens: {}", self.tokens),
+        };
+        lines.push(Line::from(tokens_line).fg(theme::TEXT_DIM));
+        lines.push(
+            Line::from(format!(
+                "    ↑{} ↓{}",
+                self.input_tokens.to_dec_sep_num(','),
+                self.output_tokens.to_dec_sep_num(',')
+            ))
+            .fg(theme::TEXT_DIM),
+        );
+        if self.reasoning_tokens > 0 {
+            lines.push(
+                Line::from(format!(
+                    "  Think:  {}",
+                    self.reasoning_tokens.to_dec_sep_num(',')
+                ))
+                .fg(theme::TEXT_DIM),
+            );
+        }
+        if self.cached_tokens > 0 {
+            lines.push(
+                Line::from(format!(
+                    "  Cache:  {}",
+                    self.cached_tokens.to_dec_sep_num(',')
+                ))
+                .fg(theme::TEXT_DIM),
+            );
+        }
         lines.push(Line::from(format!("  Cost: ${:.2}", self.cost)).fg(theme::TEXT_DIM));
         lines.push(Line::from(""));
 

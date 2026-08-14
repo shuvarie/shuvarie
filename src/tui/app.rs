@@ -110,6 +110,7 @@ impl App {
                 s.sidebar.update(SidebarMessage::UpdateConfig {
                     provider: initial_provider,
                     model: initial_model,
+                    context_length: None,
                 });
                 s
             },
@@ -142,11 +143,16 @@ impl App {
             Event::ConfigSaved => AppMessage::ConfigSaved,
             Event::ConfigError { error } => AppMessage::ConfigError { error },
             Event::SessionStarted => AppMessage::Session(SessionMessage::Reset),
-            Event::MessageReceived { content } => {
-                AppMessage::Session(SessionMessage::MessageReceived { content })
+            Event::TokenReceived { content } => {
+                AppMessage::Session(SessionMessage::TokenReceived { content })
             }
-            Event::ReplyError { error } => {
-                AppMessage::Session(SessionMessage::ReplyError { error })
+            Event::StreamDone { .. } => AppMessage::Session(SessionMessage::StreamDone),
+            Event::StreamError { error } => {
+                AppMessage::Session(SessionMessage::StreamError { error })
+            }
+            Event::StreamCancelled => AppMessage::Session(SessionMessage::StreamCancelled),
+            Event::UsageUpdate { usage, cost } => {
+                AppMessage::Session(SessionMessage::UsageUpdate { usage, cost })
             }
         }
     }
@@ -191,6 +197,9 @@ impl App {
                 match key.kind {
                     KeyEventKind::Press => match key.code {
                         KeyCode::Char('c') if ctrl(key) => {
+                            if app.route == Route::Session && app.session.streaming {
+                                return Some(AppMessage::Session(SessionMessage::CancelRequested));
+                            }
                             return Some(AppMessage::RequestQuit);
                         }
                         KeyCode::Char('m') if ctrl(key) => {
@@ -246,6 +255,9 @@ impl App {
                         SessionEffect::SendMessage { content } => {
                             self.ctx
                                 .send(shuvarie_core::Command::SendMessage { content });
+                        }
+                        SessionEffect::CancelStream => {
+                            self.ctx.send(shuvarie_core::Command::CancelStream);
                         }
                     }
                 }
@@ -382,6 +394,12 @@ impl App {
                     {
                         self.ctx
                             .send(shuvarie_core::Command::SetActiveModel { model });
+                    } else {
+                        self.session.update(SessionMessage::UpdateConfig {
+                            provider: Some(provider_name.clone()),
+                            model: current.map(|m| m.to_string()),
+                            context_length: self.active_context_length(),
+                        });
                     }
                 }
             }
@@ -420,6 +438,16 @@ impl App {
         }
     }
 
+    fn active_context_length(&self) -> Option<u64> {
+        let provider = self.ctx.config.active_provider.as_deref()?;
+        let model = self.ctx.config.active_model.as_deref()?;
+        self.models
+            .get(provider)?
+            .iter()
+            .find(|m| m.id == model)
+            .and_then(|m| m.context_length)
+    }
+
     fn reload_config(&mut self) {
         if let Ok(fresh) = Config::load() {
             self.ctx.config = fresh;
@@ -430,6 +458,7 @@ impl App {
             self.session.update(SessionMessage::UpdateConfig {
                 provider: self.ctx.config.active_provider.clone(),
                 model: self.ctx.config.active_model.clone(),
+                context_length: self.active_context_length(),
             });
         }
     }
@@ -497,6 +526,10 @@ impl App {
         }
         if self.overlay == Overlay::Welcome {
             return theme::help_line(&[("Enter", "add provider"), ("Ctrl+C", "quit")]);
+        }
+
+        if self.route == Route::Session && self.session.streaming {
+            return theme::help_line(&[("Ctrl+C", "stop"), ("Ctrl+M", "commands")]);
         }
 
         if let Some(status) = &self.session.status {
