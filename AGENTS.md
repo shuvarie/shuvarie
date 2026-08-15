@@ -42,6 +42,7 @@ There should be a `new` and a `view` method, and a `update` method when data upd
 | File | Role |
 |---|---|
 | `tui.rs` | Event loop: `EventStream` + `tokio::select!`, terminal init/deinit, calls `App::view` |
+| `event.rs` | `Event` enum — `Terminal(termina::Event)` / `Core(shuvarie_core::Event)` — the single input type for `App::map_event` |
 | `app.rs` | Parent `App`: `Route` (`Home`/`Session`), `Overlay` enum, `AppMessage` (grouped), `map_event` dispatch, `update`, `view` (content routing + footer + overlays) |
 | `context.rs` | `UpdateCtx` — shared `Config` + `Command` sender passed to submodel `update` calls |
 | `home.rs` | `HomeScreen` submodel + `HomeMessage` + `HomeEffect` (ASCII art + input) |
@@ -59,14 +60,15 @@ There should be a `new` and a `view` method, and a `update` method when data upd
 | `theme.rs` | Color palette + style helpers (see UI design below) |
 | `escape.rs` | CSI escape sequences for alt-screen enter/exit |
 
-**Message grouping**: `AppMessage` wraps submodel messages — `Home(HomeMessage)`, `Session(SessionMessage)`, `AddProvider(AddProviderMessage)`, `ModelPicker(ModelPickerMessage)`, `CommandMenu(CommandMenuMessage)`, `Welcome(WelcomeMessage)` — plus parent-only variants (`OpenCommandMenu`, `RequestQuit`, `ConfirmQuit`, `CancelQuit`, `Resized { rows, cols }`, `ConfigSaved`, `ConfigError`, `ModelsLoaded`, `ModelsError`). Core `Event`s are mapped to `AppMessage` via `App::map_core_event`, which wraps `MessageReceived`/`ReplyError`/`Reset` into `Session(...)` and keeps `ConfigSaved`/`ConfigError`/`ModelsLoaded`/`ModelsError` at the parent level (the parent reloads config from disk on `ConfigSaved` so submodels see fresh provider data, and auto-selects a model on `ModelsLoaded`). `Resized` is sent from the `tui.rs` event loop when the terminal size changes and dispatched in `App::update` to the open overlay's `Resize { viewport_height }` submessage (computed from the popup rect + overlay block inner layout) so the overlay can recompute its scroll offset.
+**Message grouping**: `AppMessage` wraps submodel messages — `Home(HomeMessage)`, `Session(SessionMessage)`, `AddProvider(AddProviderMessage)`, `ModelPicker(ModelPickerMessage)`, `CommandMenu(CommandMenuMessage)`, `Welcome(WelcomeMessage)` — plus parent-only variants (`OpenCommandMenu`, `RequestQuit`, `ConfirmQuit`, `CancelQuit`, `Resized { rows, cols }`, `ConfigSaved`, `ConfigError`, `ModelsLoaded`, `ModelsError`). The TUI `Event` enum (`src/tui/event.rs`) unifies terminal and core inputs: `Event::Terminal(termina::Event)` and `Event::Core(shuvarie_core::Event)`. `App::map_event(ev, &app)` matches on `Event` — terminal events are dispatched overlay-aware then route-aware (below), while core events are mapped to `AppMessage` directly: stream/usage events (`TokenReceived`, `StreamDone`, `StreamError`, `StreamCancelled`, `UsageUpdate`, `SessionStarted`) wrap into `Session(...)`, `Pong` closes the command menu, and `ConfigSaved`/`ConfigError`/`ModelsLoaded`/`ModelsError` stay at the parent level (the parent reloads config from disk on `ConfigSaved` so submodels see fresh provider data, and auto-selects a model on `ModelsLoaded`). `Resized` is sent from the `tui.rs` event loop when the terminal size changes and dispatched in `App::update` to the open overlay's `Resize { viewport_height }` submessage (computed from the popup rect + overlay block inner layout) so the overlay can recompute its scroll offset.
 
 **Event dispatch flow** (`App::map_event`, overlay-aware, then route-aware):
 
-1. If an overlay is open → route to that overlay's `map_event` (CommandMenu, AddProviderForm, ModelPicker, Welcome, ConfirmQuit).
-2. Else `Ctrl+C` → `RequestQuit` (opens ConfirmQuit overlay).
+1. `Event::Terminal` — if an overlay is open → route to that overlay's `map_event` (CommandMenu, AddProviderForm, ModelPicker, Welcome, ConfirmQuit).
+2. Else `Ctrl+C` → `RequestQuit` (opens ConfirmQuit overlay; cancels the stream first if the session is streaming).
 3. Else `Ctrl+M` → `OpenCommandMenu` (parent-level global keybind).
 4. Else route to the active screen's `map_event` (`Home` or `Session`).
+5. `Event::Core` — mapped to `AppMessage` directly (see Message grouping above).
 
 **Update forwarding**: `App::update` matches `AppMessage` — parent-only variants are handled in-place; submodel variants are forwarded to `submodel.update(msg, &self.ctx)`. `CommandMenu::update` returns `Option<CommandMenuEffect>`; the parent matches effects (`OpenModelSelect`, `AddProvider`) to perform parent-level actions (opening the ModelPicker overlay, opening the AddProviderForm). `HomeScreen::update` returns `Option<HomeEffect>` (`Submit` → start session); `SessionScreen::update` returns `Option<SessionEffect>` (`SendMessage` → send command to core). `AddProviderForm::update` returns `AddProviderOutcome` (`Submit` → add provider + set active + list models; `Cancel` → close or back to kind list). `ModelPicker::update` returns `Option<ModelPickerEffect>` (`Selected` → set active model).
 
@@ -81,7 +83,7 @@ The `view` method must have an immutable `self` reference (`&self`) as parameter
 `main` is `#[tokio::main]`. The TUI loop runs on the main thread using `termina`'s `EventStream` (the `event-stream` feature) so the loop can `tokio::select!` between terminal key events and core events without blocking. All LLM and database work runs on a spawned **core task** (`shuvarie_core::run`). Communication is via `tokio::sync::mpsc` channels:
 
 - TUI → core: commands (e.g. `SendMessage`, `StartSession`, `ListModels`, `AddProvider`, `SetActiveModel`) — `shuvarie_core::Command`.
-- Core → TUI: events (e.g. `MessageReceived`, `ReplyError`, `SessionStarted`, `ModelsLoaded`, `ConfigSaved`) — `shuvarie_core::Event` — that are converted into `AppMessage` variants and fed into `update`.
+- Core → TUI: events (e.g. `MessageReceived`, `ReplyError`, `SessionStarted`, `ModelsLoaded`, `ConfigSaved`) — `shuvarie_core::Event` — wrapped in `Event::Core` by the `tui.rs` event loop, mapped to `AppMessage` variants by `App::map_event`, and fed into `update`.
 
 Keep the TUI thread free of `await`s on blocking work; offload any blocking work to the core task (or `spawn_blocking`). The `select!` loop wakes on either a terminal event or a core event, so live updates (model lists, streaming tokens) render without requiring a keypress.
 
