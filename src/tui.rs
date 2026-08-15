@@ -5,7 +5,9 @@ use ratatui::prelude::*;
 use termina::{EventStream, PlatformTerminal, Terminal as _};
 use tokio::sync::mpsc::{Receiver, Sender};
 
-use shuvarie_core::{Command, Config, Event};
+use shuvarie_core::{Command, Config, Event as CoreEvent};
+
+use crate::tui::event::Event;
 
 use self::app::{App, AppReturn};
 
@@ -15,6 +17,7 @@ mod command_menu;
 mod confirm_quit;
 mod context;
 mod escape;
+mod event;
 mod home;
 mod list;
 mod logo;
@@ -27,7 +30,7 @@ mod utils;
 mod welcome;
 mod widgets;
 
-pub async fn run_tui(cmd_tx: Sender<Command>, mut event_rx: Receiver<Event>) -> io::Result<()> {
+pub async fn run_tui(cmd_tx: Sender<Command>, mut event_rx: Receiver<CoreEvent>) -> io::Result<()> {
     let mut term = PlatformTerminal::new()?;
     term.enter_raw_mode()?;
 
@@ -50,12 +53,12 @@ pub async fn run_tui(cmd_tx: Sender<Command>, mut event_rx: Receiver<Event>) -> 
                 // Terminal event
                 ev = event_stream.next() => {
                     let Some(ev_result) = ev else { break 'render_loop Ok(()); };
-                    App::map_event(&ev_result?, &app)
+                    App::map_event(Event::Terminal(ev_result?), &app)
                 }
                 // Shuvarie core event
                 ev = event_rx.recv() => {
                     let Some(ev) = ev else { break 'render_loop Ok(()); };
-                    Some(App::map_core_event(ev))
+                    App::map_event(Event::Core(ev), &app)
                 }
             };
 

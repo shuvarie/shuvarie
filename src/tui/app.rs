@@ -3,11 +3,12 @@ use std::collections::HashMap;
 use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
-use shuvarie_core::{Config, Event, ModelInfo};
+use shuvarie_core::{Config, Event as CoreEvent, ModelInfo};
 use termina::Event as TermEvent;
 use termina::event::{KeyCode, KeyEventKind};
 use tokio::sync::mpsc::Sender;
 
+use crate::tui::event::Event;
 use crate::tui::utils::ctrl;
 
 use super::add_provider::{
@@ -123,99 +124,98 @@ impl App {
         }
     }
 
-    pub fn map_core_event(ev: Event) -> AppMessage {
+    pub fn map_event(ev: Event, app: &App) -> Option<AppMessage> {
         match ev {
-            Event::Pong => AppMessage::CommandMenu(CommandMenuMessage::Close),
-            Event::ModelsLoaded {
-                provider_name,
-                models,
-            } => AppMessage::ModelsLoaded {
-                provider_name,
-                models,
-            },
-            Event::ModelsError {
-                provider_name,
-                error,
-            } => AppMessage::ModelsError {
-                provider_name,
-                error,
-            },
-            Event::ConfigSaved => AppMessage::ConfigSaved,
-            Event::ConfigError { error } => AppMessage::ConfigError { error },
-            Event::SessionStarted => AppMessage::Session(SessionMessage::Reset),
-            Event::TokenReceived { content } => {
-                AppMessage::Session(SessionMessage::TokenReceived { content })
-            }
-            Event::StreamDone { .. } => AppMessage::Session(SessionMessage::StreamDone),
-            Event::StreamError { error } => {
-                AppMessage::Session(SessionMessage::StreamError { error })
-            }
-            Event::StreamCancelled => AppMessage::Session(SessionMessage::StreamCancelled),
-            Event::UsageUpdate { usage, cost } => {
-                AppMessage::Session(SessionMessage::UsageUpdate { usage, cost })
-            }
-        }
-    }
+            Event::Terminal(term_ev) => match term_ev {
+                TermEvent::WindowResized(size) => Some(AppMessage::Resized {
+                    rows: size.rows,
+                    cols: size.cols,
+                }),
+                TermEvent::Key(key) => {
+                    // Overlay events
+                    match app.overlay {
+                        Overlay::CommandMenu => {
+                            return CommandMenu::map_event(&key).map(AppMessage::CommandMenu);
+                        }
+                        Overlay::AddProvider => {
+                            let stage = app
+                                .add_provider_form
+                                .as_ref()
+                                .map(|f| f.stage)
+                                .unwrap_or(AddProviderStage::SelectKind);
+                            return AddProviderForm::map_event(&key, stage).map(AppMessage::AddProvider);
+                        }
+                        Overlay::ModelPicker => {
+                            return ModelPicker::map_event(&key).map(AppMessage::ModelPicker);
+                        }
+                        Overlay::Welcome => {
+                            return Welcome::map_event(&key).map(AppMessage::Welcome);
+                        }
+                        Overlay::ConfirmQuit => {
+                            return ConfirmQuit::map_event(&key).map(|m| match m {
+                                ConfirmQuitMessage::Confirm => AppMessage::ConfirmQuit,
+                                ConfirmQuitMessage::Cancel => AppMessage::CancelQuit,
+                            });
+                        }
+                        Overlay::None => {}
+                    }
 
-    pub fn map_event(event: &TermEvent, app: &App) -> Option<AppMessage> {
-        match event {
-            TermEvent::WindowResized(size) => Some(AppMessage::Resized {
-                rows: size.rows,
-                cols: size.cols,
-            }),
-            TermEvent::Key(key) => {
-                // Overlay events
-                match app.overlay {
-                    Overlay::CommandMenu => {
-                        return CommandMenu::map_event(key).map(AppMessage::CommandMenu);
-                    }
-                    Overlay::AddProvider => {
-                        let stage = app
-                            .add_provider_form
-                            .as_ref()
-                            .map(|f| f.stage)
-                            .unwrap_or(AddProviderStage::SelectKind);
-                        return AddProviderForm::map_event(key, stage).map(AppMessage::AddProvider);
-                    }
-                    Overlay::ModelPicker => {
-                        return ModelPicker::map_event(key).map(AppMessage::ModelPicker);
-                    }
-                    Overlay::Welcome => {
-                        return Welcome::map_event(key).map(AppMessage::Welcome);
-                    }
-                    Overlay::ConfirmQuit => {
-                        return ConfirmQuit::map_event(key).map(|m| match m {
-                            ConfirmQuitMessage::Confirm => AppMessage::ConfirmQuit,
-                            ConfirmQuitMessage::Cancel => AppMessage::CancelQuit,
-                        });
-                    }
-                    Overlay::None => {}
-                }
-
-                // App key event
-                #[allow(clippy::single_match)]
-                match key.kind {
-                    KeyEventKind::Press => match key.code {
-                        KeyCode::Char('c') if ctrl(key) => {
-                            if app.route == Route::Session && app.session.streaming {
-                                return Some(AppMessage::Session(SessionMessage::CancelRequested));
+                    // App key event
+                    #[allow(clippy::single_match)]
+                    match key.kind {
+                        KeyEventKind::Press => match key.code {
+                            KeyCode::Char('c') if ctrl(&key) => {
+                                if app.route == Route::Session && app.session.streaming {
+                                    return Some(AppMessage::Session(SessionMessage::CancelRequested));
+                                }
+                                return Some(AppMessage::RequestQuit);
                             }
-                            return Some(AppMessage::RequestQuit);
-                        }
-                        KeyCode::Char('m') if ctrl(key) => {
-                            return Some(AppMessage::OpenCommandMenu);
-                        }
+                            KeyCode::Char('m') if ctrl(&key) => {
+                                return Some(AppMessage::OpenCommandMenu);
+                            }
+                            _ => {}
+                        },
                         _ => {}
-                    },
-                    _ => {}
-                }
+                    }
 
-                match app.route {
-                    Route::Home => app.home.map_event(key).map(AppMessage::Home),
-                    Route::Session => app.session.map_event(key).map(AppMessage::Session),
+                    match app.route {
+                        Route::Home => app.home.map_event(&key).map(AppMessage::Home),
+                        Route::Session => app.session.map_event(&key).map(AppMessage::Session),
+                    }
                 }
-            }
-            _ => None,
+                _ => None,
+            },
+            Event::Core(core_ev) => match core_ev {
+                CoreEvent::Pong => Some(AppMessage::CommandMenu(CommandMenuMessage::Close)),
+                CoreEvent::ModelsLoaded {
+                    provider_name,
+                    models,
+                } => Some(AppMessage::ModelsLoaded {
+                    provider_name,
+                    models,
+                }),
+                CoreEvent::ModelsError {
+                    provider_name,
+                    error,
+                } => Some(AppMessage::ModelsError {
+                    provider_name,
+                    error,
+                }),
+                CoreEvent::ConfigSaved => Some(AppMessage::ConfigSaved),
+                CoreEvent::ConfigError { error } => Some(AppMessage::ConfigError { error }),
+                CoreEvent::SessionStarted => Some(AppMessage::Session(SessionMessage::Reset)),
+                CoreEvent::TokenReceived { content } => {
+                    Some(AppMessage::Session(SessionMessage::TokenReceived { content }))
+                }
+                CoreEvent::StreamDone { .. } => Some(AppMessage::Session(SessionMessage::StreamDone)),
+                CoreEvent::StreamError { error } => {
+                    Some(AppMessage::Session(SessionMessage::StreamError { error }))
+                }
+                CoreEvent::StreamCancelled => Some(AppMessage::Session(SessionMessage::StreamCancelled)),
+                CoreEvent::UsageUpdate { usage, cost } => {
+                    Some(AppMessage::Session(SessionMessage::UsageUpdate { usage, cost }))
+                }
+            },
         }
     }
 
