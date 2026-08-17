@@ -53,7 +53,10 @@ pub async fn run_tui(cmd_tx: Sender<Command>, mut event_rx: Receiver<CoreEvent>)
                 // Terminal event
                 ev = event_stream.next() => {
                     let Some(ev_result) = ev else { break 'render_loop Ok(()); };
-                    app.map_event(Event::Terminal(ev_result?))
+                    match ev_result {
+                        Ok(ev) => app.map_event(Event::Terminal(ev)),
+                        Err(err) => break 'render_loop Err(err),
+                    }
                 }
                 // Shuvarie core event
                 ev = event_rx.recv() => {
