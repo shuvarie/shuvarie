@@ -139,25 +139,29 @@ impl App {
                     // Overlay events
                     match self.overlay {
                         Overlay::CommandMenu => {
-                            return CommandMenu::map_event(&key).map(AppMessage::CommandMenu);
+                            return self
+                                .command_menu
+                                .map_event(&key)
+                                .map(AppMessage::CommandMenu);
                         }
                         Overlay::AddProvider => {
-                            let stage = self
+                            return self
                                 .add_provider_form
                                 .as_ref()
-                                .map(|f| f.stage)
-                                .unwrap_or(AddProviderStage::SelectKind);
-                            return AddProviderForm::map_event(&key, stage)
+                                .and_then(|f| f.map_event(&key))
                                 .map(AppMessage::AddProvider);
                         }
                         Overlay::ModelPicker => {
-                            return ModelPicker::map_event(&key).map(AppMessage::ModelPicker);
+                            return self
+                                .model_picker
+                                .map_event(&key)
+                                .map(AppMessage::ModelPicker);
                         }
                         Overlay::Welcome => {
-                            return Welcome::map_event(&key).map(AppMessage::Welcome);
+                            return self.welcome.map_event(&key).map(AppMessage::Welcome);
                         }
                         Overlay::ConfirmQuit => {
-                            return ConfirmQuit::map_event(&key).map(|m| match m {
+                            return self.confirm_quit.map_event(&key).map(|m| match m {
                                 ConfirmQuitMessage::Confirm => AppMessage::ConfirmQuit,
                                 ConfirmQuitMessage::Cancel => AppMessage::CancelQuit,
                             });

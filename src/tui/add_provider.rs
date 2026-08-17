@@ -160,8 +160,8 @@ impl AddProviderForm {
         };
     }
 
-    pub fn map_event(key: &KeyEvent, stage: AddProviderStage) -> Option<AddProviderMessage> {
-        match stage {
+    pub fn map_event(&self, key: &KeyEvent) -> Option<AddProviderMessage> {
+        match self.stage {
             AddProviderStage::SelectKind => {
                 if ctrl(key) {
                     return match key.code {

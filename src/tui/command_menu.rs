@@ -123,7 +123,7 @@ impl CommandMenu {
         Some(self.commands[*cmd_idx].action)
     }
 
-    pub fn map_event(key: &KeyEvent) -> Option<CommandMenuMessage> {
+    pub fn map_event(&self, key: &KeyEvent) -> Option<CommandMenuMessage> {
         if ctrl(key) {
             return match key.code {
                 KeyCode::Char('n') => Some(CommandMenuMessage::Next),

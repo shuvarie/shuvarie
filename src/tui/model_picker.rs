@@ -76,7 +76,7 @@ impl ModelPicker {
         self.offset = scroll_offset_for(self.selected, self.offset, vh, len);
     }
 
-    pub fn map_event(key: &KeyEvent) -> Option<ModelPickerMessage> {
+    pub fn map_event(&self, key: &KeyEvent) -> Option<ModelPickerMessage> {
         if ctrl(key) {
             return match key.code {
                 KeyCode::Char('n') => Some(ModelPickerMessage::Next),
