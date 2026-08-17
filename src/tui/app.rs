@@ -86,6 +86,8 @@ pub struct App {
     pub add_provider_form: Option<AddProviderForm>,
     pub model_picker: ModelPicker,
     pub models: HashMap<String, Vec<ModelInfo>>,
+    pending_model_pick: Option<String>,
+    footer_error: Option<String>,
 }
 
 impl App {
@@ -121,6 +123,8 @@ impl App {
             add_provider_form: None,
             model_picker: ModelPicker::new(),
             models: HashMap::new(),
+            pending_model_pick: None,
+            footer_error: None,
         }
     }
 
@@ -234,6 +238,7 @@ impl App {
     pub fn update(&mut self, msg: AppMessage) -> Option<AppReturn> {
         match msg {
             AppMessage::OpenCommandMenu => {
+                self.footer_error = None;
                 self.command_menu.open();
                 self.overlay = Overlay::CommandMenu;
             }
@@ -288,6 +293,7 @@ impl App {
                             base_url,
                         } => {
                             let pc = shuvarie_core::ProviderConfig::new(kind, api_key, base_url);
+                            self.pending_model_pick = Some(name.clone());
                             self.ctx.send(shuvarie_core::Command::AddProvider {
                                 name: name.clone(),
                                 config: pc,
@@ -311,7 +317,15 @@ impl App {
                             self.ctx
                                 .send(shuvarie_core::Command::SetActiveModel { model });
                         }
-                        ModelPickerEffect::Close => {}
+                        ModelPickerEffect::Close => {
+                            if self.ctx.config.active_model.is_none()
+                                && let Some(first) = self.model_picker.models.first()
+                            {
+                                self.ctx.send(shuvarie_core::Command::SetActiveModel {
+                                    model: first.id.clone(),
+                                });
+                            }
+                        }
                     }
                     self.close_overlay();
                 }
@@ -389,6 +403,16 @@ impl App {
                 provider_name,
                 models,
             } => {
+                if self.pending_model_pick.as_deref() == Some(provider_name.as_str()) {
+                    self.pending_model_pick = None;
+                    if models.is_empty() {
+                        self.footer_error = Some(format!("{provider_name}: no models found"));
+                    } else {
+                        self.model_picker.open(&models);
+                        self.overlay = Overlay::ModelPicker;
+                    }
+                    return None;
+                }
                 let empty = models.is_empty();
                 self.models.insert(provider_name.clone(), models);
                 if empty {
@@ -419,7 +443,10 @@ impl App {
                 provider_name,
                 error,
             } => {
-                if let Some(form) = &mut self.add_provider_form {
+                if self.pending_model_pick.as_deref() == Some(provider_name.as_str()) {
+                    self.pending_model_pick = None;
+                    self.footer_error = Some(format!("{provider_name}: {error}"));
+                } else if let Some(form) = &mut self.add_provider_form {
                     form.error = Some(format!("{provider_name}: {error}"));
                 }
             }
@@ -428,6 +455,7 @@ impl App {
     }
 
     fn start_session(&mut self, content: String) {
+        self.footer_error = None;
         self.route = Route::Session;
         self.session.messages.clear();
         self.session
@@ -540,6 +568,10 @@ impl App {
             return theme::help_line(&[("Enter", "add provider"), ("Ctrl+C", "quit")]);
         }
 
+        if let Some(error) = &self.footer_error {
+            return Line::from(vec![Span::raw(error.clone()).fg(theme::ERROR)]);
+        }
+
         if self.route == Route::Session && self.session.streaming {
             return theme::help_line(&[("Ctrl+C", "stop"), ("Ctrl+M", "commands")]);
         }
@@ -605,5 +637,5 @@ fn model_picker_list_height(area: Rect) -> Option<u16> {
 }
 
 fn add_provider_kind_list_height(area: Rect) -> Option<u16> {
-    overlay_inner_list_height(area, 50, 55, 2)
+    overlay_inner_list_height(area, 50, 55, 3)
 }

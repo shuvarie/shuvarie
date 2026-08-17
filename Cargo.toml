@@ -16,6 +16,7 @@ shuvarie-core = { path = "crates/core" }
 shuvarie-llm = { path = "crates/llm" }
 termina = { version = "0.3.3", features = ["event-stream"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tui-scrollview = "0.6.7"
 
 [dependencies.ratatui]
 version = "0.30.2"
@@ -27,8 +28,9 @@ features = [
     "std",
     "termina",
     "underline-color",
-    "widget-calendar",
     "unstable-backend-writer",
+    "unstable-rendered-line-info",
+    "widget-calendar",
 ]
 
 [workspace]

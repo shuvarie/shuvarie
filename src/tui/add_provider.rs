@@ -8,6 +8,7 @@ use termina::event::{KeyCode, KeyEvent};
 use crate::tui::utils::{alt, ctrl};
 
 use super::list::{render_list_item, scroll_offset_for};
+use super::search::{Search, SearchMessage};
 use super::theme;
 use super::widgets::InputBuffer;
 
@@ -28,6 +29,7 @@ pub enum AddProviderMessage {
     NextKind,
     PrevKind,
     SelectKind,
+    Search(SearchMessage),
     Input(char),
     Backspace,
     Delete,
@@ -61,6 +63,8 @@ pub struct AddProviderForm {
     pub kind_selected: usize,
     pub kind_offset: usize,
     kind_viewport_height: u16,
+    pub search: Search,
+    pub filtered: Vec<usize>,
     pub name: InputBuffer,
     pub api_key: InputBuffer,
     pub base_url: InputBuffer,
@@ -76,6 +80,8 @@ impl AddProviderForm {
             kind_selected: 0,
             kind_offset: 0,
             kind_viewport_height: 0,
+            search: Search::new(),
+            filtered: (0..Provider::ALL.len()).collect(),
             name: InputBuffer::new(),
             api_key: InputBuffer::new(),
             base_url: InputBuffer::new(),
@@ -86,12 +92,27 @@ impl AddProviderForm {
     }
 
     fn kind(&self) -> Provider {
-        Provider::ALL[self.kind_selected.min(Provider::ALL.len() - 1)]
+        let idx = self
+            .filtered
+            .get(self.kind_selected)
+            .copied()
+            .unwrap_or(0)
+            .min(Provider::ALL.len() - 1);
+        Provider::ALL[idx]
+    }
+
+    fn refilter(&mut self) {
+        self.filtered = self.search.filter_indices(Provider::ALL.len(), |i| {
+            Provider::ALL[i].display_name().to_string()
+        });
+        self.kind_selected = 0;
+        self.kind_offset = 0;
+        self.recompute_kind_offset();
     }
 
     fn recompute_kind_offset(&mut self) {
         let vh = self.kind_viewport_height as usize;
-        let len = Provider::ALL.len();
+        let len = self.filtered.len();
         self.kind_offset = scroll_offset_for(self.kind_selected, self.kind_offset, vh, len);
     }
 
@@ -154,6 +175,10 @@ impl AddProviderForm {
                     KeyCode::Down | KeyCode::Char('j') => Some(AddProviderMessage::NextKind),
                     KeyCode::Up | KeyCode::Char('k') => Some(AddProviderMessage::PrevKind),
                     KeyCode::Enter => Some(AddProviderMessage::SelectKind),
+                    KeyCode::Backspace => {
+                        Some(AddProviderMessage::Search(SearchMessage::Backspace))
+                    }
+                    KeyCode::Char(c) => Some(AddProviderMessage::Search(SearchMessage::Input(c))),
                     _ => None,
                 }
             }
@@ -206,9 +231,11 @@ impl AddProviderForm {
                 }
             }
             AddProviderMessage::NextKind => {
-                let len = Provider::ALL.len();
-                self.kind_selected = (self.kind_selected + 1).min(len - 1);
-                self.recompute_kind_offset();
+                let len = self.filtered.len();
+                if len > 0 {
+                    self.kind_selected = (self.kind_selected + 1).min(len - 1);
+                    self.recompute_kind_offset();
+                }
                 AddProviderOutcome::None
             }
             AddProviderMessage::PrevKind => {
@@ -216,8 +243,15 @@ impl AddProviderForm {
                 self.recompute_kind_offset();
                 AddProviderOutcome::None
             }
+            AddProviderMessage::Search(m) => {
+                self.search.update(m);
+                self.refilter();
+                AddProviderOutcome::None
+            }
             AddProviderMessage::SelectKind => {
-                self.transition_to_details();
+                if !self.filtered.is_empty() {
+                    self.transition_to_details();
+                }
                 AddProviderOutcome::None
             }
             AddProviderMessage::NextField => {
@@ -411,25 +445,35 @@ impl AddProviderForm {
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
 
-        let [heading_area, list_area, hint_area] =
-            Layout::vertical([Length(2), Min(0), Length(1)]).areas(inner);
+        let [heading_area, search_area, list_area, hint_area] =
+            Layout::vertical([Length(2), Length(1), Min(0), Length(1)]).areas(inner);
 
         frame.render_widget(
             Paragraph::new("Select a provider:").fg(theme::TEXT),
             heading_area,
         );
 
-        let visible: Vec<ListItem> = Provider::ALL
+        self.search
+            .view(frame, search_area, "Type to filter providers…");
+
+        let visible: Vec<ListItem> = self
+            .filtered
             .iter()
             .enumerate()
             .skip(self.kind_offset)
             .take(list_area.height as usize)
-            .map(|(i, &p)| render_list_item(p.display_name().to_string(), i == self.kind_selected))
+            .map(|(i, &orig)| {
+                render_list_item(
+                    Provider::ALL[orig].display_name().to_string(),
+                    i == self.kind_selected,
+                )
+            })
             .collect();
         frame.render_widget(List::new(visible), list_area);
 
         frame.render_widget(
             Paragraph::new(theme::help_line(&[
+                ("Type", "to filter"),
                 ("↑↓", "navigate"),
                 ("Enter", "continue"),
                 ("Esc", "cancel"),
@@ -487,4 +531,66 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let x = area.x + (area.width.saturating_sub(pop_w)) / 2;
     let y = area.y + (area.height.saturating_sub(pop_h)) / 2;
     Rect::new(x, y, pop_w, pop_h)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn form_with_query(query: &str) -> AddProviderForm {
+        let mut form = AddProviderForm::new(&[]);
+        if !query.is_empty() {
+            form.search.query = query.into();
+            form.refilter();
+        }
+        form
+    }
+
+    #[test]
+    fn empty_query_lists_all_kinds() {
+        let form = form_with_query("");
+        assert_eq!(form.filtered.len(), Provider::ALL.len());
+        assert_eq!(form.filtered, (0..Provider::ALL.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn query_filters_kinds() {
+        let form = form_with_query("open");
+        assert!(!form.filtered.is_empty());
+        assert!(form.filtered.iter().all(|&i| {
+            Provider::ALL[i]
+                .display_name()
+                .to_lowercase()
+                .contains("open")
+        }));
+    }
+
+    #[test]
+    fn no_match_query_yields_empty_filter() {
+        let form = form_with_query("zzzzzz");
+        assert!(form.filtered.is_empty());
+    }
+
+    #[test]
+    fn kind_resolves_through_filtered() {
+        let mut form = form_with_query("ollama");
+        form.kind_selected = 0;
+        assert_eq!(form.kind(), Provider::Ollama);
+        assert!(form.filtered.contains(&(Provider::Ollama as usize)));
+    }
+
+    #[test]
+    fn kind_falls_back_when_filtered_empty() {
+        let form = form_with_query("zzzzzz");
+        assert_eq!(form.kind(), Provider::ALL[0]);
+    }
+
+    #[test]
+    fn search_update_refilters_and_resets_selection() {
+        let mut form = AddProviderForm::new(&[]);
+        form.kind_selected = 3;
+        form.update(AddProviderMessage::Search(SearchMessage::Input('o')));
+        assert!(!form.filtered.is_empty());
+        assert_eq!(form.kind_selected, 0);
+    }
 }

@@ -1,9 +1,12 @@
-use ratatui::layout::{Alignment, Constraint::*, Layout, Rect};
+use std::cell::{Cell, RefCell};
+
+use ratatui::layout::{Alignment, Constraint::*, Layout, Rect, Size};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph, Wrap};
 use shuvarie_core::Role;
 use shuvarie_llm::TokenUsage;
 use termina::event::{KeyCode, KeyEvent};
+use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
 use crate::tui::utils::{alt, ctrl};
 
@@ -41,7 +44,10 @@ pub struct SessionScreen {
     pub messages: Vec<(Role, String)>,
     pub streaming: bool,
     pub pending: String,
-    pub scroll: usize,
+    pub scroll_state: RefCell<ScrollViewState>,
+    scroll_view: RefCell<ScrollView>,
+    scroll_dirty: Cell<bool>,
+    scroll_width: Cell<u16>,
     pub status: Option<String>,
     pub sidebar: Sidebar,
 }
@@ -53,7 +59,10 @@ impl SessionScreen {
             messages: Vec::new(),
             streaming: false,
             pending: String::new(),
-            scroll: 0,
+            scroll_state: RefCell::new(ScrollViewState::default()),
+            scroll_view: RefCell::new(ScrollView::new(Size::new(0, 0))),
+            scroll_dirty: Cell::new(false),
+            scroll_width: Cell::new(0),
             status: None,
             sidebar: Sidebar::new(),
         }
@@ -85,6 +94,8 @@ impl SessionScreen {
                         TextAreaEffect::Submit { content } => {
                             self.messages.push((Role::User, content.clone()));
                             self.status = Some("thinking…".to_string());
+                            self.mark_scroll_dirty();
+                            self.follow_bottom();
                             return Some(SessionEffect::SendMessage { content });
                         }
                     }
@@ -92,11 +103,11 @@ impl SessionScreen {
                 None
             }
             SessionMessage::ScrollUp => {
-                self.scroll = self.scroll.saturating_add(1);
+                self.scroll_state.get_mut().scroll_up();
                 None
             }
             SessionMessage::ScrollDown => {
-                self.scroll = self.scroll.saturating_sub(1);
+                self.scroll_state.get_mut().scroll_down();
                 None
             }
             SessionMessage::TokenReceived { content } => {
@@ -106,6 +117,8 @@ impl SessionScreen {
                 }
                 self.pending.push_str(&content);
                 self.status = Some("streaming…".to_string());
+                self.mark_scroll_dirty();
+                self.follow_bottom();
                 None
             }
             SessionMessage::StreamDone => {
@@ -115,18 +128,22 @@ impl SessionScreen {
                     self.streaming = false;
                 }
                 self.status = None;
+                self.mark_scroll_dirty();
+                self.follow_bottom();
                 None
             }
             SessionMessage::StreamError { error } => {
                 self.streaming = false;
                 self.pending.clear();
                 self.status = Some(format!("error: {error}"));
+                self.mark_scroll_dirty();
                 None
             }
             SessionMessage::StreamCancelled => {
                 self.streaming = false;
                 self.pending.clear();
                 self.status = None;
+                self.mark_scroll_dirty();
                 None
             }
             SessionMessage::CancelRequested => {
@@ -145,6 +162,8 @@ impl SessionScreen {
                 self.streaming = false;
                 self.pending.clear();
                 self.status = None;
+                *self.scroll_state.get_mut() = ScrollViewState::default();
+                self.mark_scroll_dirty();
                 None
             }
             SessionMessage::UpdateConfig {
@@ -188,11 +207,44 @@ impl SessionScreen {
         let history_inner = history_block.inner(history_area);
         frame.render_widget(history_block, history_area);
 
-        let mut rendered_messages: Vec<(Role, String)> = self.messages.clone();
-        if self.streaming {
-            rendered_messages.push((Role::Assistant, self.pending.clone()));
+        let content_width = history_inner.width.saturating_sub(1);
+        if self.scroll_width.get() != content_width {
+            self.scroll_dirty.set(true);
+            self.scroll_width.set(content_width);
         }
-        let lines: Vec<Line> = rendered_messages
+        if self.scroll_dirty.replace(false) {
+            let mut rendered_messages: Vec<(Role, String)> = self.messages.clone();
+            if self.streaming {
+                rendered_messages.push((Role::Assistant, self.pending.clone()));
+            }
+            self.rebuild_scroll_view(&rendered_messages, content_width);
+        }
+
+        let mut scroll_state = self.scroll_state.borrow_mut();
+        let scroll_view = self.scroll_view.borrow();
+        frame.render_stateful_widget(&*scroll_view, history_inner, &mut scroll_state);
+
+        let content_height = scroll_view.size().height;
+        if content_height > history_inner.height {
+            self.render_scrollbar(frame, history_inner, &scroll_state, content_height);
+        }
+
+        self.input.view(frame, input_area);
+
+        if let Some(status) = &self.status {
+            frame.render_widget(
+                Paragraph::new(status.as_str()).fg(theme::TEXT_MUTED),
+                status_area,
+            );
+        }
+    }
+
+    fn mark_scroll_dirty(&self) {
+        self.scroll_dirty.set(true);
+    }
+
+    fn rebuild_scroll_view(&self, messages: &[(Role, String)], content_width: u16) {
+        let lines: Vec<Line> = messages
             .iter()
             .flat_map(|(role, content)| {
                 let (label, label_fg) = match role {
@@ -208,18 +260,56 @@ impl SessionScreen {
                 out
             })
             .collect();
-        let history = Paragraph::new(lines)
-            .wrap(Wrap { trim: true })
-            .scroll((self.scroll as u16, 0));
-        frame.render_widget(history, history_inner);
+        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: true });
+        let content_height = paragraph.line_count(content_width).min(u16::MAX as usize) as u16;
+        let mut scroll_view = ScrollView::new(Size::new(content_width, content_height))
+            .scrollbars_visibility(ScrollbarVisibility::Never);
+        scroll_view.render_widget(&paragraph, scroll_view.area());
+        *self.scroll_view.borrow_mut() = scroll_view;
+    }
 
-        self.input.view(frame, input_area);
+    fn render_scrollbar(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        state: &ScrollViewState,
+        content_height: u16,
+    ) {
+        let track_len = area.height as usize;
+        if track_len < 2 {
+            return;
+        }
+        let content_len = content_height as usize;
+        let viewport_len = area.height as usize;
+        let offset = state.offset().y as usize;
+        let max_offset = content_len.saturating_sub(viewport_len);
+        let max_start = track_len.saturating_sub(1);
+        let thumb_len = max_start.max(1) * viewport_len / content_len.max(1);
+        let thumb_len = thumb_len.clamp(1, max_start);
+        let thumb_start = max_start
+            .saturating_sub(thumb_len)
+            .saturating_mul(offset)
+            .div_ceil(max_offset.max(1))
+            .min(max_start.saturating_sub(thumb_len));
+        let bar_x = area.right().saturating_sub(1);
+        let buf = frame.buffer_mut();
+        for row in area.top()..area.bottom() {
+            let y = row as usize;
+            let (symbol, style) = if (thumb_start..thumb_start + thumb_len).contains(&y) {
+                ("█", theme::ACCENT)
+            } else {
+                (" ", theme::TEXT_MUTED)
+            };
+            let cell = buf.cell_mut((bar_x, row)).expect("bar_x in bounds");
+            cell.set_symbol(symbol);
+            cell.set_style(Style::new().fg(style));
+        }
+    }
 
-        if let Some(status) = &self.status {
-            frame.render_widget(
-                Paragraph::new(status.as_str()).fg(theme::TEXT_MUTED),
-                status_area,
-            );
+    fn follow_bottom(&self) {
+        let mut state = self.scroll_state.borrow_mut();
+        if state.is_at_bottom() {
+            state.scroll_to_bottom();
         }
     }
 }
