@@ -143,7 +143,8 @@ impl App {
                                 .as_ref()
                                 .map(|f| f.stage)
                                 .unwrap_or(AddProviderStage::SelectKind);
-                            return AddProviderForm::map_event(&key, stage).map(AppMessage::AddProvider);
+                            return AddProviderForm::map_event(&key, stage)
+                                .map(AppMessage::AddProvider);
                         }
                         Overlay::ModelPicker => {
                             return ModelPicker::map_event(&key).map(AppMessage::ModelPicker);
@@ -166,7 +167,9 @@ impl App {
                         KeyEventKind::Press => match key.code {
                             KeyCode::Char('c') if ctrl(&key) => {
                                 if app.route == Route::Session && app.session.streaming {
-                                    return Some(AppMessage::Session(SessionMessage::CancelRequested));
+                                    return Some(AppMessage::Session(
+                                        SessionMessage::CancelRequested,
+                                    ));
                                 }
                                 return Some(AppMessage::RequestQuit);
                             }
@@ -205,15 +208,24 @@ impl App {
                 CoreEvent::ConfigError { error } => Some(AppMessage::ConfigError { error }),
                 CoreEvent::SessionStarted => Some(AppMessage::Session(SessionMessage::Reset)),
                 CoreEvent::TokenReceived { content } => {
-                    Some(AppMessage::Session(SessionMessage::TokenReceived { content }))
+                    Some(AppMessage::Session(SessionMessage::TokenReceived {
+                        content,
+                    }))
                 }
-                CoreEvent::StreamDone { .. } => Some(AppMessage::Session(SessionMessage::StreamDone)),
+                CoreEvent::StreamDone { .. } => {
+                    Some(AppMessage::Session(SessionMessage::StreamDone))
+                }
                 CoreEvent::StreamError { error } => {
                     Some(AppMessage::Session(SessionMessage::StreamError { error }))
                 }
-                CoreEvent::StreamCancelled => Some(AppMessage::Session(SessionMessage::StreamCancelled)),
+                CoreEvent::StreamCancelled => {
+                    Some(AppMessage::Session(SessionMessage::StreamCancelled))
+                }
                 CoreEvent::UsageUpdate { usage, cost } => {
-                    Some(AppMessage::Session(SessionMessage::UsageUpdate { usage, cost }))
+                    Some(AppMessage::Session(SessionMessage::UsageUpdate {
+                        usage,
+                        cost,
+                    }))
                 }
             },
         }
