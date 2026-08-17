@@ -128,7 +128,7 @@ impl App {
         }
     }
 
-    pub fn map_event(ev: Event, app: &App) -> Option<AppMessage> {
+    pub fn map_event(&self, ev: Event) -> Option<AppMessage> {
         match ev {
             Event::Terminal(term_ev) => match term_ev {
                 TermEvent::WindowResized(size) => Some(AppMessage::Resized {
@@ -137,12 +137,12 @@ impl App {
                 }),
                 TermEvent::Key(key) => {
                     // Overlay events
-                    match app.overlay {
+                    match self.overlay {
                         Overlay::CommandMenu => {
                             return CommandMenu::map_event(&key).map(AppMessage::CommandMenu);
                         }
                         Overlay::AddProvider => {
-                            let stage = app
+                            let stage = self
                                 .add_provider_form
                                 .as_ref()
                                 .map(|f| f.stage)
@@ -170,7 +170,7 @@ impl App {
                     match key.kind {
                         KeyEventKind::Press => match key.code {
                             KeyCode::Char('c') if ctrl(&key) => {
-                                if app.route == Route::Session && app.session.streaming {
+                                if self.route == Route::Session && self.session.streaming {
                                     return Some(AppMessage::Session(
                                         SessionMessage::CancelRequested,
                                     ));
@@ -185,9 +185,9 @@ impl App {
                         _ => {}
                     }
 
-                    match app.route {
-                        Route::Home => app.home.map_event(&key).map(AppMessage::Home),
-                        Route::Session => app.session.map_event(&key).map(AppMessage::Session),
+                    match self.route {
+                        Route::Home => self.home.map_event(&key).map(AppMessage::Home),
+                        Route::Session => self.session.map_event(&key).map(AppMessage::Session),
                     }
                 }
                 _ => None,
