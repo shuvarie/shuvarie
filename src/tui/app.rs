@@ -70,7 +70,7 @@ pub enum AppMessage {
 }
 
 #[derive(Debug)]
-pub enum AppReturn {
+pub enum AppEffect {
     Quit,
 }
 
@@ -239,7 +239,7 @@ impl App {
         }
     }
 
-    pub fn update(&mut self, msg: AppMessage) -> Option<AppReturn> {
+    pub fn update(&mut self, msg: AppMessage) -> Option<AppEffect> {
         match msg {
             AppMessage::OpenCommandMenu => {
                 self.footer_error = None;
@@ -254,7 +254,7 @@ impl App {
                 if let Some(ConfirmQuitEffect::Confirm) =
                     self.confirm_quit.update(ConfirmQuitMessage::Confirm)
                 {
-                    return Some(AppReturn::Quit);
+                    return Some(AppEffect::Quit);
                 }
             }
             AppMessage::CancelQuit => {

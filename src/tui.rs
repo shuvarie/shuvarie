@@ -9,7 +9,7 @@ use shuvarie_core::{Command, Config, Event as CoreEvent};
 
 use crate::tui::event::Event;
 
-use self::app::{App, AppReturn};
+use self::app::{App, AppEffect};
 
 pub mod add_provider;
 mod app;
@@ -71,7 +71,7 @@ pub async fn run_tui(cmd_tx: Sender<Command>, mut event_rx: Receiver<CoreEvent>)
                 if let Some(ret) = app.update(msg) {
                     // Match return
                     match ret {
-                        AppReturn::Quit => break 'render_loop Ok(()),
+                        AppEffect::Quit => break 'render_loop Ok(()),
                     }
                 }
                 // Model updated. Rendering the next frame is required.

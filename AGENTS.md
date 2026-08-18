@@ -17,7 +17,7 @@ When adding a feature: put domain logic in `shuvarie-core`, LLM/SDK glue in `shu
 The TUI follows `map_event → message → update → return`:
 
 - `map_event` (pure, no side effects): maps a terminal `Event` (or an async channel message) to a message (e.g. `AppMessage`). Takes `&self`/`&App` only — never mutates.
-- `update` (mutates the model): consumes a message and may produce a return (e.g. `AppReturn::Quit`) or an effect for the parent.
+- `update` (mutates the model): consumes a message and may produce an effect (e.g. `AppEffect::Quit`) or an effect for the parent.
 - `view(&self, frame: &mut Frame<'_>, area: Rect)`: draws current state. A TEA model is **not** required to implement `ratatui::Widget`; the dedicated `view` method takes a `Frame` + `Rect` and may compose multiple widgets, so it is not limited to a single widget's render contract. No side effects in `view`.
 
 The root `App` composes **submodels**, each following the same TEA shape with its own message enum, `map_event`, `update`, and `view`. Submodels own their state and logic; the parent dispatches events, forwards grouped messages, handles routing, and processes core events:
