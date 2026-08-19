@@ -401,17 +401,20 @@ impl App {
                                 .unwrap_or_default();
                             self.model_picker.open(&models);
                             self.overlay = Overlay::ModelPicker;
+                            return None;
                         }
                         CommandMenuEffect::AddProvider => {
                             let names: Vec<String> =
                                 self.ctx.config.providers.keys().cloned().collect();
                             self.add_provider_form = Some(AddProviderForm::new(&names));
                             self.overlay = Overlay::AddProvider;
+                            return None;
                         }
                         CommandMenuEffect::OpenSessionPicker => {
                             self.session_picker.open(self.session.session_id);
                             self.refresh_sessions();
                             self.overlay = Overlay::SessionPicker;
+                            return None;
                         }
                         CommandMenuEffect::NewSession => {
                             self.route = Route::Session;
