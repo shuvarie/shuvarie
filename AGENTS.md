@@ -6,7 +6,7 @@ Shuvarie (シュヴァリエ, "chevalier") is a terminal-based AI agent coding t
 
 - `./` (binary `shuvarie`) — TUI rendering, event loop, input handling, channel wiring. **No business logic lives here.** Renders state produced by `shuvarie-core`.
 - `./crates/core/` (`shuvarie-core`) — App state, config loading, and the async core task that orchestrates LLM and database work. Owns the domain `Session`/`Event`/`Command` logic and persists through `shuvarie-db`. Depends on `shuvarie-llm` (config holds a `shuvarie_llm::Provider`).
-- `./crates/llm/` (`shuvarie-llm`) — Thin wrapper over `rig`: `Provider` enum (8 variants) with metadata, `ProviderClient` builder, `ModelInfo`, model listing, non-streaming completion API (`complete` via `rig::completion::Chat`), `ChatMsg`/`Role` message types. No TUI concerns.
+- `./crates/llm/` (`shuvarie-llm`) — Thin wrapper over `rig`: `Provider` enum (9 variants) with metadata, `ProviderClient` builder, `ModelInfo`, model listing, non-streaming completion API (`complete` via `rig::completion::Chat`), `ChatMsg`/`Role` message types. No TUI concerns.
 - `./crates/db/` (`shuvarie-db`) — Persistence layer: Toasty models (`Session`, `Message`), the `Store` wrapper over `toasty::Db` (Turso embedded SQLite via `toasty-driver-turso`), embedded schema migrations, and a `migrate` bin (toasty-cli) for managing them. No TUI concerns.
 
 When adding a feature: put domain logic in `shuvarie-core`, LLM/SDK glue in `shuvarie-llm`, storage/ORM glue in `shuvarie-db`, and only rendering + input dispatch in the root binary.
@@ -103,6 +103,7 @@ All provider access goes through `rig` in `shuvarie-llm`. Supported providers, v
 - **Anthropic** — Claude models.
 - **Gemini** — Google models.
 - **Ollama** — local models, no API key required (good for offline development).
+- **Ollama Cloud** — Ollama's hosted cloud service (`https://ollama.com`, Bearer API key from https://ollama.com/settings/keys); same Ollama API as local, so it reuses rig's `ollama` client with a key + base URL.
 
 `shuvarie-llm` exposes a `Provider` enum and a model-listing/streaming API; the root binary never calls `rig` directly.
 

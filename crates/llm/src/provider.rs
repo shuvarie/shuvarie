@@ -16,10 +16,11 @@ pub enum Provider {
     Anthropic,
     Gemini,
     Ollama,
+    OllamaCloud,
 }
 
 impl Provider {
-    pub const ALL: [Provider; 8] = [
+    pub const ALL: [Provider; 9] = [
         Provider::OpenAiCompatible,
         Provider::OpenRouter,
         Provider::Groq,
@@ -28,6 +29,7 @@ impl Provider {
         Provider::Anthropic,
         Provider::Gemini,
         Provider::Ollama,
+        Provider::OllamaCloud,
     ];
 
     pub fn display_name(self) -> &'static str {
@@ -40,6 +42,7 @@ impl Provider {
             Provider::Anthropic => "Anthropic",
             Provider::Gemini => "Gemini",
             Provider::Ollama => "Ollama",
+            Provider::OllamaCloud => "Ollama Cloud",
         }
     }
 
@@ -57,6 +60,7 @@ impl Provider {
             Provider::Anthropic => Some("https://api.anthropic.com"),
             Provider::Gemini => Some("https://generativelanguage.googleapis.com"),
             Provider::Ollama => Some("http://localhost:11434"),
+            Provider::OllamaCloud => Some("https://ollama.com"),
         }
     }
 
@@ -154,6 +158,15 @@ impl ProviderClient {
             Provider::Ollama => {
                 let client = rig::providers::ollama::Client::builder()
                     .api_key(api_key.unwrap_or(""))
+                    .base_url(&base_url)
+                    .build()
+                    .map_err(|e| LlmError::Provider(e.to_string()))?;
+                ListImpl::Ollama(client)
+            }
+            Provider::OllamaCloud => {
+                let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
+                let client = rig::providers::ollama::Client::builder()
+                    .api_key(key)
                     .base_url(&base_url)
                     .build()
                     .map_err(|e| LlmError::Provider(e.to_string()))?;

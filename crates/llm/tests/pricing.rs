@@ -22,6 +22,7 @@ fn ollama_is_free() {
         ..TokenUsage::default()
     };
     assert_eq!(estimate_cost(Provider::Ollama, &usage), 0.0);
+    assert_eq!(estimate_cost(Provider::OllamaCloud, &usage), 0.0);
 }
 
 #[test]

@@ -115,6 +115,34 @@ fn ollama_without_key_is_connected() {
 }
 
 #[test]
+fn ollama_cloud_without_key_is_not_connected() {
+    let config = Config {
+        providers: HashMap::from([(
+            "cloud".to_string(),
+            ProviderConfig::new(Provider::OllamaCloud, None, None),
+        )]),
+        active_provider: Some("cloud".to_string()),
+        active_model: None,
+        ui: Default::default(),
+    };
+    assert!(!config.has_connected_providers());
+}
+
+#[test]
+fn ollama_cloud_with_key_is_connected() {
+    let config = Config {
+        providers: HashMap::from([(
+            "cloud".to_string(),
+            ProviderConfig::new(Provider::OllamaCloud, Some("ollama-key".to_string()), None),
+        )]),
+        active_provider: Some("cloud".to_string()),
+        active_model: None,
+        ui: Default::default(),
+    };
+    assert!(config.has_connected_providers());
+}
+
+#[test]
 fn save_and_load_from_temp_dir() {
     let dir = std::env::temp_dir().join(format!(
         "shuvarie-test-{}",

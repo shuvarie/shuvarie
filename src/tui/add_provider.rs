@@ -580,6 +580,14 @@ mod tests {
     }
 
     #[test]
+    fn cloud_query_resolves_to_ollama_cloud() {
+        let mut form = form_with_query("cloud");
+        form.kind_selected = 0;
+        assert_eq!(form.kind(), Provider::OllamaCloud);
+        assert!(form.filtered.contains(&(Provider::OllamaCloud as usize)));
+    }
+
+    #[test]
     fn kind_falls_back_when_filtered_empty() {
         let form = form_with_query("zzzzzz");
         assert_eq!(form.kind(), Provider::ALL[0]);

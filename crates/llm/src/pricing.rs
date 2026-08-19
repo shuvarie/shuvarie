@@ -19,7 +19,7 @@ fn rate(provider: Provider) -> (f64, f64) {
         | Provider::DeepSeek => (OPENAI_INPUT, OPENAI_OUTPUT),
         Provider::Anthropic => (ANTHROPIC_INPUT, ANTHROPIC_OUTPUT),
         Provider::Gemini => (GEMINI_INPUT, GEMINI_OUTPUT),
-        Provider::Ollama => (0.0, 0.0),
+        Provider::Ollama | Provider::OllamaCloud => (0.0, 0.0),
     }
 }
 
