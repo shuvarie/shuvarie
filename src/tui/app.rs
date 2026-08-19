@@ -615,17 +615,13 @@ impl App {
     }
 
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
-        let [content_area, footer_area] = Layout::vertical([Min(0), Length(1)]).areas(area);
+        let [content_area, footer_area] = Layout::vertical([Min(0), Length(1)])
+            .spacing(1)
+            .areas(area);
 
-        let padded = Rect::new(
-            content_area.x + 1,
-            content_area.y + 1,
-            content_area.width.saturating_sub(2),
-            content_area.height.saturating_sub(2),
-        );
         match self.route {
-            Route::Home => self.home.view(frame, padded),
-            Route::Session => self.session.view(frame, padded),
+            Route::Home => self.home.view(frame, content_area),
+            Route::Session => self.session.view(frame, content_area),
         }
 
         let footer = self.build_footer();
