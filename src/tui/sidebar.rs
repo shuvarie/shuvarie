@@ -118,9 +118,9 @@ impl Sidebar {
         let tokens_line = match self.context_length {
             Some(ctx) if ctx > 0 => {
                 let pct = self.tokens as f64 / ctx as f64 * 100.0;
-                format!("  Tokens: {} ({pct:.1}%)", self.tokens)
+                format!("  Tokens: {} ({pct:.1}%)", self.tokens.to_dec_sep_num(','))
             }
-            _ => format!("  Tokens: {}", self.tokens),
+            _ => format!("  Tokens: {}", self.tokens.to_dec_sep_num(',')),
         };
         lines.push(Line::from(tokens_line).fg(theme::TEXT_DIM));
         lines.push(
