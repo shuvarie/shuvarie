@@ -1,7 +1,10 @@
+use shuvarie_db::StoredSession;
 use shuvarie_llm::{ChatMsg, TokenUsage};
 
 #[derive(Debug, Clone, Default)]
 pub struct Session {
+    pub id: Option<u64>,
+    pub title: Option<String>,
     pub messages: Vec<ChatMsg>,
     pub tokens: u64,
     pub cost: f64,
@@ -16,7 +19,34 @@ impl Session {
         Self::default()
     }
 
+    pub fn from_stored(stored: StoredSession) -> Self {
+        let mut s = Self {
+            id: Some(stored.id),
+            title: Some(stored.title),
+            ..Self::default()
+        };
+        for m in &stored.messages {
+            s.input_tokens = s.input_tokens.saturating_add(m.input_tokens);
+            s.output_tokens = s.output_tokens.saturating_add(m.output_tokens);
+            s.tokens = s.tokens.saturating_add(m.total_tokens);
+            s.reasoning_tokens = s.reasoning_tokens.saturating_add(m.reasoning_tokens);
+            s.cached_tokens = s.cached_tokens.saturating_add(m.cached_input_tokens);
+            s.cost += m.cost;
+        }
+        s.messages = stored
+            .messages
+            .into_iter()
+            .map(|m| ChatMsg {
+                role: m.role.into(),
+                content: m.content,
+            })
+            .collect();
+        s
+    }
+
     pub fn clear(&mut self) {
+        self.id = None;
+        self.title = None;
         self.messages.clear();
         self.tokens = 0;
         self.cost = 0.0;

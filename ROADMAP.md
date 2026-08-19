@@ -7,14 +7,16 @@ Each milestone is intended to be independently mergeable and to leave the binary
 ## Current state
 
 - Working TUI loop (ratatui + termina backend), TEA pattern with hierarchical submodels (`HomeScreen`, `SessionScreen`, overlays).
-- `shuvarie-core` and `shuvarie-llm` wired as dependencies of the root binary, with real crate roots and typed error enums (`CoreError`, `LlmError` via `thiserror`).
+- `shuvarie-core`, `shuvarie-db`, and `shuvarie-llm` wired as dependencies of the root binary, with real crate roots and typed error enums (`CoreError`, `DbError`, `LlmError` via `thiserror`).
+- `shuvarie-db` provides the Toasty/Turso persistence layer: `Session`/`Message` models, a `Store` wrapper (`.shuvarie/data.db` in the working directory), embedded migrations (see `crates/db/toasty/`), and a `migrate` bin (toasty-cli) for managing them.
 - `shuvarie-llm` exposes a `Provider` enum (8 variants: OpenAi-compatible, OpenRouter, Groq, Together, DeepSeek, Anthropic, Gemini, Ollama) with metadata (display name, requires-api-key, default base URL), a `ProviderClient` that builds the right `rig` client per kind, an async `list_models` returning a lightweight `ModelInfo`, a streaming `stream` (via `rig::streaming::StreamingChat`) yielding a portable `StreamItem` stream (`Delta`/`Done`/`Error`), and `estimate_cost` from a built-in per-provider price table. Rig types stay out of `shuvarie-core`; `ChatMsg`/`Role` are the portable message types.
-- `shuvarie-core` defines the config schema (`Config`, `ProviderConfig`, `UiPrefs`), loads/saves `~/.config/shuvarie/config.toml` via the `dirs` crate, and exposes `has_connected_providers()`. An in-memory `Session` struct holds messages + token/cost totals (input/output/reasoning/cache + cost, accumulated from real `Usage` on each completed reply).
+- `shuvarie-core` defines the config schema (`Config`, `ProviderConfig`, `UiPrefs`), loads/saves `~/.config/shuvarie/config.toml` via the `dirs` crate, and exposes `has_connected_providers()`. An in-memory `Session` struct holds messages + token/cost totals (input/output/reasoning/cache + cost, accumulated from real `Usage` on each completed reply) plus persisted `id`/`title` tracking.
 - `tokio` (`rt-multi-thread`, `macros`, `sync`) in the root binary and `shuvarie-core`; `main` is `#[tokio::main]` and spawns the core task.
 - The core task (`shuvarie_core::run`) owns the in-memory `Config` and active `Session`, handles `Command`s (ping, list/add/remove/set-active providers, set active model, save config, start session, send message, cancel stream), and emits `Event`s (pong, models loaded/error, config saved/error, session started, token received, stream done/error/cancelled, usage update). LLM streams run on a spawned task inside the core task, so the loop stays responsive to `CancelStream` (abort) while tokens flow. The TUI and core communicate via `tokio::sync::mpsc` channels.
 - Two-route TUI: **Home** (new-session empty state with centered ASCII art + input) and **Session** (left sidebar + content with centered title bar + transparent chat history + input). No global title bar; branding lives in the sidebar and Home logo. Overlays float over either route: Welcome (first-run), AddProvider (two-stage wizard: kind list then details), ModelPicker (fuzzy search), CommandMenu (Ctrl+M), ConfirmQuit (Ctrl+C).
 - Provider management is overlay-based (no dedicated route). Adding a provider shows a kind list first, then a details form with auto-populated default name (suffix-numbered if taken) and default base URL. Model auto-selection on `ModelsLoaded`: keeps last-used model if present, else picks the first.
 - Responses stream token-by-token into the in-flight assistant message (status row "streaming…"); `Ctrl+C` mid-stream aborts and discards the partial reply (`Ctrl+C` while idle opens the confirm-quit dialog). Session Context panel in the sidebar shows accumulated input/output/reasoning/cache tokens and an estimated cost (built-in per-provider price table).
+- Sessions and message history persist to `.shuvarie/data.db` (Turso embedded SQLite via Toasty, in the working directory). On launch the most recent session loads into the chat view; the `Ctrl+M` command menu offers "Switch session" (list/resume/`Ctrl+D`-to-delete with a second `Ctrl+D` to confirm) and "New session". Schema changes are managed with toasty migrations (see `crates/db/toasty/` and the `migrate` bin).
 - Input areas feature a virtual cursor (reversed block at cursor position), Emacs keybindings (Ctrl+B/F/A/E/D/H/K, Alt+B/F, Ctrl+N/P), and content-width-sized centered text in overlays.
 - Quit is via `Ctrl+C` → confirm dialog (Enter or Ctrl+C again to confirm, Esc to cancel); `q` no longer quits.
 
@@ -90,11 +92,11 @@ Replace the non-streaming send with token streaming for live feedback.
 
 Persist chat sessions and message history so conversations survive restarts.
 
-- [ ] Add `turso` (embedded SQLite) and `toasty` to `shuvarie-core`.
-- [ ] Define Toasty models for `Session` and `Message` (role, content, provider, model, timestamps).
-- [ ] On launch: load the most recent session into the chat view; on send/receive: persist messages.
-- [ ] Session switcher UI (list of sessions, new session, delete session) — likely a sidebar section or overlay.
-- [ ] Keep provider config in the TOML file — do not migrate secrets into the database.
+- [x] Add `shuvarie-db` (new crate) with `turso` (embedded SQLite via `toasty-driver-turso`) and `toasty`.
+- [x] Define Toasty models for `Session` and `Message` (role, content, provider, model, usage/cost, timestamps), migrations managed by the toasty-cli `migrate` bin and embedded via `embed_migrations!`.
+- [x] On launch: load the most recent session into the chat view; on send/receive: persist messages.
+- [x] Session switcher UI (list of sessions, new session, delete session) — `Ctrl+M` → "Switch session", plus a "New session" command.
+- [x] Keep provider config in the TOML file — do not migrate secrets into the database.
 
 ## M7+ — Agent features (future, out of first-pass scope)
 

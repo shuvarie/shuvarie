@@ -20,6 +20,7 @@ use super::context::UpdateCtx;
 use super::home::{HomeEffect, HomeMessage, HomeScreen};
 use super::model_picker::{ModelPicker, ModelPickerEffect, ModelPickerMessage};
 use super::session::{SessionEffect, SessionMessage, SessionScreen};
+use super::session_picker::{SessionPicker, SessionPickerEffect, SessionPickerMessage};
 use super::sidebar::SidebarMessage;
 use super::theme;
 use super::welcome::{Welcome, WelcomeEffect, WelcomeMessage};
@@ -38,6 +39,7 @@ pub enum Overlay {
     ModelPicker,
     CommandMenu,
     ConfirmQuit,
+    SessionPicker,
 }
 
 pub enum AppMessage {
@@ -55,6 +57,7 @@ pub enum AppMessage {
     ModelPicker(ModelPickerMessage),
     CommandMenu(CommandMenuMessage),
     Welcome(WelcomeMessage),
+    SessionPicker(SessionPickerMessage),
     ConfigSaved,
     ConfigError {
         error: String,
@@ -65,6 +68,24 @@ pub enum AppMessage {
     },
     ModelsError {
         provider_name: String,
+        error: String,
+    },
+    SessionsLoaded {
+        sessions: Vec<shuvarie_core::SessionSummary>,
+    },
+    SessionLoaded {
+        id: u64,
+        title: String,
+        session: shuvarie_core::Session,
+    },
+    SessionCreated {
+        id: u64,
+        title: String,
+    },
+    SessionDeleted {
+        id: u64,
+    },
+    SessionError {
         error: String,
     },
 }
@@ -85,6 +106,7 @@ pub struct App {
     pub confirm_quit: ConfirmQuit,
     pub add_provider_form: Option<AddProviderForm>,
     pub model_picker: ModelPicker,
+    pub session_picker: SessionPicker,
     pub models: HashMap<String, Vec<ModelInfo>>,
     pending_model_pick: Option<String>,
     footer_error: Option<String>,
@@ -122,6 +144,7 @@ impl App {
             confirm_quit: ConfirmQuit::new(),
             add_provider_form: None,
             model_picker: ModelPicker::new(),
+            session_picker: SessionPicker::new(),
             models: HashMap::new(),
             pending_model_pick: None,
             footer_error: None,
@@ -165,6 +188,12 @@ impl App {
                                 ConfirmQuitMessage::Confirm => AppMessage::ConfirmQuit,
                                 ConfirmQuitMessage::Cancel => AppMessage::CancelQuit,
                             });
+                        }
+                        Overlay::SessionPicker => {
+                            return self
+                                .session_picker
+                                .map_event(&key)
+                                .map(AppMessage::SessionPicker);
                         }
                         Overlay::None => {}
                     }
@@ -214,7 +243,10 @@ impl App {
                 }),
                 CoreEvent::ConfigSaved => Some(AppMessage::ConfigSaved),
                 CoreEvent::ConfigError { error } => Some(AppMessage::ConfigError { error }),
-                CoreEvent::SessionStarted => Some(AppMessage::Session(SessionMessage::Reset)),
+                CoreEvent::SessionStarted => None,
+                CoreEvent::SessionCreated { id, title } => {
+                    Some(AppMessage::SessionCreated { id, title })
+                }
                 CoreEvent::TokenReceived { content } => {
                     Some(AppMessage::Session(SessionMessage::TokenReceived {
                         content,
@@ -235,6 +267,14 @@ impl App {
                         cost,
                     }))
                 }
+                CoreEvent::SessionsLoaded { sessions } => {
+                    Some(AppMessage::SessionsLoaded { sessions })
+                }
+                CoreEvent::SessionLoaded { id, title, session } => {
+                    Some(AppMessage::SessionLoaded { id, title, session })
+                }
+                CoreEvent::SessionDeleted { id } => Some(AppMessage::SessionDeleted { id }),
+                CoreEvent::SessionError { error } => Some(AppMessage::SessionError { error }),
             },
         }
     }
@@ -279,6 +319,29 @@ impl App {
                         }
                         SessionEffect::CancelStream => {
                             self.ctx.send(shuvarie_core::Command::CancelStream);
+                        }
+                    }
+                }
+            }
+            AppMessage::SessionPicker(m) => {
+                if let Some(effect) = self.session_picker.update(m) {
+                    match effect {
+                        SessionPickerEffect::LoadSession { id } => {
+                            self.route = Route::Session;
+                            self.ctx.send(shuvarie_core::Command::LoadSession { id });
+                            self.close_overlay();
+                        }
+                        SessionPickerEffect::DeleteSession { id } => {
+                            self.ctx.send(shuvarie_core::Command::DeleteSession { id });
+                        }
+                        SessionPickerEffect::NewSession => {
+                            self.route = Route::Session;
+                            self.session.update(SessionMessage::Reset);
+                            self.ctx.send(shuvarie_core::Command::NewSession);
+                            self.close_overlay();
+                        }
+                        SessionPickerEffect::Close => {
+                            self.close_overlay();
                         }
                     }
                 }
@@ -352,6 +415,16 @@ impl App {
                             self.add_provider_form = Some(AddProviderForm::new(&names));
                             self.overlay = Overlay::AddProvider;
                         }
+                        CommandMenuEffect::OpenSessionPicker => {
+                            self.session_picker.open(self.session.session_id);
+                            self.refresh_sessions();
+                            self.overlay = Overlay::SessionPicker;
+                        }
+                        CommandMenuEffect::NewSession => {
+                            self.route = Route::Session;
+                            self.session.update(SessionMessage::Reset);
+                            self.ctx.send(shuvarie_core::Command::NewSession);
+                        }
                     }
                 }
                 if !self.command_menu.open {
@@ -390,6 +463,12 @@ impl App {
                             && let Some(form) = &mut self.add_provider_form
                         {
                             form.update(AddProviderMessage::Resize { viewport_height: h });
+                        }
+                    }
+                    Overlay::SessionPicker => {
+                        if let Some(h) = session_picker_list_height(area) {
+                            self.session_picker
+                                .update(SessionPickerMessage::Resize { viewport_height: h });
                         }
                     }
                     Overlay::None | Overlay::Welcome | Overlay::ConfirmQuit => {}
@@ -454,6 +533,29 @@ impl App {
                     form.error = Some(format!("{provider_name}: {error}"));
                 }
             }
+            AppMessage::SessionCreated { id, title } => {
+                self.session.session_id = Some(id);
+                self.session.session_title = Some(title);
+                self.session_picker.active_id = Some(id);
+            }
+            AppMessage::SessionsLoaded { sessions } => {
+                self.session_picker.set_sessions(sessions);
+            }
+            AppMessage::SessionLoaded { id, title, session } => {
+                self.route = Route::Session;
+                self.session
+                    .update(SessionMessage::Loaded { id, title, session });
+                self.session_picker.active_id = Some(id);
+            }
+            AppMessage::SessionDeleted { id } => {
+                if self.session.session_id == Some(id) {
+                    self.session.update(SessionMessage::Reset);
+                }
+                self.refresh_sessions();
+            }
+            AppMessage::SessionError { error } => {
+                self.footer_error = Some(error);
+            }
         }
         None
     }
@@ -471,11 +573,16 @@ impl App {
             .send(shuvarie_core::Command::SendMessage { content });
     }
 
+    fn refresh_sessions(&mut self) {
+        self.ctx.send(shuvarie_core::Command::ListSessions);
+    }
+
     fn close_overlay(&mut self) {
         self.overlay = Overlay::None;
         self.command_menu.close();
         self.add_provider_form = None;
         self.model_picker.close();
+        self.session_picker.close();
         self.confirm_quit.close();
         if self.welcome.open {
             self.welcome.close();
@@ -529,6 +636,7 @@ impl App {
             form.view(frame, area);
         }
         self.model_picker.view(frame, area);
+        self.session_picker.view(frame, area);
         self.command_menu.view(frame, area);
         self.confirm_quit.view(frame, area);
     }
@@ -567,6 +675,21 @@ impl App {
                 ("Esc", "close"),
                 ("Enter", "select"),
             ]);
+        }
+        if self.overlay == Overlay::SessionPicker {
+            let hint = if self.session_picker.confirm_delete {
+                theme::help_line(&[("Ctrl+D", "confirm delete"), ("Esc", "cancel")])
+            } else if self.session_picker.sessions.is_empty() {
+                theme::help_line(&[("N", "new session"), ("Esc", "close")])
+            } else {
+                theme::help_line(&[
+                    ("Enter", "resume"),
+                    ("Ctrl+D", "delete"),
+                    ("N", "new"),
+                    ("Esc", "close"),
+                ])
+            };
+            return hint;
         }
         if self.overlay == Overlay::Welcome {
             return theme::help_line(&[("Enter", "add provider"), ("Ctrl+C", "quit")]);
@@ -642,4 +765,8 @@ fn model_picker_list_height(area: Rect) -> Option<u16> {
 
 fn add_provider_kind_list_height(area: Rect) -> Option<u16> {
     overlay_inner_list_height(area, 50, 55, 3)
+}
+
+fn session_picker_list_height(area: Rect) -> Option<u16> {
+    overlay_inner_list_height(area, 64, 36, 1)
 }

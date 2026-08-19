@@ -5,6 +5,7 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::AbortHandle;
 
+use shuvarie_db::Store;
 use shuvarie_llm::ProviderClient;
 
 use crate::command::Command;
@@ -12,10 +13,17 @@ use crate::config::{Config, ProviderConfig};
 use crate::event::Event;
 use crate::session::Session;
 
-pub async fn run(mut config: Config, mut cmd_rx: Receiver<Command>, event_tx: Sender<Event>) {
+pub async fn run(
+    mut config: Config,
+    mut store: Store,
+    mut cmd_rx: Receiver<Command>,
+    event_tx: Sender<Event>,
+) {
     let mut clients: HashMap<String, ProviderClient> = HashMap::new();
     let mut session: Option<Arc<Mutex<Session>>> = None;
     let mut active_stream: Option<AbortHandle> = None;
+
+    load_most_recent_session(&mut store, &mut session, &event_tx).await;
 
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
@@ -91,6 +99,13 @@ pub async fn run(mut config: Config, mut cmd_rx: Receiver<Command>, event_tx: Se
                 session = Some(Arc::new(Mutex::new(Session::new())));
                 let _ = event_tx.send(Event::SessionStarted).await;
             }
+            Command::NewSession => {
+                if stream_busy(&active_stream, &event_tx).await {
+                    continue;
+                }
+                session = Some(Arc::new(Mutex::new(Session::new())));
+                let _ = event_tx.send(Event::SessionStarted).await;
+            }
             Command::SendMessage { content } => {
                 if active_stream.as_ref().is_some_and(|h| !h.is_finished()) {
                     let _ = event_tx
@@ -107,6 +122,47 @@ pub async fn run(mut config: Config, mut cmd_rx: Receiver<Command>, event_tx: Se
                 }
                 let s = session.as_ref().unwrap();
                 s.lock().await.push_user(content.clone());
+
+                {
+                    let mut guard = s.lock().await;
+                    if guard.id.is_none() {
+                        let title = title_for(&content);
+                        match store
+                            .create_session(
+                                &title,
+                                config.active_provider.as_deref(),
+                                config.active_model.as_deref(),
+                            )
+                            .await
+                        {
+                            Ok(id) => {
+                                guard.id = Some(id);
+                                guard.title = Some(title.clone());
+                                let _ = event_tx.send(Event::SessionCreated { id, title }).await;
+                            }
+                            Err(e) => {
+                                let _ = event_tx
+                                    .send(Event::StreamError {
+                                        error: format!("failed to create session: {e}"),
+                                    })
+                                    .await;
+                                continue;
+                            }
+                        }
+                    }
+                    let id = guard.id.unwrap();
+                    if let Err(e) = store
+                        .append_message(id, guard.messages.last().unwrap().role, &content)
+                        .await
+                    {
+                        let _ = event_tx
+                            .send(Event::StreamError {
+                                error: format!("failed to persist message: {e}"),
+                            })
+                            .await;
+                        continue;
+                    }
+                }
 
                 let Some(provider_name) = config.active_provider.clone() else {
                     let _ = event_tx
@@ -141,9 +197,17 @@ pub async fn run(mut config: Config, mut cmd_rx: Receiver<Command>, event_tx: Se
                 let tx = event_tx.clone();
                 let session_shared = s.clone();
                 let client_shared = client.clone();
+                let store_shared = store.clone();
                 active_stream = Some(
                     tokio::spawn(async move {
-                        stream_stream_to_events(stream, session_shared, client_shared, tx).await;
+                        stream_stream_to_events(
+                            stream,
+                            session_shared,
+                            client_shared,
+                            store_shared,
+                            tx,
+                        )
+                        .await;
                     })
                     .abort_handle(),
                 );
@@ -156,8 +220,116 @@ pub async fn run(mut config: Config, mut cmd_rx: Receiver<Command>, event_tx: Se
                     let _ = event_tx.send(Event::StreamCancelled).await;
                 }
             }
+            Command::ListSessions => match store.list_sessions().await {
+                Ok(sessions) => {
+                    let _ = event_tx.send(Event::SessionsLoaded { sessions }).await;
+                }
+                Err(e) => {
+                    let _ = event_tx
+                        .send(Event::SessionError {
+                            error: e.to_string(),
+                        })
+                        .await;
+                }
+            },
+            Command::LoadSession { id } => {
+                if stream_busy(&active_stream, &event_tx).await {
+                    continue;
+                }
+                match store.load_session(id).await {
+                    Ok(stored) => {
+                        let loaded = Session::from_stored(stored);
+                        session = Some(Arc::new(Mutex::new(loaded.clone())));
+                        let _ = event_tx
+                            .send(Event::SessionLoaded {
+                                id,
+                                title: loaded.title.clone().unwrap_or_default(),
+                                session: loaded,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = event_tx
+                            .send(Event::SessionError {
+                                error: e.to_string(),
+                            })
+                            .await;
+                    }
+                }
+            }
+            Command::DeleteSession { id } => {
+                if stream_busy(&active_stream, &event_tx).await {
+                    continue;
+                }
+                match store.delete_session(id).await {
+                    Ok(()) => {
+                        if let Some(s) = &session
+                            && s.lock().await.id == Some(id)
+                        {
+                            *s.lock().await = Session::new();
+                        }
+                        let _ = event_tx.send(Event::SessionDeleted { id }).await;
+                    }
+                    Err(e) => {
+                        let _ = event_tx
+                            .send(Event::SessionError {
+                                error: e.to_string(),
+                            })
+                            .await;
+                    }
+                }
+            }
         }
     }
+}
+
+fn title_for(content: &str) -> String {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        "Untitled session".to_string()
+    } else {
+        trimmed.chars().take(48).collect()
+    }
+}
+
+async fn load_most_recent_session(
+    store: &mut Store,
+    session: &mut Option<Arc<Mutex<Session>>>,
+    event_tx: &Sender<Event>,
+) {
+    match store.most_recent_session().await {
+        Ok(Some(stored)) => {
+            let loaded = Session::from_stored(stored);
+            *session = Some(Arc::new(Mutex::new(loaded.clone())));
+            let _ = event_tx
+                .send(Event::SessionLoaded {
+                    id: loaded.id.unwrap_or_default(),
+                    title: loaded.title.clone().unwrap_or_default(),
+                    session: loaded,
+                })
+                .await;
+        }
+        Ok(None) => {}
+        Err(e) => {
+            let _ = event_tx
+                .send(Event::SessionError {
+                    error: e.to_string(),
+                })
+                .await;
+        }
+    }
+}
+
+async fn stream_busy(active_stream: &Option<AbortHandle>, event_tx: &Sender<Event>) -> bool {
+    if active_stream.as_ref().is_some_and(|h| !h.is_finished()) {
+        let _ = event_tx
+            .send(Event::StreamError {
+                error: "a reply is already streaming".into(),
+            })
+            .await;
+        return true;
+    }
+    false
 }
 
 fn client_for<'a>(
@@ -180,6 +352,7 @@ async fn stream_stream_to_events(
     mut stream: shuvarie_llm::StreamStream,
     session: Arc<Mutex<Session>>,
     client: ProviderClient,
+    mut store: Store,
     event_tx: Sender<Event>,
 ) {
     use futures_util::StreamExt;
@@ -195,7 +368,17 @@ async fn stream_stream_to_events(
                 guard.push_assistant(text.clone());
                 let cost = client.estimate_cost(&usage);
                 guard.add_usage(usage, cost);
+                let id = guard.id;
                 drop(guard);
+                if let Some(id) = id
+                    && let Err(e) = store.append_assistant_message(id, &text, usage, cost).await
+                {
+                    let _ = event_tx
+                        .send(Event::StreamError {
+                            error: format!("failed to persist message: {e}"),
+                        })
+                        .await;
+                }
                 let _ = event_tx.send(Event::StreamDone { text, usage }).await;
                 let _ = event_tx.send(Event::UsageUpdate { usage, cost }).await;
                 break;
@@ -258,8 +441,9 @@ mod tests {
         ]));
 
         let session_shared = session.clone();
+        let store = Store::open_in_memory().await.unwrap();
         tokio::spawn(async move {
-            stream_stream_to_events(stream, session_shared, client, event_tx).await;
+            stream_stream_to_events(stream, session_shared, client, store, event_tx).await;
         });
 
         let mut deltas = String::new();
@@ -303,8 +487,9 @@ mod tests {
         ]));
 
         let session_shared = session.clone();
+        let store = Store::open_in_memory().await.unwrap();
         tokio::spawn(async move {
-            stream_stream_to_events(stream, session_shared, client, event_tx).await;
+            stream_stream_to_events(stream, session_shared, client, store, event_tx).await;
         });
 
         let mut saw_error = false;

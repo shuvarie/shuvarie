@@ -1,0 +1,20 @@
+[package]
+name = "shuvarie-db"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1"
+jiff = "0.2"
+shuvarie-llm = { path = "../llm" }
+thiserror = "2"
+toasty = { version = "0.10", features = ["turso", "jiff", "migration"] }
+toasty-cli = "0.10"
+toasty-driver-turso = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+
+[dev-dependencies]
+tempfile = "3"

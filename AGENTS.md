@@ -5,10 +5,11 @@ Shuvarie (シュヴァリエ, "chevalier") is a terminal-based AI agent coding t
 ## Workspace crates
 
 - `./` (binary `shuvarie`) — TUI rendering, event loop, input handling, channel wiring. **No business logic lives here.** Renders state produced by `shuvarie-core`.
-- `./crates/core/` (`shuvarie-core`) — App state, config loading, storage layer (Turso + Toasty ORM), and the async core task that orchestrates LLM and database work. Owns the domain `Message`/`Update` logic. Depends on `shuvarie-llm` (config holds a `shuvarie_llm::Provider`).
+- `./crates/core/` (`shuvarie-core`) — App state, config loading, and the async core task that orchestrates LLM and database work. Owns the domain `Session`/`Event`/`Command` logic and persists through `shuvarie-db`. Depends on `shuvarie-llm` (config holds a `shuvarie_llm::Provider`).
 - `./crates/llm/` (`shuvarie-llm`) — Thin wrapper over `rig`: `Provider` enum (8 variants) with metadata, `ProviderClient` builder, `ModelInfo`, model listing, non-streaming completion API (`complete` via `rig::completion::Chat`), `ChatMsg`/`Role` message types. No TUI concerns.
+- `./crates/db/` (`shuvarie-db`) — Persistence layer: Toasty models (`Session`, `Message`), the `Store` wrapper over `toasty::Db` (Turso embedded SQLite via `toasty-driver-turso`), embedded schema migrations, and a `migrate` bin (toasty-cli) for managing them. No TUI concerns.
 
-When adding a feature: put domain logic in `shuvarie-core`, LLM/SDK glue in `shuvarie-llm`, and only rendering + input dispatch in the root binary.
+When adding a feature: put domain logic in `shuvarie-core`, LLM/SDK glue in `shuvarie-llm`, storage/ORM glue in `shuvarie-db`, and only rendering + input dispatch in the root binary.
 
 ## Architecture
 
@@ -51,6 +52,7 @@ There should be a `new` and a `view` method, and a `update` method when data upd
 | `logo.rs` | Double-sword-behind-shield ASCII art for the Home screen |
 | `add_provider.rs` | `AddProviderForm` submodel (two-stage wizard: SelectKind → Details) + `AddProviderMessage` + `AddProviderOutcome` |
 | `model_picker.rs` | `ModelPicker` overlay submodel + `ModelPickerMessage` + `ModelPickerEffect` |
+| `session_picker.rs` | `SessionPicker` overlay submodel (session list, resume, `Ctrl+D` delete with confirm) + `SessionPickerMessage` + `SessionPickerEffect` |
 | `command_menu.rs` | `CommandMenu` submodel + `CommandMenuMessage` + `CommandMenuEffect` |
 | `welcome.rs` | `Welcome` overlay (first-run) + `WelcomeMessage` |
 | `confirm_quit.rs` | `ConfirmQuit` overlay (Ctrl+C) + `ConfirmQuitMessage` |
@@ -60,7 +62,7 @@ There should be a `new` and a `view` method, and a `update` method when data upd
 | `theme.rs` | Color palette + style helpers (see UI design below) |
 | `escape.rs` | CSI escape sequences for alt-screen enter/exit |
 
-**Message grouping**: `AppMessage` wraps submodel messages — `Home(HomeMessage)`, `Session(SessionMessage)`, `AddProvider(AddProviderMessage)`, `ModelPicker(ModelPickerMessage)`, `CommandMenu(CommandMenuMessage)`, `Welcome(WelcomeMessage)` — plus parent-only variants (`OpenCommandMenu`, `RequestQuit`, `ConfirmQuit`, `CancelQuit`, `Resized { rows, cols }`, `ConfigSaved`, `ConfigError`, `ModelsLoaded`, `ModelsError`). The TUI `Event` enum (`src/tui/event.rs`) unifies terminal and core inputs: `Event::Terminal(termina::Event)` and `Event::Core(shuvarie_core::Event)`. `App::map_event(ev, &app)` matches on `Event` — terminal events are dispatched overlay-aware then route-aware (below), while core events are mapped to `AppMessage` directly: stream/usage events (`TokenReceived`, `StreamDone`, `StreamError`, `StreamCancelled`, `UsageUpdate`, `SessionStarted`) wrap into `Session(...)`, `Pong` closes the command menu, and `ConfigSaved`/`ConfigError`/`ModelsLoaded`/`ModelsError` stay at the parent level (the parent reloads config from disk on `ConfigSaved` so submodels see fresh provider data, and auto-selects a model on `ModelsLoaded`). `Resized` is sent from the `tui.rs` event loop when the terminal size changes and dispatched in `App::update` to the open overlay's `Resize { viewport_height }` submessage (computed from the popup rect + overlay block inner layout) so the overlay can recompute its scroll offset.
+**Message grouping**: `AppMessage` wraps submodel messages — `Home(HomeMessage)`, `Session(SessionMessage)`, `AddProvider(AddProviderMessage)`, `ModelPicker(ModelPickerMessage)`, `CommandMenu(CommandMenuMessage)`, `Welcome(WelcomeMessage)`, `SessionPicker(SessionPickerMessage)` — plus parent-only variants (`OpenCommandMenu`, `RequestQuit`, `ConfirmQuit`, `CancelQuit`, `Resized { rows, cols }`, `ConfigSaved`, `ConfigError`, `ModelsLoaded`, `ModelsError`, `SessionsLoaded`, `SessionLoaded`, `SessionCreated`, `SessionDeleted`, `SessionError`). The TUI `Event` enum (`src/tui/event.rs`) unifies terminal and core inputs: `Event::Terminal(termina::Event)` and `Event::Core(shuvarie_core::Event)`. `App::map_event(ev, &app)` matches on `Event` — terminal events are dispatched overlay-aware then route-aware (below), while core events are mapped to `AppMessage` directly: stream/usage events (`TokenReceived`, `StreamDone`, `StreamError`, `StreamCancelled`, `UsageUpdate`) wrap into `Session(...)`, session events (`SessionLoaded`, `SessionCreated`, `SessionDeleted`, `SessionsLoaded`, `SessionError`) stay at the parent level (they populate the chat view and the SessionPicker), `Pong` closes the command menu, and `ConfigSaved`/`ConfigError`/`ModelsLoaded`/`ModelsError` stay at the parent level (the parent reloads config from disk on `ConfigSaved` so submodels see fresh provider data, and auto-selects a model on `ModelsLoaded`). `Resized` is sent from the `tui.rs` event loop when the terminal size changes and dispatched in `App::update` to the open overlay's `Resize { viewport_height }` submessage (computed from the popup rect + overlay block inner layout) so the overlay can recompute its scroll offset.
 
 **Event dispatch flow** (`App::map_event`, overlay-aware, then route-aware):
 
@@ -70,7 +72,7 @@ There should be a `new` and a `view` method, and a `update` method when data upd
 4. Else route to the active screen's `map_event` (`Home` or `Session`).
 5. `Event::Core` — mapped to `AppMessage` directly (see Message grouping above).
 
-**Update forwarding**: `App::update` matches `AppMessage` — parent-only variants are handled in-place; submodel variants are forwarded to `submodel.update(msg, &self.ctx)`. `CommandMenu::update` returns `Option<CommandMenuEffect>`; the parent matches effects (`OpenModelSelect`, `AddProvider`) to perform parent-level actions (opening the ModelPicker overlay, opening the AddProviderForm). `HomeScreen::update` returns `Option<HomeEffect>` (`Submit` → start session); `SessionScreen::update` returns `Option<SessionEffect>` (`SendMessage` → send command to core). `AddProviderForm::update` returns `AddProviderOutcome` (`Submit` → add provider + set active + list models; `Cancel` → close or back to kind list). `ModelPicker::update` returns `Option<ModelPickerEffect>` (`Selected` → set active model).
+**Update forwarding**: `App::update` matches `AppMessage` — parent-only variants are handled in-place; submodel variants are forwarded to `submodel.update(msg, &self.ctx)`. `CommandMenu::update` returns `Option<CommandMenuEffect>`; the parent matches effects (`OpenModelSelect`, `AddProvider`, `OpenSessionPicker`, `NewSession`) to perform parent-level actions (opening the ModelPicker overlay, opening the AddProviderForm, opening the SessionPicker / starting a fresh session). `HomeScreen::update` returns `Option<HomeEffect>` (`Submit` → start session); `SessionScreen::update` returns `Option<SessionEffect>` (`SendMessage` → send command to core). `AddProviderForm::update` returns `AddProviderOutcome` (`Submit` → add provider + set active + list models; `Cancel` → close or back to kind list). `ModelPicker::update` returns `Option<ModelPickerEffect>` (`Selected` → set active model). `SessionPicker::update` returns `Option<SessionPickerEffect>` (`LoadSession` → resume; `DeleteSession` → delete with a second `Ctrl+D` to confirm; `NewSession` → fresh conversation).
 
 **`UpdateCtx`** (`src/tui/context.rs`): carries `config: Config` and `cmd_tx: Sender<Command>`. Passed by shared reference (`&UpdateCtx`) to submodel `update` calls so they can read config and send commands without owning them. The parent owns the `UpdateCtx` and reloads `config` from disk on `ConfigSaved`.
 
@@ -90,7 +92,8 @@ Keep the TUI thread free of `await`s on blocking work; offload any blocking work
 ### Storage: hybrid
 
 - **Config file** (`~/.config/shuvarie/config.toml`, via `toml` + `serde`): API keys, base URLs, the active provider/model, UI preferences. Keeps secrets out of the database.
-- **Database** (Turso embedded SQLite + Toasty ORM): chat sessions and message history. Added in a later milestone; provider config stays in the TOML file regardless.
+- **Database** (`.shuvarie/data.db` in the working directory — Turso embedded SQLite + Toasty ORM): chat sessions and message history. Provider config stays in the TOML file regardless.
+- **Migrations**: schema is managed with toasty migrations, not `push_schema` (which emits bare `CREATE TABLE` and fails on re-open). Migration files live in `crates/db/toasty/` and are embedded into the binary via `toasty::embed_migrations!`; `Store::open` applies them automatically. Regenerate with `cargo run -p shuvarie-db --bin migrate -- migration generate --name <change>`, then `apply` (or just reopen a store — the embedded set applies pending migrations at open). The `migrate` bin uses an in-memory DB and a programmatically-built `toasty-cli` config pointing at `crates/db/toasty` so it is CWD-independent.
 
 ### LLM providers
 
@@ -156,7 +159,7 @@ When adding a new screen or widget, use the `theme` helpers — do not inline `B
 
 ### Launch flow
 
-On startup `shuvarie-core` loads config and checks for connected providers. If none are configured, the TUI opens to the **Home** route with a **Welcome** overlay prompting the user to add a provider; otherwise it opens to the **Home** route directly. Provider/model management is overlay-based (AddProvider wizard, ModelPicker) and reachable at any time via the `Ctrl+M` command menu. When the user submits a message from Home, the app switches to the **Session** route.
+On startup `shuvarie-core` loads config, opens the working-directory session store (`.shuvarie/data.db`), and loads the most recent session into the chat view. If no providers are configured, the TUI opens to the **Home** route with a **Welcome** overlay prompting the user to add a provider; otherwise it opens to the **Home** route directly (the loaded session is one `Enter` away, or via `Ctrl+M` → "Switch session"). Provider/model management is overlay-based (AddProvider wizard, ModelPicker) and reachable at any time via the `Ctrl+M` command menu. When the user submits a message from Home, the app switches to the **Session** route.
 
 ## Conventions
 
@@ -180,7 +183,8 @@ cargo fmt --check
 ## Known issues to resolve
 
 - `shuvarie-llm` implements model listing and streaming completion (`ProviderClient::stream` via `rig::streaming::StreamingChat`, M5).
-- `shuvarie-core` implements config load/save, `has_connected_providers()`, the `Command`/`Event` enums (including `CancelStream` and stream events), the in-memory `Session` struct, and the core task (`run`) that orchestrates provider/model listing and streaming chat (M5). The storage layer (Turso + Toasty) lands in M6.
+- `shuvarie-db` implements the Toasty models (`Session`, `Message`), the `Store` wrapper (open/apply embedded migrations, list/load/create/append/delete, most-recent query) and the `migrate` bin (toasty-cli) for managing `crates/db/toasty/` migration files (M6).
+- `shuvarie-core` implements config load/save, `has_connected_providers()`, the `Command`/`Event` enums (including `CancelStream` and stream events), the in-memory `Session` struct (with `id`/`title` tracking), the persistence hooks into `shuvarie-db` (session row created lazily on first message; user message persisted on send, assistant message + real usage on stream done; most-recent session loaded on startup), and the core task (`run`) that orchestrates provider/model listing and streaming chat (M5, M6).
 - Cost estimates in the sidebar Context panel use a built-in per-provider price table (`shuvarie-llm::pricing`); token counts are real `Usage` data. Provider-specific pricing/configurable rates land later.
 - LSP and Skills sidebar panels show "inactive" placeholders (M7+ will add real LSP/Skills systems).
 - Model search uses `nucleo` (fuzzy matcher) via `src/tui/search.rs`; the Ctrl+M command menu (`src/tui/command_menu.rs`) is a small extensible registry of `CommandEntry`s.

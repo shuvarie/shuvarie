@@ -13,6 +13,8 @@ use super::theme;
 pub enum CommandAction {
     OpenModelSelect,
     AddProvider,
+    OpenSessionPicker,
+    NewSession,
 }
 
 #[derive(Clone)]
@@ -34,6 +36,8 @@ pub enum CommandMenuMessage {
 pub enum CommandMenuEffect {
     OpenModelSelect,
     AddProvider,
+    OpenSessionPicker,
+    NewSession,
 }
 
 pub fn default_commands() -> Vec<CommandEntry> {
@@ -47,6 +51,16 @@ pub fn default_commands() -> Vec<CommandEntry> {
             name: "Add provider",
             description: "Add a new LLM provider",
             action: CommandAction::AddProvider,
+        },
+        CommandEntry {
+            name: "Switch session",
+            description: "Resume or delete past sessions",
+            action: CommandAction::OpenSessionPicker,
+        },
+        CommandEntry {
+            name: "New session",
+            description: "Start a fresh conversation",
+            action: CommandAction::NewSession,
         },
     ]
 }
@@ -162,6 +176,10 @@ impl CommandMenu {
                     return match action {
                         CommandAction::OpenModelSelect => Some(CommandMenuEffect::OpenModelSelect),
                         CommandAction::AddProvider => Some(CommandMenuEffect::AddProvider),
+                        CommandAction::OpenSessionPicker => {
+                            Some(CommandMenuEffect::OpenSessionPicker)
+                        }
+                        CommandAction::NewSession => Some(CommandMenuEffect::NewSession),
                     };
                 }
             }

@@ -31,6 +31,10 @@ pub enum SidebarMessage {
         usage: TokenUsage,
         cost: f64,
     },
+    SetUsage {
+        usage: TokenUsage,
+        cost: f64,
+    },
 }
 
 impl Sidebar {
@@ -68,6 +72,14 @@ impl Sidebar {
                     self.reasoning_tokens.saturating_add(usage.reasoning_tokens);
                 self.cached_tokens = self.cached_tokens.saturating_add(usage.cached_input_tokens);
                 self.cost += cost;
+            }
+            SidebarMessage::SetUsage { usage, cost } => {
+                self.tokens = usage.total_tokens;
+                self.input_tokens = usage.input_tokens;
+                self.output_tokens = usage.output_tokens;
+                self.reasoning_tokens = usage.reasoning_tokens;
+                self.cached_tokens = usage.cached_input_tokens;
+                self.cost = cost;
             }
         }
     }

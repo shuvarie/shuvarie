@@ -32,6 +32,11 @@ pub enum SessionMessage {
         cost: f64,
     },
     Reset,
+    Loaded {
+        id: u64,
+        title: String,
+        session: shuvarie_core::Session,
+    },
     UpdateConfig {
         provider: Option<String>,
         model: Option<String>,
@@ -50,6 +55,8 @@ pub struct SessionScreen {
     scroll_width: Cell<u16>,
     pub status: Option<String>,
     pub sidebar: Sidebar,
+    pub session_id: Option<u64>,
+    pub session_title: Option<String>,
 }
 
 impl SessionScreen {
@@ -65,6 +72,8 @@ impl SessionScreen {
             scroll_width: Cell::new(0),
             status: None,
             sidebar: Sidebar::new(),
+            session_id: None,
+            session_title: None,
         }
     }
 
@@ -162,6 +171,37 @@ impl SessionScreen {
                 self.streaming = false;
                 self.pending.clear();
                 self.status = None;
+                self.session_id = None;
+                self.session_title = None;
+                self.sidebar.update(SidebarMessage::SetUsage {
+                    usage: TokenUsage::default(),
+                    cost: 0.0,
+                });
+                *self.scroll_state.get_mut() = ScrollViewState::default();
+                self.mark_scroll_dirty();
+                None
+            }
+            SessionMessage::Loaded { id, title, session } => {
+                self.messages = session
+                    .messages
+                    .into_iter()
+                    .map(|m| (m.role, m.content))
+                    .collect();
+                self.streaming = false;
+                self.pending.clear();
+                self.status = None;
+                self.session_id = Some(id);
+                self.session_title = Some(title);
+                self.sidebar.update(SidebarMessage::SetUsage {
+                    usage: TokenUsage {
+                        input_tokens: session.input_tokens,
+                        output_tokens: session.output_tokens,
+                        total_tokens: session.tokens,
+                        cached_input_tokens: session.cached_tokens,
+                        reasoning_tokens: session.reasoning_tokens,
+                    },
+                    cost: session.cost,
+                });
                 *self.scroll_state.get_mut() = ScrollViewState::default();
                 self.mark_scroll_dirty();
                 None
@@ -188,11 +228,14 @@ impl SessionScreen {
 
         self.sidebar.view(frame, sidebar_area);
 
-        let title = format!(
-            "Shuvarie · {}:{}",
-            self.sidebar.provider.as_deref().unwrap_or("?"),
-            self.sidebar.model.as_deref().unwrap_or("?")
-        );
+        let title = match &self.session_title {
+            Some(t) if !t.is_empty() => format!("Shuvarie · {t}"),
+            _ => format!(
+                "Shuvarie · {}:{}",
+                self.sidebar.provider.as_deref().unwrap_or("?"),
+                self.sidebar.model.as_deref().unwrap_or("?")
+            ),
+        };
         let [title_area, history_area, input_area, status_area] =
             Layout::vertical([Length(1), Min(0), Length(3), Length(1)]).areas(content_area);
 

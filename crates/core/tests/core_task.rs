@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use shuvarie_core::{Command, Config, Event, ProviderConfig, run};
+use shuvarie_db::Store;
 use shuvarie_llm::Provider;
 
 fn empty_config() -> Config {
@@ -17,7 +18,12 @@ async fn ping_pong() {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
-    let handle = tokio::spawn(run(empty_config(), cmd_rx, event_tx));
+    let handle = tokio::spawn(run(
+        empty_config(),
+        Store::open_in_memory().await.unwrap(),
+        cmd_rx,
+        event_tx,
+    ));
     cmd_tx.send(Command::Ping).await.unwrap();
     let ev = event_rx.recv().await.expect("event");
     assert!(matches!(ev, Event::Pong));
@@ -33,7 +39,12 @@ async fn add_provider_emits_saved() {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
     let config = empty_config();
-    let handle = tokio::spawn(run(config, cmd_rx, event_tx));
+    let handle = tokio::spawn(run(
+        config,
+        Store::open_in_memory().await.unwrap(),
+        cmd_rx,
+        event_tx,
+    ));
     cmd_tx
         .send(Command::AddProvider {
             name: "shuvarie-test-add".into(),
@@ -70,7 +81,12 @@ async fn remove_provider_clears_active() {
     );
     config.active_provider = Some("p1".into());
 
-    let handle = tokio::spawn(run(config, cmd_rx, event_tx));
+    let handle = tokio::spawn(run(
+        config,
+        Store::open_in_memory().await.unwrap(),
+        cmd_rx,
+        event_tx,
+    ));
     cmd_tx
         .send(Command::RemoveProvider { name: "p1".into() })
         .await
@@ -93,7 +109,12 @@ async fn send_message_without_active_provider_emits_error() {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
-    let handle = tokio::spawn(run(empty_config(), cmd_rx, event_tx));
+    let handle = tokio::spawn(run(
+        empty_config(),
+        Store::open_in_memory().await.unwrap(),
+        cmd_rx,
+        event_tx,
+    ));
     cmd_tx
         .send(Command::SendMessage {
             content: "hello".into(),
@@ -125,7 +146,12 @@ async fn cancel_with_no_active_stream_keeps_task_alive() {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
-    let handle = tokio::spawn(run(empty_config(), cmd_rx, event_tx));
+    let handle = tokio::spawn(run(
+        empty_config(),
+        Store::open_in_memory().await.unwrap(),
+        cmd_rx,
+        event_tx,
+    ));
     cmd_tx.send(Command::CancelStream).await.unwrap();
     cmd_tx.send(Command::Ping).await.unwrap();
 
@@ -151,7 +177,12 @@ async fn double_send_while_streaming_is_rejected() {
     config.active_provider = Some("ollama".into());
     config.active_model = Some("test-model".into());
 
-    let handle = tokio::spawn(run(config, cmd_rx, event_tx));
+    let handle = tokio::spawn(run(
+        config,
+        Store::open_in_memory().await.unwrap(),
+        cmd_rx,
+        event_tx,
+    ));
     cmd_tx
         .send(Command::SendMessage {
             content: "first".into(),
@@ -178,6 +209,61 @@ async fn double_send_while_streaming_is_rejected() {
     }
     assert!(saw_rejection, "expected second send to be rejected");
     cmd_tx.send(Command::CancelStream).await.unwrap();
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn send_message_persists_session_and_messages() {
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+
+    let mut config = empty_config();
+    config.providers.insert(
+        "ollama".into(),
+        ProviderConfig::new(Provider::Ollama, None, None),
+    );
+    config.active_provider = Some("ollama".into());
+    config.active_model = Some("test-model".into());
+
+    let store = Store::open_in_memory().await.unwrap();
+    let store_clone = store.clone();
+    let handle = tokio::spawn(run(config, store_clone, cmd_rx, event_tx));
+
+    cmd_tx
+        .send(Command::SendMessage {
+            content: "hello world".into(),
+        })
+        .await
+        .unwrap();
+    // Wait for the stream error (no real ollama running) after the session row is created.
+    let mut saw_error = false;
+    for _ in 0..8 {
+        match event_rx.recv().await {
+            Some(Event::StreamError { error }) if error.contains("failed to") => {
+                saw_error = true;
+                break;
+            }
+            Some(Event::SessionStarted) => {}
+            Some(Event::StreamError { .. }) => {
+                saw_error = true;
+                break;
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    assert!(saw_error, "expected a stream error for missing ollama");
+
+    let mut store = store;
+    let sessions = store.list_sessions().await.unwrap();
+    assert_eq!(sessions.len(), 1, "session row created on first message");
+    assert_eq!(sessions[0].title, "hello world");
+    assert_eq!(sessions[0].message_count, 1, "user message persisted");
+    let loaded = store.load_session(sessions[0].id).await.unwrap();
+    assert_eq!(loaded.messages.len(), 1);
+    assert_eq!(loaded.messages[0].content, "hello world");
+
     drop(cmd_tx);
     let _ = handle.await;
 }

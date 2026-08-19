@@ -21,8 +21,16 @@ pub enum Command {
     },
     SaveConfig,
     StartSession,
+    NewSession,
     SendMessage {
         content: String,
     },
     CancelStream,
+    ListSessions,
+    LoadSession {
+        id: u64,
+    },
+    DeleteSession {
+        id: u64,
+    },
 }

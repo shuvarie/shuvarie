@@ -10,6 +10,7 @@ repository.workspace = true
 dirs = "6"
 futures-util = { version = "0.3", default-features = false, features = ["std", "alloc"] }
 serde = { version = "1", features = ["derive"] }
+shuvarie-db = { path = "../db" }
 shuvarie-llm = { path = "../llm" }
 thiserror = "2"
 tokio = { version = "1", features = ["sync", "rt", "macros"] }

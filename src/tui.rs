@@ -24,6 +24,7 @@ mod logo;
 mod model_picker;
 mod search;
 mod session;
+mod session_picker;
 mod sidebar;
 mod theme;
 mod utils;

@@ -13,6 +13,7 @@ color-eyre = "0.6.5"
 futures-util = { version = "0.3", default-features = false, features = ["std", "alloc"] }
 nucleo = "0.5"
 shuvarie-core = { path = "crates/core" }
+shuvarie-db = { path = "crates/db" }
 shuvarie-llm = { path = "crates/llm" }
 termina = { version = "0.3.3", features = ["event-stream"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }

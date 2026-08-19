@@ -1,3 +1,4 @@
+use shuvarie_db::SessionSummary;
 use shuvarie_llm::{ModelInfo, TokenUsage};
 
 #[derive(Debug, Clone)]
@@ -16,6 +17,10 @@ pub enum Event {
         error: String,
     },
     SessionStarted,
+    SessionCreated {
+        id: u64,
+        title: String,
+    },
     TokenReceived {
         content: String,
     },
@@ -30,5 +35,19 @@ pub enum Event {
     UsageUpdate {
         usage: TokenUsage,
         cost: f64,
+    },
+    SessionsLoaded {
+        sessions: Vec<SessionSummary>,
+    },
+    SessionLoaded {
+        id: u64,
+        title: String,
+        session: crate::Session,
+    },
+    SessionDeleted {
+        id: u64,
+    },
+    SessionError {
+        error: String,
     },
 }
