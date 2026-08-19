@@ -27,6 +27,10 @@ pub enum SessionMessage {
     },
     StreamCancelled,
     CancelRequested,
+    ShowError {
+        error: String,
+    },
+    ClearError,
     UsageUpdate {
         usage: TokenUsage,
         cost: f64,
@@ -57,6 +61,7 @@ pub struct SessionScreen {
     pub sidebar: Sidebar,
     pub session_id: Option<u64>,
     pub session_title: Option<String>,
+    pub error: Option<String>,
 }
 
 impl SessionScreen {
@@ -74,6 +79,7 @@ impl SessionScreen {
             sidebar: Sidebar::new(),
             session_id: None,
             session_title: None,
+            error: None,
         }
     }
 
@@ -161,6 +167,14 @@ impl SessionScreen {
                 }
                 None
             }
+            SessionMessage::ShowError { error } => {
+                self.error = Some(error);
+                None
+            }
+            SessionMessage::ClearError => {
+                self.error = None;
+                None
+            }
             SessionMessage::UsageUpdate { usage, cost } => {
                 self.sidebar
                     .update(SidebarMessage::UpdateUsage { usage, cost });
@@ -236,8 +250,14 @@ impl SessionScreen {
                 self.sidebar.model.as_deref().unwrap_or("?")
             ),
         };
-        let [title_area, history_area, input_area, status_area] =
-            Layout::vertical([Length(1), Min(0), Length(3), Length(1)]).areas(content_area);
+        let [
+            title_area,
+            history_area,
+            input_area,
+            status_area,
+            footer_area,
+        ] = Layout::vertical([Length(1), Min(0), Length(3), Length(1), Length(1)])
+            .areas(content_area);
 
         frame.render_widget(
             Paragraph::new(theme::title_header(&title))
@@ -279,6 +299,21 @@ impl SessionScreen {
                 Paragraph::new(status.as_str()).fg(theme::TEXT_MUTED),
                 status_area,
             );
+        }
+
+        if let Some(error) = &self.error {
+            frame.render_widget(Paragraph::new(error.as_str()).fg(theme::ERROR), footer_area);
+        } else {
+            let footer = if self.streaming {
+                theme::help_line(&[("Ctrl+C", "stop"), ("Ctrl+M", "commands")])
+            } else {
+                theme::help_line(&[
+                    ("Enter", "send"),
+                    ("Ctrl+M", "commands"),
+                    ("Ctrl+C", "quit"),
+                ])
+            };
+            frame.render_widget(Paragraph::new(footer).fg(theme::TEXT_MUTED), footer_area);
         }
     }
 

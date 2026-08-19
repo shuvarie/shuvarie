@@ -44,7 +44,7 @@ There should be a `new` and a `view` method, and a `update` method when data upd
 |---|---|
 | `tui.rs` | Event loop: `EventStream` + `tokio::select!`, terminal init/deinit, calls `App::view` |
 | `event.rs` | `Event` enum — `Terminal(termina::Event)` / `Core(shuvarie_core::Event)` — the single input type for `App::map_event` |
-| `app.rs` | Parent `App`: `Route` (`Home`/`Session`), `Overlay` enum, `AppMessage` (grouped), `map_event` dispatch, `update`, `view` (content routing + footer + overlays) |
+| `app.rs` | Parent `App`: `Route` (`Home`/`Session`), `Overlay` enum, `AppMessage` (grouped), `map_event` dispatch, `update`, `view` (content routing + overlays) |
 | `context.rs` | `UpdateCtx` — shared `Config` + `Command` sender passed to submodel `update` calls |
 | `home.rs` | `HomeScreen` submodel + `HomeMessage` + `HomeEffect` (ASCII art + input) |
 | `session.rs` | `SessionScreen` submodel + `SessionMessage` + `SessionEffect` (sidebar + chat history + input) |
@@ -140,11 +140,9 @@ The visual style is defined in `src/tui/theme.rs` and used by all submodel `view
 
 **Scrollable text panes** — the session chat history is the one exception to the stateless pattern: it renders a `Paragraph` (with `Wrap`) into a cached `tui_scrollview::ScrollView` buffer and keeps a `ScrollViewState` on the model. Because TEA `view` takes `&self` but `render_stateful_widget` needs `&mut state`, the state lives in a `RefCell<ScrollViewState>` (`scroll_state` on `SessionScreen`); the `ScrollView` itself is also cached (in a `RefCell`), rebuilt only when the content changes (`scroll_dirty` flag set in `update` via `mark_scroll_dirty()`) or the pane width changes — never on every frame, so scrolling stays responsive while streaming. `update` drives scrolling with `state.scroll_up()`/`scroll_down()`, and auto-follows streaming output with `if state.is_at_bottom() { state.scroll_to_bottom() }` on token/stream-done/submit (so the view only pins to the bottom while the user hasn't scrolled up). The scroll-view buffer height is computed from `Paragraph::line_count(width)` (feature `unstable-rendered-line-info`), with the rightmost column reserved for the scrollbar. The scrollbar is drawn manually (buffer cells: `█` thumb in `ACCENT` on a `TEXT_MUTED` track) — do not use `ratatui::widgets::Scrollbar`, whose position math cannot bottom-align the thumb (offset clamps at `content - viewport`, so the thumb stops short of the track end at the bottom of the scroll).
 
-**Layout** — `App::view` renders a 2-row vertical layout (no global title bar; branding lives in the sidebar and Home logo):
-1. **Content** (`Min(0)`) — inset by 1 cell on all sides. Delegated to the active submodel's `view`:
-   - `HomeScreen::view` — centered ASCII art + centered input area (no sidebar).
-   - `SessionScreen::view` — left sidebar (30 cols, `SURFACE` bg) + 1-cell `BG` gutter + content pane with centered title bar atop transparent chat history + input + status row.
-2. **Status footer** (1 row) — `SURFACE` bg: left = contextual help via `theme::help_line(...)` (keybindings as styled `Span`s: keys in `ACCENT`, labels in `TEXT_MUTED`); right = error/loading state in `ERROR`/`WARNING`.
+**Layout** — `App::view` renders the active submodel's `view` over the full area, then any overlays (no global footer; no global title bar; branding lives in the sidebar and Home logo). Each screen owns its footer row:
+- `HomeScreen::view` — centered ASCII art + centered input area, with a 1-row help footer below the input (no sidebar).
+- `SessionScreen::view` — left sidebar (30 cols, `SURFACE` bg) + 1-cell `BG` gutter + content pane with centered title bar atop transparent chat history + input + status row, and a 1-row footer below the input. The footer shows contextual help via `theme::help_line(...)` (keybindings as styled `Span`s: keys in `ACCENT`, labels in `TEXT_MUTED`); while streaming it swaps to stop/commands hints. Session-scoped errors (`SessionMessage::ShowError`, e.g. model listing or session errors) render in the same footer row in `ERROR` instead of the help line — there is no separate global error row.
 
 **Pane gutter** — two-pane layouts use `Layout::horizontal(...).spacing(1)` so the `BG` shows through as a 1-cell gap between panes (visual separation without borders).
 

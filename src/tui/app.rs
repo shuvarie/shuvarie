@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 
-use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
-use ratatui::widgets::Paragraph;
 use shuvarie_core::{Config, Event as CoreEvent, ModelInfo};
 use termina::Event as TermEvent;
 use termina::event::{KeyCode, KeyEventKind};
@@ -11,9 +9,7 @@ use tokio::sync::mpsc::Sender;
 use crate::tui::event::Event;
 use crate::tui::utils::ctrl;
 
-use super::add_provider::{
-    AddProviderForm, AddProviderMessage, AddProviderOutcome, AddProviderStage,
-};
+use super::add_provider::{AddProviderForm, AddProviderMessage, AddProviderOutcome};
 use super::command_menu::{CommandMenu, CommandMenuEffect, CommandMenuMessage};
 use super::confirm_quit::{ConfirmQuit, ConfirmQuitEffect, ConfirmQuitMessage};
 use super::context::UpdateCtx;
@@ -22,7 +18,6 @@ use super::model_picker::{ModelPicker, ModelPickerEffect, ModelPickerMessage};
 use super::session::{SessionEffect, SessionMessage, SessionScreen};
 use super::session_picker::{SessionPicker, SessionPickerEffect, SessionPickerMessage};
 use super::sidebar::SidebarMessage;
-use super::theme;
 use super::welcome::{Welcome, WelcomeEffect, WelcomeMessage};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -109,7 +104,6 @@ pub struct App {
     pub session_picker: SessionPicker,
     pub models: HashMap<String, Vec<ModelInfo>>,
     pending_model_pick: Option<String>,
-    footer_error: Option<String>,
 }
 
 impl App {
@@ -147,7 +141,6 @@ impl App {
             session_picker: SessionPicker::new(),
             models: HashMap::new(),
             pending_model_pick: None,
-            footer_error: None,
         }
     }
 
@@ -282,7 +275,7 @@ impl App {
     pub fn update(&mut self, msg: AppMessage) -> Option<AppEffect> {
         match msg {
             AppMessage::OpenCommandMenu => {
-                self.footer_error = None;
+                self.session.update(SessionMessage::ClearError);
                 self.command_menu.open();
                 self.overlay = Overlay::CommandMenu;
             }
@@ -489,7 +482,9 @@ impl App {
                 if self.pending_model_pick.as_deref() == Some(provider_name.as_str()) {
                     self.pending_model_pick = None;
                     if models.is_empty() {
-                        self.footer_error = Some(format!("{provider_name}: no models found"));
+                        self.session.update(SessionMessage::ShowError {
+                            error: format!("{provider_name}: no models found"),
+                        });
                     } else {
                         self.model_picker.open(&models);
                         self.overlay = Overlay::ModelPicker;
@@ -528,7 +523,9 @@ impl App {
             } => {
                 if self.pending_model_pick.as_deref() == Some(provider_name.as_str()) {
                     self.pending_model_pick = None;
-                    self.footer_error = Some(format!("{provider_name}: {error}"));
+                    self.session.update(SessionMessage::ShowError {
+                        error: format!("{provider_name}: {error}"),
+                    });
                 } else if let Some(form) = &mut self.add_provider_form {
                     form.error = Some(format!("{provider_name}: {error}"));
                 }
@@ -554,14 +551,14 @@ impl App {
                 self.refresh_sessions();
             }
             AppMessage::SessionError { error } => {
-                self.footer_error = Some(error);
+                self.session.update(SessionMessage::ShowError { error });
             }
         }
         None
     }
 
     fn start_session(&mut self, content: String) {
-        self.footer_error = None;
+        self.session.update(SessionMessage::ClearError);
         self.route = Route::Session;
         self.session.messages.clear();
         self.session
@@ -615,17 +612,10 @@ impl App {
     }
 
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
-        let [content_area, footer_area] = Layout::vertical([Min(0), Length(1)])
-            .spacing(1)
-            .areas(area);
-
         match self.route {
-            Route::Home => self.home.view(frame, content_area),
-            Route::Session => self.session.view(frame, content_area),
+            Route::Home => self.home.view(frame, area),
+            Route::Session => self.session.view(frame, area),
         }
-
-        let footer = self.build_footer();
-        frame.render_widget(Paragraph::new(footer), footer_area);
 
         self.welcome.view(frame, area);
         if let Some(form) = &self.add_provider_form {
@@ -635,89 +625,6 @@ impl App {
         self.session_picker.view(frame, area);
         self.command_menu.view(frame, area);
         self.confirm_quit.view(frame, area);
-    }
-
-    fn build_footer(&self) -> Line<'static> {
-        if self.confirm_quit.open {
-            return theme::help_line(&[
-                ("Enter", "confirm"),
-                ("Ctrl+C", "confirm"),
-                ("Esc", "cancel"),
-            ]);
-        }
-        if self.command_menu.open {
-            return theme::help_line(&[("Enter", "run"), ("Esc", "close"), ("↑↓", "navigate")]);
-        }
-        if self.overlay == Overlay::AddProvider {
-            let stage = self
-                .add_provider_form
-                .as_ref()
-                .map(|f| f.stage)
-                .unwrap_or(AddProviderStage::SelectKind);
-            return match stage {
-                AddProviderStage::SelectKind => theme::help_line(&[
-                    ("↑↓", "navigate"),
-                    ("Enter", "continue"),
-                    ("Esc", "cancel"),
-                ]),
-                AddProviderStage::Details => {
-                    theme::help_line(&[("Tab", "next field"), ("Enter", "submit"), ("Esc", "back")])
-                }
-            };
-        }
-        if self.overlay == Overlay::ModelPicker {
-            return theme::help_line(&[
-                ("Type", "to filter"),
-                ("Esc", "close"),
-                ("Enter", "select"),
-            ]);
-        }
-        if self.overlay == Overlay::SessionPicker {
-            let hint = if self.session_picker.confirm_delete {
-                theme::help_line(&[("Ctrl+D", "confirm delete"), ("Esc", "cancel")])
-            } else if self.session_picker.sessions.is_empty() {
-                theme::help_line(&[("N", "new session"), ("Esc", "close")])
-            } else {
-                theme::help_line(&[
-                    ("Enter", "resume"),
-                    ("Ctrl+D", "delete"),
-                    ("N", "new"),
-                    ("Esc", "close"),
-                ])
-            };
-            return hint;
-        }
-        if self.overlay == Overlay::Welcome {
-            return theme::help_line(&[("Enter", "add provider"), ("Ctrl+C", "quit")]);
-        }
-
-        if let Some(error) = &self.footer_error {
-            return Line::from(vec![Span::raw(error.clone()).fg(theme::ERROR)]);
-        }
-
-        if self.route == Route::Session && self.session.streaming {
-            return theme::help_line(&[("Ctrl+C", "stop"), ("Ctrl+M", "commands")]);
-        }
-
-        if let Some(status) = &self.session.status {
-            return Line::from(vec![
-                Span::raw(" ").fg(theme::TEXT_MUTED),
-                Span::raw(status.clone()).fg(theme::TEXT_MUTED),
-            ]);
-        }
-
-        match self.route {
-            Route::Home => theme::help_line(&[
-                ("Enter", "send"),
-                ("Ctrl+M", "commands"),
-                ("Ctrl+C", "quit"),
-            ]),
-            Route::Session => theme::help_line(&[
-                ("Enter", "send"),
-                ("Ctrl+M", "commands"),
-                ("Ctrl+C", "quit"),
-            ]),
-        }
     }
 }
 

@@ -1,8 +1,10 @@
 use ratatui::layout::{Constraint::*, Layout, Rect};
 use ratatui::prelude::*;
+use ratatui::widgets::Paragraph;
 use termina::event::KeyEvent;
 
 use super::logo::Logo;
+use super::theme;
 use super::widgets::{TextArea, TextAreaEffect, TextAreaMessage};
 
 pub enum HomeMessage {
@@ -42,11 +44,19 @@ impl HomeScreen {
     }
 
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
-        let [top_spacer, logo_area, gap, input_area, bottom_spacer] = Layout::vertical([
+        let [
+            top_spacer,
+            logo_area,
+            gap,
+            input_area,
+            footer_area,
+            bottom_spacer,
+        ] = Layout::vertical([
             Min(0),
             Length(self.logo.height() as u16),
             Length(1),
             Length(3),
+            Length(1),
             Min(0),
         ])
         .areas(area);
@@ -56,6 +66,16 @@ impl HomeScreen {
         let _ = gap;
 
         self.input.view(frame, input_area);
+
+        frame.render_widget(
+            Paragraph::new(theme::help_line(&[
+                ("Enter", "send"),
+                ("Ctrl+M", "commands"),
+                ("Ctrl+C", "quit"),
+            ]))
+            .fg(theme::TEXT_MUTED),
+            footer_area,
+        );
 
         let _ = bottom_spacer;
     }

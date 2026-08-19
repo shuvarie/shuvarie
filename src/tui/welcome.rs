@@ -58,8 +58,7 @@ impl Welcome {
             Line::from(""),
             Line::from("Connect an LLM provider to begin.").style(Style::new().fg(theme::TEXT)),
             Line::from(""),
-            Line::from("Press Enter to add a provider, or Ctrl+C to quit.")
-                .style(Style::new().fg(theme::TEXT_MUTED)),
+            Line::from(""),
         ];
 
         let content_width = lines
@@ -69,9 +68,18 @@ impl Welcome {
             .unwrap_or(0)
             .min(inner.width);
         let x = inner.x + (inner.width.saturating_sub(content_width)) / 2;
-        let text_area = Rect::new(x, inner.y, content_width, inner.height);
+        let text_area = Rect::new(x, inner.y, content_width, inner.height.saturating_sub(1));
 
         frame.render_widget(Paragraph::new(lines).alignment(Alignment::Left), text_area);
+
+        frame.render_widget(
+            Paragraph::new(theme::help_line(&[
+                ("Enter", "add provider"),
+                ("Ctrl+C", "quit"),
+            ]))
+            .fg(theme::TEXT_MUTED),
+            Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+        );
     }
 }
 

@@ -77,9 +77,7 @@ impl ConfirmQuit {
                 .style(Style::new().fg(theme::TEXT))
                 .alignment(Alignment::Center),
             Line::from(""),
-            Line::from("Enter to confirm · Esc to cancel")
-                .style(Style::new().fg(theme::TEXT_MUTED))
-                .alignment(Alignment::Center),
+            Line::from(""),
         ];
 
         let content_width = lines
@@ -89,9 +87,20 @@ impl ConfirmQuit {
             .unwrap_or(0)
             .min(inner.width);
         let x = inner.x + (inner.width.saturating_sub(content_width)) / 2;
-        let text_area = Rect::new(x, inner.y, content_width, inner.height);
+        let text_area = Rect::new(x, inner.y, content_width, inner.height.saturating_sub(1));
 
         frame.render_widget(Paragraph::new(lines).alignment(Alignment::Left), text_area);
+
+        frame.render_widget(
+            Paragraph::new(theme::help_line(&[
+                ("Enter", "confirm"),
+                ("Ctrl+C", "confirm"),
+                ("Esc", "cancel"),
+            ]))
+            .fg(theme::TEXT_MUTED)
+            .alignment(Alignment::Center),
+            Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+        );
     }
 }
 
