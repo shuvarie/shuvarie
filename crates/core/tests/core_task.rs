@@ -21,6 +21,7 @@ async fn ping_pong() {
     let handle = tokio::spawn(run(
         empty_config(),
         Store::open_in_memory().await.unwrap(),
+        false,
         cmd_rx,
         event_tx,
     ));
@@ -42,6 +43,7 @@ async fn add_provider_emits_saved() {
     let handle = tokio::spawn(run(
         config,
         Store::open_in_memory().await.unwrap(),
+        false,
         cmd_rx,
         event_tx,
     ));
@@ -84,6 +86,7 @@ async fn remove_provider_clears_active() {
     let handle = tokio::spawn(run(
         config,
         Store::open_in_memory().await.unwrap(),
+        false,
         cmd_rx,
         event_tx,
     ));
@@ -112,6 +115,7 @@ async fn send_message_without_active_provider_emits_error() {
     let handle = tokio::spawn(run(
         empty_config(),
         Store::open_in_memory().await.unwrap(),
+        false,
         cmd_rx,
         event_tx,
     ));
@@ -149,6 +153,7 @@ async fn cancel_with_no_active_stream_keeps_task_alive() {
     let handle = tokio::spawn(run(
         empty_config(),
         Store::open_in_memory().await.unwrap(),
+        false,
         cmd_rx,
         event_tx,
     ));
@@ -180,6 +185,7 @@ async fn double_send_while_streaming_is_rejected() {
     let handle = tokio::spawn(run(
         config,
         Store::open_in_memory().await.unwrap(),
+        false,
         cmd_rx,
         event_tx,
     ));
@@ -228,7 +234,7 @@ async fn send_message_persists_session_and_messages() {
 
     let store = Store::open_in_memory().await.unwrap();
     let store_clone = store.clone();
-    let handle = tokio::spawn(run(config, store_clone, cmd_rx, event_tx));
+    let handle = tokio::spawn(run(config, store_clone, false, cmd_rx, event_tx));
 
     cmd_tx
         .send(Command::SendMessage {
@@ -263,6 +269,62 @@ async fn send_message_persists_session_and_messages() {
     let loaded = store.load_session(sessions[0].id).await.unwrap();
     assert_eq!(loaded.messages.len(), 1);
     assert_eq!(loaded.messages[0].content, "hello world");
+
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn load_current_emits_session_loaded_on_startup() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    store
+        .create_session("existing", Some("ollama"), Some("model"))
+        .await
+        .unwrap();
+
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+    let handle = tokio::spawn(run(empty_config(), store.clone(), true, cmd_rx, event_tx));
+
+    cmd_tx.send(Command::Ping).await.unwrap();
+
+    let mut saw_loaded = false;
+    for _ in 0..3 {
+        match event_rx.recv().await {
+            Some(Event::SessionLoaded { title, .. }) => {
+                assert_eq!(title, "existing");
+                saw_loaded = true;
+            }
+            Some(Event::Pong) => break,
+            Some(_) => {}
+            None => break,
+        }
+    }
+    assert!(saw_loaded, "expected SessionLoaded for --current startup");
+
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn no_load_current_skips_session_loaded_on_startup() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    store
+        .create_session("existing", Some("ollama"), Some("model"))
+        .await
+        .unwrap();
+
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+    let handle = tokio::spawn(run(empty_config(), store.clone(), false, cmd_rx, event_tx));
+
+    cmd_tx.send(Command::Ping).await.unwrap();
+
+    let ev = event_rx.recv().await.expect("event");
+    assert!(
+        matches!(ev, Event::Pong),
+        "expected Pong, got {ev:?}; no SessionLoaded without --current"
+    );
 
     drop(cmd_tx);
     let _ = handle.await;

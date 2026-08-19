@@ -6,7 +6,7 @@ mod tui;
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
-    let _args = cli::Cli::parse();
+    let args = cli::Cli::parse();
 
     let store = shuvarie_db::Store::open(&shuvarie_db::Store::default_path()).await?;
 
@@ -15,6 +15,7 @@ async fn main() -> color_eyre::Result<()> {
     let core = tokio::spawn(shuvarie_core::run(
         shuvarie_core::Config::load()?,
         store,
+        args.current,
         cmd_rx,
         event_tx,
     ));

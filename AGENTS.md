@@ -158,7 +158,7 @@ When adding a new screen or widget, use the `theme` helpers — do not inline `B
 
 ### Launch flow
 
-On startup `shuvarie-core` loads config, opens the working-directory session store (`.shuvarie/data.db`), and loads the most recent session into the chat view. If no providers are configured, the TUI opens to the **Home** route with a **Welcome** overlay prompting the user to add a provider; otherwise it opens to the **Home** route directly (the loaded session is one `Enter` away, or via `Ctrl+M` → "Switch session"). Provider/model management is overlay-based (AddProvider wizard, ModelPicker) and reachable at any time via the `Ctrl+M` command menu. When the user submits a message from Home, the app switches to the **Session** route.
+On startup `shuvarie-core` loads config, opens the working-directory session store (`.shuvarie/data.db`), and — when launched with `-c`/`--current` (the CLI flag threaded into `run` as `load_current`) — loads the most recent session into the chat view. By default the TUI opens to the **Home** route; `--current` resumes the last session (the existing `SessionLoaded` → `Route::Session` path). If no providers are configured, the TUI opens to the **Home** route with a **Welcome** overlay prompting the user to add a provider; otherwise it opens to the **Home** route directly (the loaded session is one `Enter` away, or via `Ctrl+M` → "Switch session"). Provider/model management is overlay-based (AddProvider wizard, ModelPicker) and reachable at any time via the `Ctrl+M` command menu. When the user submits a message from Home, the app switches to the **Session** route.
 
 ## Conventions
 

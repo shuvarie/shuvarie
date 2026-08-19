@@ -16,6 +16,7 @@ use crate::session::Session;
 pub async fn run(
     mut config: Config,
     mut store: Store,
+    load_current: bool,
     mut cmd_rx: Receiver<Command>,
     event_tx: Sender<Event>,
 ) {
@@ -23,7 +24,9 @@ pub async fn run(
     let mut session: Option<Arc<Mutex<Session>>> = None;
     let mut active_stream: Option<AbortHandle> = None;
 
-    load_most_recent_session(&mut store, &mut session, &event_tx).await;
+    if load_current {
+        load_most_recent_session(&mut store, &mut session, &event_tx).await;
+    }
 
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
