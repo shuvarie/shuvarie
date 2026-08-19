@@ -20,6 +20,7 @@ Each milestone is intended to be independently mergeable and to leave the binary
 - Input areas feature a virtual cursor (reversed block at cursor position), Emacs keybindings (Ctrl+B/F/A/E/D/H/K, Alt+B/F, Ctrl+N/P), and content-width-sized centered text in overlays.
 - Quit is via `Ctrl+C` → confirm dialog (Enter or Ctrl+C again to confirm, Esc to cancel); `q` no longer quits.
 - Agent tool calling (M7.1): `shuvarie-llm` exposes a portable `Tool` trait; `shuvarie-core` implements six tools (read/write/edit files, run commands, list dirs, grep) with a workspace-root escape guard; the streaming agent loop runs up to 20 turns, and tool calls/results render inline in the chat pane (`›` running, `✓` ok, `✗` error). Tool-call-only replies surface a "(tool output only)" placeholder instead of an empty message.
+- Markdown + code highlighting: new `shuvarie-highlight` crate renders user/system/assistant message bodies through pulldown-cmark (bold/italic/strikethrough, inline code, headings, lists, quotes, tables, links) with fenced code blocks highlighted via syntect (pure-rust regex-fancy, programmatic heraldic theme) and a custom ` ```diff ` renderer (`+`/`-`/`@@` tinctures); code-block lines get a subtle surface background. Re-parses the streaming pending text each token.
 
 ## M0 — Foundations
 

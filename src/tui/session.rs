@@ -400,9 +400,7 @@ impl SessionScreen {
             match role {
                 Role::User => {
                     lines.push(Line::from(Span::raw("You").fg(theme::ACCENT).bold()));
-                    for text_line in content.lines() {
-                        lines.push(Line::from(Span::raw(text_line.to_string()).fg(theme::TEXT)));
-                    }
+                    lines.append(&mut shuvarie_highlight::render(content));
                     lines.push(Line::from(""));
                 }
                 Role::Assistant => {
@@ -425,9 +423,7 @@ impl SessionScreen {
                 }
                 Role::System => {
                     lines.push(Line::from(Span::raw("System").fg(theme::TEXT_MUTED).bold()));
-                    for text in content.lines() {
-                        lines.push(Line::from(Span::raw(text.to_string()).fg(theme::TEXT)));
-                    }
+                    lines.append(&mut shuvarie_highlight::render(content));
                     lines.push(Line::from(""));
                 }
             }
@@ -444,9 +440,7 @@ impl SessionScreen {
         let mut tool_idx = 0;
         let mut text = String::new();
         let flush = |lines: &mut Vec<Line>, text: &mut String| {
-            for t in text.lines() {
-                lines.push(Line::from(Span::raw(t.to_string()).fg(theme::TEXT)));
-            }
+            lines.append(&mut shuvarie_highlight::render(text));
             text.clear();
         };
         for (i, ch) in content.char_indices() {
