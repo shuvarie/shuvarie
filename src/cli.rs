@@ -1,9 +1,9 @@
 use clap::{
-    builder::{
-        styling::{AnsiColor, Style},
-        Styles,
-    },
     Parser,
+    builder::{
+        Styles,
+        styling::{AnsiColor, Style},
+    },
 };
 
 const STYLES: Styles = Styles::styled()

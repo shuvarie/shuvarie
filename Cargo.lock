@@ -7803,6 +7803,7 @@ dependencies = [
  "futures-util",
  "nucleo",
  "ratatui",
+ "serde_json",
  "shuvarie-core",
  "shuvarie-db",
  "shuvarie-llm",
@@ -7817,9 +7818,12 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "futures-util",
+ "regex",
  "serde",
+ "serde_json",
  "shuvarie-db",
  "shuvarie-llm",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "toml",
@@ -7848,6 +7852,7 @@ dependencies = [
  "futures-util",
  "rig",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
 ]

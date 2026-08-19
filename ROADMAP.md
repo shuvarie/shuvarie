@@ -19,6 +19,7 @@ Each milestone is intended to be independently mergeable and to leave the binary
 - Sessions and message history persist to `.shuvarie/data.db` (Turso embedded SQLite via Toasty, in the working directory). On launch the most recent session loads into the chat view; the `Ctrl+M` command menu offers "Switch session" (list/resume/`Ctrl+D`-to-delete with a second `Ctrl+D` to confirm) and "New session". Schema changes are managed with toasty migrations (see `crates/db/toasty/` and the `migrate` bin).
 - Input areas feature a virtual cursor (reversed block at cursor position), Emacs keybindings (Ctrl+B/F/A/E/D/H/K, Alt+B/F, Ctrl+N/P), and content-width-sized centered text in overlays.
 - Quit is via `Ctrl+C` → confirm dialog (Enter or Ctrl+C again to confirm, Esc to cancel); `q` no longer quits.
+- Agent tool calling (M7.1): `shuvarie-llm` exposes a portable `Tool` trait; `shuvarie-core` implements six tools (read/write/edit files, run commands, list dirs, grep) with a workspace-root escape guard; the streaming agent loop runs up to 20 turns, and tool calls/results render inline in the chat pane (`›` running, `✓` ok, `✗` error). Tool-call-only replies surface a "(tool output only)" placeholder instead of an empty message.
 
 ## M0 — Foundations
 
@@ -98,19 +99,19 @@ Persist chat sessions and message history so conversations survive restarts.
 - [x] Session switcher UI (list of sessions, new session, delete session) — `Ctrl+M` → "Switch session", plus a "New session" command.
 - [x] Keep provider config in the TOML file — do not migrate secrets into the database.
 
-## M7+ — Agent features (future, out of first-pass scope)
+## M7+ — Agent features
 
-These are deliberately left undetailed; expand them into their own milestones when work begins.
+Milestone M7.1 is shipped; the rest remain future work.
 
-- Tool calling (file read/write, shell execution, web fetch) via `rig` tool support.
-- Multi-turn agent loops with tool-result feedback and a stop condition.
-- Context files / project-aware prompts.
+- [x] M7.1 — Tool calling (file read/write/edit, shell execution, list, grep) via a portable `Tool` trait over rig's `DynamicTool`, with a multi-turn agent loop (`max_turns` 20), an agent preamble, inline tool-activity rendering in the chat pane, and a workspace-root escape guard on all tools. Deferred follow-ups: tool-output token counting, configurable turn budget, approval prompts for edits/commands (see below).
+- Multi-agent orchestration and task decomposition.
+- Context files / project-aware prompts (AGENTS.md scanning, `.shuvarie/context`).
 - RAG over chat history using Turso vector search and full-text search.
 - LSP integration (real LSP servers in the sidebar instead of inactive placeholders).
 - Skills system (real skills panel instead of inactive placeholder).
 - Theming, keybinding configuration, and expanding the command palette.
 - Workspace/checkout integration, diff review, approval prompts for edits.
-- Export/import sessions, multi-agent orchestration.
+- Export/import sessions.
 
 ## Non-goals (for now)
 

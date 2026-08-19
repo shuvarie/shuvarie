@@ -196,7 +196,10 @@ pub async fn run(
                     let guard = s.lock().await;
                     guard.messages[..guard.messages.len().saturating_sub(1)].to_vec()
                 };
-                let stream = client.stream(&model, &content, &prior).await;
+                let tools = crate::tools::all_tools();
+                let stream = client
+                    .stream(&model, Some(AGENT_PREAMBLE), &content, &prior, &tools)
+                    .await;
                 let tx = event_tx.clone();
                 let session_shared = s.clone();
                 let client_shared = client.clone();
@@ -295,6 +298,14 @@ fn title_for(content: &str) -> String {
     }
 }
 
+const AGENT_PREAMBLE: &str = "\
+You are Shuvarie, an agentic coding assistant running in a terminal inside the user's project. \
+You can read, write, and edit files, list directories, grep for text, and run commands. \
+Prefer using tools to inspect the workspace and verify your work (for example, run the test \
+suite after editing code) instead of guessing. When a tool reports an error, fix the cause and \
+retry rather than stopping. After finishing the work, summarize what you did and any results in \
+a short reply. Keep the reply concise.";
+
 async fn load_most_recent_session(
     store: &mut Store,
     session: &mut Option<Arc<Mutex<Session>>>,
@@ -366,6 +377,14 @@ async fn stream_stream_to_events(
                 let _ = event_tx.send(Event::TokenReceived { content: text }).await;
             }
             shuvarie_llm::StreamItem::Delta { .. } => {}
+            shuvarie_llm::StreamItem::ToolStart { name, args } => {
+                let _ = event_tx.send(Event::ToolStarted { name, args }).await;
+            }
+            shuvarie_llm::StreamItem::ToolResult { name, output, ok } => {
+                let _ = event_tx
+                    .send(Event::ToolFinished { name, ok, output })
+                    .await;
+            }
             shuvarie_llm::StreamItem::Done { text, usage } => {
                 let mut guard = session.lock().await;
                 guard.push_assistant(text.clone());

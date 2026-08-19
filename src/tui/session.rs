@@ -21,6 +21,15 @@ pub enum SessionMessage {
     TokenReceived {
         content: String,
     },
+    ToolStarted {
+        name: String,
+        args: serde_json::Value,
+    },
+    ToolFinished {
+        name: String,
+        ok: bool,
+        output: String,
+    },
     StreamDone,
     StreamError {
         error: String,
@@ -48,9 +57,33 @@ pub enum SessionMessage {
     },
 }
 
+#[derive(Debug, Clone)]
+pub enum ToolStatus {
+    Running,
+    Ok,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolActivity {
+    pub name: String,
+    pub args: String,
+    pub status: ToolStatus,
+    pub output: String,
+    pub message_index: usize,
+    pub text_offset: usize,
+}
+
+impl ToolActivity {
+    fn belongs_to(&self, index: usize) -> bool {
+        self.message_index == index
+    }
+}
+
 pub struct SessionScreen {
     pub input: TextArea,
     pub messages: Vec<(Role, String)>,
+    pub tools: Vec<ToolActivity>,
     pub streaming: bool,
     pub pending: String,
     pub scroll_state: RefCell<ScrollViewState>,
@@ -69,6 +102,7 @@ impl SessionScreen {
         Self {
             input: TextArea::new("Type a message…"),
             messages: Vec::new(),
+            tools: Vec::new(),
             streaming: false,
             pending: String::new(),
             scroll_state: RefCell::new(ScrollViewState::default()),
@@ -136,10 +170,43 @@ impl SessionScreen {
                 self.follow_bottom();
                 None
             }
+            SessionMessage::ToolStarted { name, args } => {
+                self.tools.push(ToolActivity {
+                    name,
+                    args: args.to_string(),
+                    status: ToolStatus::Running,
+                    output: String::new(),
+                    message_index: self.messages.len(),
+                    text_offset: self.pending.len(),
+                });
+                self.streaming = true;
+                self.status = Some(format!("tool: {}", self.tools.last().unwrap().name));
+                self.mark_scroll_dirty();
+                self.follow_bottom();
+                None
+            }
+            SessionMessage::ToolFinished { name, ok, output } => {
+                if let Some(tool) = self
+                    .tools
+                    .iter_mut()
+                    .find(|t| t.name == name && matches!(t.status, ToolStatus::Running))
+                {
+                    tool.status = if ok {
+                        ToolStatus::Ok
+                    } else {
+                        ToolStatus::Failed
+                    };
+                    tool.output = output;
+                }
+                self.status = None;
+                self.mark_scroll_dirty();
+                self.follow_bottom();
+                None
+            }
             SessionMessage::StreamDone => {
                 if self.streaming {
-                    self.messages
-                        .push((Role::Assistant, std::mem::take(&mut self.pending)));
+                    let pending = std::mem::take(&mut self.pending);
+                    self.messages.push((Role::Assistant, pending));
                     self.streaming = false;
                 }
                 self.status = None;
@@ -150,6 +217,8 @@ impl SessionScreen {
             SessionMessage::StreamError { error } => {
                 self.streaming = false;
                 self.pending.clear();
+                self.tools
+                    .retain(|t| t.message_index != self.messages.len());
                 self.status = Some(format!("error: {error}"));
                 self.mark_scroll_dirty();
                 None
@@ -157,6 +226,8 @@ impl SessionScreen {
             SessionMessage::StreamCancelled => {
                 self.streaming = false;
                 self.pending.clear();
+                self.tools
+                    .retain(|t| t.message_index != self.messages.len());
                 self.status = None;
                 self.mark_scroll_dirty();
                 None
@@ -182,6 +253,7 @@ impl SessionScreen {
             }
             SessionMessage::Reset => {
                 self.messages.clear();
+                self.tools.clear();
                 self.streaming = false;
                 self.pending.clear();
                 self.status = None;
@@ -201,6 +273,7 @@ impl SessionScreen {
                     .into_iter()
                     .map(|m| (m.role, m.content))
                     .collect();
+                self.tools.clear();
                 self.streaming = false;
                 self.pending.clear();
                 self.status = None;
@@ -322,28 +395,108 @@ impl SessionScreen {
     }
 
     fn rebuild_scroll_view(&self, messages: &[(Role, String)], content_width: u16) {
-        let lines: Vec<Line> = messages
-            .iter()
-            .flat_map(|(role, content)| {
-                let (label, label_fg) = match role {
-                    Role::User => ("You", theme::ACCENT),
-                    Role::Assistant => ("Assistant", theme::TEXT),
-                    Role::System => ("System", theme::TEXT_MUTED),
-                };
-                let mut out = vec![Line::from(Span::raw(label.to_string()).fg(label_fg).bold())];
-                for text_line in content.lines() {
-                    out.push(Line::from(Span::raw(text_line.to_string()).fg(theme::TEXT)));
+        let mut lines: Vec<Line> = Vec::new();
+        for (i, (role, content)) in messages.iter().enumerate() {
+            match role {
+                Role::User => {
+                    lines.push(Line::from(Span::raw("You").fg(theme::ACCENT).bold()));
+                    for text_line in content.lines() {
+                        lines.push(Line::from(Span::raw(text_line.to_string()).fg(theme::TEXT)));
+                    }
+                    lines.push(Line::from(""));
                 }
-                out.push(Line::from(""));
-                out
-            })
-            .collect();
+                Role::Assistant => {
+                    let tool_lines: Vec<&ToolActivity> =
+                        self.tools.iter().filter(|t| t.belongs_to(i)).collect();
+                    if content.is_empty() {
+                        for tool in &tool_lines {
+                            self.push_tool_lines(&mut lines, tool);
+                        }
+                        let placeholder = if self.streaming && i == self.messages.len() {
+                            "(working…)"
+                        } else {
+                            "(tool output only — no text reply)"
+                        };
+                        lines.push(Line::from(Span::raw(placeholder).fg(theme::TEXT_MUTED)));
+                    } else {
+                        self.push_interleaved(&mut lines, content, &tool_lines);
+                    }
+                    lines.push(Line::from(""));
+                }
+                Role::System => {
+                    lines.push(Line::from(Span::raw("System").fg(theme::TEXT_MUTED).bold()));
+                    for text in content.lines() {
+                        lines.push(Line::from(Span::raw(text.to_string()).fg(theme::TEXT)));
+                    }
+                    lines.push(Line::from(""));
+                }
+            }
+        }
         let paragraph = Paragraph::new(lines).wrap(Wrap { trim: true });
         let content_height = paragraph.line_count(content_width).min(u16::MAX as usize) as u16;
         let mut scroll_view = ScrollView::new(Size::new(content_width, content_height))
             .scrollbars_visibility(ScrollbarVisibility::Never);
         scroll_view.render_widget(&paragraph, scroll_view.area());
         *self.scroll_view.borrow_mut() = scroll_view;
+    }
+
+    fn push_interleaved(&self, lines: &mut Vec<Line>, content: &str, tools: &[&ToolActivity]) {
+        let mut tool_idx = 0;
+        let mut text = String::new();
+        let flush = |lines: &mut Vec<Line>, text: &mut String| {
+            for t in text.lines() {
+                lines.push(Line::from(Span::raw(t.to_string()).fg(theme::TEXT)));
+            }
+            text.clear();
+        };
+        for (i, ch) in content.char_indices() {
+            if tool_idx < tools.len() && i >= tools[tool_idx].text_offset {
+                flush(lines, &mut text);
+                while tool_idx < tools.len() && i >= tools[tool_idx].text_offset {
+                    self.push_tool_lines(lines, tools[tool_idx]);
+                    tool_idx += 1;
+                }
+            }
+            text.push(ch);
+        }
+        flush(lines, &mut text);
+        while tool_idx < tools.len() {
+            self.push_tool_lines(lines, tools[tool_idx]);
+            tool_idx += 1;
+        }
+    }
+
+    fn push_tool_lines(&self, lines: &mut Vec<Line>, tool: &ToolActivity) {
+        let (marker, fg) = match tool.status {
+            ToolStatus::Running => ("›", theme::ACCENT),
+            ToolStatus::Ok => ("✓", theme::SUCCESS),
+            ToolStatus::Failed => ("✗", theme::ERROR),
+        };
+        let mut header = vec![Span::raw(marker).fg(fg).bold()];
+        header.push(Span::raw(format!(" {}", tool.name)).fg(theme::TEXT).bold());
+        if !tool.args.is_empty() {
+            let args = &tool.args;
+            let args_display: String = if args.len() > 120 {
+                format!("{}…", &args[..120])
+            } else {
+                args.clone()
+            };
+            header.push(Span::raw(format!(" {args_display}")).fg(theme::TEXT_MUTED));
+        }
+        lines.push(Line::from(header));
+        if !tool.output.is_empty() {
+            let first: String = tool
+                .output
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(120)
+                .collect();
+            lines.push(Line::from(
+                Span::raw(format!("    {first}")).fg(theme::TEXT_DIM),
+            ));
+        }
     }
 
     fn render_scrollbar(

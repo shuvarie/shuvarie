@@ -245,6 +245,19 @@ impl App {
                         content,
                     }))
                 }
+                CoreEvent::ToolStarted { name, args } => {
+                    Some(AppMessage::Session(SessionMessage::ToolStarted {
+                        name,
+                        args,
+                    }))
+                }
+                CoreEvent::ToolFinished { name, ok, output } => {
+                    Some(AppMessage::Session(SessionMessage::ToolFinished {
+                        name,
+                        ok,
+                        output,
+                    }))
+                }
                 CoreEvent::StreamDone { .. } => {
                     Some(AppMessage::Session(SessionMessage::StreamDone))
                 }

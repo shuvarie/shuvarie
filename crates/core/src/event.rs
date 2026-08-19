@@ -24,6 +24,15 @@ pub enum Event {
     TokenReceived {
         content: String,
     },
+    ToolStarted {
+        name: String,
+        args: serde_json::Value,
+    },
+    ToolFinished {
+        name: String,
+        ok: bool,
+        output: String,
+    },
     StreamDone {
         text: String,
         usage: TokenUsage,

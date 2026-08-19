@@ -5,6 +5,7 @@ mod error;
 pub mod command;
 pub mod event;
 pub mod session;
+pub mod tools;
 
 pub use command::Command;
 pub use config::{Config, ProviderConfig, UiPrefs};

@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::message::ChatMsg;
 use crate::stream::{StreamItem, StreamStream};
+use crate::tool::Tool;
 use crate::usage::TokenUsage;
 use crate::{LlmError, Result};
 
@@ -207,9 +209,15 @@ impl ProviderClient {
             .collect())
     }
 
-    pub async fn stream(&self, model: &str, prompt: &str, history: &[ChatMsg]) -> StreamStream {
+    pub async fn stream(
+        &self,
+        model: &str,
+        preamble: Option<&str>,
+        prompt: &str,
+        history: &[ChatMsg],
+        tools: &[std::sync::Arc<dyn Tool>],
+    ) -> StreamStream {
         use futures_util::StreamExt;
-        use rig::prelude::AgentClientExt;
         use rig::streaming::StreamingChat;
 
         let user_msg = rig::message::Message::user(prompt.to_string());
@@ -218,6 +226,50 @@ impl ProviderClient {
             .cloned()
             .map(rig::message::Message::from)
             .collect();
+        let dynamic: Vec<rig::tool::DynamicTool> = tools
+            .iter()
+            .map(|tool| {
+                let def = tool.definition();
+                let tool = std::sync::Arc::clone(tool);
+                rig::tool::DynamicTool::new(
+                    def.name.clone(),
+                    def.description.clone(),
+                    def.parameters.clone(),
+                    move |_ctx, args| {
+                        let tool = std::sync::Arc::clone(&tool);
+                        Box::pin(async move {
+                            tool.call(args)
+                                .await
+                                .map(rig::tool::ToolOutput::text)
+                                .map_err(|message| {
+                                    let error = serde_json::json!({ "error": message });
+                                    rig::tool::ToolExecutionError::new(
+                                        rig::tool::ToolErrorKind::Other,
+                                        message,
+                                    )
+                                    .with_model_output(rig::tool::ToolOutput::json(error))
+                                })
+                        })
+                    },
+                )
+            })
+            .collect();
+
+        fn agent_with_tools<C>(
+            client: &C,
+            model: &str,
+            preamble: Option<&str>,
+            dynamic: Vec<rig::tool::DynamicTool>,
+        ) -> rig::agent::Agent<C::CompletionModel>
+        where
+            C: rig::client::CompletionClient + rig::prelude::AgentClientExt,
+        {
+            let builder = match preamble {
+                Some(p) => client.agent(model).preamble(p),
+                None => client.agent(model).without_preamble(),
+            };
+            builder.dynamic_tools(dynamic).build()
+        }
 
         async fn build<M>(
             agent: rig::agent::Agent<M>,
@@ -227,15 +279,72 @@ impl ProviderClient {
         where
             M: rig::completion::CompletionModel + 'static,
         {
-            let stream = agent.stream_chat(prompt, history).await;
-            Box::pin(stream.map(|item| match item {
+            let stream = agent.stream_chat(prompt, history).max_turns(20).await;
+            let mut tool_called = false;
+            let mut accumulated = String::new();
+            let mut tool_names: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            Box::pin(stream.map(move |item| match item {
                 Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
                     rig::streaming::StreamedAssistantContent::Text(t),
-                )) => StreamItem::Delta { text: t.text },
-                Ok(rig::agent::MultiTurnStreamItem::FinalResponse(resp)) => StreamItem::Done {
-                    text: resp.output,
-                    usage: TokenUsage::from_rig(resp.usage),
-                },
+                )) => {
+                    accumulated.push_str(&t.text);
+                    StreamItem::Delta { text: t.text }
+                }
+                Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
+                    rig::streaming::StreamedAssistantContent::ToolCall {
+                        tool_call,
+                        internal_call_id,
+                    },
+                )) => {
+                    tool_called = true;
+                    tool_names.insert(internal_call_id, tool_call.function.name.clone());
+                    StreamItem::ToolStart {
+                        name: tool_call.function.name,
+                        args: tool_call.function.arguments,
+                    }
+                }
+                Ok(rig::agent::MultiTurnStreamItem::StreamUserItem(
+                    rig::streaming::StreamedUserContent::ToolResult {
+                        tool_result,
+                        internal_call_id,
+                    },
+                )) => {
+                    let name = tool_names.remove(&internal_call_id).unwrap_or_default();
+                    let mut output = String::new();
+                    let mut ok = true;
+                    for content in tool_result.content.iter() {
+                        if let Some(text) = content.as_text() {
+                            if !output.is_empty() {
+                                output.push('\n');
+                            }
+                            output.push_str(text);
+                        }
+                    }
+                    if output.is_empty() {
+                        ok = false;
+                        output = String::from("(no output)");
+                    } else if output.starts_with("{\"error\":") {
+                        ok = false;
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&output)
+                            && let Some(message) = value.get("error").and_then(Value::as_str)
+                        {
+                            output = message.to_string();
+                        }
+                    }
+                    StreamItem::ToolResult { name, output, ok }
+                }
+                Ok(rig::agent::MultiTurnStreamItem::FinalResponse(resp)) => {
+                    let text = if accumulated.is_empty() && tool_called {
+                        String::new()
+                    } else {
+                        std::mem::take(&mut accumulated)
+                    };
+                    StreamItem::Done {
+                        text,
+                        usage: TokenUsage::from_rig(resp.usage),
+                    }
+                }
                 Ok(_) => StreamItem::Delta {
                     text: String::new(),
                 },
@@ -246,12 +355,54 @@ impl ProviderClient {
         }
 
         match &self.list {
-            ListImpl::OpenAi(c) => build(c.agent(model).build(), user_msg, rig_history).await,
-            ListImpl::OpenRouter(c) => build(c.agent(model).build(), user_msg, rig_history).await,
-            ListImpl::DeepSeek(c) => build(c.agent(model).build(), user_msg, rig_history).await,
-            ListImpl::Anthropic(c) => build(c.agent(model).build(), user_msg, rig_history).await,
-            ListImpl::Gemini(c) => build(c.agent(model).build(), user_msg, rig_history).await,
-            ListImpl::Ollama(c) => build(c.agent(model).build(), user_msg, rig_history).await,
+            ListImpl::OpenAi(c) => {
+                build(
+                    agent_with_tools(c, model, preamble, dynamic),
+                    user_msg,
+                    rig_history,
+                )
+                .await
+            }
+            ListImpl::OpenRouter(c) => {
+                build(
+                    agent_with_tools(c, model, preamble, dynamic),
+                    user_msg,
+                    rig_history,
+                )
+                .await
+            }
+            ListImpl::DeepSeek(c) => {
+                build(
+                    agent_with_tools(c, model, preamble, dynamic),
+                    user_msg,
+                    rig_history,
+                )
+                .await
+            }
+            ListImpl::Anthropic(c) => {
+                build(
+                    agent_with_tools(c, model, preamble, dynamic),
+                    user_msg,
+                    rig_history,
+                )
+                .await
+            }
+            ListImpl::Gemini(c) => {
+                build(
+                    agent_with_tools(c, model, preamble, dynamic),
+                    user_msg,
+                    rig_history,
+                )
+                .await
+            }
+            ListImpl::Ollama(c) => {
+                build(
+                    agent_with_tools(c, model, preamble, dynamic),
+                    user_msg,
+                    rig_history,
+                )
+                .await
+            }
         }
     }
 

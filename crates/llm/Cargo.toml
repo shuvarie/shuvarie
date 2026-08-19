@@ -11,6 +11,7 @@ futures-core = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std", "alloc"] }
 rig = "0.41.0"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
 
 [dev-dependencies]
