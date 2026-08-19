@@ -142,7 +142,20 @@ let user = toasty::create!(User {
 assert_eq!(user.email.0, "alice@example.com");
 ```
 
-Newtypes support `#[key]`, `#[unique]`, `#[index]`, filtering, updating — same as primitives.
+Newtypes support `#[key]`, `#[unique]`, `#[index]`, filtering, updating — same as primitives. Since v0.10 the comparison operators `ne`/`gt`/`ge`/`lt`/`le` and the sort operators `asc()`/`desc()` are generated directly on the newtype field path — they compare the underlying column using the backend's ordering for the inner type (no `._0()` descent needed):
+
+```rust
+#[derive(Debug, toasty::Embed)]
+struct Millis(i64);
+
+let recent = Credit::filter(Credit::fields().timestamp().ge(Millis(cutoff)))
+    .exec(&mut db).await?;
+let newest = Credit::all()
+    .order_by(Credit::fields().timestamp().desc())
+    .exec(&mut db).await?;
+```
+
+Multi-field embedded structs support only `eq`/`ne` (which compare every column); ordering operators and `asc`/`desc` are newtype-only because backends share no ordering for multi-column values.
 
 A newtype can be a primary key:
 ```rust
@@ -290,6 +303,19 @@ enum ContactInfo {
 ```
 
 Mixed enums (both unit and data-carrying variants) supported.
+
+### `#[belongs_to]` inside embedded types
+
+(v0.10) A `#[belongs_to]` field can appear inside an embedded struct or enum variant. Key/references inference works as usual (`key` defaults to `<field>_id`, `references` to `id`; composite keys must be spelled out). The relation must be `Deferred` — eager loading with `.include()` is not supported inside embeds yet:
+
+```rust
+#[derive(Debug, toasty::Embed)]
+struct Audit {
+    #[belongs_to]
+    user: toasty::Deferred<User>,
+    action: String,
+}
+```
 
 ### Changing stored discriminants
 
@@ -441,6 +467,8 @@ Whole-value create/read/replace work. `stmt::push` appends one embedded value. E
 
 ### Restrictions
 
+Supported inside a document (v0.10): nested embedded structs, scalar lists, optional scalar fields, decimal types, `jiff` temporal types, and `net` address types (`cidr`/`macaddr` — canonical text encodings so filters compare what reads reconstruct).
+
 - Embedded enums cannot be inside a document
 - Tuple structs rejected (no field names for document keys)
 - Relations cannot appear inside a document
@@ -458,7 +486,7 @@ Whole-value create/read/replace work. `stmt::push` appends one embedded value. E
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toasty = { version = "0.9", features = ["postgresql", "serde"] }
+toasty = { version = "0.10", features = ["postgresql", "serde"] }
 ```
 
 ### Typed payload
@@ -549,7 +577,7 @@ Follows normal deferred loading rules. `toasty::Deferred<serde_json::Value>` als
 
 ## `Vec<scalar>` fields
 
-A `Vec<scalar>` stores a homogeneous, ordered collection in a single column. Element type must be a scalar (any primitive except `u8`, plus `String`, `Uuid`, decimal types, `jiff` date/time types, and unit enums with `toasty::Embed`). `Vec<u8>` is a binary blob, not a collection.
+A `Vec<scalar>` stores a homogeneous, ordered collection in a single column. Element type must be a scalar (any primitive except `u8`, plus `String`, `Uuid`, decimal types, `jiff` date/time types, `net` address types, and unit enums with `toasty::Embed`). `Vec<u8>` is a binary blob, not a collection.
 
 ### Storage by driver
 

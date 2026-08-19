@@ -78,6 +78,10 @@ posts: toasty::Deferred<Vec<Post>>,
 
 One-sided relationships (only `#[belongs_to]` on child, no `#[has_many]` on parent) are allowed. The reverse (a `#[has_many]` without a matching `#[belongs_to]`) is NOT allowed — Toasty needs the FK definition.
 
+### Embedded `#[belongs_to]`
+
+(v0.10) `#[belongs_to]` fields work inside embedded structs and enum variants. Key/references inference is unchanged (`key` defaults to `<field>_id`; composite keys spelled out). The relation must be `Deferred`; eager loading via `.include()` is not supported inside embeds (see `references/fields-advanced.md`).
+
 ### Composite foreign keys
 
 When the parent has a composite PK, pass arrays to `key` and `references`:

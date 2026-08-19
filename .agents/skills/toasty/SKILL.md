@@ -7,13 +7,14 @@ description: >-
   builders, create/update/upsert/delete builders, and relationship accessors at
   compile time. This skill covers model definition, CRUD, relationships,
   filtering expressions, pagination, embedded types, document/JSON fields,
-  Vec<scalar> collections, batch operations, transactions, migrations, and
-  concurrency control. Docs: guide at https://tokio-rs.github.io/toasty/0.9.0/guide/introduction.html
-  and API docs at https://docs.rs/toasty/latest/toasty/.
+  Vec<scalar> collections, batch operations, transactions, migrations (CLI +
+  embedded), and concurrency control. Docs: guide at
+  https://tokio-rs.github.io/toasty/0.10.0/guide/introduction.html and API docs
+  at https://docs.rs/toasty/latest/toasty/.
 license: MIT
 metadata:
   author: shuvarie
-  version: 0.9.0
+  version: 0.10.0
   category: Backend Development
   tags:
     - rust
@@ -31,9 +32,9 @@ metadata:
 
 Toasty is an async ORM for Rust. You define models as Rust structs annotated with `#[derive(toasty::Model)]`. Toasty infers the database schema from your annotated structs — field types map to column types, and attributes like `#[key]`, `#[unique]`, and `#[index]` control the schema. The derive macro generates query builders, create/update/upsert builders, and relationship accessors at compile time.
 
-Supported databases (each behind a feature flag): SQLite (`sqlite`), Turso (`turso`), PostgreSQL (`postgresql`), MySQL (`mysql`), DynamoDB (`dynamodb`). Additional features: `jiff` (date/time), `rust_decimal`, `bigdecimal`, `serde` (JSON).
+Supported databases (each behind a feature flag): SQLite (`sqlite`), Turso (`turso`), PostgreSQL (`postgresql`), MySQL (`mysql`), DynamoDB (`dynamodb`). Additional features: `jiff` (date/time), `rust_decimal`, `bigdecimal`, `serde` (JSON), `net` (IP/MAC address types via `cidr` and `macaddr`), `migration` (embedded migrations via `embed_migrations!` + the `toasty::migration` module), `rustls`/`native-tls` (MySQL TLS; `rustls` is the default).
 
-Official docs: **Guide** at https://tokio-rs.github.io/toasty/0.9.0/guide/introduction.html and **API docs** at https://docs.rs/toasty/latest/toasty/.
+Official docs: **Guide** at https://tokio-rs.github.io/toasty/0.10.0/guide/introduction.html and **API docs** at https://docs.rs/toasty/latest/toasty/.
 
 ## Critical Rules
 
@@ -42,22 +43,25 @@ Before writing Toasty code, know these constraints:
 - **No eager-load cycles** — Toasty rejects schemas where eager relations recurse (e.g. `User.posts: Vec<Post>` + `Post.user: User`). Wrap at least one side in `Deferred<_>`.
 - **`#[auto]` on non-key fields only matches `created_at`/`updated_at`** with `jiff::Timestamp`; otherwise use `#[default(...)]` / `#[update(...)]` explicitly.
 - **MySQL upserts unsupported** — Toasty returns `unsupported_feature` for `upsert_by_*` on MySQL (its `ON DUPLICATE KEY UPDATE` reacts to any unique conflict, not the named target).
+- **MySQL 0.10 uses SQLx + rustls** — the old `mysql_async` URL options (`require_ssl`, `verify_ca`, `verify_identity`) are ignored; use SQLx options like `?ssl-mode=verify_identity`. Keep native TLS with `native-tls` feature.
 - **DynamoDB: no composite unique constraints** — multi-column `#[unique(...)]` returns `unsupported_feature`; single-column `#[unique]` works. `via` relations, `.any()`/`.all()` on associations, and preloading/projecting `via` are SQL-only.
 - **`pop`/`remove`/`remove_at` on `Vec<scalar>` require PostgreSQL** — other drivers return an error.
 - **`.like()` is SQL-only** (panics on DynamoDB); `.ilike()` is PostgreSQL-only.
-- **`#[document]` rejects enums, tuple structs, `Vec<u8>`, relations, `jiff::Zoned`, and `#[column]` renames inside the document.** `#[index]`/`#[unique]`/`#[column]` cannot be placed on the `#[document]` field.
+- **`#[document]` rejects enums, tuple structs, `Vec<u8>`, relations, `jiff::Zoned`, and `#[column]` renames inside the document.** `#[index]`/`#[unique]`/`#[column]` cannot be placed on the `#[document]` field. Optional document roots unsupported; optional fields inside are fine.
 - **Raw SQL is SQL-only** — DynamoDB returns `unsupported_feature`. Use placeholders reported by `db.capability().sql_placeholder` (e.g. `?1` for SQLite/Turso, `$1` for PostgreSQL, `?` for MySQL).
 - **Transactions are SQL-only.** Prefer `toasty::batch()` for atomic multi-op when you don't need read-then-branch.
 - **`#[auto]` UUID default is v7** (time-ordered) — better for indexes than v4.
+- **Embedded relations** — `#[belongs_to]` works inside embedded structs/enums (0.10), with normal key/references inference, but must be `Deferred` — eager loading via `.include()` is NOT supported there.
+- **Ordering operators are newtype-only** — `ne`/`gt`/`ge`/`lt`/`le`/`asc`/`desc` exist on newtype embeds (comparing the wrapped column); multi-field embeds support only `eq`/`ne`. No more `._0()` descent for comparisons.
 
 ## Installation
 
 ```toml
 [dependencies]
-toasty = { version = "0.9", features = ["sqlite"] }
+toasty = { version = "0.10", features = ["sqlite"] }
 tokio = { version = "1", features = ["full"] }
-# Optional: jiff for timestamps, serde for JSON
-# toasty = { version = "0.9", features = ["sqlite", "jiff", "serde"] }
+# Optional: jiff for timestamps, serde for JSON, net for IP/MAC types, migration for embed_migrations!
+# toasty = { version = "0.10", features = ["sqlite", "jiff", "serde"] }
 ```
 
 Swap the feature flag for your backend: `sqlite`, `turso`, `postgresql`, `mysql`, `dynamodb`.
@@ -121,7 +125,7 @@ Use this to decide which reference file to load:
 **Need batch operations, transactions (nested/savepoints), raw SQL, or concurrency control (`#[version]`)?**
 → Read `references/transactions-and-advanced.md`
 
-**Need database setup, connection URLs, connection pool, migrations, or schema management?**
+**Need database setup, connection URLs, connection pool, migrations (CLI or embedded `embed_migrations!`), or schema management?**
 → Read `references/database-setup.md`
 
 ## Generated Methods Cheat Sheet
@@ -183,4 +187,4 @@ Query builder terminal methods: `.exec(&mut db)` → `Vec<T>`, `.first().exec(&m
 | `references/querying.md` | Filter expressions (eq/ne/gt/lt/in_list/is_none/is_some/starts_with/like/ilike/and/or/not), association filters (any/all), sorting, limit/offset, cursor pagination (Page) |
 | `references/fields-advanced.md` | Field options (column name/type/default/update), timestamps with #[auto], embedded types (newtype/struct/enum), #[document] fields, JSON encoding (Json<T>/serde_json::Value), Vec<scalar> fields (predicates + incremental mutations), deferred fields |
 | `references/transactions-and-advanced.md` | Batch operations (toasty::batch / create_many), transactions (nested/savepoints/options), raw SQL (statement/query/placeholders), concurrency control (#[version]) |
-| `references/database-setup.md` | Db::builder, registering models, connection URLs, driver feature flags, connection pool tuning, table name prefix, push_schema vs migration system, toasty-cli workflow |
+| `references/database-setup.md` | Db::builder, registering models, connection URLs, driver feature flags, connection pool tuning, table name prefix, push_schema vs migration system, toasty-cli workflow, embedded migrations (embed_migrations!) |

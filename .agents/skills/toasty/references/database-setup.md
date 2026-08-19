@@ -54,6 +54,20 @@ let mut db = toasty::Db::builder()
     .await?;
 ```
 
+## MySQL TLS (v0.10 uses SQLx)
+
+Since 0.10 the MySQL driver is built on SQLx and defaults to rustls. The old `mysql_async` URL options (`require_ssl`, `verify_ca`, `verify_identity`) are ignored — leaving them can allow `ssl-mode=preferred` to fall back to plaintext. Use SQLx options instead:
+
+```
+# v0.9 (ignored in v0.10)
+mysql://app:secret@db.internal/store?require_ssl=true&verify_identity=true
+
+# v0.10
+mysql://app:secret@db.internal/store?ssl-mode=verify_identity
+```
+
+To keep native TLS, disable default features and enable `mysql` plus `native-tls`.
+
 ## Connection pool
 
 `Db` owns a connection pool. Each query checks out a connection, returns it when finished.
@@ -126,8 +140,8 @@ Migrations are managed through a small CLI binary you create in your project usi
 
 ```toml
 [dependencies]
-toasty = { version = "0.9", features = ["sqlite"] }
-toasty-cli = "0.9"
+toasty = { version = "0.10", features = ["sqlite"] }
+toasty-cli = "0.10"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 ```
@@ -200,6 +214,27 @@ cargo run --bin my-cli -- migration apply
 ```
 
 Reads `history.toml`, queries the `__toasty_migrations` tracking table, executes each pending migration in order inside a transaction, records it. If all are already applied, prints a message and exits.
+
+### Embedding migrations in the application binary
+
+(v0.10) Single-binary apps can compile the generated migrations in — no CLI at runtime. Requires the `migration` feature. `embed_migrations!` validates `history.toml` and its referenced SQL files at compile time (compile error on invalid history, duplicate IDs/names, or missing SQL files), then packages them in the binary.
+
+```rust
+static MIGRATIONS: toasty::migration::MigrationSet = toasty::embed_migrations!();
+
+async fn migrate(db: &toasty::Db) -> toasty::Result<()> {
+    let report = MIGRATIONS.apply(db).await?;
+    println!("applied {}, skipped {}", report.applied(), report.skipped());
+    Ok(())
+}
+```
+
+- Default path is the `toasty/` migration directory; pass a path relative to `Cargo.toml` when elsewhere: `toasty::embed_migrations!("migrations/primary")`.
+- Snapshot files are NOT embedded (not needed to apply); only `history.toml` and the named `migrations/*.sql` files.
+- `MigrationSet::apply(&db)` checks the `__toasty_migrations` table, applies pending migrations in order, and returns a `MigrationReport` with `applied()` / `skipped()` counts.
+- One set per database; the application decides which set applies to which `Db`.
+
+This is what `shuvarie-db` does (`crates/db/src/store.rs`): a static `MIGRATIONS` applied in `Store::open` so the schema upgrades automatically on startup.
 
 ### Inspecting the current schema
 

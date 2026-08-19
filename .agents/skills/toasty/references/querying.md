@@ -160,6 +160,14 @@ let items = Item::all()
     .exec(&mut db).await?;
 ```
 
+Newtype embed fields expose `asc()`/`desc()` directly (v0.10):
+
+```rust
+let newest_first = Credit::all()
+    .order_by(Credit::fields().timestamp().desc())
+    .exec(&mut db).await?;
+```
+
 ### Multiple fields (tie-breakers)
 
 ```rust
@@ -227,6 +235,12 @@ println!("items: {}", page.len());
 
 `Page` dereferences to a slice (index, iterate, `.len()`, `.iter()`). `per_page` is an upper bound — a page can contain fewer than `per_page` items even when more exist. Check `.has_next()` rather than relying on page size.
 
+### Ties and compound ordering
+
+(v0.10) Cursor pagination is deterministic with ties. When the requested order does not uniquely identify every row, Toasty appends primary-key fields to the ordering, so `.next()`/`.prev()` keep stable page boundaries even when ordered values repeat. Cursors expand lexicographically for multi-column ordering and honor backend-specific `NULL` ordering, and are preserved through `.include()`.
+
+A cursor passed directly to `.after()`/`.before()` may omit the appended primary-key fields (accepted as a prefix of the complete ordering) — but a prefix cursor cannot position within rows sharing the same prefix values, so after the initial query use the cursor returned by `Page` to continue without skipping tied rows.
+
 ### Navigating
 
 ```rust
@@ -291,6 +305,8 @@ Query builders:
 | `.select(path)` | Project columns |
 | `.include(path)` | Preload a relation/deferred field |
 | `.filter(expr)` | Add AND condition |
+
+The `query!` macro builds queries with a small SQL-like syntax: `query!(User [FILTER .age > 25] [ORDER BY .name ASC] [OFFSET 5] [LIMIT 10])`, expanding to the equivalent method chain — still chain `.exec(&mut db).await?`. Keywords are case-insensitive; dot-prefixed paths refer to source-model fields.
 
 `Page`:
 

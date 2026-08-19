@@ -52,7 +52,12 @@ With feature flags:
 | `bigdecimal` | `bigdecimal::BigDecimal` | Decimal |
 | `jiff` | `jiff::Timestamp` | Timestamp |
 | `jiff` | `jiff::civil::Date` / `Time` / `DateTime` | Date / Time / DateTime |
+| `net` | `toasty::stmt::IpCidr` | IP network prefix |
+| `net` | `toasty::stmt::IpInet` | IP host address with network prefix |
+| `net` | `toasty::stmt::MacAddr6` / `MacAddr8` | 6- / 8-byte MAC address |
 | `serde` | `toasty::Json<T>`, `serde_json::Value` | `text`/`json`/`jsonb` column |
+
+Network types (v0.10+, `net` feature) work in scalar fields, `Vec<scalar>` collections, document leaves, and filters. PostgreSQL uses native `CIDR`, `INET`, `MACADDR`, `MACADDR8` types; MySQL, SQLite, Turso, and DynamoDB use canonical string storage. Note the types live under `toasty::stmt::`.
 
 ## Optional fields
 
