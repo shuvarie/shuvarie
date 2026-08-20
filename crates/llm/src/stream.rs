@@ -1,8 +1,7 @@
 use futures_core::Stream;
 use serde_json::Value;
+use shuvarie_catalog::TokenUsage;
 use std::pin::Pin;
-
-use crate::usage::TokenUsage;
 
 #[derive(Debug, Clone)]
 pub enum StreamItem {

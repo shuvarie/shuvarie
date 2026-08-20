@@ -13,5 +13,6 @@ pub use core_task::run;
 pub use error::{CoreError, Result};
 pub use event::Event;
 pub use session::Session;
+pub use shuvarie_catalog::{ModelInfo, Provider};
 pub use shuvarie_db::SessionSummary;
-pub use shuvarie_llm::{ChatMsg, ModelInfo, Role};
+pub use shuvarie_llm::{ChatMsg, Role};

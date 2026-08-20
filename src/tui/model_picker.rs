@@ -7,7 +7,7 @@ use termina::event::{KeyCode, KeyEvent};
 use crate::tui::utils::ctrl;
 
 use super::add_provider::centered_rect;
-use super::list::{render_list_item, scroll_offset_for};
+use super::list::{render_list_item_line, scroll_offset_for};
 use super::search::{Search, SearchMessage};
 use super::theme;
 
@@ -164,7 +164,11 @@ impl ModelPicker {
             .take(list_area.height as usize)
             .map(|(idx, &orig)| {
                 let m = &self.models[orig];
-                render_list_item(m.display_name().to_string(), idx == self.selected)
+                let mut line = vec![Span::raw(m.display_name().to_string()).fg(theme::TEXT)];
+                if let Some(ctx) = m.context_length {
+                    line.push(Span::raw(format!(" · {}k ctx", ctx / 1024)).fg(theme::TEXT_MUTED));
+                }
+                render_list_item_line(Line::from(line), idx == self.selected)
             })
             .collect();
         frame.render_widget(List::new(visible), list_area);

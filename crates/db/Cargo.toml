@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 anyhow = "1"
 jiff = "0.2"
+shuvarie-catalog = { path = "../catalog" }
 shuvarie-llm = { path = "../llm" }
 thiserror = "2"
 toasty = { version = "0.10", features = ["turso", "jiff", "migration"] }

@@ -1,0 +1,30 @@
+input_per_mtok = 2.50
+output_per_mtok = 10.00
+
+[[models]]
+model = "meta-llama/llama-3.3-70b"
+aliases = [
+    "meta-llama/llama-3.3-70b",
+    "llama-3.3-70b-versatile",
+]
+
+[[models]]
+model = "meta-llama/llama-3.1-8b"
+aliases = [
+    "meta-llama/llama-3.1-8b",
+    "llama-3.1-8b-instant",
+]
+
+[[models]]
+model = "meta-llama/llama-4-scout-17b-16e"
+aliases = [
+    "meta-llama/llama-4-scout-17b-16e",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+]
+
+[[models]]
+model = "Qwen/qwen-2.5-coder-32b"
+aliases = [
+    "Qwen/qwen-2.5-coder-32b",
+    "qwen-2.5-coder-32b",
+]

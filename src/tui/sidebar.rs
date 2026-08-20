@@ -1,7 +1,7 @@
 use ratatui::layout::{Alignment, Rect};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph};
-use shuvarie_llm::TokenUsage;
+use shuvarie_catalog::TokenUsage;
 use termina::event::KeyEvent;
 
 use crate::tui::utils::locale::ToDecSepNum;

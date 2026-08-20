@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
+use shuvarie_catalog::Provider;
 use shuvarie_core::{Config, ProviderConfig};
-use shuvarie_llm::Provider;
 
 fn sample_config() -> Config {
     let mut providers = HashMap::new();

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use shuvarie_llm::Provider;
+use shuvarie_catalog::Provider;
 
 use crate::{CoreError, Result};
 

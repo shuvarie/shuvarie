@@ -1,5 +1,6 @@
+use shuvarie_catalog::TokenUsage;
 use shuvarie_db::{Store, StoredSession};
-use shuvarie_llm::{Role, TokenUsage};
+use shuvarie_llm::Role;
 
 #[tokio::test]
 async fn create_and_list_sessions_most_recent_first() {

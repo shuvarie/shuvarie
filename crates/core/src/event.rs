@@ -1,5 +1,5 @@
+use shuvarie_catalog::{ModelInfo, TokenUsage};
 use shuvarie_db::SessionSummary;
-use shuvarie_llm::{ModelInfo, TokenUsage};
 
 #[derive(Debug, Clone)]
 pub enum Event {

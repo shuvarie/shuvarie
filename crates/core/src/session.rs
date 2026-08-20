@@ -1,5 +1,6 @@
+use shuvarie_catalog::TokenUsage;
 use shuvarie_db::StoredSession;
-use shuvarie_llm::{ChatMsg, TokenUsage};
+use shuvarie_llm::ChatMsg;
 
 #[derive(Debug, Clone, Default)]
 pub struct Session {

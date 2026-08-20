@@ -47,7 +47,11 @@ pub async fn run(
                     }
                 };
                 match client.list_models().await {
-                    Ok(models) => {
+                    Ok(mut models) => {
+                        let provider = client.kind();
+                        for model in &mut models {
+                            shuvarie_catalog::enrich(provider, model);
+                        }
                         let _ = event_tx
                             .send(Event::ModelsLoaded {
                                 provider_name,
@@ -204,6 +208,7 @@ pub async fn run(
                 let session_shared = s.clone();
                 let client_shared = client.clone();
                 let store_shared = store.clone();
+                let model_shared = model.clone();
                 active_stream = Some(
                     tokio::spawn(async move {
                         stream_stream_to_events(
@@ -211,6 +216,7 @@ pub async fn run(
                             session_shared,
                             client_shared,
                             store_shared,
+                            model_shared,
                             tx,
                         )
                         .await;
@@ -367,6 +373,7 @@ async fn stream_stream_to_events(
     session: Arc<Mutex<Session>>,
     client: ProviderClient,
     mut store: Store,
+    model: String,
     event_tx: Sender<Event>,
 ) {
     use futures_util::StreamExt;
@@ -388,7 +395,7 @@ async fn stream_stream_to_events(
             shuvarie_llm::StreamItem::Done { text, usage } => {
                 let mut guard = session.lock().await;
                 guard.push_assistant(text.clone());
-                let cost = client.estimate_cost(&usage);
+                let cost = shuvarie_catalog::estimate_cost(client.kind(), &model, &usage);
                 guard.add_usage(usage, cost);
                 let id = guard.id;
                 drop(guard);
@@ -436,7 +443,8 @@ async fn persist(config: &Config, event_tx: &Sender<Event>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shuvarie_llm::{Provider, StreamItem, TokenUsage};
+    use shuvarie_catalog::{Provider, TokenUsage};
+    use shuvarie_llm::StreamItem;
 
     #[tokio::test]
     async fn stream_events_forward_and_accumulate_usage() {
@@ -465,7 +473,15 @@ mod tests {
         let session_shared = session.clone();
         let store = Store::open_in_memory().await.unwrap();
         tokio::spawn(async move {
-            stream_stream_to_events(stream, session_shared, client, store, event_tx).await;
+            stream_stream_to_events(
+                stream,
+                session_shared,
+                client,
+                store,
+                "ollama-model".into(),
+                event_tx,
+            )
+            .await;
         });
 
         let mut deltas = String::new();
@@ -511,7 +527,15 @@ mod tests {
         let session_shared = session.clone();
         let store = Store::open_in_memory().await.unwrap();
         tokio::spawn(async move {
-            stream_stream_to_events(stream, session_shared, client, store, event_tx).await;
+            stream_stream_to_events(
+                stream,
+                session_shared,
+                client,
+                store,
+                "ollama-model".into(),
+                event_tx,
+            )
+            .await;
         });
 
         let mut saw_error = false;

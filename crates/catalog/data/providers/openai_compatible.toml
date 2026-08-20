@@ -1,0 +1,122 @@
+input_per_mtok = 2.50
+output_per_mtok = 10.00
+
+[[models]]
+model = "openai/gpt-5"
+aliases = [
+    "openai/gpt-5",
+    "gpt-5",
+]
+
+[[models]]
+model = "openai/gpt-5-mini"
+aliases = [
+    "openai/gpt-5-mini",
+    "gpt-5-mini",
+]
+
+[[models]]
+model = "openai/gpt-4o"
+aliases = [
+    "openai/gpt-4o",
+    "gpt-4o",
+    "gpt-4o-2024-11-20",
+    "gpt-4o-2024-08-06",
+    "gpt-4o-2024-05-13",
+]
+
+[[models]]
+model = "openai/gpt-4o-mini"
+aliases = [
+    "openai/gpt-4o-mini",
+    "gpt-4o-mini",
+    "gpt-4o-mini-2024-07-18",
+]
+
+[[models]]
+model = "openai/gpt-4.1"
+aliases = [
+    "openai/gpt-4.1",
+    "gpt-4.1",
+    "gpt-4.1-2025-04-14",
+]
+
+[[models]]
+model = "openai/gpt-4.1-mini"
+aliases = [
+    "openai/gpt-4.1-mini",
+    "gpt-4.1-mini",
+    "gpt-4.1-mini-2025-04-14",
+]
+
+[[models]]
+model = "openai/gpt-4.1-nano"
+aliases = [
+    "openai/gpt-4.1-nano",
+    "gpt-4.1-nano",
+    "gpt-4.1-nano-2025-04-14",
+]
+
+[[models]]
+model = "openai/gpt-4"
+aliases = [
+    "openai/gpt-4",
+    "gpt-4",
+    "gpt-4-0613",
+]
+
+[[models]]
+model = "openai/gpt-4-turbo"
+aliases = [
+    "openai/gpt-4-turbo",
+    "gpt-4-turbo",
+    "gpt-4-turbo-2024-04-09",
+]
+
+[[models]]
+model = "openai/gpt-3.5-turbo"
+aliases = [
+    "openai/gpt-3.5-turbo",
+    "gpt-3.5-turbo",
+    "gpt-3.5-turbo-0125",
+]
+
+[[models]]
+model = "openai/o3"
+aliases = [
+    "openai/o3",
+    "o3",
+    "o3-2025-04-16",
+]
+
+[[models]]
+model = "openai/o3-mini"
+aliases = [
+    "openai/o3-mini",
+    "o3-mini",
+    "o3-mini-2025-01-31",
+]
+
+[[models]]
+model = "openai/o4-mini"
+aliases = [
+    "openai/o4-mini",
+    "o4-mini",
+    "o4-mini-2025-04-16",
+]
+
+[[models]]
+model = "openai/o1"
+aliases = [
+    "openai/o1",
+    "o1",
+    "o1-2024-12-17",
+]
+
+[[models]]
+model = "openai/o1-mini"
+aliases = [
+    "openai/o1-mini",
+    "o1-mini",
+    "o1-mini-2024-09-12",
+]

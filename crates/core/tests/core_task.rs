@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
+use shuvarie_catalog::Provider;
 use shuvarie_core::{Command, Config, Event, ProviderConfig, run};
 use shuvarie_db::Store;
-use shuvarie_llm::Provider;
 
 fn empty_config() -> Config {
     Config {

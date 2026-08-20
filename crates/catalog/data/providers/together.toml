@@ -1,0 +1,35 @@
+input_per_mtok = 2.50
+output_per_mtok = 10.00
+
+[[models]]
+model = "meta-llama/llama-3.1-8b"
+aliases = [
+    "meta-llama/llama-3.1-8b",
+    "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
+]
+
+[[models]]
+model = "meta-llama/llama-3.3-70b"
+aliases = [
+    "meta-llama/llama-3.3-70b",
+    "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
+    "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+]
+
+[[models]]
+model = "Qwen/qwen-2.5-coder-32b"
+aliases = [
+    "Qwen/qwen-2.5-coder-32b",
+    "Qwen/Qwen2.5-Coder-32B-Instruct",
+]
+
+[[models]]
+model = "deepseek-ai/deepseek-reasoner"
+aliases = [
+    "deepseek-ai/deepseek-reasoner",
+    "deepseek-ai/DeepSeek-R1",
+]
+
+[[models]]
+model = "mistralai/mistral-7b"
+aliases = ["mistralai/Mistral-7B-Instruct-v0.3"]

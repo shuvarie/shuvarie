@@ -7850,6 +7850,7 @@ dependencies = [
  "nucleo",
  "ratatui",
  "serde_json",
+ "shuvarie-catalog",
  "shuvarie-core",
  "shuvarie-db",
  "shuvarie-highlight",
@@ -7857,6 +7858,14 @@ dependencies = [
  "termina",
  "tokio",
  "tui-scrollview",
+]
+
+[[package]]
+name = "shuvarie-catalog"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml",
 ]
 
 [[package]]
@@ -7868,6 +7877,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "shuvarie-catalog",
  "shuvarie-db",
  "shuvarie-llm",
  "tempfile",
@@ -7882,6 +7892,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "jiff",
+ "shuvarie-catalog",
  "shuvarie-llm",
  "tempfile",
  "thiserror 2.0.20",
@@ -7909,6 +7920,7 @@ dependencies = [
  "rig",
  "serde",
  "serde_json",
+ "shuvarie-catalog",
  "thiserror 2.0.20",
  "tokio",
 ]

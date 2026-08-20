@@ -2,7 +2,7 @@ use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
 use ratatui::style::Modifier;
 use ratatui::widgets::{Clear, List, ListItem, Paragraph, Wrap};
-use shuvarie_llm::Provider;
+use shuvarie_catalog::Provider;
 use termina::event::{KeyCode, KeyEvent};
 
 use crate::tui::utils::{alt, ctrl};

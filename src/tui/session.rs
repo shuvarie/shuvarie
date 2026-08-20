@@ -3,8 +3,8 @@ use std::cell::{Cell, RefCell};
 use ratatui::layout::{Alignment, Constraint::*, Layout, Rect, Size};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph, Wrap};
+use shuvarie_catalog::TokenUsage;
 use shuvarie_core::Role;
-use shuvarie_llm::TokenUsage;
 use termina::event::{KeyCode, KeyEvent};
 use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
