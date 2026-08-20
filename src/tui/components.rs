@@ -6,6 +6,10 @@ use termina::event::{KeyCode, KeyEvent};
 
 use crate::tui::utils::{alt, ctrl};
 
+pub use version_bar::VersionBar;
+
+mod version_bar;
+
 pub struct InputBuffer {
     pub value: String,
     pub cursor: usize,
@@ -297,7 +301,7 @@ impl TextArea {
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
         let block = Block::new()
             .bg(crate::tui::theme::SURFACE)
-            .padding(ratatui::widgets::Padding::horizontal(2));
+            .padding(ratatui::widgets::Padding::symmetric(2, 1));
         let inner = block.inner(area);
         frame.render_widget(block, area);
 

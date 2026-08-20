@@ -3,9 +3,11 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 use termina::event::KeyEvent;
 
+use crate::tui::components::VersionBar;
+
 use super::logo::Logo;
 use super::theme;
-use super::widgets::{TextArea, TextAreaEffect, TextAreaMessage};
+use super::components::{TextArea, TextAreaEffect, TextAreaMessage};
 
 pub enum HomeMessage {
     Input(TextAreaMessage),
@@ -18,6 +20,7 @@ pub enum HomeEffect {
 pub struct HomeScreen {
     pub logo: Logo,
     pub input: TextArea,
+    pub version_bar: VersionBar,
 }
 
 impl HomeScreen {
@@ -25,6 +28,7 @@ impl HomeScreen {
         Self {
             logo: Logo::new(),
             input: TextArea::new("Ask anything…"),
+            version_bar: VersionBar::new(HorizontalAlignment::Center),
         }
     }
 
@@ -44,27 +48,15 @@ impl HomeScreen {
     }
 
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
-        let [
-            top_spacer,
-            logo_area,
-            gap,
-            input_area,
-            footer_area,
-            bottom_spacer,
-        ] = Layout::vertical([
-            Min(0),
-            Length(self.logo.height() as u16),
-            Length(1),
-            Length(3),
-            Length(1),
-            Min(0),
-        ])
-        .areas(area);
+        let [logo_area, input_area, key_hint_area, version_area] =
+            Layout::vertical([Length(self.logo.height() as u16), Length(3), Length(1), Length(1)])
+                .spacing(1)
+                .areas(
+                    area.centered_horizontally(Max(100))
+                        .centered_vertically(Ratio(1, 2)),
+                );
 
-        let _ = top_spacer;
         self.logo.view(frame, logo_area);
-        let _ = gap;
-
         self.input.view(frame, input_area);
 
         frame.render_widget(
@@ -74,10 +66,10 @@ impl HomeScreen {
                 ("Ctrl+C", "quit"),
             ]))
             .fg(theme::TEXT_MUTED),
-            footer_area,
+            key_hint_area,
         );
 
-        let _ = bottom_spacer;
+        self.version_bar.view(frame, version_area);
     }
 }
 

@@ -4,12 +4,12 @@ use ratatui::widgets::{Block, Padding, Paragraph};
 use shuvarie_catalog::TokenUsage;
 use termina::event::KeyEvent;
 
-use crate::tui::utils::locale::ToDecSepNum;
+use crate::tui::{utils::locale::ToDecSepNum, components::VersionBar};
 
 use super::theme;
 
 pub struct Sidebar {
-    pub version: String,
+    pub version_bar: VersionBar,
     pub tokens: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -40,7 +40,7 @@ pub enum SidebarMessage {
 impl Sidebar {
     pub fn new() -> Self {
         Self {
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version_bar: VersionBar::new(HorizontalAlignment::Left),
             tokens: 0,
             input_tokens: 0,
             output_tokens: 0,
@@ -96,13 +96,16 @@ impl Sidebar {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let mut lines: Vec<Line> = Vec::new();
+        let [version_area, lines_area] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .spacing(1)
+        .areas(inner);
 
-        lines.push(Line::from(vec![
-            Span::raw("⚔️ Shuvarie ").fg(theme::ACCENT).bold(),
-            Span::raw(format!("v{}", self.version)).fg(theme::TEXT_DIM),
-        ]));
-        lines.push(Line::from(""));
+        self.version_bar.view(frame, version_area);
+
+        let mut lines: Vec<Line> = Vec::new();
 
         if let Some(p) = &self.provider {
             let mut line = vec![Span::raw(p.clone()).fg(theme::TEXT)];
@@ -160,7 +163,7 @@ impl Sidebar {
         lines.push(Line::from("  inactive").fg(theme::TEXT_MUTED));
 
         let para = Paragraph::new(lines).alignment(Alignment::Left);
-        frame.render_widget(para, inner);
+        frame.render_widget(para, lines_area);
     }
 }
 

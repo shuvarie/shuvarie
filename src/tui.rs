@@ -29,7 +29,7 @@ mod sidebar;
 mod theme;
 mod utils;
 mod welcome;
-mod widgets;
+mod components;
 
 pub async fn run_tui(cmd_tx: Sender<Command>, mut event_rx: Receiver<CoreEvent>) -> io::Result<()> {
     let mut term = PlatformTerminal::new()?;

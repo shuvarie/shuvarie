@@ -12,7 +12,7 @@ use crate::tui::utils::{alt, ctrl};
 
 use super::sidebar::{Sidebar, SidebarMessage};
 use super::theme;
-use super::widgets::{TextArea, TextAreaEffect, TextAreaMessage};
+use super::components::{TextArea, TextAreaEffect, TextAreaMessage};
 
 pub enum SessionMessage {
     Text(TextAreaMessage),
