@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -17,6 +18,7 @@ pub async fn run(
     mut config: Config,
     mut store: Store,
     load_current: bool,
+    config_path: Option<PathBuf>,
     mut cmd_rx: Receiver<Command>,
     event_tx: Sender<Event>,
 ) {
@@ -72,7 +74,7 @@ pub async fn run(
             Command::AddProvider { name, config: pc } => {
                 config.providers.insert(name.clone(), pc);
                 clients.remove(&name);
-                persist(&config, &event_tx).await;
+                persist(&config, config_path.as_deref(), &event_tx).await;
             }
             Command::RemoveProvider { name } => {
                 config.providers.remove(&name);
@@ -81,7 +83,7 @@ pub async fn run(
                     config.active_provider = None;
                     config.active_model = None;
                 }
-                persist(&config, &event_tx).await;
+                persist(&config, config_path.as_deref(), &event_tx).await;
             }
             Command::SetActiveProvider { name } => {
                 if config.providers.contains_key(&name) {
@@ -92,15 +94,15 @@ pub async fn run(
                     {
                         clients.insert(name.clone(), client);
                     }
-                    persist(&config, &event_tx).await;
+                    persist(&config, config_path.as_deref(), &event_tx).await;
                 }
             }
             Command::SetActiveModel { model } => {
                 config.active_model = Some(model);
-                persist(&config, &event_tx).await;
+                persist(&config, config_path.as_deref(), &event_tx).await;
             }
             Command::SaveConfig => {
-                persist(&config, &event_tx).await;
+                persist(&config, config_path.as_deref(), &event_tx).await;
             }
             Command::StartSession => {
                 session = Some(Arc::new(Mutex::new(Session::new())));
@@ -481,8 +483,12 @@ fn build_client(pc: &ProviderConfig) -> Result<ProviderClient, String> {
         .map_err(|e| e.to_string())
 }
 
-async fn persist(config: &Config, event_tx: &Sender<Event>) {
-    match config.save() {
+async fn persist(config: &Config, config_path: Option<&Path>, event_tx: &Sender<Event>) {
+    let result = match config_path {
+        Some(path) => config.save_to(path),
+        None => config.save(),
+    };
+    match result {
         Ok(()) => {
             let _ = event_tx.send(Event::ConfigSaved).await;
         }

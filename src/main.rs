@@ -16,6 +16,7 @@ async fn main() -> color_eyre::Result<()> {
         shuvarie_core::Config::load()?,
         store,
         args.current,
+        None,
         cmd_rx,
         event_tx,
     ));

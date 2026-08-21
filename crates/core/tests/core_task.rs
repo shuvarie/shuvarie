@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use shuvarie_catalog::Provider;
 use shuvarie_core::{Command, Config, Event, ProviderConfig, run};
@@ -13,6 +14,17 @@ fn empty_config() -> Config {
     }
 }
 
+fn temp_config_path(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "shuvarie-test-{name}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    dir.join("shuvarie").join("config.toml")
+}
+
 #[tokio::test]
 async fn ping_pong() {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
@@ -22,6 +34,7 @@ async fn ping_pong() {
         empty_config(),
         Store::open_in_memory().await.unwrap(),
         false,
+        None,
         cmd_rx,
         event_tx,
     ));
@@ -34,8 +47,9 @@ async fn ping_pong() {
 
 #[tokio::test]
 async fn add_provider_emits_saved() {
-    // The core task persists to Config::config_path() (user config dir). We only
-    // assert the event is emitted here; disk round-trip is covered by config tests.
+    // The core task persists to the given config path; we assert the event is
+    // emitted and the provider lands in the temp file, not the user config.
+    let config_path = temp_config_path("add-provider");
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
@@ -44,6 +58,7 @@ async fn add_provider_emits_saved() {
         config,
         Store::open_in_memory().await.unwrap(),
         false,
+        Some(config_path.clone()),
         cmd_rx,
         event_tx,
     ));
@@ -67,12 +82,20 @@ async fn add_provider_emits_saved() {
         }
     }
     assert!(saw_saved, "expected ConfigSaved event");
+
+    let loaded = Config::load_from(&config_path).expect("load persisted config");
+    assert!(
+        loaded.providers.contains_key("shuvarie-test-add"),
+        "provider persisted to the temp config path"
+    );
     drop(cmd_tx);
     let _ = handle.await;
+    let _ = std::fs::remove_file(config_path);
 }
 
 #[tokio::test]
 async fn remove_provider_clears_active() {
+    let config_path = temp_config_path("remove-provider");
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
@@ -87,6 +110,7 @@ async fn remove_provider_clears_active() {
         config,
         Store::open_in_memory().await.unwrap(),
         false,
+        Some(config_path.clone()),
         cmd_rx,
         event_tx,
     ));
@@ -103,8 +127,15 @@ async fn remove_provider_clears_active() {
         }
     }
     assert!(saved);
+
+    let loaded = Config::load_from(&config_path).expect("load persisted config");
+    assert!(
+        !loaded.providers.contains_key("p1") && loaded.active_provider.is_none(),
+        "removal persisted to the temp config path"
+    );
     drop(cmd_tx);
     let _ = handle.await;
+    let _ = std::fs::remove_file(config_path);
 }
 
 #[tokio::test]
@@ -116,6 +147,7 @@ async fn send_message_without_active_provider_emits_error() {
         empty_config(),
         Store::open_in_memory().await.unwrap(),
         false,
+        None,
         cmd_rx,
         event_tx,
     ));
@@ -154,6 +186,7 @@ async fn cancel_with_no_active_stream_keeps_task_alive() {
         empty_config(),
         Store::open_in_memory().await.unwrap(),
         false,
+        None,
         cmd_rx,
         event_tx,
     ));
@@ -186,6 +219,7 @@ async fn double_send_while_streaming_is_rejected() {
         config,
         Store::open_in_memory().await.unwrap(),
         false,
+        None,
         cmd_rx,
         event_tx,
     ));
@@ -234,7 +268,7 @@ async fn send_message_persists_session_and_messages() {
 
     let store = Store::open_in_memory().await.unwrap();
     let store_clone = store.clone();
-    let handle = tokio::spawn(run(config, store_clone, false, cmd_rx, event_tx));
+    let handle = tokio::spawn(run(config, store_clone, false, None, cmd_rx, event_tx));
 
     cmd_tx
         .send(Command::SendMessage {
@@ -284,7 +318,14 @@ async fn load_current_emits_session_loaded_on_startup() {
 
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
-    let handle = tokio::spawn(run(empty_config(), store.clone(), true, cmd_rx, event_tx));
+    let handle = tokio::spawn(run(
+        empty_config(),
+        store.clone(),
+        true,
+        None,
+        cmd_rx,
+        event_tx,
+    ));
 
     cmd_tx.send(Command::Ping).await.unwrap();
 
@@ -316,7 +357,14 @@ async fn no_load_current_skips_session_loaded_on_startup() {
 
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
-    let handle = tokio::spawn(run(empty_config(), store.clone(), false, cmd_rx, event_tx));
+    let handle = tokio::spawn(run(
+        empty_config(),
+        store.clone(),
+        false,
+        None,
+        cmd_rx,
+        event_tx,
+    ));
 
     cmd_tx.send(Command::Ping).await.unwrap();
 
