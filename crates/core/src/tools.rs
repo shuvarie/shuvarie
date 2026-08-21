@@ -475,6 +475,26 @@ pub fn all_tools() -> Vec<std::sync::Arc<dyn Tool>> {
     ]
 }
 
+pub fn read_tools() -> Vec<std::sync::Arc<dyn Tool>> {
+    vec![
+        std::sync::Arc::new(ReadFile),
+        std::sync::Arc::new(ListDir),
+        std::sync::Arc::new(Grep),
+    ]
+}
+
+pub fn command_tools() -> Vec<std::sync::Arc<dyn Tool>> {
+    vec![std::sync::Arc::new(RunCommand)]
+}
+
+pub fn edit_tools() -> Vec<std::sync::Arc<dyn Tool>> {
+    vec![
+        std::sync::Arc::new(ReadFile),
+        std::sync::Arc::new(WriteFile),
+        std::sync::Arc::new(EditFile),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

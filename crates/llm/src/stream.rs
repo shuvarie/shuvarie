@@ -3,7 +3,7 @@ use serde_json::Value;
 use shuvarie_catalog::TokenUsage;
 use std::pin::Pin;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum StreamItem {
     Delta {
         text: String,
@@ -11,8 +11,19 @@ pub enum StreamItem {
     ToolStart {
         name: String,
         args: Value,
+        worker: Option<String>,
     },
     ToolResult {
+        name: String,
+        output: String,
+        ok: bool,
+        worker: Option<String>,
+    },
+    WorkerStart {
+        name: String,
+        args: Value,
+    },
+    WorkerResult {
         name: String,
         output: String,
         ok: bool,

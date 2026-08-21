@@ -1,5 +1,7 @@
+use futures_util::StreamExt;
 use serde_json::Value;
 use shuvarie_catalog::Provider;
+use std::sync::Arc;
 
 use crate::message::ChatMsg;
 use crate::stream::{StreamItem, StreamStream};
@@ -142,6 +144,90 @@ impl ProviderClient {
             .collect())
     }
 
+    pub async fn run_worker(
+        &self,
+        req: &crate::agent::WorkerRequest,
+    ) -> std::result::Result<String, String> {
+        let user_msg = rig::message::Message::user(req.task.clone());
+        let dynamic = dynamic_tools(&req.tools);
+        let activity_tx = req.activity_tx.clone();
+        let usage = Arc::clone(&req.usage);
+        match &self.list {
+            ListImpl::OpenAi(c) => {
+                let agent = agent_with_tools(c, &req.model, Some(&req.preamble), dynamic);
+                run_worker_agent(
+                    agent,
+                    &req.name,
+                    user_msg,
+                    activity_tx,
+                    usage,
+                    req.max_turns,
+                )
+                .await
+            }
+            ListImpl::OpenRouter(c) => {
+                let agent = agent_with_tools(c, &req.model, Some(&req.preamble), dynamic);
+                run_worker_agent(
+                    agent,
+                    &req.name,
+                    user_msg,
+                    activity_tx,
+                    usage,
+                    req.max_turns,
+                )
+                .await
+            }
+            ListImpl::DeepSeek(c) => {
+                let agent = agent_with_tools(c, &req.model, Some(&req.preamble), dynamic);
+                run_worker_agent(
+                    agent,
+                    &req.name,
+                    user_msg,
+                    activity_tx,
+                    usage,
+                    req.max_turns,
+                )
+                .await
+            }
+            ListImpl::Anthropic(c) => {
+                let agent = agent_with_tools(c, &req.model, Some(&req.preamble), dynamic);
+                run_worker_agent(
+                    agent,
+                    &req.name,
+                    user_msg,
+                    activity_tx,
+                    usage,
+                    req.max_turns,
+                )
+                .await
+            }
+            ListImpl::Gemini(c) => {
+                let agent = agent_with_tools(c, &req.model, Some(&req.preamble), dynamic);
+                run_worker_agent(
+                    agent,
+                    &req.name,
+                    user_msg,
+                    activity_tx,
+                    usage,
+                    req.max_turns,
+                )
+                .await
+            }
+            ListImpl::Ollama(c) => {
+                let agent = agent_with_tools(c, &req.model, Some(&req.preamble), dynamic);
+                run_worker_agent(
+                    agent,
+                    &req.name,
+                    user_msg,
+                    activity_tx,
+                    usage,
+                    req.max_turns,
+                )
+                .await
+            }
+        }
+    }
+
     pub async fn stream(
         &self,
         model: &str,
@@ -149,8 +235,8 @@ impl ProviderClient {
         prompt: &str,
         history: &[ChatMsg],
         tools: &[std::sync::Arc<dyn Tool>],
+        workers: &mut [crate::agent::WorkerAgent],
     ) -> StreamStream {
-        use futures_util::StreamExt;
         use rig::streaming::StreamingChat;
 
         let user_msg = rig::message::Message::user(prompt.to_string());
@@ -159,55 +245,46 @@ impl ProviderClient {
             .cloned()
             .map(rig::message::Message::from)
             .collect();
-        let dynamic: Vec<rig::tool::DynamicTool> = tools
-            .iter()
-            .map(|tool| {
-                let def = tool.definition();
-                let tool = std::sync::Arc::clone(tool);
-                rig::tool::DynamicTool::new(
-                    def.name.clone(),
-                    def.description.clone(),
-                    def.parameters.clone(),
-                    move |_ctx, args| {
-                        let tool = std::sync::Arc::clone(&tool);
-                        Box::pin(async move {
-                            tool.call(args)
-                                .await
-                                .map(rig::tool::ToolOutput::text)
-                                .map_err(|message| {
-                                    let error = serde_json::json!({ "error": message });
-                                    rig::tool::ToolExecutionError::new(
-                                        rig::tool::ToolErrorKind::Other,
-                                        message,
-                                    )
-                                    .with_model_output(rig::tool::ToolOutput::json(error))
-                                })
-                        })
-                    },
-                )
-            })
-            .collect();
-
-        fn agent_with_tools<C>(
-            client: &C,
-            model: &str,
-            preamble: Option<&str>,
-            dynamic: Vec<rig::tool::DynamicTool>,
-        ) -> rig::agent::Agent<C::CompletionModel>
-        where
-            C: rig::client::CompletionClient + rig::prelude::AgentClientExt,
-        {
-            let builder = match preamble {
-                Some(p) => client.agent(model).preamble(p),
-                None => client.agent(model).without_preamble(),
-            };
-            builder.dynamic_tools(dynamic).build()
+        let mut dynamic = dynamic_tools(tools);
+        for worker in workers.iter() {
+            let def = worker.definition();
+            let worker = std::sync::Arc::new(worker.clone());
+            dynamic.push(rig::tool::DynamicTool::new(
+                def.name,
+                def.description,
+                def.parameters,
+                move |_ctx, args| {
+                    let worker = std::sync::Arc::clone(&worker);
+                    Box::pin(async move {
+                        worker
+                            .call(args)
+                            .await
+                            .map(rig::tool::ToolOutput::text)
+                            .map_err(|message| {
+                                let error = serde_json::json!({ "error": message });
+                                rig::tool::ToolExecutionError::new(
+                                    rig::tool::ToolErrorKind::Other,
+                                    message,
+                                )
+                                .with_model_output(rig::tool::ToolOutput::json(error))
+                            })
+                    })
+                },
+            ));
         }
+        let worker_names: std::collections::HashSet<String> =
+            workers.iter().map(|w| w.name().to_string()).collect();
+        let receivers: Vec<tokio::sync::mpsc::Receiver<StreamItem>> = workers
+            .iter_mut()
+            .filter_map(crate::agent::WorkerAgent::take_activity_receiver)
+            .collect();
 
         async fn build<M>(
             agent: rig::agent::Agent<M>,
             prompt: rig::message::Message,
             history: Vec<rig::message::Message>,
+            receivers: Vec<tokio::sync::mpsc::Receiver<StreamItem>>,
+            worker_names: std::collections::HashSet<String>,
         ) -> StreamStream
         where
             M: rig::completion::CompletionModel + 'static,
@@ -217,7 +294,9 @@ impl ProviderClient {
             let mut accumulated = String::new();
             let mut tool_names: std::collections::HashMap<String, String> =
                 std::collections::HashMap::new();
-            Box::pin(stream.map(move |item| match item {
+            let mut pending_workers: std::collections::VecDeque<String> =
+                std::collections::VecDeque::new();
+            let main = stream.map(move |item| match item {
                 Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
                     rig::streaming::StreamedAssistantContent::Text(t),
                 )) => {
@@ -231,10 +310,20 @@ impl ProviderClient {
                     },
                 )) => {
                     tool_called = true;
-                    tool_names.insert(internal_call_id, tool_call.function.name.clone());
-                    StreamItem::ToolStart {
-                        name: tool_call.function.name,
-                        args: tool_call.function.arguments,
+                    let name = tool_call.function.name.clone();
+                    if worker_names.contains(&name) {
+                        pending_workers.push_back(name.clone());
+                        StreamItem::WorkerStart {
+                            name,
+                            args: tool_call.function.arguments,
+                        }
+                    } else {
+                        tool_names.insert(internal_call_id, name.clone());
+                        StreamItem::ToolStart {
+                            name,
+                            args: tool_call.function.arguments,
+                            worker: None,
+                        }
                     }
                 }
                 Ok(rig::agent::MultiTurnStreamItem::StreamUserItem(
@@ -243,7 +332,6 @@ impl ProviderClient {
                         internal_call_id,
                     },
                 )) => {
-                    let name = tool_names.remove(&internal_call_id).unwrap_or_default();
                     let mut output = String::new();
                     let mut ok = true;
                     for content in tool_result.content.iter() {
@@ -265,7 +353,20 @@ impl ProviderClient {
                             output = message.to_string();
                         }
                     }
-                    StreamItem::ToolResult { name, output, ok }
+                    let name = tool_names.remove(&internal_call_id);
+                    match name {
+                        Some(name) => StreamItem::ToolResult {
+                            name,
+                            output,
+                            ok,
+                            worker: None,
+                        },
+                        None => StreamItem::WorkerResult {
+                            name: pending_workers.pop_front().unwrap_or_default(),
+                            output,
+                            ok,
+                        },
+                    }
                 }
                 Ok(rig::agent::MultiTurnStreamItem::FinalResponse(resp)) => {
                     let text = if accumulated.is_empty() && tool_called {
@@ -284,7 +385,8 @@ impl ProviderClient {
                 Err(e) => StreamItem::Error {
                     message: e.to_string(),
                 },
-            }))
+            });
+            Box::pin(merge_streams(main, receivers))
         }
 
         match &self.list {
@@ -293,6 +395,8 @@ impl ProviderClient {
                     agent_with_tools(c, model, preamble, dynamic),
                     user_msg,
                     rig_history,
+                    receivers,
+                    worker_names,
                 )
                 .await
             }
@@ -301,6 +405,8 @@ impl ProviderClient {
                     agent_with_tools(c, model, preamble, dynamic),
                     user_msg,
                     rig_history,
+                    receivers,
+                    worker_names,
                 )
                 .await
             }
@@ -309,6 +415,8 @@ impl ProviderClient {
                     agent_with_tools(c, model, preamble, dynamic),
                     user_msg,
                     rig_history,
+                    receivers,
+                    worker_names,
                 )
                 .await
             }
@@ -317,6 +425,8 @@ impl ProviderClient {
                     agent_with_tools(c, model, preamble, dynamic),
                     user_msg,
                     rig_history,
+                    receivers,
+                    worker_names,
                 )
                 .await
             }
@@ -325,6 +435,8 @@ impl ProviderClient {
                     agent_with_tools(c, model, preamble, dynamic),
                     user_msg,
                     rig_history,
+                    receivers,
+                    worker_names,
                 )
                 .await
             }
@@ -333,9 +445,274 @@ impl ProviderClient {
                     agent_with_tools(c, model, preamble, dynamic),
                     user_msg,
                     rig_history,
+                    receivers,
+                    worker_names,
                 )
                 .await
             }
         }
+    }
+}
+
+fn dynamic_tools(tools: &[std::sync::Arc<dyn Tool>]) -> Vec<rig::tool::DynamicTool> {
+    tools
+        .iter()
+        .map(|tool| {
+            let def = tool.definition();
+            let tool = std::sync::Arc::clone(tool);
+            rig::tool::DynamicTool::new(
+                def.name.clone(),
+                def.description.clone(),
+                def.parameters.clone(),
+                move |_ctx, args| {
+                    let tool = std::sync::Arc::clone(&tool);
+                    Box::pin(async move {
+                        tool.call(args)
+                            .await
+                            .map(rig::tool::ToolOutput::text)
+                            .map_err(|message| {
+                                let error = serde_json::json!({ "error": message });
+                                rig::tool::ToolExecutionError::new(
+                                    rig::tool::ToolErrorKind::Other,
+                                    message,
+                                )
+                                .with_model_output(rig::tool::ToolOutput::json(error))
+                            })
+                    })
+                },
+            )
+        })
+        .collect()
+}
+
+fn agent_with_tools<C>(
+    client: &C,
+    model: &str,
+    preamble: Option<&str>,
+    dynamic: Vec<rig::tool::DynamicTool>,
+) -> rig::agent::Agent<C::CompletionModel>
+where
+    C: rig::client::CompletionClient + rig::prelude::AgentClientExt,
+{
+    let builder = match preamble {
+        Some(p) => client.agent(model).preamble(p),
+        None => client.agent(model).without_preamble(),
+    };
+    builder.dynamic_tools(dynamic).build()
+}
+
+async fn run_worker_agent<M>(
+    agent: rig::agent::Agent<M>,
+    name: &str,
+    prompt: rig::message::Message,
+    activity_tx: tokio::sync::mpsc::Sender<StreamItem>,
+    usage: std::sync::Arc<std::sync::Mutex<shuvarie_catalog::TokenUsage>>,
+    max_turns: usize,
+) -> std::result::Result<String, String>
+where
+    M: rig::completion::CompletionModel + 'static,
+{
+    use rig::streaming::StreamingChat;
+
+    let mut stream = agent
+        .stream_chat(prompt, Vec::<rig::message::Message>::new())
+        .max_turns(max_turns)
+        .await;
+
+    let mut text = String::new();
+    let mut usage_aggregate = shuvarie_catalog::TokenUsage::default();
+    let mut tool_names: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
+                rig::streaming::StreamedAssistantContent::Text(t),
+            )) => {
+                text.push_str(&t.text);
+            }
+            Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
+                rig::streaming::StreamedAssistantContent::ToolCall {
+                    tool_call,
+                    internal_call_id,
+                },
+            )) => {
+                tool_names.insert(internal_call_id, tool_call.function.name.clone());
+                let _ = activity_tx
+                    .send(StreamItem::ToolStart {
+                        name: tool_call.function.name,
+                        args: tool_call.function.arguments,
+                        worker: Some(name.to_string()),
+                    })
+                    .await;
+            }
+            Ok(rig::agent::MultiTurnStreamItem::StreamUserItem(
+                rig::streaming::StreamedUserContent::ToolResult {
+                    tool_result,
+                    internal_call_id,
+                },
+            )) => {
+                let tool_name = tool_names.remove(&internal_call_id).unwrap_or_default();
+                let mut output = String::new();
+                let mut ok = true;
+                for content in tool_result.content.iter() {
+                    if let Some(text) = content.as_text() {
+                        if !output.is_empty() {
+                            output.push('\n');
+                        }
+                        output.push_str(text);
+                    }
+                }
+                if output.is_empty() {
+                    ok = false;
+                    output = String::from("(no output)");
+                } else if output.starts_with("{\"error\":") {
+                    ok = false;
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&output)
+                        && let Some(message) = value.get("error").and_then(Value::as_str)
+                    {
+                        output = message.to_string();
+                    }
+                }
+                let _ = activity_tx
+                    .send(StreamItem::ToolResult {
+                        name: tool_name,
+                        output,
+                        ok,
+                        worker: Some(name.to_string()),
+                    })
+                    .await;
+            }
+            Ok(rig::agent::MultiTurnStreamItem::FinalResponse(resp)) => {
+                usage_aggregate = crate::usage::token_usage_from_rig(resp.usage);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                let message = format!("worker '{name}' failed: {e}");
+                let _ = activity_tx
+                    .send(StreamItem::Error {
+                        message: message.clone(),
+                    })
+                    .await;
+                return Err(message);
+            }
+        }
+    }
+    {
+        let mut guard = usage.lock().unwrap();
+        guard.input_tokens += usage_aggregate.input_tokens;
+        guard.output_tokens += usage_aggregate.output_tokens;
+        guard.total_tokens += usage_aggregate.total_tokens;
+        guard.cached_input_tokens += usage_aggregate.cached_input_tokens;
+        guard.reasoning_tokens += usage_aggregate.reasoning_tokens;
+    }
+    Ok(text)
+}
+
+fn merge_streams(
+    main: impl futures_core::Stream<Item = StreamItem> + Send + 'static,
+    receivers: Vec<tokio::sync::mpsc::Receiver<StreamItem>>,
+) -> StreamStream {
+    use futures_util::stream::select_all;
+    use std::pin::Pin;
+
+    let mut streams: Vec<Pin<Box<dyn futures_core::Stream<Item = StreamItem> + Send>>> = Vec::new();
+    streams.push(Box::pin(main));
+    for rx in receivers {
+        streams.push(Box::pin(tokio_rx_stream(rx)));
+    }
+    Box::pin(select_all(streams))
+}
+
+fn tokio_rx_stream(
+    rx: tokio::sync::mpsc::Receiver<StreamItem>,
+) -> impl futures_core::Stream<Item = StreamItem> {
+    use futures_util::stream::unfold;
+    unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::StreamExt;
+    use serde_json::json;
+
+    fn pending_stream() -> impl futures_core::Stream<Item = StreamItem> + Send + 'static {
+        futures_util::stream::pending::<StreamItem>()
+    }
+
+    #[tokio::test]
+    async fn merge_streams_yields_main_and_worker_items() {
+        let (worker_tx, worker_rx) = tokio::sync::mpsc::channel(8);
+        let main_stream = futures_util::stream::iter(vec![StreamItem::Delta {
+            text: "main".into(),
+        }]);
+        let mut merged = merge_streams(main_stream, vec![worker_rx]);
+        let worker_items = vec![
+            StreamItem::ToolStart {
+                name: "read_file".into(),
+                args: json!({ "path": "x.rs" }),
+                worker: Some("explore_workspace".into()),
+            },
+            StreamItem::ToolResult {
+                name: "read_file".into(),
+                output: "ok".into(),
+                ok: true,
+                worker: Some("explore_workspace".into()),
+            },
+        ];
+        let _ = worker_tx.send(worker_items[0].clone()).await;
+        let _ = worker_tx.send(worker_items[1].clone()).await;
+        drop(worker_tx);
+        let mut collected = Vec::new();
+        while let Some(item) = merged.next().await {
+            collected.push(item);
+        }
+        assert_eq!(collected.len(), 3, "main delta + two worker items");
+        assert!(collected.contains(&worker_items[0]));
+        assert!(collected.contains(&worker_items[1]));
+        assert!(collected.contains(&StreamItem::Delta {
+            text: "main".into()
+        }));
+    }
+
+    #[tokio::test]
+    async fn merge_streams_emits_worker_items_even_when_main_pending() {
+        let (worker_tx, worker_rx) = tokio::sync::mpsc::channel(8);
+        let mut merged = merge_streams(pending_stream(), vec![worker_rx]);
+        let item = StreamItem::WorkerStart {
+            name: "run_tests".into(),
+            args: json!({ "task": "run tests" }),
+        };
+        let _ = worker_tx.send(item.clone()).await;
+        let got = tokio::time::timeout(std::time::Duration::from_secs(2), merged.next())
+            .await
+            .expect("worker item should arrive")
+            .expect("stream should not end");
+        assert_eq!(got, item);
+    }
+
+    #[tokio::test]
+    async fn worker_missing_task_returns_error() {
+        let client = ProviderClient::build(Provider::Ollama, None, None).unwrap();
+        let (activity_tx, _activity_rx) = tokio::sync::mpsc::channel::<StreamItem>(8);
+        let usage = Arc::new(std::sync::Mutex::new(
+            shuvarie_catalog::TokenUsage::default(),
+        ));
+        let worker = crate::agent::WorkerAgent::new(
+            "test_worker",
+            "a test worker",
+            "you are a test worker",
+            client,
+            "test-model",
+            Vec::new(),
+            usage,
+        );
+        let err = worker
+            .call(json!({}))
+            .await
+            .expect_err("missing task should fail");
+        assert!(err.contains("task"), "error should mention task: {err}");
     }
 }

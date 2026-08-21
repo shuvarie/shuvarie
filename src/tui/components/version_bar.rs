@@ -1,8 +1,8 @@
 use ratatui::{
+    Frame,
     layout::Rect,
     prelude::*,
     text::{Line, Span},
-    Frame,
 };
 
 use crate::tui::theme;

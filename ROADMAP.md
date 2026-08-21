@@ -22,6 +22,7 @@ Each milestone is intended to be independently mergeable and to leave the binary
 - Input areas feature a virtual cursor (reversed block at cursor position), Emacs keybindings (Ctrl+B/F/A/E/D/H/K, Alt+B/F, Ctrl+N/P), and content-width-sized centered text in overlays.
 - Quit is via `Ctrl+C` → confirm dialog (Enter or Ctrl+C again to confirm, Esc to cancel); `q` no longer quits.
 - Agent tool calling (M7.1): `shuvarie-llm` exposes a portable `Tool` trait; `shuvarie-core` implements six tools (read/write/edit files, run commands, list dirs, grep) with a workspace-root escape guard; the streaming agent loop runs up to 20 turns, and tool calls/results render inline in the chat pane (`›` running, `✓` ok, `✗` error). Tool-call-only replies surface a "(tool output only)" placeholder instead of an empty message.
+- Multi-agent orchestration (M7.3): the main agent is an orchestrator that can delegate to three worker agents (`explore_workspace`, `run_tests`, `edit_files`), each running its own agent loop over a narrowed tool set. Worker delegation renders with a `❖` marker and nested indented tool lines; worker token usage accumulates into the session Context totals. See the M7.3 bullet below for details.
 - Markdown + code highlighting: new `shuvarie-highlight` crate renders user/system/assistant message bodies through pulldown-cmark (bold/italic/strikethrough, inline code, headings, lists, quotes, tables, links) with fenced code blocks highlighted via syntect (pure-rust regex-fancy, programmatic heraldic theme) and a custom ` ```diff ` renderer (`+`/`-`/`@@` tinctures); code-block lines get a subtle surface background. Re-parses the streaming pending text each token.
 
 ## M0 — Foundations
@@ -104,11 +105,11 @@ Persist chat sessions and message history so conversations survive restarts.
 
 ## M7+ — Agent features
 
-Milestone M7.1 ships; the M7.2 catalog milestone ships; the rest remain future work.
+Milestone M7.1 ships; the M7.2 catalog milestone ships; M7.3 multi-agent orchestration ships; the rest remain future work.
 
 - [x] M7.1 — Tool calling (file read/write/edit, shell execution, list, grep) via a portable `Tool` trait over rig's `DynamicTool`, with a multi-turn agent loop (`max_turns` 20), an agent preamble, inline tool-activity rendering in the chat pane, and a workspace-root escape guard on all tools. Deferred follow-ups: tool-output token counting, configurable turn budget, approval prompts for edits/commands (see below).
 - [x] M7.2 — Uniform provider/model catalog: the `shuvarie-catalog` crate centralizes `Provider`/`ModelInfo`/`TokenUsage`, split embedded data (`data/models.toml` — canonical `<org>/<model>` stats; `data/providers/*.toml` — fallback rates, `aliases`, and kind-labeled `variants` deployment tiers), and `resolve`/`estimate_cost`/`enrich`/`variants` (exact then longest-prefix alias matching, provider-specific overrides win, provider-default fallback for unknown ids). Deferred follow-up: user-configurable rate overrides, and surfacing deployment-tier variants in the ModelPicker.
-- Multi-agent orchestration and task decomposition.
+- [x] M7.3 — Multi-agent orchestration and task decomposition: an always-active orchestrator agent (the main session agent) exposes three worker agents as tools — `explore_workspace` (list/read/grep), `run_tests` (build/test/lint), and `edit_files` (read/write/edit) — each running its own LLM agent loop (`max_turns` 10) over a narrowed tool set with a role-specific preamble. Workers surface inline in the chat pane: the delegate call renders with a `❖` marker and the worker's own tool calls render indented beneath it, tagged with the owning worker. Worker token usage accumulates into the session Context totals alongside the manager's. Deferred follow-up: per-worker model choice, configurable turn budgets, and deeper nesting (workers calling workers).
 - Context files / project-aware prompts (AGENTS.md scanning, `.shuvarie/context`).
 - RAG over chat history using Turso vector search and full-text search.
 - LSP integration (real LSP servers in the sidebar instead of inactive placeholders).

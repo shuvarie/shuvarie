@@ -14,6 +14,7 @@ use self::app::{App, AppEffect};
 pub mod add_provider;
 mod app;
 mod command_menu;
+mod components;
 mod confirm_quit;
 mod context;
 mod escape;
@@ -29,7 +30,6 @@ mod sidebar;
 mod theme;
 mod utils;
 mod welcome;
-mod components;
 
 pub async fn run_tui(cmd_tx: Sender<Command>, mut event_rx: Receiver<CoreEvent>) -> io::Result<()> {
     let mut term = PlatformTerminal::new()?;

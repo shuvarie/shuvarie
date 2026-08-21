@@ -1,3 +1,4 @@
+pub mod agent;
 mod error;
 pub mod message;
 mod model;
@@ -6,6 +7,7 @@ pub mod stream;
 pub mod tool;
 mod usage;
 
+pub use agent::WorkerAgent;
 pub use error::{LlmError, Result};
 pub use message::{ChatMsg, Role};
 pub use provider::ProviderClient;

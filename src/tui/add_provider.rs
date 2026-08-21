@@ -7,10 +7,10 @@ use termina::event::{KeyCode, KeyEvent};
 
 use crate::tui::utils::{alt, ctrl};
 
+use super::components::InputBuffer;
 use super::list::{render_list_item, scroll_offset_for};
 use super::search::{Search, SearchMessage};
 use super::theme;
-use super::components::InputBuffer;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AddProviderStage {

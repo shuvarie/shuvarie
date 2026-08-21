@@ -1,0 +1,139 @@
+use serde_json::{Value, json};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+
+use shuvarie_catalog::TokenUsage;
+
+use crate::ProviderClient;
+use crate::stream::StreamItem;
+use crate::tool::{Tool, ToolDefinition};
+
+pub struct WorkerAgent {
+    name: String,
+    description: String,
+    preamble: String,
+    client: ProviderClient,
+    model: String,
+    tools: Vec<Arc<dyn Tool>>,
+    activity_tx: mpsc::Sender<StreamItem>,
+    activity_rx: Option<mpsc::Receiver<StreamItem>>,
+    usage: Arc<std::sync::Mutex<TokenUsage>>,
+    max_turns: usize,
+}
+
+pub struct WorkerRequest {
+    pub client: ProviderClient,
+    pub name: String,
+    pub model: String,
+    pub preamble: String,
+    pub task: String,
+    pub tools: Vec<Arc<dyn Tool>>,
+    pub activity_tx: mpsc::Sender<StreamItem>,
+    pub usage: Arc<std::sync::Mutex<TokenUsage>>,
+    pub max_turns: usize,
+}
+
+impl WorkerAgent {
+    pub fn new(
+        name: &str,
+        description: &str,
+        preamble: &str,
+        client: ProviderClient,
+        model: &str,
+        tools: Vec<Arc<dyn Tool>>,
+        usage: Arc<std::sync::Mutex<TokenUsage>>,
+    ) -> Self {
+        let (activity_tx, activity_rx) = mpsc::channel(64);
+        Self {
+            name: name.to_string(),
+            description: description.to_string(),
+            preamble: preamble.to_string(),
+            client,
+            model: model.to_string(),
+            tools,
+            activity_tx,
+            activity_rx: Some(activity_rx),
+            usage,
+            max_turns: 10,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    pub fn take_activity_receiver(&mut self) -> Option<mpsc::Receiver<StreamItem>> {
+        self.activity_rx.take()
+    }
+
+    pub fn usage_shared(&self) -> Arc<std::sync::Mutex<TokenUsage>> {
+        Arc::clone(&self.usage)
+    }
+}
+
+impl Clone for WorkerAgent {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            preamble: self.preamble.clone(),
+            client: self.client.clone(),
+            model: self.model.clone(),
+            tools: self.tools.clone(),
+            activity_tx: self.activity_tx.clone(),
+            activity_rx: None,
+            usage: Arc::clone(&self.usage),
+            max_turns: self.max_turns,
+        }
+    }
+}
+
+impl Tool for WorkerAgent {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "The task for the worker to carry out"
+                    }
+                },
+                "required": ["task"]
+            }),
+        }
+    }
+
+    fn call(&self, args: Value) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
+        let request = WorkerRequest {
+            client: self.client.clone(),
+            name: self.name.clone(),
+            model: self.model.clone(),
+            preamble: self.preamble.clone(),
+            task: args
+                .get("task")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            tools: self.tools.clone(),
+            activity_tx: self.activity_tx.clone(),
+            usage: Arc::clone(&self.usage),
+            max_turns: self.max_turns,
+        };
+        let name = self.name.clone();
+        Box::pin(async move {
+            if request.task.is_empty() {
+                return Err(format!("worker '{name}' missing string argument 'task'"));
+            }
+            request.client.run_worker(&request).await
+        })
+    }
+}

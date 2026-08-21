@@ -5,9 +5,9 @@ use termina::event::KeyEvent;
 
 use crate::tui::components::VersionBar;
 
+use super::components::{TextArea, TextAreaEffect, TextAreaMessage};
 use super::logo::Logo;
 use super::theme;
-use super::components::{TextArea, TextAreaEffect, TextAreaMessage};
 
 pub enum HomeMessage {
     Input(TextAreaMessage),
@@ -48,13 +48,17 @@ impl HomeScreen {
     }
 
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
-        let [logo_area, input_area, key_hint_area, version_area] =
-            Layout::vertical([Length(self.logo.height() as u16), Length(3), Length(1), Length(1)])
-                .spacing(1)
-                .areas(
-                    area.centered_horizontally(Max(100))
-                        .centered_vertically(Ratio(1, 2)),
-                );
+        let [logo_area, input_area, key_hint_area, version_area] = Layout::vertical([
+            Length(self.logo.height() as u16),
+            Length(3),
+            Length(1),
+            Length(1),
+        ])
+        .spacing(1)
+        .areas(
+            area.centered_horizontally(Max(100))
+                .centered_vertically(Ratio(1, 2)),
+        );
 
         self.logo.view(frame, logo_area);
         self.input.view(frame, input_area);

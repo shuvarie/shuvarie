@@ -201,14 +201,23 @@ pub async fn run(
                     guard.messages[..guard.messages.len().saturating_sub(1)].to_vec()
                 };
                 let tools = crate::tools::all_tools();
+                let mut worker_set = crate::agents::build_workers(client.clone(), &model);
                 let stream = client
-                    .stream(&model, Some(AGENT_PREAMBLE), &content, &prior, &tools)
+                    .stream(
+                        &model,
+                        Some(AGENT_PREAMBLE),
+                        &content,
+                        &prior,
+                        &tools,
+                        &mut worker_set.workers,
+                    )
                     .await;
                 let tx = event_tx.clone();
                 let session_shared = s.clone();
                 let client_shared = client.clone();
                 let store_shared = store.clone();
                 let model_shared = model.clone();
+                let worker_usage = worker_set.usage;
                 active_stream = Some(
                     tokio::spawn(async move {
                         stream_stream_to_events(
@@ -217,6 +226,7 @@ pub async fn run(
                             client_shared,
                             store_shared,
                             model_shared,
+                            worker_usage,
                             tx,
                         )
                         .await;
@@ -310,7 +320,19 @@ You can read, write, and edit files, list directories, grep for text, and run co
 Prefer using tools to inspect the workspace and verify your work (for example, run the test \
 suite after editing code) instead of guessing. When a tool reports an error, fix the cause and \
 retry rather than stopping. After finishing the work, summarize what you did and any results in \
-a short reply. Keep the reply concise.";
+a short reply. Keep the reply concise.
+
+You can also delegate work to three specialist worker agents, exposed as tools:
+- explore_workspace: locates, reads, and summarizes existing code (list/read/grep). Use it for \
+  research and understanding before changes.
+- run_tests: runs the project's build, test, and lint commands and iterates on failures. Use it \
+  to verify changes or diagnose failing commands.
+- edit_files: implements changes by reading, writing, and editing files.
+
+Delegate a task to a worker when it is long, multi-step, or self-contained — the worker runs its \
+own agent loop and returns a summary. Keep doing your own work for quick, single tool calls. \
+You remain responsible for the final answer: synthesize worker results and verify the overall \
+outcome (for example, delegate to run_tests after edit_files).";
 
 async fn load_most_recent_session(
     store: &mut Store,
@@ -374,6 +396,7 @@ async fn stream_stream_to_events(
     client: ProviderClient,
     mut store: Store,
     model: String,
+    worker_usage: Arc<std::sync::Mutex<shuvarie_catalog::TokenUsage>>,
     event_tx: Sender<Event>,
 ) {
     use futures_util::StreamExt;
@@ -384,23 +407,56 @@ async fn stream_stream_to_events(
                 let _ = event_tx.send(Event::TokenReceived { content: text }).await;
             }
             shuvarie_llm::StreamItem::Delta { .. } => {}
-            shuvarie_llm::StreamItem::ToolStart { name, args } => {
-                let _ = event_tx.send(Event::ToolStarted { name, args }).await;
-            }
-            shuvarie_llm::StreamItem::ToolResult { name, output, ok } => {
+            shuvarie_llm::StreamItem::ToolStart { name, args, worker } => {
                 let _ = event_tx
-                    .send(Event::ToolFinished { name, ok, output })
+                    .send(Event::ToolStarted { name, args, worker })
+                    .await;
+            }
+            shuvarie_llm::StreamItem::ToolResult {
+                name,
+                output,
+                ok,
+                worker,
+            } => {
+                let _ = event_tx
+                    .send(Event::ToolFinished {
+                        name,
+                        ok,
+                        output,
+                        worker,
+                    })
+                    .await;
+            }
+            shuvarie_llm::StreamItem::WorkerStart { name, args } => {
+                let _ = event_tx.send(Event::WorkerStarted { name, args }).await;
+            }
+            shuvarie_llm::StreamItem::WorkerResult { name, output, ok } => {
+                let _ = event_tx
+                    .send(Event::WorkerFinished { name, ok, output })
                     .await;
             }
             shuvarie_llm::StreamItem::Done { text, usage } => {
                 let mut guard = session.lock().await;
+                let combined = {
+                    let worker_usage = worker_usage.lock().unwrap();
+                    shuvarie_catalog::TokenUsage {
+                        input_tokens: usage.input_tokens + worker_usage.input_tokens,
+                        output_tokens: usage.output_tokens + worker_usage.output_tokens,
+                        total_tokens: usage.total_tokens + worker_usage.total_tokens,
+                        cached_input_tokens: usage.cached_input_tokens
+                            + worker_usage.cached_input_tokens,
+                        reasoning_tokens: usage.reasoning_tokens + worker_usage.reasoning_tokens,
+                    }
+                };
                 guard.push_assistant(text.clone());
-                let cost = shuvarie_catalog::estimate_cost(client.kind(), &model, &usage);
-                guard.add_usage(usage, cost);
+                let cost = shuvarie_catalog::estimate_cost(client.kind(), &model, &combined);
+                guard.add_usage(combined, cost);
                 let id = guard.id;
                 drop(guard);
                 if let Some(id) = id
-                    && let Err(e) = store.append_assistant_message(id, &text, usage, cost).await
+                    && let Err(e) = store
+                        .append_assistant_message(id, &text, combined, cost)
+                        .await
                 {
                     let _ = event_tx
                         .send(Event::StreamError {
@@ -472,6 +528,7 @@ mod tests {
 
         let session_shared = session.clone();
         let store = Store::open_in_memory().await.unwrap();
+        let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
         tokio::spawn(async move {
             stream_stream_to_events(
                 stream,
@@ -479,6 +536,7 @@ mod tests {
                 client,
                 store,
                 "ollama-model".into(),
+                worker_usage,
                 event_tx,
             )
             .await;
@@ -526,6 +584,7 @@ mod tests {
 
         let session_shared = session.clone();
         let store = Store::open_in_memory().await.unwrap();
+        let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
         tokio::spawn(async move {
             stream_stream_to_events(
                 stream,
@@ -533,6 +592,7 @@ mod tests {
                 client,
                 store,
                 "ollama-model".into(),
+                worker_usage,
                 event_tx,
             )
             .await;
@@ -552,5 +612,100 @@ mod tests {
         assert!(saw_error, "expected StreamError");
         let guard = session.lock().await;
         assert!(guard.messages.is_empty(), "no assistant message on error");
+    }
+
+    #[tokio::test]
+    async fn worker_events_forward_and_usage_accumulates() {
+        let client = ProviderClient::build(Provider::Ollama, None, None).unwrap();
+        let session = Arc::new(Mutex::new(Session::new()));
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(16);
+
+        let stream: shuvarie_llm::StreamStream = Box::pin(futures_util::stream::iter(vec![
+            StreamItem::WorkerStart {
+                name: "explore_workspace".into(),
+                args: serde_json::json!({ "task": "find the bug" }),
+            },
+            StreamItem::ToolStart {
+                name: "grep".into(),
+                args: serde_json::json!({ "pattern": "bug" }),
+                worker: Some("explore_workspace".into()),
+            },
+            StreamItem::ToolResult {
+                name: "grep".into(),
+                output: "found".into(),
+                ok: true,
+                worker: Some("explore_workspace".into()),
+            },
+            StreamItem::WorkerResult {
+                name: "explore_workspace".into(),
+                output: "summary".into(),
+                ok: true,
+            },
+            StreamItem::Done {
+                text: "done".into(),
+                usage: TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 20,
+                    total_tokens: 30,
+                    ..TokenUsage::default()
+                },
+            },
+        ]));
+
+        let session_shared = session.clone();
+        let store = Store::open_in_memory().await.unwrap();
+        let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage {
+            input_tokens: 5,
+            output_tokens: 7,
+            total_tokens: 12,
+            ..TokenUsage::default()
+        }));
+        tokio::spawn(async move {
+            stream_stream_to_events(
+                stream,
+                session_shared,
+                client,
+                store,
+                "ollama-model".into(),
+                worker_usage,
+                event_tx,
+            )
+            .await;
+        });
+
+        let mut saw_worker_start = false;
+        let mut saw_worker_tool = false;
+        let mut saw_worker_finish = false;
+        loop {
+            match event_rx.recv().await {
+                Some(Event::WorkerStarted { name, .. }) if name == "explore_workspace" => {
+                    saw_worker_start = true;
+                }
+                Some(Event::ToolStarted { worker, .. })
+                    if worker.as_deref() == Some("explore_workspace") =>
+                {
+                    saw_worker_tool = true;
+                }
+                Some(Event::WorkerFinished { name, ok, .. }) if name == "explore_workspace" => {
+                    saw_worker_finish = ok;
+                }
+                Some(Event::UsageUpdate { usage, .. }) => {
+                    assert_eq!(usage.input_tokens, 15, "manager + worker input");
+                    assert_eq!(usage.output_tokens, 27, "manager + worker output");
+                    assert_eq!(usage.total_tokens, 42, "manager + worker total");
+                    saw_worker_finish = true;
+                }
+                Some(Event::StreamDone { .. }) => break,
+                Some(_) => {}
+                None => break,
+            }
+        }
+        assert!(saw_worker_start, "expected WorkerStarted");
+        assert!(saw_worker_tool, "expected nested tool event");
+        assert!(saw_worker_finish, "expected WorkerFinished or UsageUpdate");
+        let guard = session.lock().await;
+        assert_eq!(guard.tokens, 42, "session accumulates combined usage");
+        assert_eq!(guard.input_tokens, 15);
+        assert_eq!(guard.output_tokens, 27);
     }
 }

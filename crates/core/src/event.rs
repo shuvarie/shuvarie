@@ -27,8 +27,19 @@ pub enum Event {
     ToolStarted {
         name: String,
         args: serde_json::Value,
+        worker: Option<String>,
     },
     ToolFinished {
+        name: String,
+        ok: bool,
+        output: String,
+        worker: Option<String>,
+    },
+    WorkerStarted {
+        name: String,
+        args: serde_json::Value,
+    },
+    WorkerFinished {
         name: String,
         ok: bool,
         output: String,

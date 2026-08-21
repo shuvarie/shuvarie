@@ -245,14 +245,32 @@ impl App {
                         content,
                     }))
                 }
-                CoreEvent::ToolStarted { name, args } => {
+                CoreEvent::ToolStarted { name, args, worker } => {
                     Some(AppMessage::Session(SessionMessage::ToolStarted {
+                        name,
+                        args,
+                        worker,
+                    }))
+                }
+                CoreEvent::ToolFinished {
+                    name,
+                    ok,
+                    output,
+                    worker,
+                } => Some(AppMessage::Session(SessionMessage::ToolFinished {
+                    name,
+                    ok,
+                    output,
+                    worker,
+                })),
+                CoreEvent::WorkerStarted { name, args } => {
+                    Some(AppMessage::Session(SessionMessage::WorkerStarted {
                         name,
                         args,
                     }))
                 }
-                CoreEvent::ToolFinished { name, ok, output } => {
-                    Some(AppMessage::Session(SessionMessage::ToolFinished {
+                CoreEvent::WorkerFinished { name, ok, output } => {
+                    Some(AppMessage::Session(SessionMessage::WorkerFinished {
                         name,
                         ok,
                         output,

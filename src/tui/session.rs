@@ -10,9 +10,9 @@ use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
 use crate::tui::utils::{alt, ctrl};
 
+use super::components::{TextArea, TextAreaEffect, TextAreaMessage};
 use super::sidebar::{Sidebar, SidebarMessage};
 use super::theme;
-use super::components::{TextArea, TextAreaEffect, TextAreaMessage};
 
 pub enum SessionMessage {
     Text(TextAreaMessage),
@@ -24,8 +24,19 @@ pub enum SessionMessage {
     ToolStarted {
         name: String,
         args: serde_json::Value,
+        worker: Option<String>,
     },
     ToolFinished {
+        name: String,
+        ok: bool,
+        output: String,
+        worker: Option<String>,
+    },
+    WorkerStarted {
+        name: String,
+        args: serde_json::Value,
+    },
+    WorkerFinished {
         name: String,
         ok: bool,
         output: String,
@@ -70,6 +81,7 @@ pub struct ToolActivity {
     pub args: String,
     pub status: ToolStatus,
     pub output: String,
+    pub worker: Option<String>,
     pub message_index: usize,
     pub text_offset: usize,
 }
@@ -170,12 +182,13 @@ impl SessionScreen {
                 self.follow_bottom();
                 None
             }
-            SessionMessage::ToolStarted { name, args } => {
+            SessionMessage::ToolStarted { name, args, worker } => {
                 self.tools.push(ToolActivity {
                     name,
                     args: args.to_string(),
                     status: ToolStatus::Running,
                     output: String::new(),
+                    worker,
                     message_index: self.messages.len(),
                     text_offset: self.pending.len(),
                 });
@@ -185,12 +198,49 @@ impl SessionScreen {
                 self.follow_bottom();
                 None
             }
-            SessionMessage::ToolFinished { name, ok, output } => {
-                if let Some(tool) = self
-                    .tools
-                    .iter_mut()
-                    .find(|t| t.name == name && matches!(t.status, ToolStatus::Running))
-                {
+            SessionMessage::ToolFinished {
+                name,
+                ok,
+                output,
+                worker,
+            } => {
+                if let Some(tool) = self.tools.iter_mut().find(|t| {
+                    t.name == name && t.worker == worker && matches!(t.status, ToolStatus::Running)
+                }) {
+                    tool.status = if ok {
+                        ToolStatus::Ok
+                    } else {
+                        ToolStatus::Failed
+                    };
+                    tool.output = output;
+                }
+                self.status = None;
+                self.mark_scroll_dirty();
+                self.follow_bottom();
+                None
+            }
+            SessionMessage::WorkerStarted { name, args } => {
+                self.tools.push(ToolActivity {
+                    name,
+                    args: args.to_string(),
+                    status: ToolStatus::Running,
+                    output: String::new(),
+                    worker: Some(String::new()),
+                    message_index: self.messages.len(),
+                    text_offset: self.pending.len(),
+                });
+                self.streaming = true;
+                self.status = Some(format!("worker: {}", self.tools.last().unwrap().name));
+                self.mark_scroll_dirty();
+                self.follow_bottom();
+                None
+            }
+            SessionMessage::WorkerFinished { name, ok, output } => {
+                if let Some(tool) = self.tools.iter_mut().find(|t| {
+                    t.name == name
+                        && t.worker.as_deref() == Some("")
+                        && matches!(t.status, ToolStatus::Running)
+                }) {
                     tool.status = if ok {
                         ToolStatus::Ok
                     } else {
@@ -466,7 +516,12 @@ impl SessionScreen {
             ToolStatus::Ok => ("✓", theme::SUCCESS),
             ToolStatus::Failed => ("✗", theme::ERROR),
         };
-        let mut header = vec![Span::raw(marker).fg(fg).bold()];
+        let (prefix, marker, fg) = match tool.worker.as_deref() {
+            Some("") => ("", "❖", theme::ACCENT),
+            Some(_) => ("  ", marker, fg),
+            None => ("", marker, fg),
+        };
+        let mut header = vec![Span::raw(format!("{prefix}{marker}")).fg(fg).bold()];
         header.push(Span::raw(format!(" {}", tool.name)).fg(theme::TEXT).bold());
         if !tool.args.is_empty() {
             let args = &tool.args;
@@ -488,7 +543,7 @@ impl SessionScreen {
                 .take(120)
                 .collect();
             lines.push(Line::from(
-                Span::raw(format!("    {first}")).fg(theme::TEXT_DIM),
+                Span::raw(format!("{prefix}    {first}")).fg(theme::TEXT_DIM),
             ));
         }
     }

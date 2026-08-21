@@ -4,7 +4,7 @@ use ratatui::widgets::{Block, Padding, Paragraph};
 use shuvarie_catalog::TokenUsage;
 use termina::event::KeyEvent;
 
-use crate::tui::{utils::locale::ToDecSepNum, components::VersionBar};
+use crate::tui::{components::VersionBar, utils::locale::ToDecSepNum};
 
 use super::theme;
 
@@ -96,12 +96,10 @@ impl Sidebar {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let [version_area, lines_area] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(0),
-        ])
-        .spacing(1)
-        .areas(inner);
+        let [version_area, lines_area] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)])
+                .spacing(1)
+                .areas(inner);
 
         self.version_bar.view(frame, version_area);
 
