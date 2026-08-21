@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use ratatui::prelude::*;
-use shuvarie_core::{Config, Event as CoreEvent, ModelInfo};
+use shuvarie_core::{Connections, Event as CoreEvent, ModelInfo};
 use termina::Event as TermEvent;
 use termina::event::{KeyCode, KeyEventKind};
 use tokio::sync::mpsc::Sender;
@@ -111,16 +111,16 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(config: Config, cmd_tx: Sender<shuvarie_core::Command>) -> Self {
+    pub fn new(connections: Connections, cmd_tx: Sender<shuvarie_core::Command>) -> Self {
         let route = Route::Home;
         let mut welcome = Welcome::new();
-        if !config.has_connected_providers() {
+        if !connections.has_connected_providers() {
             welcome.open();
         }
-        let initial_provider = config.active_provider.clone();
-        let initial_model = config.active_model.clone();
+        let initial_provider = connections.active_provider.clone();
+        let initial_model = connections.active_model.clone();
         Self {
-            ctx: UpdateCtx::new(config, cmd_tx),
+            ctx: UpdateCtx::new(connections, cmd_tx),
             route,
             overlay: if welcome.open {
                 Overlay::Welcome
@@ -436,7 +436,7 @@ impl App {
                                 .send(shuvarie_core::Command::SetActiveModel { model });
                         }
                         ModelPickerEffect::Close => {
-                            if self.ctx.config.active_model.is_none()
+                            if self.ctx.connections.active_model.is_none()
                                 && let Some(first) = self.model_picker.models.first()
                             {
                                 self.ctx.send(shuvarie_core::Command::SetActiveModel {
@@ -454,7 +454,13 @@ impl App {
                         CommandMenuEffect::OpenModelSelect => {
                             let models = self
                                 .models
-                                .get(self.ctx.config.active_provider.as_deref().unwrap_or(""))
+                                .get(
+                                    self.ctx
+                                        .connections
+                                        .active_provider
+                                        .as_deref()
+                                        .unwrap_or(""),
+                                )
                                 .cloned()
                                 .unwrap_or_default();
                             self.model_picker.open(&models);
@@ -463,7 +469,7 @@ impl App {
                         }
                         CommandMenuEffect::AddProvider => {
                             let names: Vec<String> =
-                                self.ctx.config.providers.keys().cloned().collect();
+                                self.ctx.connections.providers.keys().cloned().collect();
                             self.add_provider_form = Some(AddProviderForm::new(&names));
                             self.overlay = Overlay::AddProvider;
                             return None;
@@ -511,7 +517,7 @@ impl App {
                     match effect {
                         WelcomeEffect::AddProvider => {
                             let names: Vec<String> =
-                                self.ctx.config.providers.keys().cloned().collect();
+                                self.ctx.connections.providers.keys().cloned().collect();
                             self.add_provider_form = Some(AddProviderForm::new(&names));
                             self.overlay = Overlay::AddProvider;
                         }
@@ -584,15 +590,15 @@ impl App {
                 if empty {
                     return None;
                 }
-                if Some(provider_name.as_str()) == self.ctx.config.active_provider.as_deref() {
+                if Some(provider_name.as_str()) == self.ctx.connections.active_provider.as_deref() {
                     let models = self.models.get(&provider_name).unwrap();
-                    let current = self.ctx.config.active_model.as_deref();
+                    let current = self.ctx.connections.active_model.as_deref();
                     let chosen = current
                         .filter(|c| models.iter().any(|m| m.id == *c))
                         .map(|c| c.to_string())
                         .or_else(|| models.first().map(|m| m.id.clone()));
                     if let Some(model) = chosen
-                        && self.ctx.config.active_model.as_deref() != Some(model.as_str())
+                        && self.ctx.connections.active_model.as_deref() != Some(model.as_str())
                     {
                         self.ctx
                             .send(shuvarie_core::Command::SetActiveModel { model });
@@ -676,8 +682,8 @@ impl App {
     }
 
     fn active_context_length(&self) -> Option<u64> {
-        let provider = self.ctx.config.active_provider.as_deref()?;
-        let model = self.ctx.config.active_model.as_deref()?;
+        let provider = self.ctx.connections.active_provider.as_deref()?;
+        let model = self.ctx.connections.active_model.as_deref()?;
         self.models
             .get(provider)?
             .iter()
@@ -686,15 +692,15 @@ impl App {
     }
 
     fn reload_config(&mut self) {
-        if let Ok(fresh) = Config::load() {
-            self.ctx.config = fresh;
-            if self.ctx.config.has_connected_providers() && self.welcome.open {
+        if let Ok(fresh) = Connections::load() {
+            self.ctx.connections = fresh;
+            if self.ctx.connections.has_connected_providers() && self.welcome.open {
                 self.welcome.close();
                 self.overlay = Overlay::None;
             }
             self.session.update(SessionMessage::UpdateConfig {
-                provider: self.ctx.config.active_provider.clone(),
-                model: self.ctx.config.active_model.clone(),
+                provider: self.ctx.connections.active_provider.clone(),
+                model: self.ctx.connections.active_model.clone(),
                 context_length: self.active_context_length(),
             });
         }

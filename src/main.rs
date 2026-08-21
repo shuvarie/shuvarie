@@ -14,8 +14,10 @@ async fn main() -> color_eyre::Result<()> {
     let (event_tx, event_rx) = channel::<shuvarie_core::Event>(64);
     let core = tokio::spawn(shuvarie_core::run(
         shuvarie_core::Config::load()?,
+        shuvarie_core::Connections::load()?,
         store,
         args.current,
+        None,
         None,
         cmd_rx,
         event_tx,

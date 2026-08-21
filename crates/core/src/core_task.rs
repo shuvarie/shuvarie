@@ -10,16 +10,20 @@ use shuvarie_db::Store;
 use shuvarie_llm::ProviderClient;
 
 use crate::command::Command;
-use crate::config::{Config, ProviderConfig};
+use crate::config::Config;
+use crate::connections::{Connections, ProviderConfig};
 use crate::embeddings::{self, EmbeddingSetup};
 use crate::event::Event;
 use crate::session::Session;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
-    mut config: Config,
+    config: Config,
+    mut connections: Connections,
     mut store: Store,
     load_current: bool,
     config_path: Option<PathBuf>,
+    connections_path: Option<PathBuf>,
     mut cmd_rx: Receiver<Command>,
     event_tx: Sender<Event>,
 ) {
@@ -28,7 +32,7 @@ pub async fn run(
     let mut active_stream: Option<AbortHandle> = None;
     let mut semantic_search: Option<AbortHandle> = None;
 
-    let embedding_setup = embeddings::setup(&config, &mut clients);
+    let embedding_setup = embeddings::setup(&config, &connections, &mut clients);
     if let Some(setup) = embedding_setup.clone() {
         let store_backfill = store.clone();
         tokio::spawn(async move {
@@ -46,7 +50,7 @@ pub async fn run(
                 let _ = event_tx.send(Event::Pong).await;
             }
             Command::ListModels { provider_name } => {
-                let client = match client_for(&mut clients, &mut config, &provider_name) {
+                let client = match client_for(&mut clients, &mut connections, &provider_name) {
                     Ok(c) => c,
                     Err(e) => {
                         let _ = event_tx
@@ -82,37 +86,72 @@ pub async fn run(
                 }
             }
             Command::AddProvider { name, config: pc } => {
-                config.providers.insert(name.clone(), pc);
+                connections.providers.insert(name.clone(), pc);
                 clients.remove(&name);
-                persist(&config, config_path.as_deref(), &event_tx).await;
+                persist(
+                    &config,
+                    &connections,
+                    config_path.as_deref(),
+                    connections_path.as_deref(),
+                    &event_tx,
+                )
+                .await;
             }
             Command::RemoveProvider { name } => {
-                config.providers.remove(&name);
+                connections.providers.remove(&name);
                 clients.remove(&name);
-                if config.active_provider.as_deref() == Some(name.as_str()) {
-                    config.active_provider = None;
-                    config.active_model = None;
+                if connections.active_provider.as_deref() == Some(name.as_str()) {
+                    connections.active_provider = None;
+                    connections.active_model = None;
                 }
-                persist(&config, config_path.as_deref(), &event_tx).await;
+                persist(
+                    &config,
+                    &connections,
+                    config_path.as_deref(),
+                    connections_path.as_deref(),
+                    &event_tx,
+                )
+                .await;
             }
             Command::SetActiveProvider { name } => {
-                if config.providers.contains_key(&name) {
-                    config.active_provider = Some(name.clone());
+                if connections.providers.contains_key(&name) {
+                    connections.active_provider = Some(name.clone());
                     if !clients.contains_key(&name)
-                        && let Some(pc) = config.providers.get(&name)
+                        && let Some(pc) = connections.providers.get(&name)
                         && let Ok(client) = build_client(pc)
                     {
                         clients.insert(name.clone(), client);
                     }
-                    persist(&config, config_path.as_deref(), &event_tx).await;
+                    persist(
+                        &config,
+                        &connections,
+                        config_path.as_deref(),
+                        connections_path.as_deref(),
+                        &event_tx,
+                    )
+                    .await;
                 }
             }
             Command::SetActiveModel { model } => {
-                config.active_model = Some(model);
-                persist(&config, config_path.as_deref(), &event_tx).await;
+                connections.active_model = Some(model);
+                persist(
+                    &config,
+                    &connections,
+                    config_path.as_deref(),
+                    connections_path.as_deref(),
+                    &event_tx,
+                )
+                .await;
             }
             Command::SaveConfig => {
-                persist(&config, config_path.as_deref(), &event_tx).await;
+                persist(
+                    &config,
+                    &connections,
+                    config_path.as_deref(),
+                    connections_path.as_deref(),
+                    &event_tx,
+                )
+                .await;
             }
             Command::StartSession => {
                 session = Some(Arc::new(Mutex::new(Session::new())));
@@ -149,8 +188,8 @@ pub async fn run(
                         match store
                             .create_session(
                                 &title,
-                                config.active_provider.as_deref(),
-                                config.active_model.as_deref(),
+                                connections.active_provider.as_deref(),
+                                connections.active_model.as_deref(),
                             )
                             .await
                         {
@@ -204,7 +243,7 @@ pub async fn run(
                     }
                 }
 
-                let Some(provider_name) = config.active_provider.clone() else {
+                let Some(provider_name) = connections.active_provider.clone() else {
                     let _ = event_tx
                         .send(Event::StreamError {
                             error: "no active provider".into(),
@@ -212,7 +251,7 @@ pub async fn run(
                         .await;
                     continue;
                 };
-                let Some(model) = config.active_model.clone() else {
+                let Some(model) = connections.active_model.clone() else {
                     let _ = event_tx
                         .send(Event::StreamError {
                             error: "no active model".into(),
@@ -221,7 +260,7 @@ pub async fn run(
                     continue;
                 };
 
-                let client = match client_for(&mut clients, &mut config, &provider_name) {
+                let client = match client_for(&mut clients, &mut connections, &provider_name) {
                     Ok(c) => c,
                     Err(e) => {
                         let _ = event_tx.send(Event::StreamError { error: e }).await;
@@ -476,11 +515,11 @@ async fn stream_busy(active_stream: &Option<AbortHandle>, event_tx: &Sender<Even
 
 fn client_for<'a>(
     clients: &'a mut HashMap<String, ProviderClient>,
-    config: &'a mut Config,
+    connections: &'a mut Connections,
     name: &str,
 ) -> Result<&'a ProviderClient, String> {
     if !clients.contains_key(name) {
-        let pc = config
+        let pc = connections
             .providers
             .get(name)
             .ok_or_else(|| format!("provider '{name}' not found"))?;
@@ -605,16 +644,26 @@ fn build_client(pc: &ProviderConfig) -> Result<ProviderClient, String> {
         .map_err(|e| e.to_string())
 }
 
-async fn persist(config: &Config, config_path: Option<&Path>, event_tx: &Sender<Event>) {
-    let result = match config_path {
+async fn persist(
+    config: &Config,
+    connections: &Connections,
+    config_path: Option<&Path>,
+    connections_path: Option<&Path>,
+    event_tx: &Sender<Event>,
+) {
+    let config_result = match config_path {
         Some(path) => config.save_to(path),
         None => config.save(),
     };
-    match result {
-        Ok(()) => {
+    let connections_result = match connections_path {
+        Some(path) => connections.save_to(path),
+        None => connections.save(),
+    };
+    match (config_result, connections_result) {
+        (Ok(()), Ok(())) => {
             let _ = event_tx.send(Event::ConfigSaved).await;
         }
-        Err(e) => {
+        (Err(e), _) | (_, Err(e)) => {
             let _ = event_tx
                 .send(Event::ConfigError {
                     error: e.to_string(),

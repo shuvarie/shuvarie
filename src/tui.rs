@@ -5,7 +5,7 @@ use ratatui::prelude::*;
 use termina::{EventStream, PlatformTerminal, Terminal as _};
 use tokio::sync::mpsc::{Receiver, Sender};
 
-use shuvarie_core::{Command, Config, Event as CoreEvent};
+use shuvarie_core::{Command, Connections, Event as CoreEvent};
 
 use crate::tui::event::Event;
 
@@ -42,8 +42,8 @@ pub async fn run_tui(cmd_tx: Sender<Command>, mut event_rx: Receiver<CoreEvent>)
     let mut rat = ratatui::Terminal::new(TerminaBackend::new(term))?;
     init_terminal(rat.backend_mut().terminal_mut())?;
 
-    let config = Config::load().map_err(|e| io::Error::other(e.to_string()))?;
-    let mut app = App::new(config, cmd_tx);
+    let connections = Connections::load().map_err(|e| io::Error::other(e.to_string()))?;
+    let mut app = App::new(connections, cmd_tx);
 
     let res: io::Result<()> = 'render_loop: loop {
         // Draw frame

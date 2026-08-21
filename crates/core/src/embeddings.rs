@@ -4,6 +4,7 @@ use shuvarie_db::Store;
 use shuvarie_llm::ProviderClient;
 
 use crate::config::Config;
+use crate::connections::Connections;
 
 const MAX_TEXT_CHARS: usize = 8000;
 const BATCH_SIZE: u64 = 64;
@@ -17,6 +18,7 @@ pub struct EmbeddingSetup {
 
 pub fn setup(
     config: &Config,
+    connections: &Connections,
     clients: &mut HashMap<String, ProviderClient>,
 ) -> Option<EmbeddingSetup> {
     if !config.embedding.enabled {
@@ -26,8 +28,8 @@ pub fn setup(
         .embedding
         .provider
         .clone()
-        .or_else(|| config.active_provider.clone())?;
-    let pc = config.providers.get(&provider_name)?;
+        .or_else(|| connections.active_provider.clone())?;
+    let pc = connections.providers.get(&provider_name)?;
     let client = match clients.get(&provider_name) {
         Some(c) => c.clone(),
         None => {

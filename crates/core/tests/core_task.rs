@@ -1,21 +1,18 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use shuvarie_catalog::Provider;
-use shuvarie_core::{Command, Config, Event, ProviderConfig, run};
+use shuvarie_core::{Command, Config, Connections, Event, ProviderConfig, run};
 use shuvarie_db::Store;
 
 fn empty_config() -> Config {
-    Config {
-        providers: HashMap::new(),
-        active_provider: None,
-        active_model: None,
-        ui: Default::default(),
-        embedding: Default::default(),
-    }
+    Config::default()
 }
 
-fn temp_config_path(name: &str) -> PathBuf {
+fn empty_connections() -> Connections {
+    Connections::default()
+}
+
+fn temp_connections_path(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "shuvarie-test-{name}-{}",
         std::time::SystemTime::now()
@@ -23,7 +20,7 @@ fn temp_config_path(name: &str) -> PathBuf {
             .unwrap()
             .as_nanos()
     ));
-    dir.join("shuvarie").join("config.toml")
+    dir.join("shuvarie").join("connections.toml")
 }
 
 #[tokio::test]
@@ -33,8 +30,10 @@ async fn ping_pong() {
 
     let handle = tokio::spawn(run(
         empty_config(),
+        empty_connections(),
         Store::open_in_memory().await.unwrap(),
         false,
+        None,
         None,
         cmd_rx,
         event_tx,
@@ -48,18 +47,19 @@ async fn ping_pong() {
 
 #[tokio::test]
 async fn add_provider_emits_saved() {
-    // The core task persists to the given config path; we assert the event is
-    // emitted and the provider lands in the temp file, not the user config.
-    let config_path = temp_config_path("add-provider");
+    // The core task persists to the given connections path; we assert the event
+    // is emitted and the provider lands in the temp file, not the user config.
+    let connections_path = temp_connections_path("add-provider");
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
-    let config = empty_config();
     let handle = tokio::spawn(run(
-        config,
+        empty_config(),
+        empty_connections(),
         Store::open_in_memory().await.unwrap(),
         false,
-        Some(config_path.clone()),
+        None,
+        Some(connections_path.clone()),
         cmd_rx,
         event_tx,
     ));
@@ -84,34 +84,36 @@ async fn add_provider_emits_saved() {
     }
     assert!(saw_saved, "expected ConfigSaved event");
 
-    let loaded = Config::load_from(&config_path).expect("load persisted config");
+    let loaded = Connections::load_from(&connections_path).expect("load persisted connections");
     assert!(
         loaded.providers.contains_key("shuvarie-test-add"),
-        "provider persisted to the temp config path"
+        "provider persisted to the temp connections path"
     );
     drop(cmd_tx);
     let _ = handle.await;
-    let _ = std::fs::remove_file(config_path);
+    let _ = std::fs::remove_file(connections_path);
 }
 
 #[tokio::test]
 async fn remove_provider_clears_active() {
-    let config_path = temp_config_path("remove-provider");
+    let connections_path = temp_connections_path("remove-provider");
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
-    let mut config = empty_config();
-    config.providers.insert(
+    let mut connections = empty_connections();
+    connections.providers.insert(
         "p1".into(),
         ProviderConfig::new(Provider::Ollama, None, None),
     );
-    config.active_provider = Some("p1".into());
+    connections.active_provider = Some("p1".into());
 
     let handle = tokio::spawn(run(
-        config,
+        empty_config(),
+        connections,
         Store::open_in_memory().await.unwrap(),
         false,
-        Some(config_path.clone()),
+        None,
+        Some(connections_path.clone()),
         cmd_rx,
         event_tx,
     ));
@@ -129,14 +131,14 @@ async fn remove_provider_clears_active() {
     }
     assert!(saved);
 
-    let loaded = Config::load_from(&config_path).expect("load persisted config");
+    let loaded = Connections::load_from(&connections_path).expect("load persisted connections");
     assert!(
         !loaded.providers.contains_key("p1") && loaded.active_provider.is_none(),
-        "removal persisted to the temp config path"
+        "removal persisted to the temp connections path"
     );
     drop(cmd_tx);
     let _ = handle.await;
-    let _ = std::fs::remove_file(config_path);
+    let _ = std::fs::remove_file(connections_path);
 }
 
 #[tokio::test]
@@ -146,8 +148,10 @@ async fn send_message_without_active_provider_emits_error() {
 
     let handle = tokio::spawn(run(
         empty_config(),
+        empty_connections(),
         Store::open_in_memory().await.unwrap(),
         false,
+        None,
         None,
         cmd_rx,
         event_tx,
@@ -185,8 +189,10 @@ async fn cancel_with_no_active_stream_keeps_task_alive() {
 
     let handle = tokio::spawn(run(
         empty_config(),
+        empty_connections(),
         Store::open_in_memory().await.unwrap(),
         false,
+        None,
         None,
         cmd_rx,
         event_tx,
@@ -208,18 +214,20 @@ async fn double_send_while_streaming_is_rejected() {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
-    let mut config = empty_config();
-    config.providers.insert(
+    let mut connections = empty_connections();
+    connections.providers.insert(
         "ollama".into(),
         ProviderConfig::new(Provider::Ollama, None, None),
     );
-    config.active_provider = Some("ollama".into());
-    config.active_model = Some("test-model".into());
+    connections.active_provider = Some("ollama".into());
+    connections.active_model = Some("test-model".into());
 
     let handle = tokio::spawn(run(
-        config,
+        empty_config(),
+        connections,
         Store::open_in_memory().await.unwrap(),
         false,
+        None,
         None,
         cmd_rx,
         event_tx,
@@ -259,17 +267,26 @@ async fn send_message_persists_session_and_messages() {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
-    let mut config = empty_config();
-    config.providers.insert(
+    let mut connections = empty_connections();
+    connections.providers.insert(
         "ollama".into(),
         ProviderConfig::new(Provider::Ollama, None, None),
     );
-    config.active_provider = Some("ollama".into());
-    config.active_model = Some("test-model".into());
+    connections.active_provider = Some("ollama".into());
+    connections.active_model = Some("test-model".into());
 
     let store = Store::open_in_memory().await.unwrap();
     let store_clone = store.clone();
-    let handle = tokio::spawn(run(config, store_clone, false, None, cmd_rx, event_tx));
+    let handle = tokio::spawn(run(
+        empty_config(),
+        connections,
+        store_clone,
+        false,
+        None,
+        None,
+        cmd_rx,
+        event_tx,
+    ));
 
     cmd_tx
         .send(Command::SendMessage {
@@ -321,8 +338,10 @@ async fn load_current_emits_session_loaded_on_startup() {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
     let handle = tokio::spawn(run(
         empty_config(),
+        empty_connections(),
         store.clone(),
         true,
+        None,
         None,
         cmd_rx,
         event_tx,
@@ -360,8 +379,10 @@ async fn no_load_current_skips_session_loaded_on_startup() {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
     let handle = tokio::spawn(run(
         empty_config(),
+        empty_connections(),
         store.clone(),
         false,
+        None,
         None,
         cmd_rx,
         event_tx,

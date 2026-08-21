@@ -1,17 +1,18 @@
 pub mod agents;
+pub mod command;
 pub mod config;
+pub mod connections;
 pub mod context;
 pub mod core_task;
 pub mod embeddings;
 mod error;
-
-pub mod command;
 pub mod event;
 pub mod session;
 pub mod tools;
 
 pub use command::Command;
-pub use config::{Config, EmbeddingConfig, ProviderConfig, UiPrefs};
+pub use config::{Config, EmbeddingConfig, UiPrefs};
+pub use connections::{Connections, ProviderConfig};
 pub use core_task::run;
 pub use error::{CoreError, Result};
 pub use event::Event;
