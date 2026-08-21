@@ -13,6 +13,7 @@ use super::add_provider::{AddProviderForm, AddProviderMessage, AddProviderOutcom
 use super::command_menu::{CommandMenu, CommandMenuEffect, CommandMenuMessage};
 use super::confirm_quit::{ConfirmQuit, ConfirmQuitEffect, ConfirmQuitMessage};
 use super::context::UpdateCtx;
+use super::history_search::{HistorySearch, HistorySearchEffect, HistorySearchMessage};
 use super::home::{HomeEffect, HomeMessage, HomeScreen};
 use super::model_picker::{ModelPicker, ModelPickerEffect, ModelPickerMessage};
 use super::session::{SessionEffect, SessionMessage, SessionScreen};
@@ -35,6 +36,7 @@ pub enum Overlay {
     CommandMenu,
     ConfirmQuit,
     SessionPicker,
+    HistorySearch,
 }
 
 pub enum AppMessage {
@@ -53,6 +55,7 @@ pub enum AppMessage {
     CommandMenu(CommandMenuMessage),
     Welcome(WelcomeMessage),
     SessionPicker(SessionPickerMessage),
+    HistorySearch(HistorySearchMessage),
     ConfigSaved,
     ConfigError {
         error: String,
@@ -102,6 +105,7 @@ pub struct App {
     pub add_provider_form: Option<AddProviderForm>,
     pub model_picker: ModelPicker,
     pub session_picker: SessionPicker,
+    pub history_search: HistorySearch,
     pub models: HashMap<String, Vec<ModelInfo>>,
     pending_model_pick: Option<String>,
 }
@@ -139,6 +143,7 @@ impl App {
             add_provider_form: None,
             model_picker: ModelPicker::new(),
             session_picker: SessionPicker::new(),
+            history_search: HistorySearch::new(),
             models: HashMap::new(),
             pending_model_pick: None,
         }
@@ -188,6 +193,12 @@ impl App {
                                 .map_event(&key)
                                 .map(AppMessage::SessionPicker);
                         }
+                        Overlay::HistorySearch => {
+                            return self
+                                .history_search
+                                .map_event(&key)
+                                .map(AppMessage::HistorySearch);
+                        }
                         Overlay::None => {}
                     }
 
@@ -205,6 +216,9 @@ impl App {
                             }
                             KeyCode::Char('m') if ctrl(&key) => {
                                 return Some(AppMessage::OpenCommandMenu);
+                            }
+                            KeyCode::Char('r') if ctrl(&key) && self.route == Route::Session => {
+                                return Some(AppMessage::HistorySearch(HistorySearchMessage::Open));
                             }
                             _ => {}
                         },
@@ -302,6 +316,16 @@ impl App {
                 }
                 CoreEvent::SessionDeleted { id } => Some(AppMessage::SessionDeleted { id }),
                 CoreEvent::SessionError { error } => Some(AppMessage::SessionError { error }),
+                CoreEvent::SearchResults { hits } => {
+                    Some(AppMessage::HistorySearch(HistorySearchMessage::Results {
+                        hits,
+                    }))
+                }
+                CoreEvent::SearchError { error } => {
+                    Some(AppMessage::HistorySearch(HistorySearchMessage::Error {
+                        error,
+                    }))
+                }
             },
         }
     }
@@ -461,6 +485,27 @@ impl App {
                     self.overlay = Overlay::None;
                 }
             }
+            AppMessage::HistorySearch(m) => {
+                if let Some(effect) = self.history_search.update(m) {
+                    match effect {
+                        HistorySearchEffect::Open => {
+                            self.overlay = Overlay::HistorySearch;
+                        }
+                        HistorySearchEffect::Search { query } => {
+                            self.ctx
+                                .send(shuvarie_core::Command::SearchHistory { query });
+                        }
+                        HistorySearchEffect::LoadSession { id } => {
+                            self.route = Route::Session;
+                            self.ctx.send(shuvarie_core::Command::LoadSession { id });
+                            self.close_overlay();
+                        }
+                        HistorySearchEffect::Close => {
+                            self.close_overlay();
+                        }
+                    }
+                }
+            }
             AppMessage::Welcome(m) => {
                 if let Some(effect) = self.welcome.update(m) {
                     match effect {
@@ -499,6 +544,12 @@ impl App {
                         if let Some(h) = session_picker_list_height(area) {
                             self.session_picker
                                 .update(SessionPickerMessage::Resize { viewport_height: h });
+                        }
+                    }
+                    Overlay::HistorySearch => {
+                        if let Some(h) = history_search_list_height(area) {
+                            self.history_search
+                                .update(HistorySearchMessage::Resize { viewport_height: h });
                         }
                     }
                     Overlay::None | Overlay::Welcome | Overlay::ConfirmQuit => {}
@@ -617,6 +668,7 @@ impl App {
         self.add_provider_form = None;
         self.model_picker.close();
         self.session_picker.close();
+        self.history_search.close();
         self.confirm_quit.close();
         if self.welcome.open {
             self.welcome.close();
@@ -660,6 +712,7 @@ impl App {
         }
         self.model_picker.view(frame, area);
         self.session_picker.view(frame, area);
+        self.history_search.view(frame, area);
         self.command_menu.view(frame, area);
         self.confirm_quit.view(frame, area);
     }
@@ -709,4 +762,8 @@ fn add_provider_kind_list_height(area: Rect) -> Option<u16> {
 
 fn session_picker_list_height(area: Rect) -> Option<u16> {
     overlay_inner_list_height(area, 64, 36, 1)
+}
+
+fn history_search_list_height(area: Rect) -> Option<u16> {
+    overlay_inner_list_height(area, 64, 40, 2)
 }

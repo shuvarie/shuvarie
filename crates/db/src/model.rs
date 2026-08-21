@@ -28,6 +28,16 @@ impl From<MsgRole> for Role {
     }
 }
 
+impl MsgRole {
+    pub fn from_str_loose(s: &str) -> Self {
+        match s {
+            "user" => Self::User,
+            "assistant" => Self::Assistant,
+            _ => Self::System,
+        }
+    }
+}
+
 #[derive(Debug, toasty::Model)]
 pub struct Session {
     #[key]
@@ -62,4 +72,22 @@ pub struct Message {
     pub cached_input_tokens: u64,
     pub reasoning_tokens: u64,
     pub cost: f64,
+    #[has_many]
+    pub embeddings: toasty::Deferred<Vec<MessageEmbedding>>,
+}
+
+#[derive(Debug, toasty::Model)]
+pub struct MessageEmbedding {
+    #[key]
+    #[auto]
+    pub id: u64,
+    #[index]
+    pub message_id: u64,
+    #[belongs_to(key = message_id, references = id)]
+    pub message: toasty::Deferred<Message>,
+    #[index]
+    pub session_id: u64,
+    pub seq: u64,
+    pub content: String,
+    pub vec: Vec<u8>,
 }

@@ -11,6 +11,7 @@ fn empty_config() -> Config {
         active_provider: None,
         active_model: None,
         ui: Default::default(),
+        embedding: Default::default(),
     }
 }
 

@@ -9,4 +9,7 @@ pub enum LlmError {
 
     #[error("model error: {0}")]
     Model(String),
+
+    #[error("embedding error: {0}")]
+    Embedding(String),
 }

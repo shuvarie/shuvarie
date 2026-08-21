@@ -73,4 +73,10 @@ pub enum Event {
     SessionError {
         error: String,
     },
+    SearchResults {
+        hits: Vec<shuvarie_db::SearchHit>,
+    },
+    SearchError {
+        error: String,
+    },
 }

@@ -11,6 +11,7 @@ use shuvarie_llm::ProviderClient;
 
 use crate::command::Command;
 use crate::config::{Config, ProviderConfig};
+use crate::embeddings::{self, EmbeddingSetup};
 use crate::event::Event;
 use crate::session::Session;
 
@@ -25,6 +26,15 @@ pub async fn run(
     let mut clients: HashMap<String, ProviderClient> = HashMap::new();
     let mut session: Option<Arc<Mutex<Session>>> = None;
     let mut active_stream: Option<AbortHandle> = None;
+    let mut semantic_search: Option<AbortHandle> = None;
+
+    let embedding_setup = embeddings::setup(&config, &mut clients);
+    if let Some(setup) = embedding_setup.clone() {
+        let store_backfill = store.clone();
+        tokio::spawn(async move {
+            embeddings::backfill(&mut store_backfill.clone(), &setup).await;
+        });
+    }
 
     if load_current {
         load_most_recent_session(&mut store, &mut session, &event_tx).await;
@@ -160,16 +170,37 @@ pub async fn run(
                         }
                     }
                     let id = guard.id.unwrap();
-                    if let Err(e) = store
+                    let seq = guard.messages.len() - 1;
+                    let msg = store
                         .append_message(id, guard.messages.last().unwrap().role, &content)
-                        .await
-                    {
-                        let _ = event_tx
-                            .send(Event::StreamError {
-                                error: format!("failed to persist message: {e}"),
-                            })
-                            .await;
-                        continue;
+                        .await;
+                    match msg {
+                        Ok(msg) => {
+                            if let Some(setup) = &embedding_setup {
+                                let store_idx = store.clone();
+                                let setup_idx = setup.clone();
+                                let content_idx = msg.content.clone();
+                                tokio::spawn(async move {
+                                    let _ = embeddings::index_message(
+                                        &mut store_idx.clone(),
+                                        &setup_idx,
+                                        msg.id,
+                                        id,
+                                        seq as u64,
+                                        &content_idx,
+                                    )
+                                    .await;
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            let _ = event_tx
+                                .send(Event::StreamError {
+                                    error: format!("failed to persist message: {e}"),
+                                })
+                                .await;
+                            continue;
+                        }
                     }
                 }
 
@@ -229,6 +260,7 @@ pub async fn run(
                 let store_shared = store.clone();
                 let model_shared = model.clone();
                 let worker_usage = worker_set.usage;
+                let embedding_shared = embedding_setup.clone();
                 active_stream = Some(
                     tokio::spawn(async move {
                         stream_stream_to_events(
@@ -238,6 +270,7 @@ pub async fn run(
                             store_shared,
                             model_shared,
                             worker_usage,
+                            embedding_shared,
                             tx,
                         )
                         .await;
@@ -312,6 +345,60 @@ pub async fn run(
                     }
                 }
             }
+            Command::SearchHistory { query } => {
+                let query = query.trim().to_string();
+                if query.is_empty() {
+                    let _ = event_tx.send(Event::SearchResults { hits: vec![] }).await;
+                    continue;
+                }
+                let mut fts_hits = match store.search_messages(&query, SEARCH_LIMIT).await {
+                    Ok(hits) => hits,
+                    Err(e) => {
+                        let _ = event_tx
+                            .send(Event::SearchError {
+                                error: e.to_string(),
+                            })
+                            .await;
+                        continue;
+                    }
+                };
+                if let Some(setup) = &embedding_setup {
+                    if let Some(handle) = semantic_search.take() {
+                        handle.abort();
+                    }
+                    let store_sem = store.clone();
+                    let setup_sem = setup.clone();
+                    let tx_sem = event_tx.clone();
+                    let fts_sem = std::mem::take(&mut fts_hits);
+                    let query_sem = query.clone();
+                    semantic_search = Some(
+                        tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                            let texts = vec![query_sem];
+                            let vecs = setup_sem
+                                .client
+                                .embed(&setup_sem.model, setup_sem.dims, &texts)
+                                .await;
+                            let Ok(mut vecs) = vecs else { return };
+                            let Some(vec) = vecs.pop() else { return };
+                            let Ok(semantic_hits) =
+                                store_sem.clone().semantic_search(vec, SEARCH_LIMIT).await
+                            else {
+                                return;
+                            };
+                            let merged = embeddings::rrf_merge(
+                                fts_sem,
+                                semantic_hits,
+                                60,
+                                SEARCH_LIMIT as usize,
+                            );
+                            let _ = tx_sem.send(Event::SearchResults { hits: merged }).await;
+                        })
+                        .abort_handle(),
+                    );
+                }
+                let _ = event_tx.send(Event::SearchResults { hits: fts_hits }).await;
+            }
         }
     }
 }
@@ -324,6 +411,8 @@ fn title_for(content: &str) -> String {
         trimmed.chars().take(48).collect()
     }
 }
+
+const SEARCH_LIMIT: u64 = 50;
 
 const AGENT_PREAMBLE: &str = "\
 You are Shuvarie, an agentic coding assistant running in a terminal inside the user's project. \
@@ -401,6 +490,7 @@ fn client_for<'a>(
     Ok(clients.get(name).unwrap())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn stream_stream_to_events(
     mut stream: shuvarie_llm::StreamStream,
     session: Arc<Mutex<Session>>,
@@ -408,6 +498,7 @@ async fn stream_stream_to_events(
     mut store: Store,
     model: String,
     worker_usage: Arc<std::sync::Mutex<shuvarie_catalog::TokenUsage>>,
+    embedding_setup: Option<EmbeddingSetup>,
     event_tx: Sender<Event>,
 ) {
     use futures_util::StreamExt;
@@ -463,17 +554,39 @@ async fn stream_stream_to_events(
                 let cost = shuvarie_catalog::estimate_cost(client.kind(), &model, &combined);
                 guard.add_usage(combined, cost);
                 let id = guard.id;
+                let seq = guard.messages.len() - 1;
                 drop(guard);
-                if let Some(id) = id
-                    && let Err(e) = store
+                if let Some(id) = id {
+                    match store
                         .append_assistant_message(id, &text, combined, cost)
                         .await
-                {
-                    let _ = event_tx
-                        .send(Event::StreamError {
-                            error: format!("failed to persist message: {e}"),
-                        })
-                        .await;
+                    {
+                        Ok(msg) => {
+                            if let Some(setup) = &embedding_setup {
+                                let store_idx = store.clone();
+                                let setup_idx = setup.clone();
+                                let content_idx = msg.content.clone();
+                                tokio::spawn(async move {
+                                    let _ = embeddings::index_message(
+                                        &mut store_idx.clone(),
+                                        &setup_idx,
+                                        msg.id,
+                                        id,
+                                        seq as u64,
+                                        &content_idx,
+                                    )
+                                    .await;
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            let _ = event_tx
+                                .send(Event::StreamError {
+                                    error: format!("failed to persist message: {e}"),
+                                })
+                                .await;
+                        }
+                    }
                 }
                 let _ = event_tx.send(Event::StreamDone { text, usage }).await;
                 let _ = event_tx.send(Event::UsageUpdate { usage, cost }).await;
@@ -552,6 +665,7 @@ mod tests {
                 store,
                 "ollama-model".into(),
                 worker_usage,
+                None,
                 event_tx,
             )
             .await;
@@ -608,6 +722,7 @@ mod tests {
                 store,
                 "ollama-model".into(),
                 worker_usage,
+                None,
                 event_tx,
             )
             .await;
@@ -683,6 +798,7 @@ mod tests {
                 store,
                 "ollama-model".into(),
                 worker_usage,
+                None,
                 event_tx,
             )
             .await;

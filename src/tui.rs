@@ -19,6 +19,7 @@ mod confirm_quit;
 mod context;
 mod escape;
 mod event;
+mod history_search;
 mod home;
 mod list;
 mod logo;

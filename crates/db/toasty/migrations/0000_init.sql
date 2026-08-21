@@ -22,3 +22,18 @@ CREATE TABLE "messages" (
 );
 -- #[toasty::breakpoint]
 CREATE INDEX "index_messages_by_session_id" ON "messages" ("session_id");
+-- #[toasty::breakpoint]
+CREATE INDEX "index_messages_fts" ON "messages" USING fts ("content");
+-- #[toasty::breakpoint]
+CREATE TABLE "message_embeddings" (
+    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "message_id" INTEGER NOT NULL,
+    "session_id" INTEGER NOT NULL,
+    "seq" INTEGER NOT NULL,
+    "content" TEXT NOT NULL,
+    "vec" BLOB NOT NULL
+);
+-- #[toasty::breakpoint]
+CREATE INDEX "index_message_embeddings_by_message_id" ON "message_embeddings" ("message_id");
+-- #[toasty::breakpoint]
+CREATE INDEX "index_message_embeddings_by_session_id" ON "message_embeddings" ("session_id");

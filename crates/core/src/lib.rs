@@ -2,6 +2,7 @@ pub mod agents;
 pub mod config;
 pub mod context;
 pub mod core_task;
+pub mod embeddings;
 mod error;
 
 pub mod command;
@@ -10,11 +11,11 @@ pub mod session;
 pub mod tools;
 
 pub use command::Command;
-pub use config::{Config, ProviderConfig, UiPrefs};
+pub use config::{Config, EmbeddingConfig, ProviderConfig, UiPrefs};
 pub use core_task::run;
 pub use error::{CoreError, Result};
 pub use event::Event;
 pub use session::Session;
 pub use shuvarie_catalog::{ModelInfo, Provider};
-pub use shuvarie_db::SessionSummary;
+pub use shuvarie_db::{MsgRole, SearchHit, SearchSource, SessionSummary};
 pub use shuvarie_llm::{ChatMsg, Role};

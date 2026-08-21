@@ -12,7 +12,11 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let mut builder = toasty::Db::builder();
-    builder.models(toasty::models!(shuvarie_db::Session));
+    builder.models(toasty::models!(
+        shuvarie_db::Session,
+        shuvarie_db::Message,
+        shuvarie_db::MessageEmbedding
+    ));
     let db = builder
         .build(toasty_driver_turso::Turso::in_memory())
         .await?;

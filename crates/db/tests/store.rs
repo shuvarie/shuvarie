@@ -143,3 +143,201 @@ async fn reopen_applies_migrations_and_preserves_data() {
     assert_eq!(loaded.messages.len(), 1);
     assert_eq!(loaded.messages[0].content, "hello");
 }
+
+#[tokio::test]
+async fn search_finds_messages_across_sessions_ranked() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let s1 = store.create_session("rust", None, None).await.unwrap();
+    let s2 = store.create_session("sql", None, None).await.unwrap();
+
+    store
+        .append_message(s1, Role::User, "how does tokio spawn tasks?")
+        .await
+        .unwrap();
+    store
+        .append_assistant_message(
+            s1,
+            "tokio::spawn runs a task on the runtime",
+            TokenUsage::default(),
+            0.0,
+        )
+        .await
+        .unwrap();
+    store
+        .append_message(s2, Role::User, "how does sqlite index rows?")
+        .await
+        .unwrap();
+
+    let hits = store.search_messages("tokio", 10).await.unwrap();
+    assert_eq!(hits.len(), 2, "both tokio messages match");
+    assert!(hits.iter().all(|h| h.session_id == s1));
+    assert!(hits[0].score >= hits[1].score, "ranked by relevance");
+
+    let hits = store.search_messages("sqlite", 10).await.unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].session_id, s2);
+    assert_eq!(hits[0].session_title, "sql");
+    assert_eq!(hits[0].content, "how does sqlite index rows?");
+    assert_eq!(hits[0].seq, 0);
+    assert!(matches!(hits[0].role, shuvarie_db::MsgRole::User));
+}
+
+#[tokio::test]
+async fn search_is_case_insensitive_and_empty_query_no_match() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store.create_session("t", None, None).await.unwrap();
+    store
+        .append_message(id, Role::User, "Rust borrow checker")
+        .await
+        .unwrap();
+
+    let hits = store.search_messages("borrow", 10).await.unwrap();
+    assert_eq!(hits.len(), 1);
+    let hits = store.search_messages("RUST", 10).await.unwrap();
+    assert_eq!(hits.len(), 1);
+    let hits = store.search_messages("garbage", 10).await.unwrap();
+    assert!(hits.is_empty());
+}
+
+#[tokio::test]
+async fn search_respects_limit_and_delete() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store.create_session("t", None, None).await.unwrap();
+    for i in 0..5 {
+        store
+            .append_message(id, Role::User, &format!("request number {i}"))
+            .await
+            .unwrap();
+    }
+
+    let hits = store.search_messages("request", 3).await.unwrap();
+    assert_eq!(hits.len(), 3);
+
+    store.delete_session(id).await.unwrap();
+    let hits = store.search_messages("request", 10).await.unwrap();
+    assert!(hits.is_empty(), "deleted sessions leave no hits");
+}
+
+fn vec_bytes(values: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values.len() * 4);
+    for v in values {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out
+}
+
+#[tokio::test]
+async fn upsert_embedding_roundtrip_and_upsert() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store.create_session("t", None, None).await.unwrap();
+    store
+        .append_message(id, Role::User, "how do I parse json?")
+        .await
+        .unwrap();
+    let msg = store.load_session(id).await.unwrap();
+    let mid = msg.messages[0].id;
+
+    store
+        .upsert_embedding(mid, id, 0, "how do I parse json?", vec_bytes(&[1.0, 2.0]))
+        .await
+        .unwrap();
+    store
+        .upsert_embedding(mid, id, 0, "how do I parse json?", vec_bytes(&[3.0, 4.0]))
+        .await
+        .unwrap();
+
+    let missing = store.messages_missing_embeddings(10).await.unwrap();
+    assert!(missing.is_empty(), "upsert should replace, not duplicate");
+}
+
+#[tokio::test]
+async fn missing_embeddings_lists_only_unembedded() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store.create_session("t", None, None).await.unwrap();
+    store.append_message(id, Role::User, "a").await.unwrap();
+    store.append_message(id, Role::User, "b").await.unwrap();
+    let loaded = store.load_session(id).await.unwrap();
+
+    store
+        .upsert_embedding(loaded.messages[0].id, id, 0, "a", vec_bytes(&[0.5]))
+        .await
+        .unwrap();
+
+    let missing = store.messages_missing_embeddings(10).await.unwrap();
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0].content, "b");
+    assert_eq!(missing[0].seq, 1);
+
+    let empty = store.messages_missing_embeddings(0).await.unwrap();
+    assert!(empty.is_empty(), "limit 0 yields nothing");
+}
+
+#[tokio::test]
+async fn semantic_search_ranks_by_cosine() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store.create_session("rust", None, None).await.unwrap();
+    store
+        .append_message(id, Role::User, "tokio spawn")
+        .await
+        .unwrap();
+    store
+        .append_message(id, Role::User, "sqlite index")
+        .await
+        .unwrap();
+    let loaded = store.load_session(id).await.unwrap();
+
+    store
+        .upsert_embedding(
+            loaded.messages[0].id,
+            id,
+            0,
+            "tokio spawn",
+            vec_bytes(&[1.0, 0.0]),
+        )
+        .await
+        .unwrap();
+    store
+        .upsert_embedding(
+            loaded.messages[1].id,
+            id,
+            1,
+            "sqlite index",
+            vec_bytes(&[0.0, 1.0]),
+        )
+        .await
+        .unwrap();
+
+    let hits = store.semantic_search(vec![0.9, 0.1], 10).await.unwrap();
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0].content, "tokio spawn", "closest vector first");
+    assert_eq!(hits[0].session_title, "rust");
+    assert_eq!(hits[0].seq, 0);
+    assert!(hits[0].score <= hits[1].score, "distance ascending");
+}
+
+#[tokio::test]
+async fn semantic_search_respects_limit_and_delete() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store.create_session("t", None, None).await.unwrap();
+    store.append_message(id, Role::User, "alpha").await.unwrap();
+    store.append_message(id, Role::User, "beta").await.unwrap();
+    let loaded = store.load_session(id).await.unwrap();
+    for (i, m) in loaded.messages.iter().enumerate() {
+        store
+            .upsert_embedding(m.id, id, i as u64, &m.content, vec_bytes(&[i as f32]))
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(store.semantic_search(vec![0.0], 1).await.unwrap().len(), 1);
+
+    store.delete_session(id).await.unwrap();
+    assert!(
+        store
+            .semantic_search(vec![0.0], 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "deleted session leaves no embeddings"
+    );
+}

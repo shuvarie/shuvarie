@@ -125,6 +125,80 @@ impl ProviderClient {
         &self.base_url
     }
 
+    pub fn supports_embeddings(&self) -> bool {
+        matches!(
+            self.kind,
+            Provider::OpenAiCompatible
+                | Provider::OpenRouter
+                | Provider::Groq
+                | Provider::Together
+                | Provider::Gemini
+                | Provider::Ollama
+                | Provider::OllamaCloud
+        )
+    }
+
+    pub async fn embed(&self, model: &str, dims: usize, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        use rig::client::EmbeddingsClient;
+        use rig::embeddings::EmbeddingsBuilder;
+
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let embeddings = match &self.list {
+            ListImpl::OpenAi(c) => {
+                let model = c.embedding_model(model);
+                EmbeddingsBuilder::new(model)
+                    .documents(texts.to_vec())
+                    .map_err(|e| LlmError::Embedding(e.to_string()))?
+                    .build()
+                    .await
+                    .map_err(|e| LlmError::Embedding(e.to_string()))?
+            }
+            ListImpl::OpenRouter(c) => {
+                let model = c.embedding_model(model);
+                EmbeddingsBuilder::new(model)
+                    .documents(texts.to_vec())
+                    .map_err(|e| LlmError::Embedding(e.to_string()))?
+                    .build()
+                    .await
+                    .map_err(|e| LlmError::Embedding(e.to_string()))?
+            }
+            ListImpl::Gemini(c) => {
+                let model = c.embedding_model(model);
+                EmbeddingsBuilder::new(model)
+                    .documents(texts.to_vec())
+                    .map_err(|e| LlmError::Embedding(e.to_string()))?
+                    .build()
+                    .await
+                    .map_err(|e| LlmError::Embedding(e.to_string()))?
+            }
+            ListImpl::Ollama(c) => {
+                let model = c.embedding_model_with_ndims(model, dims);
+                EmbeddingsBuilder::new(model)
+                    .documents(texts.to_vec())
+                    .map_err(|e| LlmError::Embedding(e.to_string()))?
+                    .build()
+                    .await
+                    .map_err(|e| LlmError::Embedding(e.to_string()))?
+            }
+            _ => {
+                return Err(LlmError::Embedding(
+                    "provider does not support embeddings".into(),
+                ));
+            }
+        };
+
+        let mut out = Vec::with_capacity(embeddings.len());
+        for (_, emb) in embeddings {
+            for embedding in emb.iter() {
+                out.push(embedding.vec.iter().map(|&v| v as f32).collect());
+            }
+        }
+        Ok(out)
+    }
+
     pub async fn list_models(&self) -> Result<Vec<shuvarie_catalog::ModelInfo>> {
         use rig::client::ModelListingClient;
 
@@ -696,7 +770,7 @@ mod tests {
     #[tokio::test]
     async fn worker_missing_task_returns_error() {
         let client = ProviderClient::build(Provider::Ollama, None, None).unwrap();
-        let (activity_tx, _activity_rx) = tokio::sync::mpsc::channel::<StreamItem>(8);
+        let (_activity_tx, _activity_rx) = tokio::sync::mpsc::channel::<StreamItem>(8);
         let usage = Arc::new(std::sync::Mutex::new(
             shuvarie_catalog::TokenUsage::default(),
         ));
@@ -714,5 +788,47 @@ mod tests {
             .await
             .expect_err("missing task should fail");
         assert!(err.contains("task"), "error should mention task: {err}");
+    }
+
+    #[test]
+    fn supports_embeddings_by_provider() {
+        let ok = [
+            Provider::OpenAiCompatible,
+            Provider::OpenRouter,
+            Provider::Groq,
+            Provider::Together,
+            Provider::Gemini,
+            Provider::Ollama,
+            Provider::OllamaCloud,
+        ];
+        let no = [Provider::Anthropic, Provider::DeepSeek];
+        for p in ok {
+            let client = ProviderClient::build(p, Some("k"), None).unwrap();
+            assert!(
+                client.supports_embeddings(),
+                "{p:?} should support embeddings"
+            );
+        }
+        for p in no {
+            let client = ProviderClient::build(p, Some("k"), None).unwrap();
+            assert!(!client.supports_embeddings(), "{p:?} should not");
+        }
+    }
+
+    #[tokio::test]
+    async fn embed_unsupported_provider_errors() {
+        let client = ProviderClient::build(Provider::Anthropic, Some("k"), None).unwrap();
+        let err = client
+            .embed("some-model", 768, &["hello".to_string()])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LlmError::Embedding(_)));
+    }
+
+    #[tokio::test]
+    async fn embed_empty_input_returns_empty() {
+        let client = ProviderClient::build(Provider::Ollama, None, None).unwrap();
+        let out = client.embed("m", 384, &[]).await.unwrap();
+        assert!(out.is_empty());
     }
 }

@@ -33,4 +33,7 @@ pub enum Command {
     DeleteSession {
         id: u64,
     },
+    SearchHistory {
+        query: String,
+    },
 }

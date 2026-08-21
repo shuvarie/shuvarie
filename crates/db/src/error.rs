@@ -8,6 +8,8 @@ pub enum DbError {
     Migration(String),
     #[error("database query failed: {0}")]
     Query(String),
+    #[error("search query failed: {0}")]
+    Search(String),
     #[error("session {id} not found")]
     NotFound { id: u64 },
 }

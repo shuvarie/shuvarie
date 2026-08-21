@@ -26,6 +26,7 @@ fn sample_config() -> Config {
         active_provider: Some("my-openai".to_string()),
         active_model: Some("gpt-5.5".to_string()),
         ui: Default::default(),
+        embedding: Default::default(),
     }
 }
 
@@ -65,6 +66,7 @@ fn missing_active_provider_has_no_connected_providers() {
         active_provider: None,
         active_model: None,
         ui: Default::default(),
+        embedding: Default::default(),
     };
     assert!(!config.has_connected_providers());
 }
@@ -76,6 +78,7 @@ fn active_provider_missing_from_map_has_no_connected_providers() {
         active_provider: Some("nonexistent".to_string()),
         active_model: None,
         ui: Default::default(),
+        embedding: Default::default(),
     };
     assert!(!config.has_connected_providers());
 }
@@ -90,6 +93,7 @@ fn active_provider_without_key_has_no_connected_providers() {
         active_provider: Some("my-openai".to_string()),
         active_model: None,
         ui: Default::default(),
+        embedding: Default::default(),
     };
     assert!(!config.has_connected_providers());
 }
@@ -110,6 +114,7 @@ fn ollama_without_key_is_connected() {
         active_provider: Some("local".to_string()),
         active_model: None,
         ui: Default::default(),
+        embedding: Default::default(),
     };
     assert!(config.has_connected_providers());
 }
@@ -124,6 +129,7 @@ fn ollama_cloud_without_key_is_not_connected() {
         active_provider: Some("cloud".to_string()),
         active_model: None,
         ui: Default::default(),
+        embedding: Default::default(),
     };
     assert!(!config.has_connected_providers());
 }
@@ -138,6 +144,7 @@ fn ollama_cloud_with_key_is_connected() {
         active_provider: Some("cloud".to_string()),
         active_model: None,
         ui: Default::default(),
+        embedding: Default::default(),
     };
     assert!(config.has_connected_providers());
 }

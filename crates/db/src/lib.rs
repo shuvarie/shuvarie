@@ -3,5 +3,7 @@ pub mod model;
 pub mod store;
 
 pub use error::{DbError, Result};
-pub use model::{Message, MsgRole, Session};
-pub use store::{SessionSummary, Store, StoredMessage, StoredSession};
+pub use model::{Message, MessageEmbedding, MsgRole, Session};
+pub use store::{
+    EmbeddableMessage, SearchHit, SearchSource, SessionSummary, Store, StoredMessage, StoredSession,
+};
