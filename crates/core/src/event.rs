@@ -1,5 +1,8 @@
 use shuvarie_catalog::{ModelInfo, TokenUsage};
 use shuvarie_db::SessionSummary;
+use shuvarie_llm::FileChange;
+
+use crate::approval::ApprovalReason;
 
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -37,6 +40,7 @@ pub enum Event {
         ok: bool,
         output: String,
         worker: Option<String>,
+        file_change: Option<FileChange>,
     },
     WorkerStarted {
         name: String,
@@ -78,5 +82,11 @@ pub enum Event {
     },
     SearchError {
         error: String,
+    },
+    ApprovalRequest {
+        id: u64,
+        tool: String,
+        path: String,
+        reason: ApprovalReason,
     },
 }

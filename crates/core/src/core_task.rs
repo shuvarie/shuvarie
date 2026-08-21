@@ -4,11 +4,13 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 
 use shuvarie_db::Store;
 use shuvarie_llm::ProviderClient;
 
+use crate::approval::{ApprovalGate, ApprovalRequest};
 use crate::command::Command;
 use crate::config::Config;
 use crate::connections::{Connections, ProviderConfig};
@@ -32,6 +34,11 @@ pub async fn run(
     let mut active_stream: Option<AbortHandle> = None;
     let mut semantic_search: Option<AbortHandle> = None;
 
+    let (approval_tx, mut approval_rx) = tokio::sync::mpsc::channel::<ApprovalRequest>(64);
+    let mut pending_approvals: HashMap<u64, oneshot::Sender<bool>> = HashMap::new();
+    let mut next_approval_id: u64 = 0;
+    let mut always_approve = false;
+
     let embedding_setup = embeddings::setup(&config, &connections, &mut clients);
     if let Some(setup) = embedding_setup.clone() {
         let store_backfill = store.clone();
@@ -44,8 +51,11 @@ pub async fn run(
         load_most_recent_session(&mut store, &mut session, &event_tx).await;
     }
 
-    while let Some(cmd) = cmd_rx.recv().await {
-        match cmd {
+    loop {
+        tokio::select! {
+            cmd = cmd_rx.recv() => {
+                let Some(cmd) = cmd else { break };
+                match cmd {
             Command::Ping => {
                 let _ = event_tx.send(Event::Pong).await;
             }
@@ -154,6 +164,7 @@ pub async fn run(
                 .await;
             }
             Command::StartSession => {
+                always_approve = false;
                 session = Some(Arc::new(Mutex::new(Session::new())));
                 let _ = event_tx.send(Event::SessionStarted).await;
             }
@@ -161,6 +172,7 @@ pub async fn run(
                 if stream_busy(&active_stream, &event_tx).await {
                     continue;
                 }
+                always_approve = false;
                 session = Some(Arc::new(Mutex::new(Session::new())));
                 let _ = event_tx.send(Event::SessionStarted).await;
             }
@@ -281,8 +293,9 @@ pub async fn run(
                         .await;
                 }
                 let preamble = crate::context::build_preamble(AGENT_PREAMBLE, &loaded_context);
-                let tools = crate::tools::all_tools();
-                let mut worker_set = crate::agents::build_workers(client.clone(), &model);
+                let gate = ApprovalGate::new(approval_tx.clone());
+                let tools = crate::tools::all_tools(gate.clone());
+                let mut worker_set = crate::agents::build_workers(client.clone(), &model, gate);
                 let stream = client
                     .stream(
                         &model,
@@ -341,6 +354,7 @@ pub async fn run(
                 if stream_busy(&active_stream, &event_tx).await {
                     continue;
                 }
+                always_approve = false;
                 match store.load_session(id).await {
                     Ok(stored) => {
                         let loaded = Session::from_stored(stored);
@@ -437,6 +451,34 @@ pub async fn run(
                     );
                 }
                 let _ = event_tx.send(Event::SearchResults { hits: fts_hits }).await;
+            }
+            Command::ApproveTool { id, approved, always } => {
+                if always {
+                    always_approve = true;
+                }
+                if let Some(respond) = pending_approvals.remove(&id) {
+                    let _ = respond.send(approved);
+                }
+            }
+            }
+            }
+            approval = approval_rx.recv() => {
+                let Some(req) = approval else { break };
+                if always_approve {
+                    let _ = req.respond.send(true);
+                    continue;
+                }
+                let id = next_approval_id;
+                next_approval_id = next_approval_id.wrapping_add(1);
+                pending_approvals.insert(id, req.respond);
+                let _ = event_tx
+                    .send(Event::ApprovalRequest {
+                        id,
+                        tool: req.tool,
+                        path: req.path,
+                        reason: req.reason,
+                    })
+                    .await;
             }
         }
     }
@@ -558,6 +600,7 @@ async fn stream_stream_to_events(
                 output,
                 ok,
                 worker,
+                file_change,
             } => {
                 let _ = event_tx
                     .send(Event::ToolFinished {
@@ -565,6 +608,7 @@ async fn stream_stream_to_events(
                         ok,
                         output,
                         worker,
+                        file_change,
                     })
                     .await;
             }
@@ -814,6 +858,7 @@ mod tests {
                 output: "found".into(),
                 ok: true,
                 worker: Some("explore_workspace".into()),
+                file_change: None,
             },
             StreamItem::WorkerResult {
                 name: "explore_workspace".into(),

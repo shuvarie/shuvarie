@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod approval;
 pub mod command;
 pub mod config;
 pub mod connections;
@@ -10,6 +11,7 @@ pub mod event;
 pub mod session;
 pub mod tools;
 
+pub use approval::ApprovalReason;
 pub use command::Command;
 pub use config::{Config, EmbeddingConfig, UiPrefs};
 pub use connections::{Connections, ProviderConfig};

@@ -3,6 +3,8 @@ use serde_json::Value;
 use shuvarie_catalog::TokenUsage;
 use std::pin::Pin;
 
+use crate::file_change::FileChange;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamItem {
     Delta {
@@ -18,6 +20,7 @@ pub enum StreamItem {
         output: String,
         ok: bool,
         worker: Option<String>,
+        file_change: Option<FileChange>,
     },
     WorkerStart {
         name: String,

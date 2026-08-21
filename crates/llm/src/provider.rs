@@ -3,6 +3,7 @@ use serde_json::Value;
 use shuvarie_catalog::Provider;
 use std::sync::Arc;
 
+use crate::file_change::FileChange;
 use crate::message::ChatMsg;
 use crate::stream::{StreamItem, StreamStream};
 use crate::tool::Tool;
@@ -223,7 +224,7 @@ impl ProviderClient {
         req: &crate::agent::WorkerRequest,
     ) -> std::result::Result<String, String> {
         let user_msg = rig::message::Message::user(req.task.clone());
-        let dynamic = dynamic_tools(&req.tools);
+        let (dynamic, file_rx) = dynamic_tools(&req.tools);
         let activity_tx = req.activity_tx.clone();
         let usage = Arc::clone(&req.usage);
         match &self.list {
@@ -236,6 +237,7 @@ impl ProviderClient {
                     activity_tx,
                     usage,
                     req.max_turns,
+                    file_rx,
                 )
                 .await
             }
@@ -248,6 +250,7 @@ impl ProviderClient {
                     activity_tx,
                     usage,
                     req.max_turns,
+                    file_rx,
                 )
                 .await
             }
@@ -260,6 +263,7 @@ impl ProviderClient {
                     activity_tx,
                     usage,
                     req.max_turns,
+                    file_rx,
                 )
                 .await
             }
@@ -272,6 +276,7 @@ impl ProviderClient {
                     activity_tx,
                     usage,
                     req.max_turns,
+                    file_rx,
                 )
                 .await
             }
@@ -284,6 +289,7 @@ impl ProviderClient {
                     activity_tx,
                     usage,
                     req.max_turns,
+                    file_rx,
                 )
                 .await
             }
@@ -296,6 +302,7 @@ impl ProviderClient {
                     activity_tx,
                     usage,
                     req.max_turns,
+                    file_rx,
                 )
                 .await
             }
@@ -323,7 +330,7 @@ impl ProviderClient {
         for worker in workers.iter() {
             let def = worker.definition();
             let worker = std::sync::Arc::new(worker.clone());
-            dynamic.push(rig::tool::DynamicTool::new(
+            dynamic.0.push(rig::tool::DynamicTool::new(
                 def.name,
                 def.description,
                 def.parameters,
@@ -333,7 +340,7 @@ impl ProviderClient {
                         worker
                             .call(args)
                             .await
-                            .map(rig::tool::ToolOutput::text)
+                            .map(|out| rig::tool::ToolOutput::text(out.text))
                             .map_err(|message| {
                                 let error = serde_json::json!({ "error": message });
                                 rig::tool::ToolExecutionError::new(
@@ -352,6 +359,7 @@ impl ProviderClient {
             .iter_mut()
             .filter_map(crate::agent::WorkerAgent::take_activity_receiver)
             .collect();
+        let file_rx = dynamic.1;
 
         async fn build<M>(
             agent: rig::agent::Agent<M>,
@@ -359,6 +367,7 @@ impl ProviderClient {
             history: Vec<rig::message::Message>,
             receivers: Vec<tokio::sync::mpsc::Receiver<StreamItem>>,
             worker_names: std::collections::HashSet<String>,
+            mut file_rx: tokio::sync::mpsc::Receiver<FileChange>,
         ) -> StreamStream
         where
             M: rig::completion::CompletionModel + 'static,
@@ -434,6 +443,7 @@ impl ProviderClient {
                             output,
                             ok,
                             worker: None,
+                            file_change: file_rx.try_recv().ok(),
                         },
                         None => StreamItem::WorkerResult {
                             name: pending_workers.pop_front().unwrap_or_default(),
@@ -466,61 +476,67 @@ impl ProviderClient {
         match &self.list {
             ListImpl::OpenAi(c) => {
                 build(
-                    agent_with_tools(c, model, preamble, dynamic),
+                    agent_with_tools(c, model, preamble, dynamic.0),
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
+                    file_rx,
                 )
                 .await
             }
             ListImpl::OpenRouter(c) => {
                 build(
-                    agent_with_tools(c, model, preamble, dynamic),
+                    agent_with_tools(c, model, preamble, dynamic.0),
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
+                    file_rx,
                 )
                 .await
             }
             ListImpl::DeepSeek(c) => {
                 build(
-                    agent_with_tools(c, model, preamble, dynamic),
+                    agent_with_tools(c, model, preamble, dynamic.0),
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
+                    file_rx,
                 )
                 .await
             }
             ListImpl::Anthropic(c) => {
                 build(
-                    agent_with_tools(c, model, preamble, dynamic),
+                    agent_with_tools(c, model, preamble, dynamic.0),
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
+                    file_rx,
                 )
                 .await
             }
             ListImpl::Gemini(c) => {
                 build(
-                    agent_with_tools(c, model, preamble, dynamic),
+                    agent_with_tools(c, model, preamble, dynamic.0),
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
+                    file_rx,
                 )
                 .await
             }
             ListImpl::Ollama(c) => {
                 build(
-                    agent_with_tools(c, model, preamble, dynamic),
+                    agent_with_tools(c, model, preamble, dynamic.0),
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
+                    file_rx,
                 )
                 .await
             }
@@ -528,22 +544,35 @@ impl ProviderClient {
     }
 }
 
-fn dynamic_tools(tools: &[std::sync::Arc<dyn Tool>]) -> Vec<rig::tool::DynamicTool> {
-    tools
+fn dynamic_tools(
+    tools: &[std::sync::Arc<dyn Tool>],
+) -> (
+    Vec<rig::tool::DynamicTool>,
+    tokio::sync::mpsc::Receiver<FileChange>,
+) {
+    let (file_tx, file_rx) = tokio::sync::mpsc::channel(64);
+    let dynamic = tools
         .iter()
         .map(|tool| {
             let def = tool.definition();
             let tool = std::sync::Arc::clone(tool);
+            let file_tx = file_tx.clone();
             rig::tool::DynamicTool::new(
                 def.name.clone(),
                 def.description.clone(),
                 def.parameters.clone(),
                 move |_ctx, args| {
                     let tool = std::sync::Arc::clone(&tool);
+                    let file_tx = file_tx.clone();
                     Box::pin(async move {
                         tool.call(args)
                             .await
-                            .map(rig::tool::ToolOutput::text)
+                            .map(|out| {
+                                if let Some(change) = out.file_change {
+                                    let _ = file_tx.try_send(change);
+                                }
+                                rig::tool::ToolOutput::text(out.text)
+                            })
                             .map_err(|message| {
                                 let error = serde_json::json!({ "error": message });
                                 rig::tool::ToolExecutionError::new(
@@ -556,7 +585,8 @@ fn dynamic_tools(tools: &[std::sync::Arc<dyn Tool>]) -> Vec<rig::tool::DynamicTo
                 },
             )
         })
-        .collect()
+        .collect();
+    (dynamic, file_rx)
 }
 
 fn agent_with_tools<C>(
@@ -582,6 +612,7 @@ async fn run_worker_agent<M>(
     activity_tx: tokio::sync::mpsc::Sender<StreamItem>,
     usage: std::sync::Arc<std::sync::Mutex<shuvarie_catalog::TokenUsage>>,
     max_turns: usize,
+    mut file_rx: tokio::sync::mpsc::Receiver<FileChange>,
 ) -> std::result::Result<String, String>
 where
     M: rig::completion::CompletionModel + 'static,
@@ -653,6 +684,7 @@ where
                         output,
                         ok,
                         worker: Some(name.to_string()),
+                        file_change: file_rx.try_recv().ok(),
                     })
                     .await;
             }
@@ -734,6 +766,7 @@ mod tests {
                 output: "ok".into(),
                 ok: true,
                 worker: Some("explore_workspace".into()),
+                file_change: None,
             },
         ];
         let _ = worker_tx.send(worker_items[0].clone()).await;

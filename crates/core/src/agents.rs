@@ -3,6 +3,7 @@ use std::sync::Arc;
 use shuvarie_catalog::TokenUsage;
 use shuvarie_llm::ProviderClient;
 
+use crate::approval::ApprovalGate;
 use crate::tools;
 
 pub struct WorkerSet {
@@ -10,7 +11,7 @@ pub struct WorkerSet {
     pub usage: Arc<std::sync::Mutex<TokenUsage>>,
 }
 
-pub fn build_workers(client: ProviderClient, model: &str) -> WorkerSet {
+pub fn build_workers(client: ProviderClient, model: &str, gate: ApprovalGate) -> WorkerSet {
     let usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
     let workers = vec![
         shuvarie_llm::WorkerAgent::new(
@@ -19,7 +20,7 @@ pub fn build_workers(client: ProviderClient, model: &str) -> WorkerSet {
             EXPLORER_PREAMBLE,
             client.clone(),
             model,
-            tools::read_tools(),
+            tools::read_tools(gate.clone()),
             Arc::clone(&usage),
         ),
         shuvarie_llm::WorkerAgent::new(
@@ -28,7 +29,7 @@ pub fn build_workers(client: ProviderClient, model: &str) -> WorkerSet {
             TESTER_PREAMBLE,
             client.clone(),
             model,
-            tools::command_tools(),
+            tools::command_tools(gate.clone()),
             Arc::clone(&usage),
         ),
         shuvarie_llm::WorkerAgent::new(
@@ -37,7 +38,7 @@ pub fn build_workers(client: ProviderClient, model: &str) -> WorkerSet {
             EDITOR_PREAMBLE,
             client,
             model,
-            tools::edit_tools(),
+            tools::edit_tools(gate),
             Arc::clone(&usage),
         ),
     ];

@@ -36,4 +36,9 @@ pub enum Command {
     SearchHistory {
         query: String,
     },
+    ApproveTool {
+        id: u64,
+        approved: bool,
+        always: bool,
+    },
 }

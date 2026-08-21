@@ -5,6 +5,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph, Wrap};
 use shuvarie_catalog::TokenUsage;
 use shuvarie_core::Role;
+use shuvarie_llm::{DiffLine, DiffLineKind, FileChange};
 use termina::event::{KeyCode, KeyEvent};
 use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
@@ -34,6 +35,7 @@ pub enum SessionMessage {
         ok: bool,
         output: String,
         worker: Option<String>,
+        file_change: Option<FileChange>,
     },
     WorkerStarted {
         name: String,
@@ -87,6 +89,7 @@ pub struct ToolActivity {
     pub worker: Option<String>,
     pub message_index: usize,
     pub text_offset: usize,
+    pub file_change: Option<FileChange>,
 }
 
 impl ToolActivity {
@@ -211,6 +214,7 @@ impl SessionScreen {
                     worker,
                     message_index: self.messages.len(),
                     text_offset: self.pending.len(),
+                    file_change: None,
                 });
                 self.streaming = true;
                 self.status = Some(format!("tool: {}", self.tools.last().unwrap().name));
@@ -223,6 +227,7 @@ impl SessionScreen {
                 ok,
                 output,
                 worker,
+                file_change,
             } => {
                 if let Some(tool) = self.tools.iter_mut().find(|t| {
                     t.name == name && t.worker == worker && matches!(t.status, ToolStatus::Running)
@@ -233,6 +238,7 @@ impl SessionScreen {
                         ToolStatus::Failed
                     };
                     tool.output = output;
+                    tool.file_change = file_change;
                 }
                 self.status = None;
                 self.mark_scroll_dirty();
@@ -248,6 +254,7 @@ impl SessionScreen {
                     worker: Some(String::new()),
                     message_index: self.messages.len(),
                     text_offset: self.pending.len(),
+                    file_change: None,
                 });
                 self.streaming = true;
                 self.status = Some(format!("worker: {}", self.tools.last().unwrap().name));
@@ -580,6 +587,65 @@ impl SessionScreen {
                 Span::raw(format!("{prefix}    {first}")).fg(theme::TEXT_DIM),
             ));
         }
+        if let Some(change) = &tool.file_change {
+            self.push_file_change_lines(lines, change, prefix);
+        }
+    }
+
+    fn push_file_change_lines(&self, lines: &mut Vec<Line>, change: &FileChange, prefix: &str) {
+        match change {
+            FileChange::Edit { path, diff } => {
+                lines.push(Line::from(vec![
+                    Span::raw(format!("{prefix}  ── diff: ")).fg(theme::TEXT_MUTED),
+                    Span::raw(path.clone()).fg(theme::ACCENT),
+                ]));
+                for line in diff {
+                    self.push_diff_line(lines, line, prefix);
+                }
+            }
+            FileChange::Write { path, content } => {
+                lines.push(Line::from(vec![
+                    Span::raw(format!("{prefix}  ── new file: ")).fg(theme::TEXT_MUTED),
+                    Span::raw(path.clone()).fg(theme::ACCENT),
+                ]));
+                for (i, text) in content.lines().enumerate() {
+                    let num = format!("{:>4}", i + 1);
+                    lines.push(Line::from(vec![
+                        Span::raw(format!("{prefix}    {num} ")).fg(theme::TEXT_MUTED),
+                        Span::raw(text.to_string()).fg(theme::TEXT_DIM),
+                    ]));
+                }
+            }
+        }
+    }
+
+    fn push_diff_line(&self, lines: &mut Vec<Line>, line: &DiffLine, prefix: &str) {
+        if line.kind == DiffLineKind::Ellipsis {
+            lines.push(Line::from(
+                Span::raw(format!("{prefix}    …")).fg(theme::TEXT_MUTED),
+            ));
+            return;
+        }
+        let (marker, fg) = match line.kind {
+            DiffLineKind::Add => ("+", theme::SUCCESS),
+            DiffLineKind::Remove => ("-", theme::ERROR),
+            DiffLineKind::Context => (" ", theme::TEXT_DIM),
+            DiffLineKind::Ellipsis => unreachable!(),
+        };
+        let old_num = line
+            .old_line
+            .map(|n| format!("{n:>4}"))
+            .unwrap_or_else(|| "    ".to_string());
+        let new_num = line
+            .new_line
+            .map(|n| format!("{n:>4}"))
+            .unwrap_or_else(|| "    ".to_string());
+        let text = line.text.trim_end_matches('\n');
+        lines.push(Line::from(vec![
+            Span::raw(format!("{prefix}  {old_num} {new_num} ")).fg(theme::TEXT_MUTED),
+            Span::raw(marker).fg(fg).bold(),
+            Span::raw(text.to_string()).fg(fg),
+        ]));
     }
 
     fn push_context_lines(&self, lines: &mut Vec<Line>, context: &ContextActivity) {

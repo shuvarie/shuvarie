@@ -8,7 +8,7 @@ use shuvarie_catalog::TokenUsage;
 
 use crate::ProviderClient;
 use crate::stream::StreamItem;
-use crate::tool::{Tool, ToolDefinition};
+use crate::tool::{Tool, ToolDefinition, ToolOutput};
 
 pub struct WorkerAgent {
     name: String,
@@ -112,7 +112,10 @@ impl Tool for WorkerAgent {
         }
     }
 
-    fn call(&self, args: Value) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
+    fn call(
+        &self,
+        args: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolOutput, String>> + Send>> {
         let request = WorkerRequest {
             client: self.client.clone(),
             name: self.name.clone(),
@@ -133,7 +136,11 @@ impl Tool for WorkerAgent {
             if request.task.is_empty() {
                 return Err(format!("worker '{name}' missing string argument 'task'"));
             }
-            request.client.run_worker(&request).await
+            request
+                .client
+                .run_worker(&request)
+                .await
+                .map(ToolOutput::text)
         })
     }
 }

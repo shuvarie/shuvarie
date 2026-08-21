@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use serde_json::{Value, json};
-use shuvarie_llm::{Tool, ToolDefinition};
+use shuvarie_llm::{DiffLine, DiffLineKind, FileChange, Tool, ToolDefinition, ToolOutput};
+
+use crate::approval::{ApprovalGate, ApprovalReason};
 
 const MAX_READ_BYTES: usize = 64 * 1024;
 const MAX_COMMAND_OUTPUT: usize = 16 * 1024;
@@ -28,7 +30,9 @@ fn args_str_vec(args: &Value, key: &str) -> Result<Vec<String>, String> {
         .ok_or_else(|| format!("missing string-array argument '{key}'"))
 }
 
-struct ReadFile;
+struct ReadFile {
+    gate: ApprovalGate,
+}
 
 impl Tool for ReadFile {
     fn definition(&self) -> ToolDefinition {
@@ -48,12 +52,19 @@ impl Tool for ReadFile {
         }
     }
 
-    fn call(&self, args: Value) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
+    fn call(
+        &self,
+        args: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolOutput, String>> + Send>> {
+        let gate = self.gate.clone();
         Box::pin(async move {
             let path = arg_value(&args, "path")?;
             let offset = args.get("offset").and_then(Value::as_u64);
             let limit = args.get("limit").and_then(Value::as_u64);
-            let abs = resolve(&path)?;
+            let (abs, reason) = resolve_checked(&path)?;
+            if let Some(reason) = reason {
+                gate.request("read_file", &path, reason).await?;
+            }
             if abs.is_dir() {
                 return Err(format!("'{path}' is a directory, not a file"));
             }
@@ -69,18 +80,20 @@ impl Tool for ReadFile {
                 None => lines.len(),
             };
             if start >= lines.len() {
-                return Ok(String::from("(empty)"));
+                return Ok(ToolOutput::text("(empty)"));
             }
             let mut out = String::new();
             for (i, line) in lines[start..end].iter().enumerate() {
                 out.push_str(&format!("{:>6} | {line}\n", start + i + 1));
             }
-            Ok(out)
+            Ok(ToolOutput::text(out))
         })
     }
 }
 
-struct WriteFile;
+struct WriteFile {
+    gate: ApprovalGate,
+}
 
 impl Tool for WriteFile {
     fn definition(&self) -> ToolDefinition {
@@ -99,22 +112,34 @@ impl Tool for WriteFile {
         }
     }
 
-    fn call(&self, args: Value) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
+    fn call(
+        &self,
+        args: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolOutput, String>> + Send>> {
+        let gate = self.gate.clone();
         Box::pin(async move {
             let path = arg_value(&args, "path")?;
             let content = arg_value(&args, "content")?;
-            let abs = resolve_for_write(&path)?;
+            let (abs, reason) = resolve_for_write_checked(&path)?;
+            if let Some(reason) = reason {
+                gate.request("write_file", &path, reason).await?;
+            }
             if let Some(parent) = abs.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("create dir {}: {e}", parent.display()))?;
             }
             std::fs::write(&abs, &content).map_err(|e| format!("write {path}: {e}"))?;
-            Ok(format!("wrote {} bytes to {path}", content.len()))
+            Ok(ToolOutput::with_file_change(
+                format!("wrote {} bytes to {path}", content.len()),
+                FileChange::Write { path, content },
+            ))
         })
     }
 }
 
-struct EditFile;
+struct EditFile {
+    gate: ApprovalGate,
+}
 
 impl Tool for EditFile {
     fn definition(&self) -> ToolDefinition {
@@ -135,13 +160,20 @@ impl Tool for EditFile {
         }
     }
 
-    fn call(&self, args: Value) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
+    fn call(
+        &self,
+        args: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolOutput, String>> + Send>> {
+        let gate = self.gate.clone();
         Box::pin(async move {
             let path = arg_value(&args, "path")?;
             let old = arg_value(&args, "old")?;
             let new = arg_value(&args, "new")?;
             let occurrence = args.get("occurrence").and_then(Value::as_u64);
-            let abs = resolve(&path)?;
+            let (abs, reason) = resolve_checked(&path)?;
+            if let Some(reason) = reason {
+                gate.request("edit_file", &path, reason).await?;
+            }
             let content = std::fs::read_to_string(&abs).map_err(|e| format!("read {path}: {e}"))?;
             if old.is_empty() {
                 return Err("cannot edit with an empty 'old' text".into());
@@ -168,10 +200,11 @@ impl Tool for EditFile {
             };
             let mut edited = content.clone();
             edited.replace_range(idx..idx + old.len(), &new);
-            std::fs::write(&abs, edited).map_err(|e| format!("write {path}: {e}"))?;
-            Ok(format!(
-                "edited {path}: replaced 1 of {} occurrences",
-                matches.len()
+            let diff = compute_diff(&content, &edited);
+            std::fs::write(&abs, &edited).map_err(|e| format!("write {path}: {e}"))?;
+            Ok(ToolOutput::with_file_change(
+                format!("edited {path}: replaced 1 of {} occurrences", matches.len()),
+                FileChange::Edit { path, diff },
             ))
         })
     }
@@ -198,7 +231,10 @@ impl Tool for RunCommand {
         }
     }
 
-    fn call(&self, args: Value) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
+    fn call(
+        &self,
+        args: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolOutput, String>> + Send>> {
         Box::pin(async move {
             let cmd = arg_value(&args, "cmd")?;
             let cmd_args = args_str_vec(&args, "args").unwrap_or_default();
@@ -256,15 +292,19 @@ impl Tool for RunCommand {
                 return Err(format!("{cmd} exited with {status}:\n{capped}"));
             }
             if trimmed.is_empty() {
-                Ok(format!("{cmd} exited with {status} (no output)"))
+                Ok(ToolOutput::text(format!(
+                    "{cmd} exited with {status} (no output)"
+                )))
             } else {
-                Ok(format!("exit {status}:\n{capped}"))
+                Ok(ToolOutput::text(format!("exit {status}:\n{capped}")))
             }
         })
     }
 }
 
-struct ListDir;
+struct ListDir {
+    gate: ApprovalGate,
+}
 
 impl Tool for ListDir {
     fn definition(&self) -> ToolDefinition {
@@ -282,10 +322,17 @@ impl Tool for ListDir {
         }
     }
 
-    fn call(&self, args: Value) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
+    fn call(
+        &self,
+        args: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolOutput, String>> + Send>> {
+        let gate = self.gate.clone();
         Box::pin(async move {
             let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
-            let abs = resolve(path)?;
+            let (abs, reason) = resolve_checked(path)?;
+            if let Some(reason) = reason {
+                gate.request("list_dir", path, reason).await?;
+            }
             let entries = std::fs::read_dir(&abs).map_err(|e| format!("read_dir {path}: {e}"))?;
             let mut names: Vec<String> = Vec::new();
             for entry in entries {
@@ -300,15 +347,17 @@ impl Tool for ListDir {
             }
             names.sort();
             if names.is_empty() {
-                Ok(format!("{path} is empty"))
+                Ok(ToolOutput::text(format!("{path} is empty")))
             } else {
-                Ok(names.join("\n"))
+                Ok(ToolOutput::text(names.join("\n")))
             }
         })
     }
 }
 
-struct Grep;
+struct Grep {
+    gate: ApprovalGate,
+}
 
 impl Tool for Grep {
     fn definition(&self) -> ToolDefinition {
@@ -329,7 +378,11 @@ impl Tool for Grep {
         }
     }
 
-    fn call(&self, args: Value) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
+    fn call(
+        &self,
+        args: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolOutput, String>> + Send>> {
+        let gate = self.gate.clone();
         Box::pin(async move {
             let pattern = arg_value(&args, "pattern")?;
             let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
@@ -339,7 +392,10 @@ impl Tool for Grep {
                 .and_then(Value::as_u64)
                 .unwrap_or(200) as usize;
             let regex = regex::Regex::new(&pattern).map_err(|e| format!("bad pattern: {e}"))?;
-            let abs = resolve(path)?;
+            let (abs, reason) = resolve_checked(path)?;
+            if let Some(reason) = reason {
+                gate.request("grep", path, reason).await?;
+            }
             let mut hits = 0;
             let mut out = String::new();
             let mut walk = |entry: &Path, rel: &Path| -> Result<bool, String> {
@@ -378,12 +434,14 @@ impl Tool for Grep {
             };
             walk_dir(&abs, path, &mut walk).map_err(|e| format!("grep: {e}"))?;
             if out.is_empty() {
-                Ok(format!("no matches for /{pattern}/ in {path}"))
+                Ok(ToolOutput::text(format!(
+                    "no matches for /{pattern}/ in {path}"
+                )))
             } else if hits >= max {
                 out.push_str(&format!("… ({} results, cap {max})", hits + 1));
-                Ok(out)
+                Ok(ToolOutput::text(out))
             } else {
-                Ok(out)
+                Ok(ToolOutput::text(out))
             }
         })
     }
@@ -428,16 +486,37 @@ fn resolve(path: &str) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-fn resolve_for_write(path: &str) -> Result<PathBuf, String> {
+fn hidden_reason(path: &str) -> Option<ApprovalReason> {
+    let has_hidden = path
+        .split(['/', '\\'])
+        .any(|c| c.starts_with('.') && c != "." && c != "..");
+    has_hidden.then_some(ApprovalReason::HiddenPath)
+}
+
+fn resolve_checked(path: &str) -> Result<(PathBuf, Option<ApprovalReason>), String> {
     let root = workspace_root()?;
     let joined = root.join(path);
+    let canonical = joined.canonicalize().map_err(|e| format!("{path}: {e}"))?;
+    let reason = if !canonical.starts_with(&root) {
+        Some(ApprovalReason::OutsideWorkspace)
+    } else {
+        hidden_reason(path)
+    };
+    Ok((canonical, reason))
+}
+
+fn resolve_for_write_checked(path: &str) -> Result<(PathBuf, Option<ApprovalReason>), String> {
+    let root = workspace_root()?;
+    let joined = root.join(path);
+    let reason = hidden_reason(path);
     if joined.exists() {
         let abs = joined.canonicalize().map_err(|e| format!("{path}: {e}"))?;
-        return if abs.starts_with(&root) {
-            Ok(abs)
+        let reason = if !abs.starts_with(&root) {
+            Some(ApprovalReason::OutsideWorkspace)
         } else {
-            Err(format!("{path} resolves outside the workspace"))
+            reason
         };
+        return Ok((abs, reason));
     }
     let mut existing = joined.clone();
     let mut missing: Vec<std::ffi::OsString> = Vec::new();
@@ -458,40 +537,79 @@ fn resolve_for_write(path: &str) -> Result<PathBuf, String> {
     for name in missing.iter().rev() {
         abs.push(name);
     }
-    if !abs.starts_with(&root) {
-        return Err(format!("{path} resolves outside the workspace"));
+    let reason = if !abs.starts_with(&root) {
+        Some(ApprovalReason::OutsideWorkspace)
+    } else {
+        reason
+    };
+    Ok((abs, reason))
+}
+
+fn compute_diff(old: &str, new: &str) -> Vec<DiffLine> {
+    let diff = similar::TextDiff::from_lines(old, new);
+    let mut lines: Vec<DiffLine> = Vec::new();
+    for group in diff.grouped_ops(3) {
+        if !lines.is_empty() {
+            lines.push(DiffLine {
+                kind: DiffLineKind::Ellipsis,
+                old_line: None,
+                new_line: None,
+                text: String::new(),
+            });
+        }
+        for op in group {
+            for change in diff.iter_changes(&op) {
+                let (kind, old_line, new_line) = match change.tag() {
+                    similar::ChangeTag::Delete => (DiffLineKind::Remove, change.old_index(), None),
+                    similar::ChangeTag::Insert => (DiffLineKind::Add, None, change.new_index()),
+                    similar::ChangeTag::Equal => (
+                        DiffLineKind::Context,
+                        change.old_index(),
+                        change.new_index(),
+                    ),
+                };
+                let old_line = old_line.map(|i| i as u64 + 1);
+                let new_line = new_line.map(|i| i as u64 + 1);
+                lines.push(DiffLine {
+                    kind,
+                    old_line,
+                    new_line,
+                    text: change.value().to_string(),
+                });
+            }
+        }
     }
-    Ok(abs)
+    lines
 }
 
-pub fn all_tools() -> Vec<std::sync::Arc<dyn Tool>> {
+pub fn all_tools(gate: ApprovalGate) -> Vec<std::sync::Arc<dyn Tool>> {
     vec![
-        std::sync::Arc::new(ReadFile),
-        std::sync::Arc::new(WriteFile),
-        std::sync::Arc::new(EditFile),
+        std::sync::Arc::new(ReadFile { gate: gate.clone() }),
+        std::sync::Arc::new(WriteFile { gate: gate.clone() }),
+        std::sync::Arc::new(EditFile { gate: gate.clone() }),
         std::sync::Arc::new(RunCommand),
-        std::sync::Arc::new(ListDir),
-        std::sync::Arc::new(Grep),
+        std::sync::Arc::new(ListDir { gate: gate.clone() }),
+        std::sync::Arc::new(Grep { gate }),
     ]
 }
 
-pub fn read_tools() -> Vec<std::sync::Arc<dyn Tool>> {
+pub fn read_tools(gate: ApprovalGate) -> Vec<std::sync::Arc<dyn Tool>> {
     vec![
-        std::sync::Arc::new(ReadFile),
-        std::sync::Arc::new(ListDir),
-        std::sync::Arc::new(Grep),
+        std::sync::Arc::new(ReadFile { gate: gate.clone() }),
+        std::sync::Arc::new(ListDir { gate: gate.clone() }),
+        std::sync::Arc::new(Grep { gate }),
     ]
 }
 
-pub fn command_tools() -> Vec<std::sync::Arc<dyn Tool>> {
+pub fn command_tools(_gate: ApprovalGate) -> Vec<std::sync::Arc<dyn Tool>> {
     vec![std::sync::Arc::new(RunCommand)]
 }
 
-pub fn edit_tools() -> Vec<std::sync::Arc<dyn Tool>> {
+pub fn edit_tools(gate: ApprovalGate) -> Vec<std::sync::Arc<dyn Tool>> {
     vec![
-        std::sync::Arc::new(ReadFile),
-        std::sync::Arc::new(WriteFile),
-        std::sync::Arc::new(EditFile),
+        std::sync::Arc::new(ReadFile { gate: gate.clone() }),
+        std::sync::Arc::new(WriteFile { gate: gate.clone() }),
+        std::sync::Arc::new(EditFile { gate }),
     ]
 }
 
@@ -510,16 +628,21 @@ mod tests {
         (dir, guard)
     }
 
+    fn gate() -> ApprovalGate {
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        ApprovalGate::new(tx)
+    }
+
     #[tokio::test]
     async fn read_file_with_range() {
         let (dir, _guard) = tempdir();
         std::fs::write("a.txt", "one\ntwo\nthree\n").unwrap();
-        let out = ReadFile
+        let out = ReadFile { gate: gate() }
             .call(json!({ "path": "a.txt", "offset": 2, "limit": 1 }))
             .await
             .unwrap();
-        assert!(out.contains("two"), "{out}");
-        let err = ReadFile
+        assert!(out.text.contains("two"), "{}", out.text);
+        let err = ReadFile { gate: gate() }
             .call(json!({ "path": "missing.txt" }))
             .await
             .unwrap_err();
@@ -528,30 +651,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_refuses_binary_and_escape() {
+    async fn read_refuses_binary() {
         let (dir, _guard) = tempdir();
         std::fs::write("bin.dat", [0, 1, 2, 3]).unwrap();
-        let err = ReadFile
+        let err = ReadFile { gate: gate() }
             .call(json!({ "path": "bin.dat" }))
             .await
             .unwrap_err();
         assert!(err.contains("binary"));
-        let err = ReadFile
-            .call(json!({ "path": "../outside.txt" }))
-            .await
-            .unwrap_err();
-        assert!(err.contains("outside"));
         drop(dir);
     }
 
     #[tokio::test]
     async fn write_creates_parents() {
         let (dir, _guard) = tempdir();
-        WriteFile
+        let out = WriteFile { gate: gate() }
             .call(json!({ "path": "sub/deep/f.txt", "content": "hello" }))
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string("sub/deep/f.txt").unwrap(), "hello");
+        assert!(matches!(
+            out.file_change,
+            Some(FileChange::Write { ref path, .. }) if path == "sub/deep/f.txt"
+        ));
         drop(dir);
     }
 
@@ -559,17 +681,21 @@ mod tests {
     async fn edit_replaces_and_detects_ambiguity() {
         let (dir, _guard) = tempdir();
         std::fs::write("e.txt", "a b a").unwrap();
-        let err = EditFile
+        let err = EditFile { gate: gate() }
             .call(json!({ "path": "e.txt", "old": "a", "new": "x" }))
             .await
             .unwrap_err();
         assert!(err.contains("occurrence"));
-        EditFile
+        let out = EditFile { gate: gate() }
             .call(json!({ "path": "e.txt", "old": "a", "new": "x", "occurrence": 2 }))
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string("e.txt").unwrap(), "a b x");
-        let err = EditFile
+        assert!(matches!(
+            out.file_change,
+            Some(FileChange::Edit { ref diff, .. }) if !diff.is_empty()
+        ));
+        let err = EditFile { gate: gate() }
             .call(json!({ "path": "e.txt", "old": "zzz", "new": "x" }))
             .await
             .unwrap_err();
@@ -584,7 +710,7 @@ mod tests {
             .call(json!({ "cmd": "sh", "args": ["-c", "echo hello"] }))
             .await
             .unwrap();
-        assert!(out.contains("hello"));
+        assert!(out.text.contains("hello"));
         let err = RunCommand
             .call(json!({ "cmd": "sleep", "args": ["5"], "timeout_secs": 1 }))
             .await
@@ -609,8 +735,8 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::create_dir("zdir").unwrap();
         std::fs::write("afile", "").unwrap();
-        let out = ListDir.call(json!({})).await.unwrap();
-        let lines: Vec<&str> = out.lines().collect();
+        let out = ListDir { gate: gate() }.call(json!({})).await.unwrap();
+        let lines: Vec<&str> = out.text.lines().collect();
         assert_eq!(lines, vec!["afile", "zdir/"]);
         drop(dir);
     }
@@ -620,14 +746,66 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::write("r.rs", "fn main() {}\n").unwrap();
         std::fs::write("r.txt", "hello fn world\n").unwrap();
-        let out = Grep
+        let out = Grep { gate: gate() }
             .call(json!({ "pattern": "fn", "include": ".rs" }))
             .await
             .unwrap();
-        assert!(out.contains("r.rs:1"));
-        assert!(!out.contains("r.txt"));
-        let none = Grep.call(json!({ "pattern": "zzzz" })).await.unwrap();
-        assert!(none.contains("no matches"));
+        assert!(out.text.contains("r.rs:1"));
+        assert!(!out.text.contains("r.txt"));
+        let none = Grep { gate: gate() }
+            .call(json!({ "pattern": "zzzz" }))
+            .await
+            .unwrap();
+        assert!(none.text.contains("no matches"));
+        drop(dir);
+    }
+
+    #[test]
+    fn diff_computes_line_numbers_and_ellipsis() {
+        let old = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n";
+        let new = "one\ntwo\nTHREE\nfour\nfive\nsix\nseven\neight\nnine\nten\n";
+        let diff = compute_diff(old, new);
+        assert!(diff.iter().any(|l| l.kind == DiffLineKind::Remove));
+        assert!(diff.iter().any(|l| l.kind == DiffLineKind::Add));
+        let remove = diff
+            .iter()
+            .find(|l| l.kind == DiffLineKind::Remove)
+            .unwrap();
+        assert_eq!(remove.old_line, Some(3));
+        assert_eq!(remove.text, "three\n");
+        let add = diff.iter().find(|l| l.kind == DiffLineKind::Add).unwrap();
+        assert_eq!(add.new_line, Some(3));
+        assert_eq!(add.text, "THREE\n");
+    }
+
+    #[test]
+    fn diff_inserts_ellipsis_between_hunks() {
+        let old = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\n";
+        let new = "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nL\n";
+        let diff = compute_diff(old, new);
+        assert!(diff.iter().any(|l| l.kind == DiffLineKind::Ellipsis));
+    }
+
+    #[test]
+    fn resolve_checked_classifies_hidden_and_outside() {
+        let (dir, _guard) = tempdir();
+        std::fs::create_dir_all(".git").unwrap();
+        std::fs::write(".git/config", "x").unwrap();
+        let (_, reason) = resolve_checked(".git/config").unwrap();
+        assert_eq!(reason, Some(ApprovalReason::HiddenPath));
+        let (_, reason) = resolve_checked(".").unwrap();
+        assert_eq!(reason, None);
+
+        let outside = dir
+            .path()
+            .parent()
+            .unwrap()
+            .join(format!("shuvarie-outside-{}", std::process::id()));
+        std::fs::write(&outside, "x").unwrap();
+        let rel = format!("../{}", outside.file_name().unwrap().to_string_lossy());
+        let (_, reason) = resolve_checked(&rel).unwrap();
+        assert_eq!(reason, Some(ApprovalReason::OutsideWorkspace));
+        let _ = std::fs::remove_file(&outside);
         drop(dir);
     }
 }
