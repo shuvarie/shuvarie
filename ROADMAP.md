@@ -7,7 +7,7 @@ Each milestone is intended to be independently mergeable and to leave the binary
 ## Current state
 
 - Working TUI loop (ratatui + termina backend), TEA pattern with hierarchical submodels (`HomeScreen`, `SessionScreen`, overlays).
-- `shuvarie-core`, `shuvarie-db`, and `shuvarie-llm` wired as dependencies of the root binary, with real crate roots and typed error enums (`CoreError`, `DbError`, `LlmError` via `thiserror`).
+- `shuvarie-core`, `shuvarie-db`, `shuvarie-llm`, `shuvarie-catalog`, and `shuvarie-highlight` wired as dependencies of the root binary, with real crate roots and typed error enums (`CoreError`, `DbError`, `LlmError` via `thiserror`).
 - `shuvarie-db` provides the Toasty/Turso persistence layer: `Session`/`Message` models, a `Store` wrapper (`.shuvarie/data.db` in the working directory), embedded migrations (see `crates/db/toasty/`), and a `migrate` bin (toasty-cli) for managing them.
 - `shuvarie-catalog` is the uniform source of provider + model info: the `Provider` enum (9 variants) with metadata (display name, requires-api-key, default base URL), `ModelInfo`, `TokenUsage`, and embedded data files (`data/models.toml`: unified `[models.*]` stats — context length + per-mtok input/output rates per canonical `<org>/<model>` id, orgs matching Hugging Face; `data/providers/*.toml`: fallback rates plus `aliases` from provider-specific ids to canonical ids and `variants` — kind-labeled deployment tiers like `pro`/`thinking` with optional override rates/context), with `resolve`/`estimate_cost`/`enrich`/`variants` (exact then longest-prefix alias matching, provider-specific overrides win, provider-default fallback for unknown ids, `enrich` fills missing runtime context lengths).
 - `shuvarie-llm` exposes a `ProviderClient` that builds the right `rig` client per kind, an async `list_models` returning a lightweight `ModelInfo`, and a streaming `stream` (via `rig::streaming::StreamingChat`) yielding a portable `StreamItem` stream (`Delta`/`ToolStart`/`ToolResult`/`Done`/`Error`). Rig types stay out of `shuvarie-core`; `ChatMsg`/`Role` are the portable message types, and rig→catalog conversions (`model_info_from_rig`, `token_usage_from_rig`) live here.
@@ -104,10 +104,10 @@ Persist chat sessions and message history so conversations survive restarts.
 
 ## M7+ — Agent features
 
-Milestone M7.1 ships; the M7.2 catalog milestone lands; the rest remain future work.
+Milestone M7.1 ships; the M7.2 catalog milestone ships; the rest remain future work.
 
 - [x] M7.1 — Tool calling (file read/write/edit, shell execution, list, grep) via a portable `Tool` trait over rig's `DynamicTool`, with a multi-turn agent loop (`max_turns` 20), an agent preamble, inline tool-activity rendering in the chat pane, and a workspace-root escape guard on all tools. Deferred follow-ups: tool-output token counting, configurable turn budget, approval prompts for edits/commands (see below).
-- M7.2 — Uniform provider/model catalog: the `shuvarie-catalog` crate centralizes `Provider`/`ModelInfo`/`TokenUsage`, an embedded two-layer `catalog.toml` (canonical per-model stats + per-provider alias maps), and `resolve`/`estimate_cost`/`enrich` with longest-prefix matching. Deferred follow-up: user-configurable rate overrides.
+- [x] M7.2 — Uniform provider/model catalog: the `shuvarie-catalog` crate centralizes `Provider`/`ModelInfo`/`TokenUsage`, split embedded data (`data/models.toml` — canonical `<org>/<model>` stats; `data/providers/*.toml` — fallback rates, `aliases`, and kind-labeled `variants` deployment tiers), and `resolve`/`estimate_cost`/`enrich`/`variants` (exact then longest-prefix alias matching, provider-specific overrides win, provider-default fallback for unknown ids). Deferred follow-up: user-configurable rate overrides, and surfacing deployment-tier variants in the ModelPicker.
 - Multi-agent orchestration and task decomposition.
 - Context files / project-aware prompts (AGENTS.md scanning, `.shuvarie/context`).
 - RAG over chat history using Turso vector search and full-text search.
