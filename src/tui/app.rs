@@ -245,6 +245,9 @@ impl App {
                         content,
                     }))
                 }
+                CoreEvent::ContextLoaded { paths } => {
+                    Some(AppMessage::Session(SessionMessage::ContextLoaded { paths }))
+                }
                 CoreEvent::ToolStarted { name, args, worker } => {
                     Some(AppMessage::Session(SessionMessage::ToolStarted {
                         name,

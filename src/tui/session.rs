@@ -21,6 +21,9 @@ pub enum SessionMessage {
     TokenReceived {
         content: String,
     },
+    ContextLoaded {
+        paths: Vec<String>,
+    },
     ToolStarted {
         name: String,
         args: serde_json::Value,
@@ -92,10 +95,17 @@ impl ToolActivity {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ContextActivity {
+    pub paths: Vec<String>,
+    pub message_index: usize,
+}
+
 pub struct SessionScreen {
     pub input: TextArea,
     pub messages: Vec<(Role, String)>,
     pub tools: Vec<ToolActivity>,
+    pub context: Vec<ContextActivity>,
     pub streaming: bool,
     pub pending: String,
     pub scroll_state: RefCell<ScrollViewState>,
@@ -115,6 +125,7 @@ impl SessionScreen {
             input: TextArea::new("Type a message…"),
             messages: Vec::new(),
             tools: Vec::new(),
+            context: Vec::new(),
             streaming: false,
             pending: String::new(),
             scroll_state: RefCell::new(ScrollViewState::default()),
@@ -178,6 +189,15 @@ impl SessionScreen {
                 }
                 self.pending.push_str(&content);
                 self.status = Some("streaming…".to_string());
+                self.mark_scroll_dirty();
+                self.follow_bottom();
+                None
+            }
+            SessionMessage::ContextLoaded { paths } => {
+                self.context.push(ContextActivity {
+                    paths,
+                    message_index: self.messages.len(),
+                });
                 self.mark_scroll_dirty();
                 self.follow_bottom();
                 None
@@ -269,6 +289,8 @@ impl SessionScreen {
                 self.pending.clear();
                 self.tools
                     .retain(|t| t.message_index != self.messages.len());
+                self.context
+                    .retain(|c| c.message_index != self.messages.len());
                 self.status = Some(format!("error: {error}"));
                 self.mark_scroll_dirty();
                 None
@@ -278,6 +300,8 @@ impl SessionScreen {
                 self.pending.clear();
                 self.tools
                     .retain(|t| t.message_index != self.messages.len());
+                self.context
+                    .retain(|c| c.message_index != self.messages.len());
                 self.status = None;
                 self.mark_scroll_dirty();
                 None
@@ -304,6 +328,7 @@ impl SessionScreen {
             SessionMessage::Reset => {
                 self.messages.clear();
                 self.tools.clear();
+                self.context.clear();
                 self.streaming = false;
                 self.pending.clear();
                 self.status = None;
@@ -324,6 +349,7 @@ impl SessionScreen {
                     .map(|m| (m.role, m.content))
                     .collect();
                 self.tools.clear();
+                self.context.clear();
                 self.streaming = false;
                 self.pending.clear();
                 self.status = None;
@@ -456,6 +482,14 @@ impl SessionScreen {
                 Role::Assistant => {
                     let tool_lines: Vec<&ToolActivity> =
                         self.tools.iter().filter(|t| t.belongs_to(i)).collect();
+                    let context_lines: Vec<&ContextActivity> = self
+                        .context
+                        .iter()
+                        .filter(|c| c.message_index == i)
+                        .collect();
+                    for context in context_lines {
+                        self.push_context_lines(&mut lines, context);
+                    }
                     if content.is_empty() {
                         for tool in &tool_lines {
                             self.push_tool_lines(&mut lines, tool);
@@ -545,6 +579,16 @@ impl SessionScreen {
             lines.push(Line::from(
                 Span::raw(format!("{prefix}    {first}")).fg(theme::TEXT_DIM),
             ));
+        }
+    }
+
+    fn push_context_lines(&self, lines: &mut Vec<Line>, context: &ContextActivity) {
+        for path in &context.paths {
+            let line = vec![
+                Span::raw("◈").fg(theme::ACCENT).bold(),
+                Span::raw(format!(" Loaded {path}")).fg(theme::TEXT),
+            ];
+            lines.push(Line::from(line));
         }
     }
 

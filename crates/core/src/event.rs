@@ -24,6 +24,9 @@ pub enum Event {
     TokenReceived {
         content: String,
     },
+    ContextLoaded {
+        paths: Vec<String>,
+    },
     ToolStarted {
         name: String,
         args: serde_json::Value,

@@ -202,12 +202,21 @@ pub async fn run(
                     let guard = s.lock().await;
                     guard.messages[..guard.messages.len().saturating_sub(1)].to_vec()
                 };
+                let loaded_context = crate::context::load_from_cwd();
+                if !loaded_context.is_empty() {
+                    let _ = event_tx
+                        .send(Event::ContextLoaded {
+                            paths: loaded_context.files.clone(),
+                        })
+                        .await;
+                }
+                let preamble = crate::context::build_preamble(AGENT_PREAMBLE, &loaded_context);
                 let tools = crate::tools::all_tools();
                 let mut worker_set = crate::agents::build_workers(client.clone(), &model);
                 let stream = client
                     .stream(
                         &model,
-                        Some(AGENT_PREAMBLE),
+                        Some(&preamble),
                         &content,
                         &prior,
                         &tools,
