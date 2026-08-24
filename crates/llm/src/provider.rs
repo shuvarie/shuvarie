@@ -387,6 +387,42 @@ impl ProviderClient {
                     StreamItem::Delta { text: t.text }
                 }
                 Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
+                    rig::streaming::StreamedAssistantContent::Reasoning(reasoning),
+                )) => {
+                    let text: String = reasoning
+                        .content
+                        .iter()
+                        .filter_map(|c| match c {
+                            rig::completion::message::ReasoningContent::Text { text, .. } => {
+                                Some(text.clone())
+                            }
+                            rig::completion::message::ReasoningContent::Summary(s) => {
+                                Some(s.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    if text.is_empty() {
+                        StreamItem::Delta {
+                            text: String::new(),
+                        }
+                    } else {
+                        StreamItem::Reasoning { text }
+                    }
+                }
+                Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
+                    rig::streaming::StreamedAssistantContent::ReasoningDelta { reasoning, .. },
+                )) => {
+                    if reasoning.is_empty() {
+                        StreamItem::Delta {
+                            text: String::new(),
+                        }
+                    } else {
+                        StreamItem::Reasoning { text: reasoning }
+                    }
+                }
+                Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
                     rig::streaming::StreamedAssistantContent::ToolCall {
                         tool_call,
                         internal_call_id,

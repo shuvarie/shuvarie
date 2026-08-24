@@ -9,6 +9,7 @@ pub mod embeddings;
 mod error;
 pub mod event;
 pub mod session;
+pub mod tool_record;
 pub mod tools;
 
 pub use approval::ApprovalReason;

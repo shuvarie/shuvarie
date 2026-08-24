@@ -7903,6 +7903,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "jiff",
+ "serde",
+ "serde_json",
  "shuvarie-catalog",
  "shuvarie-llm",
  "tempfile",

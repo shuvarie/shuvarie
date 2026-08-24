@@ -9,12 +9,16 @@ use super::list::{render_list_item_line, scroll_offset_for};
 use super::search::{Search, SearchMessage};
 use super::theme;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CommandAction {
     OpenModelSelect,
     AddProvider,
     OpenSessionPicker,
     NewSession,
+    UndoLastTurn,
+    Redo,
+    Replay,
+    Resume,
 }
 
 #[derive(Clone)]
@@ -22,6 +26,7 @@ pub struct CommandEntry {
     pub name: &'static str,
     pub description: &'static str,
     pub action: CommandAction,
+    pub available: bool,
 }
 
 pub enum CommandMenuMessage {
@@ -38,6 +43,10 @@ pub enum CommandMenuEffect {
     AddProvider,
     OpenSessionPicker,
     NewSession,
+    UndoLastTurn,
+    Redo,
+    Replay,
+    Resume,
 }
 
 pub fn default_commands() -> Vec<CommandEntry> {
@@ -46,21 +55,49 @@ pub fn default_commands() -> Vec<CommandEntry> {
             name: "Select model",
             description: "Pick the active model",
             action: CommandAction::OpenModelSelect,
+            available: true,
         },
         CommandEntry {
             name: "Add provider",
             description: "Add a new LLM provider",
             action: CommandAction::AddProvider,
+            available: true,
         },
         CommandEntry {
             name: "Switch session",
             description: "Resume or delete past sessions",
             action: CommandAction::OpenSessionPicker,
+            available: true,
         },
         CommandEntry {
             name: "New session",
             description: "Start a fresh conversation",
             action: CommandAction::NewSession,
+            available: true,
+        },
+        CommandEntry {
+            name: "Undo last turn",
+            description: "Revert last chat + file changes",
+            action: CommandAction::UndoLastTurn,
+            available: true,
+        },
+        CommandEntry {
+            name: "Redo",
+            description: "Restore the last undone turn",
+            action: CommandAction::Redo,
+            available: true,
+        },
+        CommandEntry {
+            name: "Replay last turn",
+            description: "Undo + re-run the last turn",
+            action: CommandAction::Replay,
+            available: true,
+        },
+        CommandEntry {
+            name: "Resume stream",
+            description: "Restart an interrupted turn",
+            action: CommandAction::Resume,
+            available: true,
         },
     ]
 }
@@ -105,10 +142,24 @@ impl CommandMenu {
     fn refilter(&mut self) {
         self.filtered = self
             .search
-            .filter_indices(self.commands.len(), |i| self.commands[i].name.to_string());
+            .filter_indices(self.commands.len(), |i| self.commands[i].name.to_string())
+            .into_iter()
+            .filter(|&i| self.commands[i].available)
+            .collect();
         self.selected = 0;
         self.offset = 0;
         self.recompute_offset();
+    }
+
+    pub fn set_availability(&mut self, action: CommandAction, available: bool) {
+        for cmd in &mut self.commands {
+            if cmd.action == action {
+                cmd.available = available;
+            }
+        }
+        if self.open {
+            self.refilter();
+        }
     }
 
     fn next(&mut self) {
@@ -180,6 +231,10 @@ impl CommandMenu {
                             Some(CommandMenuEffect::OpenSessionPicker)
                         }
                         CommandAction::NewSession => Some(CommandMenuEffect::NewSession),
+                        CommandAction::UndoLastTurn => Some(CommandMenuEffect::UndoLastTurn),
+                        CommandAction::Redo => Some(CommandMenuEffect::Redo),
+                        CommandAction::Replay => Some(CommandMenuEffect::Replay),
+                        CommandAction::Resume => Some(CommandMenuEffect::Resume),
                     };
                 }
             }

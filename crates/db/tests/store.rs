@@ -29,6 +29,8 @@ async fn append_and_load_messages_in_order() {
         .append_assistant_message(
             id,
             "hi there",
+            "",
+            false,
             TokenUsage {
                 input_tokens: 10,
                 output_tokens: 20,
@@ -158,6 +160,8 @@ async fn search_finds_messages_across_sessions_ranked() {
         .append_assistant_message(
             s1,
             "tokio::spawn runs a task on the runtime",
+            "",
+            false,
             TokenUsage::default(),
             0.0,
         )

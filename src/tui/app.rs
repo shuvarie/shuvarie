@@ -273,6 +273,11 @@ impl App {
                         content,
                     }))
                 }
+                CoreEvent::ReasoningReceived { content } => {
+                    Some(AppMessage::Session(SessionMessage::ReasoningReceived {
+                        content,
+                    }))
+                }
                 CoreEvent::ContextLoaded { paths } => {
                     Some(AppMessage::Session(SessionMessage::ContextLoaded { paths }))
                 }
@@ -332,6 +337,16 @@ impl App {
                 }
                 CoreEvent::SessionDeleted { id } => Some(AppMessage::SessionDeleted { id }),
                 CoreEvent::SessionError { error } => Some(AppMessage::SessionError { error }),
+                CoreEvent::TurnReverted { session } => {
+                    Some(AppMessage::Session(SessionMessage::TurnReverted {
+                        session,
+                    }))
+                }
+                CoreEvent::TurnRestored { session } => {
+                    Some(AppMessage::Session(SessionMessage::TurnRestored {
+                        session,
+                    }))
+                }
                 CoreEvent::SearchResults { hits } => {
                     Some(AppMessage::HistorySearch(HistorySearchMessage::Results {
                         hits,
@@ -361,6 +376,7 @@ impl App {
         match msg {
             AppMessage::OpenCommandMenu => {
                 self.session.update(SessionMessage::ClearError);
+                self.update_command_availability();
                 self.command_menu.open();
                 self.overlay = Overlay::CommandMenu;
             }
@@ -511,6 +527,18 @@ impl App {
                             self.route = Route::Session;
                             self.session.update(SessionMessage::Reset);
                             self.ctx.send(shuvarie_core::Command::NewSession);
+                        }
+                        CommandMenuEffect::UndoLastTurn => {
+                            self.ctx.send(shuvarie_core::Command::UndoLastTurn);
+                        }
+                        CommandMenuEffect::Redo => {
+                            self.ctx.send(shuvarie_core::Command::Redo);
+                        }
+                        CommandMenuEffect::Replay => {
+                            self.ctx.send(shuvarie_core::Command::Replay);
+                        }
+                        CommandMenuEffect::Resume => {
+                            self.ctx.send(shuvarie_core::Command::Resume);
                         }
                     }
                 }
@@ -733,6 +761,21 @@ impl App {
 
     fn refresh_sessions(&mut self) {
         self.ctx.send(shuvarie_core::Command::ListSessions);
+    }
+
+    fn update_command_availability(&mut self) {
+        let has_messages = !self.session.messages.is_empty();
+        let interrupted = self.session.interrupted && !self.session.streaming;
+        self.command_menu.set_availability(
+            super::command_menu::CommandAction::UndoLastTurn,
+            has_messages,
+        );
+        self.command_menu
+            .set_availability(super::command_menu::CommandAction::Redo, has_messages);
+        self.command_menu
+            .set_availability(super::command_menu::CommandAction::Replay, has_messages);
+        self.command_menu
+            .set_availability(super::command_menu::CommandAction::Resume, interrupted);
     }
 
     fn close_overlay(&mut self) {

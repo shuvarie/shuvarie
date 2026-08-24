@@ -1,6 +1,6 @@
 use shuvarie_llm::Role;
 
-#[derive(Debug, Clone, PartialEq, Eq, toasty::Embed)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, toasty::Embed)]
 #[column(rename_all = "snake_case")]
 pub enum MsgRole {
     System,
@@ -66,6 +66,8 @@ pub struct Message {
     pub seq: u64,
     pub role: MsgRole,
     pub content: String,
+    pub reasoning: String,
+    pub interrupted: bool,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub total_tokens: u64,
@@ -74,6 +76,46 @@ pub struct Message {
     pub cost: f64,
     #[has_many]
     pub embeddings: toasty::Deferred<Vec<MessageEmbedding>>,
+    #[has_many]
+    pub tool_calls: toasty::Deferred<Vec<ToolCall>>,
+}
+
+#[derive(Debug, toasty::Model)]
+pub struct ToolCall {
+    #[key]
+    #[auto]
+    pub id: u64,
+    #[index]
+    pub session_id: u64,
+    #[index]
+    pub message_id: u64,
+    #[belongs_to(key = message_id, references = id)]
+    pub message: toasty::Deferred<Message>,
+    pub seq: u64,
+    pub name: String,
+    pub args_json: String,
+    pub output: String,
+    pub ok: bool,
+    pub worker: Option<String>,
+    pub file_change_json: String,
+    pub original_content: Option<String>,
+    pub new_content: Option<String>,
+}
+
+#[derive(Debug, toasty::Model)]
+pub struct UndoLog {
+    #[key]
+    #[auto]
+    pub id: u64,
+    #[index]
+    pub session_id: u64,
+    pub turn_seq: u64,
+    pub user_content: String,
+    pub assistant_content: String,
+    pub reasoning: String,
+    pub usage_json: String,
+    pub tool_calls_json: String,
+    pub file_changes_json: String,
 }
 
 #[derive(Debug, toasty::Model)]

@@ -22,6 +22,9 @@ pub enum SessionMessage {
     TokenReceived {
         content: String,
     },
+    ReasoningReceived {
+        content: String,
+    },
     ContextLoaded {
         paths: Vec<String>,
     },
@@ -64,6 +67,12 @@ pub enum SessionMessage {
     Loaded {
         id: u64,
         title: String,
+        session: shuvarie_core::Session,
+    },
+    TurnReverted {
+        session: shuvarie_core::Session,
+    },
+    TurnRestored {
         session: shuvarie_core::Session,
     },
     UpdateConfig {
@@ -109,8 +118,12 @@ pub struct SessionScreen {
     pub messages: Vec<(Role, String)>,
     pub tools: Vec<ToolActivity>,
     pub context: Vec<ContextActivity>,
+    pub reasoning: Vec<(usize, String)>,
+    pub expanded_reasoning: std::collections::HashSet<usize>,
     pub streaming: bool,
     pub pending: String,
+    pub pending_reasoning: String,
+    pub interrupted: bool,
     pub scroll_state: RefCell<ScrollViewState>,
     scroll_view: RefCell<ScrollView>,
     scroll_dirty: Cell<bool>,
@@ -129,8 +142,12 @@ impl SessionScreen {
             messages: Vec::new(),
             tools: Vec::new(),
             context: Vec::new(),
+            reasoning: Vec::new(),
+            expanded_reasoning: std::collections::HashSet::new(),
             streaming: false,
             pending: String::new(),
+            pending_reasoning: String::new(),
+            interrupted: false,
             scroll_state: RefCell::new(ScrollViewState::default()),
             scroll_view: RefCell::new(ScrollView::new(Size::new(0, 0))),
             scroll_dirty: Cell::new(false),
@@ -192,6 +209,15 @@ impl SessionScreen {
                 }
                 self.pending.push_str(&content);
                 self.status = Some("streaming…".to_string());
+                self.mark_scroll_dirty();
+                self.follow_bottom();
+                None
+            }
+            SessionMessage::ReasoningReceived { content } => {
+                if !self.streaming {
+                    self.streaming = true;
+                }
+                self.pending_reasoning.push_str(&content);
                 self.mark_scroll_dirty();
                 self.follow_bottom();
                 None
@@ -283,8 +309,14 @@ impl SessionScreen {
             SessionMessage::StreamDone => {
                 if self.streaming {
                     let pending = std::mem::take(&mut self.pending);
+                    let reasoning = std::mem::take(&mut self.pending_reasoning);
+                    let idx = self.messages.len();
                     self.messages.push((Role::Assistant, pending));
+                    if !reasoning.is_empty() {
+                        self.reasoning.push((idx, reasoning));
+                    }
                     self.streaming = false;
+                    self.interrupted = false;
                 }
                 self.status = None;
                 self.mark_scroll_dirty();
@@ -294,10 +326,12 @@ impl SessionScreen {
             SessionMessage::StreamError { error } => {
                 self.streaming = false;
                 self.pending.clear();
+                self.pending_reasoning.clear();
                 self.tools
                     .retain(|t| t.message_index != self.messages.len());
                 self.context
                     .retain(|c| c.message_index != self.messages.len());
+                self.interrupted = true;
                 self.status = Some(format!("error: {error}"));
                 self.mark_scroll_dirty();
                 None
@@ -305,10 +339,12 @@ impl SessionScreen {
             SessionMessage::StreamCancelled => {
                 self.streaming = false;
                 self.pending.clear();
+                self.pending_reasoning.clear();
                 self.tools
                     .retain(|t| t.message_index != self.messages.len());
                 self.context
                     .retain(|c| c.message_index != self.messages.len());
+                self.interrupted = true;
                 self.status = None;
                 self.mark_scroll_dirty();
                 None
@@ -336,8 +372,12 @@ impl SessionScreen {
                 self.messages.clear();
                 self.tools.clear();
                 self.context.clear();
+                self.reasoning.clear();
+                self.expanded_reasoning.clear();
                 self.streaming = false;
                 self.pending.clear();
+                self.pending_reasoning.clear();
+                self.interrupted = false;
                 self.status = None;
                 self.session_id = None;
                 self.session_title = None;
@@ -350,29 +390,66 @@ impl SessionScreen {
                 None
             }
             SessionMessage::Loaded { id, title, session } => {
+                let interrupted = session.last_assistant_interrupted();
+                let usage = TokenUsage {
+                    input_tokens: session.input_tokens,
+                    output_tokens: session.output_tokens,
+                    total_tokens: session.tokens,
+                    cached_input_tokens: session.cached_tokens,
+                    reasoning_tokens: session.reasoning_tokens,
+                };
+                let cost = session.cost;
                 self.messages = session
                     .messages
                     .into_iter()
                     .map(|m| (m.role, m.content))
                     .collect();
-                self.tools.clear();
+                self.tools = session
+                    .tool_records
+                    .iter()
+                    .map(|tr| ToolActivity {
+                        name: tr.name.clone(),
+                        args: tr.args_json.clone(),
+                        status: if tr.ok {
+                            ToolStatus::Ok
+                        } else {
+                            ToolStatus::Failed
+                        },
+                        output: tr.output.clone(),
+                        worker: tr.worker.clone(),
+                        message_index: tr.message_seq as usize,
+                        text_offset: 0,
+                        file_change: tr.file_change.clone(),
+                    })
+                    .collect();
                 self.context.clear();
+                self.reasoning = session
+                    .reasoning
+                    .iter()
+                    .map(|(seq, text)| (*seq as usize, text.clone()))
+                    .collect();
+                self.expanded_reasoning.clear();
                 self.streaming = false;
                 self.pending.clear();
+                self.pending_reasoning.clear();
+                self.interrupted = interrupted;
                 self.status = None;
                 self.session_id = Some(id);
                 self.session_title = Some(title);
-                self.sidebar.update(SidebarMessage::SetUsage {
-                    usage: TokenUsage {
-                        input_tokens: session.input_tokens,
-                        output_tokens: session.output_tokens,
-                        total_tokens: session.tokens,
-                        cached_input_tokens: session.cached_tokens,
-                        reasoning_tokens: session.reasoning_tokens,
-                    },
-                    cost: session.cost,
-                });
+                self.sidebar
+                    .update(SidebarMessage::SetUsage { usage, cost });
                 *self.scroll_state.get_mut() = ScrollViewState::default();
+                self.mark_scroll_dirty();
+                None
+            }
+            SessionMessage::TurnReverted { session } => {
+                self.apply_session(session);
+                *self.scroll_state.get_mut() = ScrollViewState::default();
+                self.mark_scroll_dirty();
+                None
+            }
+            SessionMessage::TurnRestored { session } => {
+                self.apply_session(session);
                 self.mark_scroll_dirty();
                 None
             }
@@ -462,6 +539,8 @@ impl SessionScreen {
         } else {
             let footer = if self.streaming {
                 theme::help_line(&[("Ctrl+C", "stop"), ("Ctrl+M", "commands")])
+            } else if self.interrupted {
+                theme::help_line(&[("Enter", "send"), ("Ctrl+M", "resume"), ("Ctrl+C", "quit")])
             } else {
                 theme::help_line(&[
                     ("Enter", "send"),
@@ -475,6 +554,53 @@ impl SessionScreen {
 
     fn mark_scroll_dirty(&self) {
         self.scroll_dirty.set(true);
+    }
+
+    fn apply_session(&mut self, session: shuvarie_core::Session) {
+        let interrupted = session.last_assistant_interrupted();
+        let usage = TokenUsage {
+            input_tokens: session.input_tokens,
+            output_tokens: session.output_tokens,
+            total_tokens: session.tokens,
+            cached_input_tokens: session.cached_tokens,
+            reasoning_tokens: session.reasoning_tokens,
+        };
+        let cost = session.cost;
+        self.messages = session
+            .messages
+            .into_iter()
+            .map(|m| (m.role, m.content))
+            .collect();
+        self.tools = session
+            .tool_records
+            .iter()
+            .map(|tr| ToolActivity {
+                name: tr.name.clone(),
+                args: tr.args_json.clone(),
+                status: if tr.ok {
+                    ToolStatus::Ok
+                } else {
+                    ToolStatus::Failed
+                },
+                output: tr.output.clone(),
+                worker: tr.worker.clone(),
+                message_index: tr.message_seq as usize,
+                text_offset: 0,
+                file_change: tr.file_change.clone(),
+            })
+            .collect();
+        self.reasoning = session
+            .reasoning
+            .iter()
+            .map(|(seq, text)| (*seq as usize, text.clone()))
+            .collect();
+        self.streaming = false;
+        self.pending.clear();
+        self.pending_reasoning.clear();
+        self.interrupted = interrupted;
+        self.status = None;
+        self.sidebar
+            .update(SidebarMessage::SetUsage { usage, cost });
     }
 
     fn rebuild_scroll_view(&self, messages: &[(Role, String)], content_width: u16) {
@@ -497,6 +623,7 @@ impl SessionScreen {
                     for context in context_lines {
                         self.push_context_lines(&mut lines, context);
                     }
+                    self.push_reasoning_lines(&mut lines, i);
                     if content.is_empty() {
                         for tool in &tool_lines {
                             self.push_tool_lines(&mut lines, tool);
@@ -509,6 +636,14 @@ impl SessionScreen {
                         lines.push(Line::from(Span::raw(placeholder).fg(theme::TEXT_MUTED)));
                     } else {
                         self.push_interleaved(&mut lines, content, &tool_lines);
+                    }
+                    if self.interrupted
+                        && i == self.messages.len().saturating_sub(1)
+                        && !self.streaming
+                    {
+                        lines.push(Line::from(
+                            Span::raw("(interrupted)").fg(theme::WARNING).italic(),
+                        ));
                     }
                     lines.push(Line::from(""));
                 }
@@ -525,6 +660,46 @@ impl SessionScreen {
             .scrollbars_visibility(ScrollbarVisibility::Never);
         scroll_view.render_widget(&paragraph, scroll_view.area());
         *self.scroll_view.borrow_mut() = scroll_view;
+    }
+
+    fn push_reasoning_lines(&self, lines: &mut Vec<Line>, message_index: usize) {
+        let reasoning: Option<&str> = if self.streaming && message_index == self.messages.len() {
+            if self.pending_reasoning.is_empty() {
+                None
+            } else {
+                Some(&self.pending_reasoning)
+            }
+        } else {
+            self.reasoning
+                .iter()
+                .find(|(idx, _)| *idx == message_index)
+                .map(|(_, text)| text.as_str())
+        };
+        let Some(reasoning) = reasoning else {
+            return;
+        };
+        if reasoning.is_empty() {
+            return;
+        }
+        let expanded = self.expanded_reasoning.contains(&message_index);
+        let header = vec![
+            Span::raw("⌥ ").fg(theme::TEXT_MUTED),
+            Span::raw(if expanded {
+                "thinking ▾"
+            } else {
+                "thinking ▸"
+            })
+            .fg(theme::TEXT_MUTED)
+            .italic(),
+        ];
+        lines.push(Line::from(header));
+        if expanded {
+            for line in reasoning.lines() {
+                lines.push(Line::from(
+                    Span::raw(format!("  {line}")).fg(theme::TEXT_DIM).italic(),
+                ));
+            }
+        }
     }
 
     fn push_interleaved(&self, lines: &mut Vec<Line>, content: &str, tools: &[&ToolActivity]) {
@@ -594,7 +769,7 @@ impl SessionScreen {
 
     fn push_file_change_lines(&self, lines: &mut Vec<Line>, change: &FileChange, prefix: &str) {
         match change {
-            FileChange::Edit { path, diff } => {
+            FileChange::Edit { path, diff, .. } => {
                 lines.push(Line::from(vec![
                     Span::raw(format!("{prefix}  ── diff: ")).fg(theme::TEXT_MUTED),
                     Span::raw(path.clone()).fg(theme::ACCENT),
@@ -603,7 +778,7 @@ impl SessionScreen {
                     self.push_diff_line(lines, line, prefix);
                 }
             }
-            FileChange::Write { path, content } => {
+            FileChange::Write { path, content, .. } => {
                 lines.push(Line::from(vec![
                     Span::raw(format!("{prefix}  ── new file: ")).fg(theme::TEXT_MUTED),
                     Span::raw(path.clone()).fg(theme::ACCENT),

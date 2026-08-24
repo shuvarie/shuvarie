@@ -41,4 +41,8 @@ pub enum Command {
         approved: bool,
         always: bool,
     },
+    UndoLastTurn,
+    Redo,
+    Replay,
+    Resume,
 }

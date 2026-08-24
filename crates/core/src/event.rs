@@ -27,6 +27,9 @@ pub enum Event {
     TokenReceived {
         content: String,
     },
+    ReasoningReceived {
+        content: String,
+    },
     ContextLoaded {
         paths: Vec<String>,
     },
@@ -76,6 +79,12 @@ pub enum Event {
     },
     SessionError {
         error: String,
+    },
+    TurnReverted {
+        session: crate::Session,
+    },
+    TurnRestored {
+        session: crate::Session,
     },
     SearchResults {
         hits: Vec<shuvarie_db::SearchHit>,

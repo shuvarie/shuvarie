@@ -10,6 +10,9 @@ pub enum StreamItem {
     Delta {
         text: String,
     },
+    Reasoning {
+        text: String,
+    },
     ToolStart {
         name: String,
         args: Value,

@@ -128,10 +128,15 @@ impl Tool for WriteFile {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("create dir {}: {e}", parent.display()))?;
             }
+            let original = std::fs::read_to_string(&abs).ok();
             std::fs::write(&abs, &content).map_err(|e| format!("write {path}: {e}"))?;
             Ok(ToolOutput::with_file_change(
                 format!("wrote {} bytes to {path}", content.len()),
-                FileChange::Write { path, content },
+                FileChange::Write {
+                    path,
+                    content,
+                    original,
+                },
             ))
         })
     }
@@ -204,7 +209,12 @@ impl Tool for EditFile {
             std::fs::write(&abs, &edited).map_err(|e| format!("write {path}: {e}"))?;
             Ok(ToolOutput::with_file_change(
                 format!("edited {path}: replaced 1 of {} occurrences", matches.len()),
-                FileChange::Edit { path, diff },
+                FileChange::Edit {
+                    path,
+                    diff,
+                    original: content,
+                    new: edited,
+                },
             ))
         })
     }

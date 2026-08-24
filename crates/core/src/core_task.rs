@@ -8,7 +8,7 @@ use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 
 use shuvarie_db::Store;
-use shuvarie_llm::ProviderClient;
+use shuvarie_llm::{FileChange, ProviderClient};
 
 use crate::approval::{ApprovalGate, ApprovalRequest};
 use crate::command::Command;
@@ -33,6 +33,7 @@ pub async fn run(
     let mut session: Option<Arc<Mutex<Session>>> = None;
     let mut active_stream: Option<AbortHandle> = None;
     let mut semantic_search: Option<AbortHandle> = None;
+    let mut turn_state: Option<Arc<Mutex<TurnState>>> = None;
 
     let (approval_tx, mut approval_rx) = tokio::sync::mpsc::channel::<ApprovalRequest>(64);
     let mut pending_approvals: HashMap<u64, oneshot::Sender<bool>> = HashMap::new();
@@ -313,6 +314,8 @@ pub async fn run(
                 let model_shared = model.clone();
                 let worker_usage = worker_set.usage;
                 let embedding_shared = embedding_setup.clone();
+                let turn_state_shared = Arc::new(Mutex::new(TurnState::default()));
+                turn_state = Some(turn_state_shared.clone());
                 active_stream = Some(
                     tokio::spawn(async move {
                         stream_stream_to_events(
@@ -324,6 +327,7 @@ pub async fn run(
                             worker_usage,
                             embedding_shared,
                             tx,
+                            turn_state_shared,
                         )
                         .await;
                     })
@@ -335,6 +339,13 @@ pub async fn run(
                     && !handle.is_finished()
                 {
                     handle.abort();
+                    persist_interrupted_turn(
+                        turn_state.take(),
+                        &mut store,
+                        &session,
+                        &event_tx,
+                    )
+                    .await;
                     let _ = event_tx.send(Event::StreamCancelled).await;
                 }
             }
@@ -460,6 +471,178 @@ pub async fn run(
                     let _ = respond.send(approved);
                 }
             }
+            Command::UndoLastTurn => {
+                if stream_busy(&active_stream, &event_tx).await {
+                    continue;
+                }
+                let Some(s) = &session else { continue; };
+                let session_id = s.lock().await.id;
+                let Some(sid) = session_id else { continue; };
+                match undo_last_turn(&mut store, sid).await {
+                    Ok(true) => {
+                        if let Ok(stored) = store.load_session(sid).await {
+                            let loaded = Session::from_stored(stored);
+                            *s.lock().await = loaded.clone();
+                            let _ = event_tx
+                                .send(Event::TurnReverted { session: loaded })
+                                .await;
+                        }
+                    }
+                    Ok(false) => {
+                        let _ = event_tx
+                            .send(Event::SessionError {
+                                error: "nothing to undo".into(),
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = event_tx
+                            .send(Event::SessionError {
+                                error: format!("undo failed: {e}"),
+                            })
+                            .await;
+                    }
+                }
+            }
+            Command::Redo => {
+                if stream_busy(&active_stream, &event_tx).await {
+                    continue;
+                }
+                let Some(s) = &session else { continue; };
+                let session_id = s.lock().await.id;
+                let Some(sid) = session_id else { continue; };
+                match redo_turn(&mut store, sid).await {
+                    Ok(true) => {
+                        if let Ok(stored) = store.load_session(sid).await {
+                            let loaded = Session::from_stored(stored);
+                            *s.lock().await = loaded.clone();
+                            let _ = event_tx
+                                .send(Event::TurnRestored { session: loaded })
+                                .await;
+                        }
+                    }
+                    Ok(false) => {
+                        let _ = event_tx
+                            .send(Event::SessionError {
+                                error: "nothing to redo".into(),
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = event_tx
+                            .send(Event::SessionError {
+                                error: format!("redo failed: {e}"),
+                            })
+                            .await;
+                    }
+                }
+            }
+            Command::Replay => {
+                if stream_busy(&active_stream, &event_tx).await {
+                    continue;
+                }
+                let Some(s) = &session else { continue; };
+                let session_id = s.lock().await.id;
+                let Some(sid) = session_id else { continue; };
+                let last_user_content = s.lock().await.messages.iter().rev()
+                    .find(|m| m.role == shuvarie_llm::Role::User)
+                    .map(|m| m.content.clone());
+                match undo_last_turn(&mut store, sid).await {
+                    Ok(true) => {
+                        if let Ok(stored) = store.load_session(sid).await {
+                            let loaded = Session::from_stored(stored);
+                            *s.lock().await = loaded.clone();
+                            let _ = event_tx
+                                .send(Event::TurnReverted { session: loaded })
+                                .await;
+                        }
+                        if let Some(content) = last_user_content {
+                            self_replay_send(
+                                &mut store,
+                                &session,
+                                &mut connections,
+                                &mut clients,
+                                &embedding_setup,
+                                &mut active_stream,
+                                &mut turn_state,
+                                &event_tx,
+                                content,
+                                true,
+                            )
+                            .await;
+                        }
+                    }
+                    Ok(false) => {
+                        let _ = event_tx
+                            .send(Event::SessionError {
+                                error: "nothing to replay".into(),
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = event_tx
+                            .send(Event::SessionError {
+                                error: format!("replay failed: {e}"),
+                            })
+                            .await;
+                    }
+                }
+            }
+            Command::Resume => {
+                if stream_busy(&active_stream, &event_tx).await {
+                    continue;
+                }
+                let Some(s) = &session else { continue; };
+                let (session_id, last_user_content) = {
+                    let guard = s.lock().await;
+                    let last_is_interrupted = guard.last_assistant_interrupted();
+                    if !last_is_interrupted {
+                        drop(guard);
+                        let _ = event_tx
+                            .send(Event::SessionError {
+                                error: "stream was not interrupted".into(),
+                            })
+                            .await;
+                        continue;
+                    }
+                    let sid = guard.id;
+                    let last_user = guard
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|m| m.role == shuvarie_llm::Role::User)
+                        .map(|m| m.content.clone());
+                    (sid, last_user)
+                };
+                let Some(sid) = session_id else { continue; };
+                let Some(content) = last_user_content else { continue; };
+                if let Ok(Some((_user_msg, assistant_msg))) = store.last_turn(sid).await {
+                    let _ = store
+                        .delete_tool_calls_for_message(assistant_msg.id)
+                        .await;
+                    let _ = store.delete_message(assistant_msg.id).await;
+                }
+                if let Ok(stored) = store.load_session(sid).await {
+                    let loaded = Session::from_stored(stored);
+                    *s.lock().await = loaded.clone();
+                    let _ = event_tx
+                        .send(Event::TurnReverted { session: loaded })
+                        .await;
+                }
+                self_replay_send(
+                    &mut store,
+                    &session,
+                    &mut connections,
+                    &mut clients,
+                    &embedding_setup,
+                    &mut active_stream,
+                    &mut turn_state,
+                    &event_tx,
+                    content,
+                    false,
+                )
+                .await;
+            }
             }
             }
             approval = approval_rx.recv() => {
@@ -484,15 +667,6 @@ pub async fn run(
     }
 }
 
-fn title_for(content: &str) -> String {
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
-        "Untitled session".to_string()
-    } else {
-        trimmed.chars().take(48).collect()
-    }
-}
-
 const SEARCH_LIMIT: u64 = 50;
 
 const AGENT_PREAMBLE: &str = "\
@@ -511,9 +685,249 @@ You can also delegate work to three specialist worker agents, exposed as tools:
 - edit_files: implements changes by reading, writing, and editing files.
 
 Delegate a task to a worker when it is long, multi-step, or self-contained — the worker runs its \
-own agent loop and returns a summary. Keep doing your own work for quick, single tool calls. \
+  own agent loop and returns a summary. Keep doing your own work for quick, single tool calls. \
 You remain responsible for the final answer: synthesize worker results and verify the overall \
 outcome (for example, delegate to run_tests after edit_files).";
+
+#[derive(Debug, Default)]
+struct TurnState {
+    assistant_message_id: Option<u64>,
+    assistant_seq: u64,
+    pending_text: String,
+    pending_reasoning: String,
+    tool_records: Vec<crate::tool_record::ToolRecord>,
+}
+
+fn title_for(content: &str) -> String {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        "Untitled session".to_string()
+    } else {
+        trimmed.chars().take(48).collect()
+    }
+}
+
+async fn undo_last_turn(store: &mut Store, session_id: u64) -> Result<bool, String> {
+    let turn = store
+        .last_turn(session_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some((user_msg, assistant_msg)) = turn else {
+        return Ok(false);
+    };
+    let tool_calls = store
+        .tool_calls_for_message(assistant_msg.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let usage = shuvarie_catalog::TokenUsage {
+        input_tokens: assistant_msg.input_tokens,
+        output_tokens: assistant_msg.output_tokens,
+        total_tokens: assistant_msg.total_tokens,
+        cached_input_tokens: assistant_msg.cached_input_tokens,
+        reasoning_tokens: assistant_msg.reasoning_tokens,
+    };
+    let entry = shuvarie_db::UndoEntry {
+        turn_seq: assistant_msg.seq,
+        user_content: user_msg.content,
+        assistant_content: assistant_msg.content,
+        reasoning: assistant_msg.reasoning,
+        usage,
+        cost: assistant_msg.cost,
+        tool_calls: tool_calls.clone(),
+    };
+    store
+        .append_undo_log(session_id, &entry)
+        .await
+        .map_err(|e| e.to_string())?;
+    for tc in &tool_calls {
+        let path = path_from_file_change_json(&tc.file_change_json);
+        if path.is_empty() {
+            continue;
+        }
+        if let Some(original) = &tc.original_content {
+            let _ = std::fs::write(&path, original);
+        } else if !tc.file_change_json.is_empty() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    store
+        .delete_tool_calls_for_message(assistant_msg.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    store
+        .delete_message(assistant_msg.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    store
+        .delete_message(user_msg.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+async fn redo_turn(store: &mut Store, session_id: u64) -> Result<bool, String> {
+    let entry = store
+        .pop_undo_log(session_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(entry) = entry else {
+        return Ok(false);
+    };
+    let _user_msg = store
+        .append_message(session_id, shuvarie_llm::Role::User, &entry.user_content)
+        .await
+        .map_err(|e| e.to_string())?;
+    let assistant_msg = store
+        .append_assistant_message(
+            session_id,
+            &entry.assistant_content,
+            &entry.reasoning,
+            false,
+            entry.usage,
+            entry.cost,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    for tc in &entry.tool_calls {
+        let path = path_from_file_change_json(&tc.file_change_json);
+        if path.is_empty() {
+            continue;
+        }
+        if let Some(new) = &tc.new_content {
+            let _ = std::fs::write(&path, new);
+        }
+        let (fc_json, original, new) = (
+            tc.file_change_json.clone(),
+            tc.original_content.clone(),
+            tc.new_content.clone(),
+        );
+        let _ = store
+            .append_tool_call(
+                session_id,
+                assistant_msg.id,
+                tc.seq,
+                &tc.name,
+                &tc.args_json,
+                &tc.output,
+                tc.ok,
+                tc.worker.as_deref(),
+                &fc_json,
+                original.as_deref(),
+                new.as_deref(),
+            )
+            .await;
+    }
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn self_replay_send(
+    store: &mut Store,
+    session: &Option<Arc<Mutex<Session>>>,
+    connections: &mut Connections,
+    clients: &mut HashMap<String, ProviderClient>,
+    embedding_setup: &Option<EmbeddingSetup>,
+    active_stream: &mut Option<AbortHandle>,
+    turn_state_slot: &mut Option<Arc<Mutex<TurnState>>>,
+    event_tx: &Sender<Event>,
+    content: String,
+    push_user: bool,
+) {
+    let Some(s) = session else {
+        return;
+    };
+    if push_user {
+        let mut guard = s.lock().await;
+        guard.push_user(content.clone());
+        let id = guard.id;
+        if let Some(id) = id {
+            let _ = store
+                .append_message(id, guard.messages.last().unwrap().role, &content)
+                .await;
+        }
+    }
+    let Some(provider_name) = connections.active_provider.clone() else {
+        let _ = event_tx
+            .send(Event::StreamError {
+                error: "no active provider".into(),
+            })
+            .await;
+        return;
+    };
+    let Some(model) = connections.active_model.clone() else {
+        let _ = event_tx
+            .send(Event::StreamError {
+                error: "no active model".into(),
+            })
+            .await;
+        return;
+    };
+    let client = match client_for(clients, connections, &provider_name) {
+        Ok(c) => c.clone(),
+        Err(e) => {
+            let _ = event_tx.send(Event::StreamError { error: e }).await;
+            return;
+        }
+    };
+    let prior: Vec<shuvarie_llm::ChatMsg> = {
+        let guard = s.lock().await;
+        guard.messages[..guard.messages.len().saturating_sub(1)].to_vec()
+    };
+    let loaded_context = crate::context::load_from_cwd();
+    if !loaded_context.is_empty() {
+        let _ = event_tx
+            .send(Event::ContextLoaded {
+                paths: loaded_context.files.clone(),
+            })
+            .await;
+    }
+    let preamble = crate::context::build_preamble(AGENT_PREAMBLE, &loaded_context);
+    let gate = ApprovalGate::new(approval_tx_local());
+    let tools = crate::tools::all_tools(gate.clone());
+    let mut worker_set = crate::agents::build_workers(client.clone(), &model, gate);
+    let stream = client
+        .stream(
+            &model,
+            Some(&preamble),
+            &content,
+            &prior,
+            &tools,
+            &mut worker_set.workers,
+        )
+        .await;
+    let tx = event_tx.clone();
+    let session_shared = s.clone();
+    let client_shared = client.clone();
+    let store_shared = store.clone();
+    let model_shared = model.clone();
+    let worker_usage = worker_set.usage;
+    let embedding_shared = embedding_setup.clone();
+    let turn_state_shared = Arc::new(Mutex::new(TurnState::default()));
+    *turn_state_slot = Some(turn_state_shared.clone());
+    *active_stream = Some(
+        tokio::spawn(async move {
+            stream_stream_to_events(
+                stream,
+                session_shared,
+                client_shared,
+                store_shared,
+                model_shared,
+                worker_usage,
+                embedding_shared,
+                tx,
+                turn_state_shared,
+            )
+            .await;
+        })
+        .abort_handle(),
+    );
+}
+
+fn approval_tx_local() -> tokio::sync::mpsc::Sender<ApprovalRequest> {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ApprovalRequest>(64);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    tx
+}
 
 async fn load_most_recent_session(
     store: &mut Store,
@@ -581,16 +995,59 @@ async fn stream_stream_to_events(
     worker_usage: Arc<std::sync::Mutex<shuvarie_catalog::TokenUsage>>,
     embedding_setup: Option<EmbeddingSetup>,
     event_tx: Sender<Event>,
+    turn_state: Arc<Mutex<TurnState>>,
 ) {
     use futures_util::StreamExt;
+
+    let mut assistant_message_id: Option<u64> = None;
+    let mut assistant_seq: u64 = 0;
+    let mut pending_reasoning = String::new();
+    let mut pending_text = String::new();
+    let mut tool_seq: u64 = 0;
+    let mut turn_tool_records: Vec<crate::tool_record::ToolRecord> = Vec::new();
+    let mut pending_tool_args: std::collections::HashMap<String, (String, Option<String>)> =
+        std::collections::HashMap::new();
 
     while let Some(item) = stream.next().await {
         match item {
             shuvarie_llm::StreamItem::Delta { text } if !text.is_empty() => {
+                pending_text.push_str(&text);
+                {
+                    let mut ts = turn_state.lock().await;
+                    ts.pending_text = pending_text.clone();
+                }
                 let _ = event_tx.send(Event::TokenReceived { content: text }).await;
             }
             shuvarie_llm::StreamItem::Delta { .. } => {}
+            shuvarie_llm::StreamItem::Reasoning { text } if !text.is_empty() => {
+                pending_reasoning.push_str(&text);
+                {
+                    let mut ts = turn_state.lock().await;
+                    ts.pending_reasoning = pending_reasoning.clone();
+                }
+                let _ = event_tx
+                    .send(Event::ReasoningReceived { content: text })
+                    .await;
+            }
+            shuvarie_llm::StreamItem::Reasoning { .. } => {}
             shuvarie_llm::StreamItem::ToolStart { name, args, worker } => {
+                let args_json = args.to_string();
+                let key = format!("{}:{:?}", name, worker);
+                pending_tool_args.insert(key, (args_json, worker.clone()));
+                ensure_assistant_row(
+                    &mut assistant_message_id,
+                    &mut assistant_seq,
+                    &session,
+                    &mut store,
+                    &pending_reasoning,
+                    &event_tx,
+                )
+                .await;
+                {
+                    let mut ts = turn_state.lock().await;
+                    ts.assistant_message_id = assistant_message_id;
+                    ts.assistant_seq = assistant_seq;
+                }
                 let _ = event_tx
                     .send(Event::ToolStarted { name, args, worker })
                     .await;
@@ -602,6 +1059,49 @@ async fn stream_stream_to_events(
                 worker,
                 file_change,
             } => {
+                let (fc_json, original, new) = serialize_file_change(&file_change);
+                let key = format!("{}:{:?}", name, worker);
+                let args_json = pending_tool_args
+                    .remove(&key)
+                    .map(|(a, _)| a)
+                    .unwrap_or_default();
+                let worker_name = worker.as_deref();
+                if let Some(msg_id) = assistant_message_id {
+                    let session_id = session.lock().await.id;
+                    if let Some(sid) = session_id {
+                        let _ = store
+                            .append_tool_call(
+                                sid,
+                                msg_id,
+                                tool_seq,
+                                &name,
+                                &args_json,
+                                &output,
+                                ok,
+                                worker_name,
+                                &fc_json,
+                                original.as_deref(),
+                                new.as_deref(),
+                            )
+                            .await;
+                    }
+                    tool_seq += 1;
+                }
+                turn_tool_records.push(crate::tool_record::ToolRecord {
+                    name: name.clone(),
+                    args_json,
+                    output: output.clone(),
+                    ok,
+                    worker: worker.clone(),
+                    message_seq: assistant_seq,
+                    file_change: file_change.clone(),
+                    original_content: original.clone(),
+                    new_content: new.clone(),
+                });
+                {
+                    let mut ts = turn_state.lock().await;
+                    ts.tool_records = turn_tool_records.clone();
+                }
                 let _ = event_tx
                     .send(Event::ToolFinished {
                         name,
@@ -621,6 +1121,11 @@ async fn stream_stream_to_events(
                     .await;
             }
             shuvarie_llm::StreamItem::Done { text, usage } => {
+                let text = if text.is_empty() && !pending_text.is_empty() {
+                    std::mem::take(&mut pending_text)
+                } else {
+                    text
+                };
                 let mut guard = session.lock().await;
                 let combined = {
                     let worker_usage = worker_usage.lock().unwrap();
@@ -638,36 +1143,62 @@ async fn stream_stream_to_events(
                 guard.add_usage(combined, cost);
                 let id = guard.id;
                 let seq = guard.messages.len() - 1;
+                let reasoning = pending_reasoning.clone();
+                guard.reasoning.insert(seq as u64, reasoning.clone());
+                guard.tool_records.append(&mut turn_tool_records);
                 drop(guard);
                 if let Some(id) = id {
-                    match store
-                        .append_assistant_message(id, &text, combined, cost)
-                        .await
-                    {
-                        Ok(msg) => {
-                            if let Some(setup) = &embedding_setup {
-                                let store_idx = store.clone();
-                                let setup_idx = setup.clone();
-                                let content_idx = msg.content.clone();
-                                tokio::spawn(async move {
-                                    let _ = embeddings::index_message(
-                                        &mut store_idx.clone(),
-                                        &setup_idx,
-                                        msg.id,
-                                        id,
-                                        seq as u64,
-                                        &content_idx,
-                                    )
-                                    .await;
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            let _ = event_tx
-                                .send(Event::StreamError {
-                                    error: format!("failed to persist message: {e}"),
-                                })
+                    if let Some(msg_id) = assistant_message_id {
+                        let _ = store
+                            .update_message(msg_id, &text, &reasoning, false, combined, cost)
+                            .await;
+                        let _ = store.truncate_undo_log(id).await;
+                        if let Some(setup) = &embedding_setup {
+                            let store_idx = store.clone();
+                            let setup_idx = setup.clone();
+                            let content_idx = text.clone();
+                            tokio::spawn(async move {
+                                let _ = embeddings::index_message(
+                                    &mut store_idx.clone(),
+                                    &setup_idx,
+                                    msg_id,
+                                    id,
+                                    seq as u64,
+                                    &content_idx,
+                                )
                                 .await;
+                            });
+                        }
+                    } else {
+                        match store
+                            .append_assistant_message(id, &text, &reasoning, false, combined, cost)
+                            .await
+                        {
+                            Ok(msg) => {
+                                if let Some(setup) = &embedding_setup {
+                                    let store_idx = store.clone();
+                                    let setup_idx = setup.clone();
+                                    let content_idx = msg.content.clone();
+                                    tokio::spawn(async move {
+                                        let _ = embeddings::index_message(
+                                            &mut store_idx.clone(),
+                                            &setup_idx,
+                                            msg.id,
+                                            id,
+                                            seq as u64,
+                                            &content_idx,
+                                        )
+                                        .await;
+                                    });
+                                }
+                            }
+                            Err(e) => {
+                                let _ = event_tx
+                                    .send(Event::StreamError {
+                                        error: format!("failed to persist message: {e}"),
+                                    })
+                                    .await;
+                            }
                         }
                     }
                 }
@@ -676,6 +1207,14 @@ async fn stream_stream_to_events(
                 break;
             }
             shuvarie_llm::StreamItem::Error { message } => {
+                persist_stream_error(
+                    assistant_message_id,
+                    &pending_text,
+                    &pending_reasoning,
+                    &session,
+                    &mut store,
+                )
+                .await;
                 let _ = event_tx.send(Event::StreamError { error: message }).await;
                 break;
             }
@@ -683,9 +1222,175 @@ async fn stream_stream_to_events(
     }
 }
 
+async fn ensure_assistant_row(
+    assistant_message_id: &mut Option<u64>,
+    assistant_seq: &mut u64,
+    session: &Arc<Mutex<Session>>,
+    store: &mut Store,
+    reasoning: &str,
+    _event_tx: &Sender<Event>,
+) {
+    if assistant_message_id.is_some() {
+        return;
+    }
+    let guard = session.lock().await;
+    let Some(id) = guard.id else {
+        return;
+    };
+    drop(guard);
+    if let Ok(msg) = store
+        .append_assistant_message(
+            id,
+            "",
+            reasoning,
+            false,
+            shuvarie_catalog::TokenUsage::default(),
+            0.0,
+        )
+        .await
+    {
+        *assistant_message_id = Some(msg.id);
+        *assistant_seq = msg.seq;
+    }
+}
+
+fn serialize_file_change(fc: &Option<FileChange>) -> (String, Option<String>, Option<String>) {
+    match fc {
+        Some(change) => {
+            let json = serde_json::to_string(change).unwrap_or_default();
+            (json, change.original_content(), change.new_content())
+        }
+        None => (String::new(), None, None),
+    }
+}
+
+fn path_from_file_change_json(json: &str) -> String {
+    if json.is_empty() {
+        return String::new();
+    }
+    serde_json::from_str::<FileChange>(json)
+        .ok()
+        .map(|fc| fc.path().to_string())
+        .unwrap_or_default()
+}
+
+async fn persist_interrupted_turn(
+    turn_state: Option<Arc<Mutex<TurnState>>>,
+    store: &mut Store,
+    session: &Option<Arc<Mutex<Session>>>,
+    _event_tx: &Sender<Event>,
+) {
+    let (text, reasoning, msg_id) = match turn_state {
+        Some(ts_arc) => {
+            let ts = ts_arc.lock().await;
+            (
+                ts.pending_text.clone(),
+                ts.pending_reasoning.clone(),
+                ts.assistant_message_id,
+            )
+        }
+        None => return,
+    };
+
+    let Some(s) = session else {
+        return;
+    };
+    let guard = s.lock().await;
+    let Some(id) = guard.id else {
+        return;
+    };
+    drop(guard);
+
+    if let Some(msg_id) = msg_id {
+        let _ = store
+            .update_message(
+                msg_id,
+                &text,
+                &reasoning,
+                true,
+                shuvarie_catalog::TokenUsage::default(),
+                0.0,
+            )
+            .await;
+        {
+            let mut g = s.lock().await;
+            g.push_assistant(text.clone());
+            let seq = g.messages.len() - 1;
+            g.reasoning.insert(seq as u64, reasoning);
+            g.interrupted.insert(seq as u64, true);
+        }
+    } else if !text.is_empty()
+        && store
+            .append_assistant_message(
+                id,
+                &text,
+                &reasoning,
+                true,
+                shuvarie_catalog::TokenUsage::default(),
+                0.0,
+            )
+            .await
+            .is_ok()
+    {
+        let mut g = s.lock().await;
+        g.push_assistant(text);
+        let seq = g.messages.len() - 1;
+        g.interrupted.insert(seq as u64, true);
+    }
+}
+
 fn build_client(pc: &ProviderConfig) -> Result<ProviderClient, String> {
     ProviderClient::build(pc.kind, pc.api_key.as_deref(), pc.base_url.as_deref())
         .map_err(|e| e.to_string())
+}
+
+async fn persist_stream_error(
+    assistant_message_id: Option<u64>,
+    pending_text: &str,
+    pending_reasoning: &str,
+    session: &Arc<Mutex<Session>>,
+    store: &mut Store,
+) {
+    if pending_text.is_empty() && pending_reasoning.is_empty() {
+        return;
+    }
+    let guard = session.lock().await;
+    let id = guard.id;
+    drop(guard);
+    let Some(id) = id else {
+        return;
+    };
+    if let Some(msg_id) = assistant_message_id {
+        let _ = store
+            .update_message(
+                msg_id,
+                pending_text,
+                pending_reasoning,
+                true,
+                shuvarie_catalog::TokenUsage::default(),
+                0.0,
+            )
+            .await;
+    } else if !pending_text.is_empty() {
+        let _ = store
+            .append_assistant_message(
+                id,
+                pending_text,
+                pending_reasoning,
+                true,
+                shuvarie_catalog::TokenUsage::default(),
+                0.0,
+            )
+            .await;
+    }
+    let mut g = session.lock().await;
+    g.push_assistant(pending_text.to_string());
+    let seq = g.messages.len() - 1;
+    if !pending_reasoning.is_empty() {
+        g.reasoning
+            .insert(seq as u64, pending_reasoning.to_string());
+    }
+    g.interrupted.insert(seq as u64, true);
 }
 
 async fn persist(
@@ -750,6 +1455,7 @@ mod tests {
         let session_shared = session.clone();
         let store = Store::open_in_memory().await.unwrap();
         let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
+        let turn_state = Arc::new(Mutex::new(TurnState::default()));
         tokio::spawn(async move {
             stream_stream_to_events(
                 stream,
@@ -760,6 +1466,7 @@ mod tests {
                 worker_usage,
                 None,
                 event_tx,
+                turn_state,
             )
             .await;
         });
@@ -807,6 +1514,7 @@ mod tests {
         let session_shared = session.clone();
         let store = Store::open_in_memory().await.unwrap();
         let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
+        let turn_state = Arc::new(Mutex::new(TurnState::default()));
         tokio::spawn(async move {
             stream_stream_to_events(
                 stream,
@@ -817,6 +1525,7 @@ mod tests {
                 worker_usage,
                 None,
                 event_tx,
+                turn_state,
             )
             .await;
         });
@@ -884,6 +1593,7 @@ mod tests {
             total_tokens: 12,
             ..TokenUsage::default()
         }));
+        let turn_state = Arc::new(Mutex::new(TurnState::default()));
         tokio::spawn(async move {
             stream_stream_to_events(
                 stream,
@@ -894,6 +1604,7 @@ mod tests {
                 worker_usage,
                 None,
                 event_tx,
+                turn_state,
             )
             .await;
         });

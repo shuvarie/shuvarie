@@ -15,7 +15,9 @@ async fn main() -> anyhow::Result<()> {
     builder.models(toasty::models!(
         shuvarie_db::Session,
         shuvarie_db::Message,
-        shuvarie_db::MessageEmbedding
+        shuvarie_db::MessageEmbedding,
+        shuvarie_db::ToolCall,
+        shuvarie_db::UndoLog
     ));
     let db = builder
         .build(toasty_driver_turso::Turso::in_memory())
