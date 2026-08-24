@@ -220,3 +220,7 @@ When changes are made, it's a good practice to check AGENTS.md if there is stale
 ### ROADMAP.md
 
 See `ROADMAP.md` for the milestone plan. Update it when milestones ship or scope changes.
+
+### In development notice
+
+Since the project is not released yet. It's safe to update the `0000` migration directly.
