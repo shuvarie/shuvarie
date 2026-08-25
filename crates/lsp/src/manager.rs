@@ -17,8 +17,10 @@ pub struct LspManager {
     specs: BTreeMap<String, LspServerSpec>,
     servers: BTreeMap<String, Server>,
     diagnostics: DiagnosticMap,
-    diagnostics_rx: tokio::sync::mpsc::UnboundedReceiver<(lsp_types::Url, Vec<DiagnosticInfo>)>,
-    diagnostics_tx: tokio::sync::mpsc::UnboundedSender<(lsp_types::Url, Vec<DiagnosticInfo>)>,
+    diagnostics_rx:
+        tokio::sync::mpsc::UnboundedReceiver<(async_lsp::lsp_types::Url, Vec<DiagnosticInfo>)>,
+    diagnostics_tx:
+        tokio::sync::mpsc::UnboundedSender<(async_lsp::lsp_types::Url, Vec<DiagnosticInfo>)>,
     supervisor: Option<JoinHandle<()>>,
     on_status: tokio::sync::mpsc::UnboundedSender<()>,
 }

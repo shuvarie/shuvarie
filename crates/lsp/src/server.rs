@@ -3,16 +3,16 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use async_lsp::concurrency::ConcurrencyLayer;
-use async_lsp::panic::CatchUnwindLayer;
-use async_lsp::router::Router;
-use async_lsp::tracing::TracingLayer;
-use async_lsp::{LanguageServer, MainLoop, ServerSocket};
-use lsp_types::notification::{Progress, PublishDiagnostics};
-use lsp_types::{
+use async_lsp::lsp_types::notification::{Progress, PublishDiagnostics};
+use async_lsp::lsp_types::{
     ClientCapabilities, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, InitializeParams, InitializedParams, TextDocumentContentChangeEvent,
     TextDocumentIdentifier, TextDocumentItem, Url, VersionedTextDocumentIdentifier,
 };
+use async_lsp::panic::CatchUnwindLayer;
+use async_lsp::router::Router;
+use async_lsp::tracing::TracingLayer;
+use async_lsp::{LanguageServer, MainLoop, ServerSocket};
 use tokio::sync::Mutex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tower::ServiceBuilder;

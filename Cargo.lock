@@ -573,7 +573,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8b8fd1e175c5ee3108095da452e816519de618beccea23aa053c00cf5e344b9"
 dependencies = [
  "futures",
- "lsp-types 0.95.1",
+ "lsp-types",
  "pin-project-lite",
  "rustix 1.1.4",
  "serde",
@@ -3117,15 +3117,6 @@ dependencies = [
 
 [[package]]
 name = "fluent-uri"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17c704e9dbe1ddd863da1e6ff3567795087b1eb201ce80d8fa81162e1516500d"
-dependencies = [
- "bitflags 1.3.2",
-]
-
-[[package]]
-name = "fluent-uri"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bc74ac4d8359ae70623506d512209619e5cf8f347124910440dbc221714b328e"
@@ -5207,19 +5198,6 @@ dependencies = [
  "serde_json",
  "serde_repr",
  "url",
-]
-
-[[package]]
-name = "lsp-types"
-version = "0.97.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53353550a17c04ac46c585feb189c2db82154fc84b79c7a66c96c2c644f66071"
-dependencies = [
- "bitflags 1.3.2",
- "fluent-uri 0.1.4",
- "serde",
- "serde_json",
- "serde_repr",
 ]
 
 [[package]]
@@ -8007,7 +7985,6 @@ name = "shuvarie-lsp"
 version = "0.1.0"
 dependencies = [
  "async-lsp",
- "lsp-types 0.97.0",
  "serde",
  "serde_json",
  "tempfile",
@@ -8993,7 +8970,7 @@ checksum = "6ce096128c41a7b5a86b0a3570a8ffa866de889a081281956bb73c6a7ba0b88a"
 dependencies = [
  "async-trait",
  "bit-set 0.11.1",
- "fluent-uri 0.4.1",
+ "fluent-uri",
  "form_urlencoded",
  "hashbrown 0.17.1",
  "heck",

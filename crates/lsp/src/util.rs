@@ -4,16 +4,16 @@ pub fn workspace_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-pub fn to_file_url(path: &Path) -> Option<lsp_types::Url> {
+pub fn to_file_url(path: &Path) -> Option<async_lsp::lsp_types::Url> {
     let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
         workspace_root().join(path)
     };
-    lsp_types::Url::from_file_path(&abs).ok()
+    async_lsp::lsp_types::Url::from_file_path(&abs).ok()
 }
 
-pub fn path_from_url(url: &lsp_types::Url) -> Option<PathBuf> {
+pub fn path_from_url(url: &async_lsp::lsp_types::Url) -> Option<PathBuf> {
     url.to_file_path().ok()
 }
 

@@ -44,8 +44,8 @@ pub enum DiagnosticSeverity {
 }
 
 impl DiagnosticSeverity {
-    pub fn from_lsp_types(sev: Option<lsp_types::DiagnosticSeverity>) -> Self {
-        use lsp_types::DiagnosticSeverity as S;
+    pub fn from_lsp_types(sev: Option<async_lsp::lsp_types::DiagnosticSeverity>) -> Self {
+        use async_lsp::lsp_types::DiagnosticSeverity as S;
         match sev {
             Some(S::ERROR) => DiagnosticSeverity::Error,
             Some(S::WARNING) => DiagnosticSeverity::Warning,
@@ -78,7 +78,7 @@ pub struct DiagnosticInfo {
 }
 
 impl DiagnosticInfo {
-    pub fn from_lsp_types(d: &lsp_types::Diagnostic) -> Self {
+    pub fn from_lsp_types(d: &async_lsp::lsp_types::Diagnostic) -> Self {
         let line = d.range.start.line.saturating_add(1).max(1);
         let col = d.range.start.character.saturating_add(1).max(1);
         let end_line = d.range.end.line.saturating_add(1).max(1);
