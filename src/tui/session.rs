@@ -556,11 +556,7 @@ impl SessionScreen {
             let footer = if self.streaming {
                 theme::help_line(&[("Ctrl+C", "stop"), ("Ctrl+M", "commands")])
             } else if self.interrupted {
-                theme::help_line(&[
-                    ("Enter", "send"),
-                    ("Ctrl+M", "resume"),
-                    ("Ctrl+C", "quit"),
-                ])
+                theme::help_line(&[("Enter", "send"), ("Ctrl+M", "resume"), ("Ctrl+C", "quit")])
             } else {
                 theme::help_line(&[
                     ("Enter", "send"),

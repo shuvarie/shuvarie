@@ -18,18 +18,6 @@ fn arg_value(args: &Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("missing string argument '{key}'"))
 }
 
-fn args_str_vec(args: &Value, key: &str) -> Result<Vec<String>, String> {
-    args.get(key)
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .ok_or_else(|| format!("missing string-array argument '{key}'"))
-}
-
 struct ReadFile {
     gate: ApprovalGate,
 }
@@ -220,23 +208,22 @@ impl Tool for EditFile {
     }
 }
 
-struct RunCommand;
+struct RunShell;
 
-impl Tool for RunCommand {
+impl Tool for RunShell {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "run_command".into(),
-            description: "Run a shell command in the workspace. Captured stdout and stderr (combined) are returned, capped at 16 KB. The command is killed when it exceeds the timeout."
+            name: "run_shell".into(),
+            description: "Run a shell command line in the workspace, executed through the system shell (`sh -c` on Unix, `powershell -NoProfile -Command` on Windows). Pipes, redirects, and shell operators work naturally. Captured stdout and stderr (combined) are returned, capped at 16 KB. The command is killed when it exceeds the timeout."
                 .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "cmd": { "type": "string", "description": "Executable or script to run" },
-                    "args": { "type": "array", "items": { "type": "string" }, "description": "Command-line arguments" },
+                    "command": { "type": "string", "description": "Shell command line to run (passed to `sh -c` / `powershell -NoProfile -Command`)" },
                     "cwd": { "type": "string", "description": "Working directory, relative to the workspace root. Defaults to the workspace root" },
                     "timeout_secs": { "type": "integer", "minimum": 1, "description": "Timeout in seconds (default 30)" }
                 },
-                "required": ["cmd"]
+                "required": ["command"]
             }),
         }
     }
@@ -246,8 +233,7 @@ impl Tool for RunCommand {
         args: Value,
     ) -> Pin<Box<dyn Future<Output = Result<ToolOutput, String>> + Send>> {
         Box::pin(async move {
-            let cmd = arg_value(&args, "cmd")?;
-            let cmd_args = args_str_vec(&args, "args").unwrap_or_default();
+            let command = arg_value(&args, "command")?;
             let cwd = args.get("cwd").and_then(Value::as_str);
             let timeout_secs = args
                 .get("timeout_secs")
@@ -257,13 +243,13 @@ impl Tool for RunCommand {
                 Some(c) => resolve(c)?,
                 None => workspace_root()?,
             };
-            let mut child = tokio::process::Command::new(&cmd)
-                .args(&cmd_args)
+            let mut builder = tokio::process::Command::new(shell_bin());
+            shell_args(&mut builder, &command);
+            builder
                 .current_dir(&cwd_abs)
                 .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .map_err(|e| format!("spawn {cmd}: {e}"))?;
+                .stderr(std::process::Stdio::piped());
+            let mut child = builder.spawn().map_err(|e| format!("spawn shell: {e}"))?;
             let status = match tokio::time::timeout(
                 std::time::Duration::from_secs(timeout_secs),
                 child.wait(),
@@ -271,11 +257,13 @@ impl Tool for RunCommand {
             .await
             {
                 Ok(Ok(status)) => status,
-                Ok(Err(e)) => return Err(format!("wait {cmd}: {e}")),
+                Ok(Err(e)) => return Err(format!("wait shell: {e}")),
                 Err(_) => {
                     let _ = child.kill().await;
                     let _ = child.wait().await;
-                    return Err(format!("{cmd} timed out after {timeout_secs}s (killed)"));
+                    return Err(format!(
+                        "shell command timed out after {timeout_secs}s (killed)"
+                    ));
                 }
             };
             let mut stdout = String::new();
@@ -299,17 +287,37 @@ impl Tool for RunCommand {
             let trimmed = body.trim();
             let capped: String = trimmed.chars().take(MAX_COMMAND_OUTPUT).collect();
             if !status.success() {
-                return Err(format!("{cmd} exited with {status}:\n{capped}"));
+                return Err(format!("shell exited with {status}:\n{capped}"));
             }
             if trimmed.is_empty() {
                 Ok(ToolOutput::text(format!(
-                    "{cmd} exited with {status} (no output)"
+                    "shell exited with {status} (no output)"
                 )))
             } else {
                 Ok(ToolOutput::text(format!("exit {status}:\n{capped}")))
             }
         })
     }
+}
+
+#[cfg(unix)]
+fn shell_bin() -> &'static str {
+    "sh"
+}
+
+#[cfg(unix)]
+fn shell_args(cmd: &mut tokio::process::Command, command: &str) {
+    cmd.arg("-c").arg(command);
+}
+
+#[cfg(windows)]
+fn shell_bin() -> &'static str {
+    "powershell"
+}
+
+#[cfg(windows)]
+fn shell_args(cmd: &mut tokio::process::Command, command: &str) {
+    cmd.arg("-NoProfile").arg("-Command").arg(command);
 }
 
 struct ListDir {
@@ -597,7 +605,7 @@ pub fn all_tools(gate: ApprovalGate) -> Vec<std::sync::Arc<dyn Tool>> {
         std::sync::Arc::new(ReadFile { gate: gate.clone() }),
         std::sync::Arc::new(WriteFile { gate: gate.clone() }),
         std::sync::Arc::new(EditFile { gate: gate.clone() }),
-        std::sync::Arc::new(RunCommand),
+        std::sync::Arc::new(RunShell),
         std::sync::Arc::new(ListDir { gate: gate.clone() }),
         std::sync::Arc::new(Grep { gate }),
     ]
@@ -612,7 +620,7 @@ pub fn read_tools(gate: ApprovalGate) -> Vec<std::sync::Arc<dyn Tool>> {
 }
 
 pub fn command_tools(_gate: ApprovalGate) -> Vec<std::sync::Arc<dyn Tool>> {
-    vec![std::sync::Arc::new(RunCommand)]
+    vec![std::sync::Arc::new(RunShell)]
 }
 
 pub fn edit_tools(gate: ApprovalGate) -> Vec<std::sync::Arc<dyn Tool>> {
@@ -714,15 +722,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_command_success_and_timeout() {
+    async fn run_shell_success_and_timeout() {
         let (dir, _guard) = tempdir();
-        let out = RunCommand
-            .call(json!({ "cmd": "sh", "args": ["-c", "echo hello"] }))
+        let out = RunShell
+            .call(json!({ "command": "echo hello" }))
             .await
             .unwrap();
         assert!(out.text.contains("hello"));
-        let err = RunCommand
-            .call(json!({ "cmd": "sleep", "args": ["5"], "timeout_secs": 1 }))
+        let err = RunShell
+            .call(json!({ "command": "sleep 5", "timeout_secs": 1 }))
             .await
             .unwrap_err();
         assert!(err.contains("timed out"));
@@ -730,13 +738,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_command_failure_returns_error() {
+    async fn run_shell_failure_returns_error() {
         let (dir, _guard) = tempdir();
-        let err = RunCommand
-            .call(json!({ "cmd": "sh", "args": ["-c", "exit 3"] }))
+        let err = RunShell
+            .call(json!({ "command": "exit 3" }))
             .await
             .unwrap_err();
         assert!(err.contains("3"));
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn run_shell_supports_pipes() {
+        let (dir, _guard) = tempdir();
+        let out = RunShell
+            .call(json!({ "command": "echo hello world | grep world" }))
+            .await
+            .unwrap();
+        assert!(out.text.contains("world"), "{}", out.text);
         drop(dir);
     }
 
