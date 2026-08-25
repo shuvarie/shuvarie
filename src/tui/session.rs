@@ -333,29 +333,53 @@ impl SessionScreen {
                 None
             }
             SessionMessage::StreamError { error } => {
-                self.streaming = false;
-                self.pending.clear();
-                self.pending_reasoning.clear();
-                self.tools
-                    .retain(|t| t.message_index != self.messages.len());
-                self.context
-                    .retain(|c| c.message_index != self.messages.len());
-                self.interrupted = true;
+                if self.streaming {
+                    let pending = std::mem::take(&mut self.pending);
+                    let reasoning = std::mem::take(&mut self.pending_reasoning);
+                    let idx = self.messages.len();
+                    self.tools.retain(|t| {
+                        t.message_index != idx || !matches!(t.status, ToolStatus::Running)
+                    });
+                    let has_tools = self.tools.iter().any(|t| t.message_index == idx);
+                    if !pending.is_empty() || !reasoning.is_empty() || has_tools {
+                        self.messages.push((Role::Assistant, pending));
+                        if !reasoning.is_empty() {
+                            self.reasoning.push((idx, reasoning));
+                        }
+                        self.interrupted = true;
+                    } else {
+                        self.context.retain(|c| c.message_index != idx);
+                    }
+                    self.streaming = false;
+                }
                 self.status = Some(format!("error: {error}"));
                 self.mark_scroll_dirty();
+                self.follow_bottom();
                 None
             }
             SessionMessage::StreamCancelled => {
-                self.streaming = false;
-                self.pending.clear();
-                self.pending_reasoning.clear();
-                self.tools
-                    .retain(|t| t.message_index != self.messages.len());
-                self.context
-                    .retain(|c| c.message_index != self.messages.len());
-                self.interrupted = true;
+                if self.streaming {
+                    let pending = std::mem::take(&mut self.pending);
+                    let reasoning = std::mem::take(&mut self.pending_reasoning);
+                    let idx = self.messages.len();
+                    self.tools.retain(|t| {
+                        t.message_index != idx || !matches!(t.status, ToolStatus::Running)
+                    });
+                    let has_tools = self.tools.iter().any(|t| t.message_index == idx);
+                    if !pending.is_empty() || !reasoning.is_empty() || has_tools {
+                        self.messages.push((Role::Assistant, pending));
+                        if !reasoning.is_empty() {
+                            self.reasoning.push((idx, reasoning));
+                        }
+                        self.interrupted = true;
+                    } else {
+                        self.context.retain(|c| c.message_index != idx);
+                    }
+                    self.streaming = false;
+                }
                 self.status = None;
                 self.mark_scroll_dirty();
+                self.follow_bottom();
                 None
             }
             SessionMessage::CancelRequested => {
