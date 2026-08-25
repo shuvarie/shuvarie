@@ -71,6 +71,18 @@ impl SessionPicker {
         self.recompute_offset();
     }
 
+    pub fn session_after(&self, id: u64) -> Option<u64> {
+        let idx = self.sessions.iter().position(|s| s.id == id)?;
+        let next = idx + 1;
+        if next < self.sessions.len() {
+            Some(self.sessions[next].id)
+        } else if idx > 0 {
+            Some(self.sessions[idx - 1].id)
+        } else {
+            None
+        }
+    }
+
     fn next(&mut self) {
         if !self.sessions.is_empty() {
             self.selected = (self.selected + 1).min(self.sessions.len() - 1);

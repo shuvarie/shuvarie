@@ -734,10 +734,21 @@ impl App {
                 self.session_picker.active_id = Some(id);
             }
             AppMessage::SessionDeleted { id } => {
-                if self.session.session_id == Some(id) {
-                    self.session.update(SessionMessage::Reset);
+                let was_active = self.session.session_id == Some(id);
+                if was_active {
+                    if let Some(rid) = self.session_picker.session_after(id) {
+                        self.session.update(SessionMessage::Reset);
+                        self.ctx
+                            .send(shuvarie_core::Command::LoadSession { id: rid });
+                        self.close_overlay();
+                    } else {
+                        self.session.update(SessionMessage::Reset);
+                        self.route = Route::Home;
+                        self.close_overlay();
+                    }
+                } else {
+                    self.refresh_sessions();
                 }
-                self.refresh_sessions();
             }
             AppMessage::SessionError { error } => {
                 self.session.update(SessionMessage::ShowError { error });
