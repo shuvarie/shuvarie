@@ -51,7 +51,7 @@ frame_rate = 60   # frames per second; 0 disables the cap (draw every event)
 
 Plumbed by passing the already-loaded `Config` from `main` into `run_tui`.
 
-## Phase 2 — Cache the committed-prefix render (not started)
+## Phase 2 — Cache the committed-prefix render (done)
 
 Split `rebuild_scroll_view` so the **committed messages** (everything in
 `self.messages` + their finalized tools / reasoning / context) are rendered
@@ -59,18 +59,20 @@ once and cached, and only the **streaming tail** (the in-flight `pending`
 assistant message + its tools / context / `pending_reasoning`) is re-rendered
 each dirty frame.
 
-- Add `committed_lines: RefCell<Vec<Line<'static>>>` + a dirty flag to
-  `SessionScreen`.
-- The separation is already clean in the data model: in-flight tools / context
-  carry `message_index == self.messages.len()`, and pending reasoning is
+- Added `committed_lines: RefCell<Vec<Line<'static>>>` + `committed_dirty:
+  Cell<bool>` to `SessionScreen`.
+- The separation is clean in the data model: in-flight tools / context carry
+  `message_index == self.messages.len()`, and pending reasoning is
   `pending_reasoning`.
-- Set `committed_dirty = true` only on changes that affect history:
-  `Submit` / `SendMessage`, `StreamDone`, `Loaded` / `apply_session`, `Reset`,
-  `TurnReverted` / `TurnRestored`, reasoning-toggle, and width change.
+- `committed_dirty` is set only on changes that affect history: `Submit` /
+  `SendMessage`, `StreamDone`, `StreamError` / `StreamCancelled` (when they
+  push), `Loaded` / `apply_session`, `Reset`, `TurnReverted` / `TurnRestored`.
   Tail-only events (`TokenReceived`, `ReasoningReceived`, `ContextLoaded`,
   `ToolStarted` / `ToolFinished`, `WorkerStarted` / `WorkerFinished`) leave the
   committed cache alone.
 - Also eliminates the `self.messages.clone()` per frame.
+- The per-message rendering was extracted into `push_message_lines`, shared by
+  the committed pass and the tail pass.
 
 Result: each streaming frame re-parses only the current growing message, not
 the whole conversation.

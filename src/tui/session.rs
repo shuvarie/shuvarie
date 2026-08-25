@@ -132,6 +132,8 @@ pub struct SessionScreen {
     scroll_view: RefCell<ScrollView>,
     scroll_dirty: Cell<bool>,
     scroll_width: Cell<u16>,
+    committed_lines: RefCell<Vec<Line<'static>>>,
+    committed_dirty: Cell<bool>,
     pub status: Option<String>,
     pub sidebar: Sidebar,
     pub session_id: Option<u64>,
@@ -157,6 +159,8 @@ impl SessionScreen {
             scroll_view: RefCell::new(ScrollView::new(Size::new(0, 0))),
             scroll_dirty: Cell::new(false),
             scroll_width: Cell::new(0),
+            committed_lines: RefCell::new(Vec::new()),
+            committed_dirty: Cell::new(true),
             status: None,
             sidebar: Sidebar::new(),
             session_id: None,
@@ -201,6 +205,7 @@ impl SessionScreen {
                         TextAreaEffect::Submit { content } => {
                             self.messages.push((Role::User, content.clone()));
                             self.status = Some("thinking…".to_string());
+                            self.mark_committed_dirty();
                             self.mark_scroll_dirty();
                             self.follow_bottom();
                             return Some(SessionEffect::SendMessage { content });
@@ -334,6 +339,7 @@ impl SessionScreen {
                     self.interrupted = false;
                 }
                 self.status = None;
+                self.mark_committed_dirty();
                 self.mark_scroll_dirty();
                 self.follow_bottom();
                 None
@@ -359,6 +365,7 @@ impl SessionScreen {
                     self.streaming = false;
                 }
                 self.status = Some(format!("error: {error}"));
+                self.mark_committed_dirty();
                 self.mark_scroll_dirty();
                 self.follow_bottom();
                 None
@@ -384,6 +391,7 @@ impl SessionScreen {
                     self.streaming = false;
                 }
                 self.status = None;
+                self.mark_committed_dirty();
                 self.mark_scroll_dirty();
                 self.follow_bottom();
                 None
@@ -426,6 +434,7 @@ impl SessionScreen {
                     cost: 0.0,
                 });
                 *self.scroll_state.get_mut() = ScrollViewState::default();
+                self.mark_committed_dirty();
                 self.mark_scroll_dirty();
                 None
             }
@@ -479,17 +488,20 @@ impl SessionScreen {
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
                 *self.scroll_state.get_mut() = ScrollViewState::default();
+                self.mark_committed_dirty();
                 self.mark_scroll_dirty();
                 None
             }
             SessionMessage::TurnReverted { session } => {
                 self.apply_session(session);
                 *self.scroll_state.get_mut() = ScrollViewState::default();
+                self.mark_committed_dirty();
                 self.mark_scroll_dirty();
                 None
             }
             SessionMessage::TurnRestored { session } => {
                 self.apply_session(session);
+                self.mark_committed_dirty();
                 self.mark_scroll_dirty();
                 None
             }
@@ -565,11 +577,7 @@ impl SessionScreen {
             self.scroll_width.set(content_width);
         }
         if self.scroll_dirty.replace(false) {
-            let mut rendered_messages: Vec<(Role, String)> = self.messages.clone();
-            if self.streaming {
-                rendered_messages.push((Role::Assistant, self.pending.clone()));
-            }
-            self.rebuild_scroll_view(&rendered_messages, content_width);
+            self.rebuild_scroll_view(content_width);
         }
 
         let mut scroll_state = self.scroll_state.borrow_mut();
@@ -610,6 +618,10 @@ impl SessionScreen {
 
     fn mark_scroll_dirty(&self) {
         self.scroll_dirty.set(true);
+    }
+
+    fn mark_committed_dirty(&self) {
+        self.committed_dirty.set(true);
     }
 
     fn apply_session(&mut self, session: shuvarie_core::Session) {
@@ -659,56 +671,19 @@ impl SessionScreen {
             .update(SidebarMessage::SetUsage { usage, cost });
     }
 
-    fn rebuild_scroll_view(&self, messages: &[(Role, String)], content_width: u16) {
+    fn rebuild_scroll_view(&self, content_width: u16) {
         let mut lines: Vec<Line> = Vec::new();
-        for (i, (role, content)) in messages.iter().enumerate() {
-            match role {
-                Role::User => {
-                    lines.push(Line::from(Span::raw("You").fg(theme::ACCENT).bold()));
-                    lines.append(&mut shuvarie_highlight::render(content));
-                    lines.push(Line::from(""));
-                }
-                Role::Assistant => {
-                    let tool_lines: Vec<&ToolActivity> =
-                        self.tools.iter().filter(|t| t.belongs_to(i)).collect();
-                    let context_lines: Vec<&ContextActivity> = self
-                        .context
-                        .iter()
-                        .filter(|c| c.message_index == i)
-                        .collect();
-                    for context in context_lines {
-                        self.push_context_lines(&mut lines, context);
-                    }
-                    self.push_reasoning_lines(&mut lines, i);
-                    if content.is_empty() {
-                        for tool in &tool_lines {
-                            self.push_tool_lines(&mut lines, tool);
-                        }
-                        let placeholder = if self.streaming && i == self.messages.len() {
-                            "(working…)"
-                        } else {
-                            "(tool output only — no text reply)"
-                        };
-                        lines.push(Line::from(Span::raw(placeholder).fg(theme::TEXT_MUTED)));
-                    } else {
-                        self.push_interleaved(&mut lines, content, &tool_lines);
-                    }
-                    if self.interrupted
-                        && i == self.messages.len().saturating_sub(1)
-                        && !self.streaming
-                    {
-                        lines.push(Line::from(
-                            Span::raw("(interrupted)").fg(theme::WARNING).italic(),
-                        ));
-                    }
-                    lines.push(Line::from(""));
-                }
-                Role::System => {
-                    lines.push(Line::from(Span::raw("System").fg(theme::TEXT_MUTED).bold()));
-                    lines.append(&mut shuvarie_highlight::render(content));
-                    lines.push(Line::from(""));
-                }
+        if self.committed_dirty.replace(false) {
+            let mut committed: Vec<Line> = Vec::new();
+            for (i, (role, content)) in self.messages.iter().enumerate() {
+                self.push_message_lines(&mut committed, i, role, content);
             }
+            *self.committed_lines.borrow_mut() = committed;
+        }
+        lines.append(&mut self.committed_lines.borrow().clone());
+        if self.streaming {
+            let i = self.messages.len();
+            self.push_message_lines(&mut lines, i, &Role::Assistant, &self.pending);
         }
         let paragraph = Paragraph::new(lines).wrap(Wrap { trim: true });
         let content_height = paragraph.line_count(content_width).min(u16::MAX as usize) as u16;
@@ -716,6 +691,54 @@ impl SessionScreen {
             .scrollbars_visibility(ScrollbarVisibility::Never);
         scroll_view.render_widget(&paragraph, scroll_view.area());
         *self.scroll_view.borrow_mut() = scroll_view;
+    }
+
+    fn push_message_lines(&self, lines: &mut Vec<Line>, i: usize, role: &Role, content: &str) {
+        match role {
+            Role::User => {
+                lines.push(Line::from(Span::raw("You").fg(theme::ACCENT).bold()));
+                lines.append(&mut shuvarie_highlight::render(content));
+                lines.push(Line::from(""));
+            }
+            Role::Assistant => {
+                let tool_lines: Vec<&ToolActivity> =
+                    self.tools.iter().filter(|t| t.belongs_to(i)).collect();
+                let context_lines: Vec<&ContextActivity> = self
+                    .context
+                    .iter()
+                    .filter(|c| c.message_index == i)
+                    .collect();
+                for context in context_lines {
+                    self.push_context_lines(lines, context);
+                }
+                self.push_reasoning_lines(lines, i);
+                if content.is_empty() {
+                    for tool in &tool_lines {
+                        self.push_tool_lines(lines, tool);
+                    }
+                    let placeholder = if self.streaming && i == self.messages.len() {
+                        "(working…)"
+                    } else {
+                        "(tool output only — no text reply)"
+                    };
+                    lines.push(Line::from(Span::raw(placeholder).fg(theme::TEXT_MUTED)));
+                } else {
+                    self.push_interleaved(lines, content, &tool_lines);
+                }
+                if self.interrupted && i == self.messages.len().saturating_sub(1) && !self.streaming
+                {
+                    lines.push(Line::from(
+                        Span::raw("(interrupted)").fg(theme::WARNING).italic(),
+                    ));
+                }
+                lines.push(Line::from(""));
+            }
+            Role::System => {
+                lines.push(Line::from(Span::raw("System").fg(theme::TEXT_MUTED).bold()));
+                lines.append(&mut shuvarie_highlight::render(content));
+                lines.push(Line::from(""));
+            }
+        }
     }
 
     fn push_reasoning_lines(&self, lines: &mut Vec<Line>, message_index: usize) {
