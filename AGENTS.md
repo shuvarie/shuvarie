@@ -45,7 +45,7 @@ There should be a `new` and a `view` method, and a `update` method when data upd
 
 | File | Role |
 |---|---|
-| `tui.rs` | Event loop: `EventStream` + `tokio::select!`, terminal init/deinit, calls `App::view` |
+| `tui.rs` | Event loop: `EventStream` + `tokio::select!`, terminal init/deinit, calls `App::view`. Coalesces bursts of core events and bounds redraws to a configurable frame rate (`[ui].frame_rate`, default 60; `0` = draw every event); terminal events draw immediately |
 | `event.rs` | `Event` enum — `Terminal(termina::Event)` / `Core(shuvarie_core::Event)` — the single input type for `App::map_event` |
 | `app.rs` | Parent `App`: `Route` (`Home`/`Session`), `Overlay` enum, `AppMessage` (grouped), `map_event` dispatch, `update`, `view` (content routing + overlays) |
 | `context.rs` | `UpdateCtx` — shared `Connections` + `Command` sender passed to submodel `update` calls |
@@ -93,11 +93,11 @@ The `view` method must have an immutable `self` reference (`&self`) as parameter
 - TUI → core: commands (e.g. `SendMessage`, `StartSession`, `ListModels`, `AddProvider`, `SetActiveModel`) — `shuvarie_core::Command`.
 - Core → TUI: events (e.g. `MessageReceived`, `ReplyError`, `SessionStarted`, `ModelsLoaded`, `ConfigSaved`) — `shuvarie_core::Event` — wrapped in `Event::Core` by the `tui.rs` event loop, mapped to `AppMessage` variants by `App::map_event`, and fed into `update`.
 
-Keep the TUI thread free of `await`s on blocking work; offload any blocking work to the core task (or `spawn_blocking`). The `select!` loop wakes on either a terminal event or a core event, so live updates (model lists, streaming tokens) render without requiring a keypress.
+Keep the TUI thread free of `await`s on blocking work; offload any blocking work to the core task (or `spawn_blocking`). The `select!` loop wakes on either a terminal event or a core event, so live updates (model lists, streaming tokens) render without requiring a keypress. Core events are coalesced: after a core event, all already-queued core events are drained and applied, then at most one frame is drawn per frame-budget interval (`[ui].frame_rate`, default 60 fps; `0` disables the cap). Terminal events draw immediately for input responsiveness. When no event changed state, the loop keeps listening without redrawing.
 
 ### Storage: hybrid
 
-- **Config file** (`~/.config/shuvarie/config.toml`, via `toml` + `serde`): UI preferences, the `[embedding]` settings, the `[agent]` turn budgets (`max_turns` / `worker_max_turns` — `0` means unlimited, the default), and the `[lsp]` settings (`enabled` defaults to true; `[lsp.servers.<lang>]` overrides or adds server specs — `command`, `extensions`, `auto_start`, `root_markers`). No secrets.
+- **Config file** (`~/.config/shuvarie/config.toml`, via `toml` + `serde`): UI preferences (`[ui].frame_rate` — target frames per second for the render loop, default 60; `0` draws every event), the `[embedding]` settings, the `[agent]` turn budgets (`max_turns` / `worker_max_turns` — `0` means unlimited, the default), and the `[lsp]` settings (`enabled` defaults to true; `[lsp.servers.<lang>]` overrides or adds server specs — `command`, `extensions`, `auto_start`, `root_markers`). No secrets.
 - **Connections file** (`~/.config/shuvarie/connections.toml`, via `toml` + `serde`): provider connections (API keys, base URLs) and the active provider/model. Keeps secrets out of the database and out of `config.toml`.
 - **Database** (`.shuvarie/data.db` in the working directory — Turso embedded SQLite + Toasty ORM): chat sessions, message history (with reasoning text + interrupted flag), tool call records (per-message, with file-change JSON + original/new content for undo), and the undo log (DB-backed multi-level redo, survives reload). Provider config stays in the TOML files regardless.
 - **Migrations**: schema is managed with toasty migrations, not `push_schema` (which emits bare `CREATE TABLE` and fails on re-open). Migration files live in `crates/db/toasty/` and are embedded into the binary via `toasty::embed_migrations!`; `Store::open` applies them automatically. Regenerate with `cargo run -p shuvarie-db --bin migrate -- migration generate --name <change>`, then `apply` (or just reopen a store — the embedded set applies pending migrations at open). The `migrate` bin uses an in-memory DB and a programmatically-built `toasty-cli` config pointing at `crates/db/toasty` so it is CWD-independent. `next_seq` uses `MAX(seq)+1` (not row count) so undo/delete doesn't collide.

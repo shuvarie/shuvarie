@@ -12,8 +12,9 @@ async fn main() -> color_eyre::Result<()> {
 
     let (cmd_tx, cmd_rx) = channel::<shuvarie_core::Command>(64);
     let (event_tx, event_rx) = channel::<shuvarie_core::Event>(64);
+    let config = shuvarie_core::Config::load()?;
     let core = tokio::spawn(shuvarie_core::run(
-        shuvarie_core::Config::load()?,
+        config.clone(),
         shuvarie_core::Connections::load()?,
         store,
         args.current,
@@ -23,7 +24,7 @@ async fn main() -> color_eyre::Result<()> {
         event_tx,
     ));
 
-    let res = tui::run_tui(cmd_tx.clone(), event_rx).await;
+    let res = tui::run_tui(config, cmd_tx.clone(), event_rx).await;
     drop(cmd_tx);
     let core_res = core.await;
 

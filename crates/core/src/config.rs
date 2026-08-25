@@ -49,8 +49,25 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct UiPrefs {}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UiPrefs {
+    /// Target frames per second for the TUI render loop. `0` disables the cap
+    /// (one draw per event, the original behavior). Defaults to 60.
+    #[serde(default = "default_frame_rate")]
+    pub frame_rate: u32,
+}
+
+impl Default for UiPrefs {
+    fn default() -> Self {
+        Self {
+            frame_rate: default_frame_rate(),
+        }
+    }
+}
+
+fn default_frame_rate() -> u32 {
+    60
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct AgentConfig {

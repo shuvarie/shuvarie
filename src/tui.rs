@@ -1,15 +1,16 @@
 use std::io::{self, Write};
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use ratatui::prelude::*;
 use termina::{EventStream, PlatformTerminal, Terminal as _};
 use tokio::sync::mpsc::{Receiver, Sender};
 
-use shuvarie_core::{Command, Connections, Event as CoreEvent};
+use shuvarie_core::{Command, Config, Connections, Event as CoreEvent};
 
 use crate::tui::event::Event;
 
-use self::app::{App, AppEffect};
+use self::app::{App, AppEffect, AppMessage};
 
 pub mod add_provider;
 mod app;
@@ -33,7 +34,11 @@ mod theme;
 mod utils;
 mod welcome;
 
-pub async fn run_tui(cmd_tx: Sender<Command>, event_rx: Receiver<CoreEvent>) -> io::Result<()> {
+pub async fn run_tui(
+    config: Config,
+    cmd_tx: Sender<Command>,
+    event_rx: Receiver<CoreEvent>,
+) -> io::Result<()> {
     let mut term = PlatformTerminal::new()?;
     term.enter_raw_mode()?;
 
@@ -46,56 +51,137 @@ pub async fn run_tui(cmd_tx: Sender<Command>, event_rx: Receiver<CoreEvent>) -> 
 
     init_terminal(rat.backend_mut().terminal_mut())?;
 
-    let res: io::Result<()> = render_tui(app, &mut rat, event_rx, event_stream).await;
+    let frame_budget = frame_budget(config.ui.frame_rate);
+
+    let res: io::Result<()> = render_tui(app, &mut rat, event_rx, event_stream, frame_budget).await;
 
     let deinit = deinit_terminal(rat.backend_mut().terminal_mut());
     res.and(deinit)
 }
 
-/// Helper function for rendering TUI and handling errors
+/// Minimum interval between frames. `None` disables the cap (one draw per
+/// event, the original behavior).
+fn frame_budget(frame_rate: u32) -> Option<Duration> {
+    if frame_rate == 0 {
+        None
+    } else {
+        Some(Duration::from_secs_f64(1.0 / frame_rate as f64))
+    }
+}
+
+/// Helper function for rendering TUI and handling errors.
+///
+/// Core events are coalesced: after a core event, all already-queued core
+/// events are drained and applied, then a frame is drawn at most once per
+/// `frame_budget`. Terminal events draw immediately to keep input snappy.
 async fn render_tui<B>(
     mut app: App,
     rat: &mut ratatui::Terminal<B>,
     mut event_rx: Receiver<CoreEvent>,
     mut event_stream: EventStream,
+    frame_budget: Option<Duration>,
 ) -> io::Result<()>
 where
     B: Backend,
     io::Error: From<<B as Backend>::Error>,
 {
+    let mut last_draw: Instant;
+    // A pending frame deadline armed when a core event arrived too soon after
+    // the last draw. `None` means no frame is pending.
+    let mut frame_deadline: Option<tokio::time::Instant> = None;
+
     'render_loop: loop {
-        // Draw frame
+        // Draw frame.
         rat.draw(|frame| app.view(frame, frame.area()))?;
+        last_draw = Instant::now();
 
         'event_listening: loop {
-            // Listen to event and map message
-            let msg = tokio::select! {
-                // Terminal event
+            // Apply one event, or flush a pending frame deadline.
+            let (is_terminal, changed) = tokio::select! {
+                biased; // cheap branches first
+                // Flush the armed frame timer: a coalesced frame is due.
+                // The `if` guard only disables polling — the future
+                // expression is still evaluated, so handle `None` here.
+                _ = async {
+                    if let Some(deadline) = frame_deadline {
+                        tokio::time::sleep_until(deadline).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                }, if frame_deadline.is_some() => {
+                    // Deadline elapsed — draw the coalesced frame.
+                    frame_deadline = None;
+                    break 'event_listening;
+                }
+                // Terminal event — always draw immediately when it changes state.
                 ev = event_stream.next() => {
                     let Some(ev_result) = ev else { break 'render_loop Ok(()); };
-                    app.map_event(Event::Terminal(ev_result?))
+                    let msg = app.map_event(Event::Terminal(ev_result?));
+                    (true, apply_msg(&mut app, msg))
                 }
-                // Shuvarie core event
+                // Core event — coalesce.
                 ev = event_rx.recv() => {
                     let Some(ev) = ev else { break 'render_loop Ok(()); };
-                    app.map_event(Event::Core(ev))
+                    let msg = app.map_event(Event::Core(ev));
+                    let mut changed = apply_msg(&mut app, msg);
+                    // Drain all already-queued core events without blocking.
+                    while let Ok(ev) = event_rx.try_recv() {
+                        let msg = app.map_event(Event::Core(ev));
+                        changed |= apply_msg(&mut app, msg);
+                    }
+                    (false, changed)
                 }
             };
 
-            // Handle message
-            if let Some(msg) = msg {
-                // Update model and catch return
-                if let Some(ret) = app.update(msg) {
-                    // Match return
-                    match ret {
-                        AppEffect::Quit => break 'render_loop Ok(()),
-                    }
-                }
-                // Model updated. Rendering the next frame is required.
+            if app.quit_requested() {
+                break 'render_loop Ok(());
+            }
+
+            if !changed {
+                // Nothing changed — keep listening without redrawing.
+                continue;
+            }
+
+            if is_terminal {
+                // Terminal input: draw immediately for responsiveness.
+                frame_deadline = None;
                 break 'event_listening;
             }
-            // Nothing changed. Keep listening.
+
+            // Core event: respect the frame budget.
+            match frame_budget {
+                None => {
+                    // No cap — draw now.
+                    frame_deadline = None;
+                    break 'event_listening;
+                }
+                Some(budget) => {
+                    let elapsed = last_draw.elapsed();
+                    if elapsed >= budget {
+                        // Budget already satisfied — draw now.
+                        frame_deadline = None;
+                        break 'event_listening;
+                    } else {
+                        // Arm a deadline and keep coalescing until it fires.
+                        frame_deadline = Some(tokio::time::Instant::now() + (budget - elapsed));
+                        // Stay in the listening loop to collect more events.
+                    }
+                }
+            }
         }
+    }
+}
+
+/// Apply a mapped message, recording a quit request on `AppEffect::Quit`.
+/// Returns `true` if there was a message to apply.
+fn apply_msg(app: &mut App, msg: Option<AppMessage>) -> bool {
+    if let Some(msg) = msg {
+        if let Some(AppEffect::Quit) = app.update(msg) {
+            app.mark_quit();
+        }
+        true
+    } else {
+        false
     }
 }
 

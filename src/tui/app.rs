@@ -128,6 +128,7 @@ pub struct App {
     pub approval: ApprovalPrompt,
     pub models: HashMap<String, Vec<ModelInfo>>,
     pending_model_pick: Option<String>,
+    quit: bool,
 }
 
 impl App {
@@ -167,7 +168,18 @@ impl App {
             approval: ApprovalPrompt::new(),
             models: HashMap::new(),
             pending_model_pick: None,
+            quit: false,
         }
+    }
+
+    /// Record that the app should quit (set when `update` returns `Quit`).
+    pub fn mark_quit(&mut self) {
+        self.quit = true;
+    }
+
+    /// Whether the render loop should terminate.
+    pub fn quit_requested(&self) -> bool {
+        self.quit
     }
 
     pub fn map_event(&self, ev: Event) -> Option<AppMessage> {
