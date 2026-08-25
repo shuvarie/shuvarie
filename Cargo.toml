@@ -53,5 +53,5 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 authors = ["Charles Dong <chardon_cs@proton.me>"]
-license = "BSD-3-Clause"
+license = "MIT"
 repository = "https://github.com/saikuru-dev/shuvarie.git"
