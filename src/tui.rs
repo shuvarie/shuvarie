@@ -89,13 +89,23 @@ pub async fn run_tui(cmd_tx: Sender<Command>, mut event_rx: Receiver<CoreEvent>)
 }
 
 fn init_terminal(terminal: &mut PlatformTerminal) -> io::Result<()> {
-    write!(terminal, "{}", escape::ENTER_ALTERNATE_SCREEN)?;
+    write!(
+        terminal,
+        "{}{}",
+        escape::ENTER_ALTERNATE_SCREEN,
+        escape::ENABLE_KITTY_KEYBOARD
+    )?;
     terminal.flush()?;
     Ok(())
 }
 
 fn deinit_terminal(terminal: &mut PlatformTerminal) -> io::Result<()> {
-    write!(terminal, "{}", escape::EXIT_ALTERNATE_SCREEN)?;
+    write!(
+        terminal,
+        "{}{}",
+        escape::DISABLE_KITTY_KEYBOARD,
+        escape::EXIT_ALTERNATE_SCREEN
+    )?;
     terminal.flush()?;
     Ok(())
 }

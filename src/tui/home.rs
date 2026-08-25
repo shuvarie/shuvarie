@@ -27,7 +27,7 @@ impl HomeScreen {
     pub fn new() -> Self {
         Self {
             logo: Logo::new(),
-            input: TextArea::new("Ask anything…"),
+            input: TextArea::with_max_height("Ask anything…", 10),
             version_bar: VersionBar::new(HorizontalAlignment::Center),
         }
     }
@@ -48,17 +48,20 @@ impl HomeScreen {
     }
 
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
+        let centered = area
+            .centered_horizontally(Max(100))
+            .centered_vertically(Ratio(1, 2));
+        let content_width = centered.width as usize;
+        let input_height = self.input.desired_height(content_width);
+
         let [logo_area, input_area, key_hint_area, version_area] = Layout::vertical([
             Length(self.logo.height() as u16),
-            Length(3),
+            Length(input_height),
             Length(1),
             Length(1),
         ])
         .spacing(1)
-        .areas(
-            area.centered_horizontally(Max(100))
-                .centered_vertically(Ratio(1, 2)),
-        );
+        .areas(centered);
 
         self.logo.view(frame, logo_area);
         self.input.view(frame, input_area);

@@ -138,7 +138,7 @@ pub struct SessionScreen {
 impl SessionScreen {
     pub fn new() -> Self {
         Self {
-            input: TextArea::new("Type a message…"),
+            input: TextArea::with_max_height("Type a message…", 8),
             messages: Vec::new(),
             tools: Vec::new(),
             context: Vec::new(),
@@ -172,10 +172,19 @@ impl SessionScreen {
             return self.input.map_event(key).map(SessionMessage::Text);
         }
         match key.code {
+            KeyCode::Up | KeyCode::Down if self.input_is_multiline() => {
+                self.input.map_event(key).map(SessionMessage::Text)
+            }
             KeyCode::Up => Some(SessionMessage::ScrollUp),
             KeyCode::Down => Some(SessionMessage::ScrollDown),
             _ => self.input.map_event(key).map(SessionMessage::Text),
         }
+    }
+
+    fn input_is_multiline(&self) -> bool {
+        let width = self.input.width.get().max(1);
+        let inner_w = width.saturating_sub(4).max(1);
+        self.input.buffer.row_count(inner_w) > 1
     }
 
     pub fn update(&mut self, msg: SessionMessage) -> Option<SessionEffect> {
@@ -483,14 +492,21 @@ impl SessionScreen {
                 self.sidebar.model.as_deref().unwrap_or("?")
             ),
         };
+        let input_height = self.input.desired_height(content_area.width as usize);
         let [
             title_area,
             history_area,
             input_area,
             status_area,
             footer_area,
-        ] = Layout::vertical([Length(1), Min(0), Length(3), Length(1), Length(1)])
-            .areas(content_area);
+        ] = Layout::vertical([
+            Length(1),
+            Min(0),
+            Length(input_height),
+            Length(1),
+            Length(1),
+        ])
+        .areas(content_area);
 
         frame.render_widget(
             Paragraph::new(theme::title_header(&title))
@@ -540,7 +556,11 @@ impl SessionScreen {
             let footer = if self.streaming {
                 theme::help_line(&[("Ctrl+C", "stop"), ("Ctrl+M", "commands")])
             } else if self.interrupted {
-                theme::help_line(&[("Enter", "send"), ("Ctrl+M", "resume"), ("Ctrl+C", "quit")])
+                theme::help_line(&[
+                    ("Enter", "send"),
+                    ("Ctrl+M", "resume"),
+                    ("Ctrl+C", "quit"),
+                ])
             } else {
                 theme::help_line(&[
                     ("Enter", "send"),
