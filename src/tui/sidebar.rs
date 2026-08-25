@@ -1,3 +1,5 @@
+use std::cell::{Cell, RefCell};
+
 use ratatui::layout::{Alignment, Rect};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph};
@@ -22,6 +24,8 @@ pub struct Sidebar {
     pub context_length: Option<u64>,
     pub lsp_servers: Vec<LspStatus>,
     pub lsp_enabled: bool,
+    dirty: Cell<bool>,
+    lines_cache: RefCell<Vec<Line<'static>>>,
 }
 
 pub enum SidebarMessage {
@@ -58,10 +62,13 @@ impl Sidebar {
             context_length: None,
             lsp_servers: Vec::new(),
             lsp_enabled: true,
+            dirty: Cell::new(true),
+            lines_cache: RefCell::new(Vec::new()),
         }
     }
 
     pub fn update(&mut self, msg: SidebarMessage) {
+        self.dirty.set(true);
         match msg {
             SidebarMessage::UpdateConfig {
                 provider,
@@ -114,6 +121,17 @@ impl Sidebar {
 
         self.version_bar.view(frame, version_area);
 
+        if self.dirty.replace(false) {
+            let lines = self.build_lines();
+            *self.lines_cache.borrow_mut() = lines;
+        }
+
+        let lines = self.lines_cache.borrow().clone();
+        let para = Paragraph::new(lines).alignment(Alignment::Left);
+        frame.render_widget(para, lines_area);
+    }
+
+    fn build_lines(&self) -> Vec<Line<'static>> {
         let mut lines: Vec<Line> = Vec::new();
 
         if let Some(p) = &self.provider {
@@ -205,8 +223,7 @@ impl Sidebar {
         lines.push(Line::from("Skills").fg(theme::ACCENT).bold());
         lines.push(Line::from("  inactive").fg(theme::TEXT_MUTED));
 
-        let para = Paragraph::new(lines).alignment(Alignment::Left);
-        frame.render_widget(para, lines_area);
+        lines
     }
 }
 

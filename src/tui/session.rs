@@ -133,6 +133,7 @@ pub struct SessionScreen {
     scroll_dirty: Cell<bool>,
     scroll_width: Cell<u16>,
     committed_lines: RefCell<Vec<Line<'static>>>,
+    committed_scroll: RefCell<ScrollView>,
     committed_dirty: Cell<bool>,
     pub status: Option<String>,
     pub sidebar: Sidebar,
@@ -160,6 +161,7 @@ impl SessionScreen {
             scroll_dirty: Cell::new(false),
             scroll_width: Cell::new(0),
             committed_lines: RefCell::new(Vec::new()),
+            committed_scroll: RefCell::new(ScrollView::new(Size::new(0, 0))),
             committed_dirty: Cell::new(true),
             status: None,
             sidebar: Sidebar::new(),
@@ -574,6 +576,7 @@ impl SessionScreen {
         let content_width = history_inner.width.saturating_sub(1);
         if self.scroll_width.get() != content_width {
             self.scroll_dirty.set(true);
+            self.committed_dirty.set(true);
             self.scroll_width.set(content_width);
         }
         if self.scroll_dirty.replace(false) {
@@ -672,24 +675,59 @@ impl SessionScreen {
     }
 
     fn rebuild_scroll_view(&self, content_width: u16) {
-        let mut lines: Vec<Line> = Vec::new();
         if self.committed_dirty.replace(false) {
             let mut committed: Vec<Line> = Vec::new();
             for (i, (role, content)) in self.messages.iter().enumerate() {
                 self.push_message_lines(&mut committed, i, role, content);
             }
             *self.committed_lines.borrow_mut() = committed;
+
+            let para =
+                Paragraph::new(self.committed_lines.borrow().clone()).wrap(Wrap { trim: true });
+            let height = para.line_count(content_width).min(u16::MAX as usize) as u16;
+            let mut sv = ScrollView::new(Size::new(content_width, height))
+                .scrollbars_visibility(ScrollbarVisibility::Never);
+            sv.render_widget(&para, sv.area());
+            *self.committed_scroll.borrow_mut() = sv;
         }
-        lines.append(&mut self.committed_lines.borrow().clone());
+
+        let mut tail: Vec<Line> = Vec::new();
         if self.streaming {
             let i = self.messages.len();
-            self.push_message_lines(&mut lines, i, &Role::Assistant, &self.pending);
+            self.push_message_lines(&mut tail, i, &Role::Assistant, &self.pending);
         }
-        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: true });
-        let content_height = paragraph.line_count(content_width).min(u16::MAX as usize) as u16;
-        let mut scroll_view = ScrollView::new(Size::new(content_width, content_height))
+
+        let committed_scroll = self.committed_scroll.borrow();
+        let committed_height = committed_scroll.size().height;
+        let tail_height = if tail.is_empty() {
+            0
+        } else {
+            let para = Paragraph::new(tail.clone()).wrap(Wrap { trim: true });
+            para.line_count(content_width).min(u16::MAX as usize) as u16
+        };
+
+        let total_height = committed_height.saturating_add(tail_height);
+        let mut scroll_view = ScrollView::new(Size::new(content_width, total_height))
             .scrollbars_visibility(ScrollbarVisibility::Never);
-        scroll_view.render_widget(&paragraph, scroll_view.area());
+
+        {
+            let src = committed_scroll.buf();
+            let dst = scroll_view.buf_mut();
+            for y in 0..committed_height {
+                for x in 0..content_width {
+                    dst[(x, y)] = src[(x, y)].clone();
+                }
+            }
+        }
+
+        if tail_height > 0 {
+            let para = Paragraph::new(tail).wrap(Wrap { trim: true });
+            scroll_view.render_widget(
+                &para,
+                Rect::new(0, committed_height, content_width, tail_height),
+            );
+        }
+
         *self.scroll_view.borrow_mut() = scroll_view;
     }
 
