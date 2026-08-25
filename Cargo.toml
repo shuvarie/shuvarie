@@ -39,6 +39,12 @@ features = [
     "widget-calendar",
 ]
 
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
+
 [workspace]
 resolver = "3"
 members = ["crates/*"]
