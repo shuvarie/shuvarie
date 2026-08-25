@@ -2,6 +2,7 @@ use ratatui::layout::{Alignment, Rect};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph};
 use shuvarie_catalog::TokenUsage;
+use shuvarie_core::LspStatus;
 use termina::event::KeyEvent;
 
 use crate::tui::{components::VersionBar, utils::locale::ToDecSepNum};
@@ -19,6 +20,8 @@ pub struct Sidebar {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub context_length: Option<u64>,
+    pub lsp_servers: Vec<LspStatus>,
+    pub lsp_enabled: bool,
 }
 
 pub enum SidebarMessage {
@@ -35,6 +38,9 @@ pub enum SidebarMessage {
         usage: TokenUsage,
         cost: f64,
     },
+    UpdateLsp {
+        servers: Vec<LspStatus>,
+    },
 }
 
 impl Sidebar {
@@ -50,6 +56,8 @@ impl Sidebar {
             provider: None,
             model: None,
             context_length: None,
+            lsp_servers: Vec::new(),
+            lsp_enabled: true,
         }
     }
 
@@ -80,6 +88,9 @@ impl Sidebar {
                 self.reasoning_tokens = usage.reasoning_tokens;
                 self.cached_tokens = usage.cached_input_tokens;
                 self.cost = cost;
+            }
+            SidebarMessage::UpdateLsp { servers } => {
+                self.lsp_servers = servers;
             }
         }
     }
@@ -154,7 +165,41 @@ impl Sidebar {
         lines.push(Line::from(""));
 
         lines.push(Line::from("LSP").fg(theme::ACCENT).bold());
-        lines.push(Line::from("  inactive").fg(theme::TEXT_MUTED));
+        if !self.lsp_enabled {
+            lines.push(Line::from("  disabled").fg(theme::TEXT_MUTED));
+        } else if self.lsp_servers.is_empty() {
+            lines.push(Line::from("  no servers").fg(theme::TEXT_MUTED));
+        } else {
+            for s in &self.lsp_servers {
+                let (marker, color) = match s.status {
+                    shuvarie_core::ServerStatus::Running => ("✓", theme::SUCCESS),
+                    shuvarie_core::ServerStatus::Starting => ("⟳", theme::WARNING),
+                    shuvarie_core::ServerStatus::Stopping => ("⟳", theme::WARNING),
+                    shuvarie_core::ServerStatus::Stopped => ("○", theme::TEXT_MUTED),
+                    shuvarie_core::ServerStatus::Failed => ("✗", theme::ERROR),
+                };
+                let mut row = vec![
+                    Span::raw("  ").fg(theme::TEXT_MUTED),
+                    Span::raw(marker.to_string()).fg(color),
+                    Span::raw(" ").fg(theme::TEXT_MUTED),
+                    Span::raw(s.name.clone()).fg(theme::TEXT),
+                ];
+                if let Some(pid) = s.pid {
+                    row.push(Span::raw(format!(" #{pid}")).fg(theme::TEXT_MUTED));
+                }
+                if s.diagnostics > 0 {
+                    row.push(Span::raw(format!("  ⚑{}", s.diagnostics)).fg(theme::WARNING));
+                }
+                lines.push(Line::from(row));
+                if let Some(err) = &s.error {
+                    lines.push(
+                        Line::from(format!("    {err}"))
+                            .fg(theme::TEXT_MUTED)
+                            .italic(),
+                    );
+                }
+            }
+        }
         lines.push(Line::from(""));
 
         lines.push(Line::from("Skills").fg(theme::ACCENT).bold());

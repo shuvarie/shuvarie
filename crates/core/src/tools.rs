@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use shuvarie_llm::{DiffLine, DiffLineKind, FileChange, Tool, ToolDefinition, ToolOutput};
 
 use crate::approval::{ApprovalGate, ApprovalReason};
+use crate::lsp_manager::SharedManager;
 
 const MAX_READ_BYTES: usize = 64 * 1024;
 const MAX_COMMAND_OUTPUT: usize = 16 * 1024;
@@ -20,6 +21,7 @@ fn arg_value(args: &Value, key: &str) -> Result<String, String> {
 
 struct ReadFile {
     gate: ApprovalGate,
+    lsp: Option<SharedManager>,
 }
 
 impl Tool for ReadFile {
@@ -45,6 +47,7 @@ impl Tool for ReadFile {
         args: Value,
     ) -> Pin<Box<dyn Future<Output = Result<ToolOutput, String>> + Send>> {
         let gate = self.gate.clone();
+        let lsp = self.lsp.clone();
         Box::pin(async move {
             let path = arg_value(&args, "path")?;
             let offset = args.get("offset").and_then(Value::as_u64);
@@ -60,8 +63,15 @@ impl Tool for ReadFile {
             if data.contains(&0) {
                 return Err(format!("'{path}' appears to be binary; refusing to read"));
             }
-            let content = String::from_utf8_lossy(&data[..data.len().min(MAX_READ_BYTES)]);
-            let lines: Vec<&str> = content.lines().collect();
+            let content_owned =
+                String::from_utf8_lossy(&data[..data.len().min(MAX_READ_BYTES)]).into_owned();
+            if let Some(lsp) = &lsp {
+                lsp.lock()
+                    .await
+                    .on_file_open(Path::new(&path), &content_owned)
+                    .await;
+            }
+            let lines: Vec<&str> = content_owned.lines().collect();
             let start = offset.unwrap_or(1).max(1) as usize - 1;
             let end = match limit {
                 Some(n) => (start + n as usize).min(lines.len()),
@@ -81,6 +91,7 @@ impl Tool for ReadFile {
 
 struct WriteFile {
     gate: ApprovalGate,
+    lsp: Option<SharedManager>,
 }
 
 impl Tool for WriteFile {
@@ -105,6 +116,7 @@ impl Tool for WriteFile {
         args: Value,
     ) -> Pin<Box<dyn Future<Output = Result<ToolOutput, String>> + Send>> {
         let gate = self.gate.clone();
+        let lsp = self.lsp.clone();
         Box::pin(async move {
             let path = arg_value(&args, "path")?;
             let content = arg_value(&args, "content")?;
@@ -118,6 +130,12 @@ impl Tool for WriteFile {
             }
             let original = std::fs::read_to_string(&abs).ok();
             std::fs::write(&abs, &content).map_err(|e| format!("write {path}: {e}"))?;
+            if let Some(lsp) = &lsp {
+                lsp.lock()
+                    .await
+                    .on_file_change(Path::new(&path), &content)
+                    .await;
+            }
             Ok(ToolOutput::with_file_change(
                 format!("wrote {} bytes to {path}", content.len()),
                 FileChange::Write {
@@ -132,6 +150,7 @@ impl Tool for WriteFile {
 
 struct EditFile {
     gate: ApprovalGate,
+    lsp: Option<SharedManager>,
 }
 
 impl Tool for EditFile {
@@ -158,6 +177,7 @@ impl Tool for EditFile {
         args: Value,
     ) -> Pin<Box<dyn Future<Output = Result<ToolOutput, String>> + Send>> {
         let gate = self.gate.clone();
+        let lsp = self.lsp.clone();
         Box::pin(async move {
             let path = arg_value(&args, "path")?;
             let old = arg_value(&args, "old")?;
@@ -195,6 +215,12 @@ impl Tool for EditFile {
             edited.replace_range(idx..idx + old.len(), &new);
             let diff = compute_diff(&content, &edited);
             std::fs::write(&abs, &edited).map_err(|e| format!("write {path}: {e}"))?;
+            if let Some(lsp) = &lsp {
+                lsp.lock()
+                    .await
+                    .on_file_change(Path::new(&path), &edited)
+                    .await;
+            }
             Ok(ToolOutput::with_file_change(
                 format!("edited {path}: replaced 1 of {} occurrences", matches.len()),
                 FileChange::Edit {
@@ -600,22 +626,125 @@ fn compute_diff(old: &str, new: &str) -> Vec<DiffLine> {
     lines
 }
 
-pub fn all_tools(gate: ApprovalGate) -> Vec<std::sync::Arc<dyn Tool>> {
+struct Lsp {
+    lsp: SharedManager,
+}
+
+impl Tool for Lsp {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "lsp".into(),
+            description: "Manage Language Server Protocol (LSP) servers for the workspace. \
+                `action` is one of `start` | `stop` | `restart` | `list`. For `start`/`stop`/`restart`, \
+                `name` is the exact server id (a language like `rust`, `go`, `typescript`). \
+                For `list`, `name` is an optional substring/fuzzy filter (matched against server \
+                name + language), and `all` controls whether to list all configured servers \
+                (true) or only the currently running ones (false, the default)."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["start", "stop", "restart", "list"], "description": "Action to perform" },
+                    "name": { "type": "string", "description": "Server name (exact id for start/stop/restart; substring filter for list)" },
+                    "all": { "type": "boolean", "description": "For `list`: list all configured servers instead of only running ones (default false)" }
+                },
+                "required": ["action"]
+            }),
+        }
+    }
+
+    fn call(
+        &self,
+        args: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolOutput, String>> + Send>> {
+        let lsp = self.lsp.clone();
+        Box::pin(async move {
+            let action = args
+                .get("action")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "missing string argument 'action'".to_string())?
+                .to_string();
+            let name = args.get("name").and_then(Value::as_str).map(String::from);
+            let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
+            let mut mgr = lsp.lock().await;
+            match action.as_str() {
+                "start" => {
+                    let Some(name) = name else {
+                        return Err("'name' is required for `lsp start`".into());
+                    };
+                    mgr.start(&name)
+                        .await
+                        .map(|_| ToolOutput::text(format!("started LSP server {name}")))
+                }
+                "stop" => {
+                    let Some(name) = name else {
+                        return Err("'name' is required for `lsp stop`".into());
+                    };
+                    mgr.stop(&name)
+                        .await
+                        .map(|_| ToolOutput::text(format!("stopped LSP server {name}")))
+                }
+                "restart" => {
+                    let Some(name) = name else {
+                        return Err("'name' is required for `lsp restart`".into());
+                    };
+                    mgr.restart(&name)
+                        .await
+                        .map(|_| ToolOutput::text(format!("restarted LSP server {name}")))
+                }
+                "list" => {
+                    let entries = mgr.list(all, name.as_deref());
+                    let mut text = String::new();
+                    if entries.is_empty() {
+                        text.push_str("no servers matching filter");
+                    } else {
+                        for e in entries {
+                            text.push_str(&format!(
+                                "{:<12} {:<28} {}\n",
+                                e.name,
+                                e.command.join(" "),
+                                e.status.as_str()
+                            ));
+                        }
+                    }
+                    Ok(ToolOutput::text(text))
+                }
+                other => Err(format!("unknown LSP action '{other}'")),
+            }
+        })
+    }
+}
+
+pub fn all_tools(gate: ApprovalGate, lsp: SharedManager) -> Vec<std::sync::Arc<dyn Tool>> {
     vec![
-        std::sync::Arc::new(ReadFile { gate: gate.clone() }),
-        std::sync::Arc::new(WriteFile { gate: gate.clone() }),
-        std::sync::Arc::new(EditFile { gate: gate.clone() }),
+        std::sync::Arc::new(ReadFile {
+            gate: gate.clone(),
+            lsp: Some(lsp.clone()),
+        }),
+        std::sync::Arc::new(WriteFile {
+            gate: gate.clone(),
+            lsp: Some(lsp.clone()),
+        }),
+        std::sync::Arc::new(EditFile {
+            gate: gate.clone(),
+            lsp: Some(lsp.clone()),
+        }),
         std::sync::Arc::new(RunShell),
         std::sync::Arc::new(ListDir { gate: gate.clone() }),
         std::sync::Arc::new(Grep { gate }),
+        std::sync::Arc::new(Lsp { lsp }),
     ]
 }
 
-pub fn read_tools(gate: ApprovalGate) -> Vec<std::sync::Arc<dyn Tool>> {
+pub fn read_tools(gate: ApprovalGate, lsp: SharedManager) -> Vec<std::sync::Arc<dyn Tool>> {
     vec![
-        std::sync::Arc::new(ReadFile { gate: gate.clone() }),
+        std::sync::Arc::new(ReadFile {
+            gate: gate.clone(),
+            lsp: Some(lsp.clone()),
+        }),
         std::sync::Arc::new(ListDir { gate: gate.clone() }),
         std::sync::Arc::new(Grep { gate }),
+        std::sync::Arc::new(Lsp { lsp }),
     ]
 }
 
@@ -623,11 +752,21 @@ pub fn command_tools(_gate: ApprovalGate) -> Vec<std::sync::Arc<dyn Tool>> {
     vec![std::sync::Arc::new(RunShell)]
 }
 
-pub fn edit_tools(gate: ApprovalGate) -> Vec<std::sync::Arc<dyn Tool>> {
+pub fn edit_tools(gate: ApprovalGate, lsp: SharedManager) -> Vec<std::sync::Arc<dyn Tool>> {
     vec![
-        std::sync::Arc::new(ReadFile { gate: gate.clone() }),
-        std::sync::Arc::new(WriteFile { gate: gate.clone() }),
-        std::sync::Arc::new(EditFile { gate }),
+        std::sync::Arc::new(ReadFile {
+            gate: gate.clone(),
+            lsp: Some(lsp.clone()),
+        }),
+        std::sync::Arc::new(WriteFile {
+            gate: gate.clone(),
+            lsp: Some(lsp.clone()),
+        }),
+        std::sync::Arc::new(EditFile {
+            gate,
+            lsp: Some(lsp.clone()),
+        }),
+        std::sync::Arc::new(Lsp { lsp }),
     ]
 }
 
@@ -651,19 +790,29 @@ mod tests {
         ApprovalGate::new(tx)
     }
 
+    fn no_lsp() -> Option<SharedManager> {
+        None
+    }
+
     #[tokio::test]
     async fn read_file_with_range() {
         let (dir, _guard) = tempdir();
         std::fs::write("a.txt", "one\ntwo\nthree\n").unwrap();
-        let out = ReadFile { gate: gate() }
-            .call(json!({ "path": "a.txt", "offset": 2, "limit": 1 }))
-            .await
-            .unwrap();
+        let out = ReadFile {
+            gate: gate(),
+            lsp: no_lsp(),
+        }
+        .call(json!({ "path": "a.txt", "offset": 2, "limit": 1 }))
+        .await
+        .unwrap();
         assert!(out.text.contains("two"), "{}", out.text);
-        let err = ReadFile { gate: gate() }
-            .call(json!({ "path": "missing.txt" }))
-            .await
-            .unwrap_err();
+        let err = ReadFile {
+            gate: gate(),
+            lsp: no_lsp(),
+        }
+        .call(json!({ "path": "missing.txt" }))
+        .await
+        .unwrap_err();
         assert!(err.contains("missing.txt"));
         drop(dir);
     }
@@ -672,10 +821,13 @@ mod tests {
     async fn read_refuses_binary() {
         let (dir, _guard) = tempdir();
         std::fs::write("bin.dat", [0, 1, 2, 3]).unwrap();
-        let err = ReadFile { gate: gate() }
-            .call(json!({ "path": "bin.dat" }))
-            .await
-            .unwrap_err();
+        let err = ReadFile {
+            gate: gate(),
+            lsp: no_lsp(),
+        }
+        .call(json!({ "path": "bin.dat" }))
+        .await
+        .unwrap_err();
         assert!(err.contains("binary"));
         drop(dir);
     }
@@ -683,10 +835,13 @@ mod tests {
     #[tokio::test]
     async fn write_creates_parents() {
         let (dir, _guard) = tempdir();
-        let out = WriteFile { gate: gate() }
-            .call(json!({ "path": "sub/deep/f.txt", "content": "hello" }))
-            .await
-            .unwrap();
+        let out = WriteFile {
+            gate: gate(),
+            lsp: no_lsp(),
+        }
+        .call(json!({ "path": "sub/deep/f.txt", "content": "hello" }))
+        .await
+        .unwrap();
         assert_eq!(std::fs::read_to_string("sub/deep/f.txt").unwrap(), "hello");
         assert!(matches!(
             out.file_change,
@@ -699,24 +854,33 @@ mod tests {
     async fn edit_replaces_and_detects_ambiguity() {
         let (dir, _guard) = tempdir();
         std::fs::write("e.txt", "a b a").unwrap();
-        let err = EditFile { gate: gate() }
-            .call(json!({ "path": "e.txt", "old": "a", "new": "x" }))
-            .await
-            .unwrap_err();
+        let err = EditFile {
+            gate: gate(),
+            lsp: no_lsp(),
+        }
+        .call(json!({ "path": "e.txt", "old": "a", "new": "x" }))
+        .await
+        .unwrap_err();
         assert!(err.contains("occurrence"));
-        let out = EditFile { gate: gate() }
-            .call(json!({ "path": "e.txt", "old": "a", "new": "x", "occurrence": 2 }))
-            .await
-            .unwrap();
+        let out = EditFile {
+            gate: gate(),
+            lsp: no_lsp(),
+        }
+        .call(json!({ "path": "e.txt", "old": "a", "new": "x", "occurrence": 2 }))
+        .await
+        .unwrap();
         assert_eq!(std::fs::read_to_string("e.txt").unwrap(), "a b x");
         assert!(matches!(
             out.file_change,
             Some(FileChange::Edit { ref diff, .. }) if !diff.is_empty()
         ));
-        let err = EditFile { gate: gate() }
-            .call(json!({ "path": "e.txt", "old": "zzz", "new": "x" }))
-            .await
-            .unwrap_err();
+        let err = EditFile {
+            gate: gate(),
+            lsp: no_lsp(),
+        }
+        .call(json!({ "path": "e.txt", "old": "zzz", "new": "x" }))
+        .await
+        .unwrap_err();
         assert!(err.contains("not found"));
         drop(dir);
     }

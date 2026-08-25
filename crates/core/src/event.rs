@@ -98,4 +98,14 @@ pub enum Event {
         path: String,
         reason: ApprovalReason,
     },
+    LspStatus {
+        servers: Vec<shuvarie_lsp::LspStatus>,
+    },
+    LspDiagnostics {
+        path: String,
+        diagnostics: Vec<shuvarie_lsp::DiagnosticInfo>,
+    },
+    LspError {
+        error: String,
+    },
 }

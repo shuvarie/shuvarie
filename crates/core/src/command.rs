@@ -45,4 +45,17 @@ pub enum Command {
     Redo,
     Replay,
     Resume,
+    LspStart {
+        name: String,
+    },
+    LspStop {
+        name: String,
+    },
+    LspRestart {
+        name: String,
+    },
+    LspList {
+        all: bool,
+        filter: Option<String>,
+    },
 }

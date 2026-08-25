@@ -80,6 +80,10 @@ pub enum SessionMessage {
         model: Option<String>,
         context_length: Option<u64>,
     },
+    LspDiagnostics {
+        path: String,
+        diagnostics: Vec<shuvarie_core::DiagnosticInfo>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +137,7 @@ pub struct SessionScreen {
     pub session_id: Option<u64>,
     pub session_title: Option<String>,
     pub error: Option<String>,
+    pub lsp_diagnostics: std::collections::BTreeMap<String, Vec<shuvarie_core::DiagnosticInfo>>,
 }
 
 impl SessionScreen {
@@ -157,6 +162,7 @@ impl SessionScreen {
             session_id: None,
             session_title: None,
             error: None,
+            lsp_diagnostics: std::collections::BTreeMap::new(),
         }
     }
 
@@ -414,6 +420,7 @@ impl SessionScreen {
                 self.status = None;
                 self.session_id = None;
                 self.session_title = None;
+                self.lsp_diagnostics.clear();
                 self.sidebar.update(SidebarMessage::SetUsage {
                     usage: TokenUsage::default(),
                     cost: 0.0,
@@ -496,6 +503,15 @@ impl SessionScreen {
                     model,
                     context_length,
                 });
+                None
+            }
+            SessionMessage::LspDiagnostics { path, diagnostics } => {
+                if diagnostics.is_empty() {
+                    self.lsp_diagnostics.remove(&path);
+                } else {
+                    self.lsp_diagnostics.insert(path, diagnostics);
+                }
+                self.mark_scroll_dirty();
                 None
             }
         }
@@ -804,6 +820,39 @@ impl SessionScreen {
         }
         if let Some(change) = &tool.file_change {
             self.push_file_change_lines(lines, change, prefix);
+            let path = match change {
+                FileChange::Edit { path, .. } => path,
+                FileChange::Write { path, .. } => path,
+            };
+            self.push_diagnostics_lines(lines, path, prefix);
+        }
+    }
+
+    fn push_diagnostics_lines(&self, lines: &mut Vec<Line>, path: &str, prefix: &str) {
+        let Some(diags) = self.lsp_diagnostics.get(path) else {
+            return;
+        };
+        if diags.is_empty() {
+            return;
+        }
+        lines.push(Line::from(vec![
+            Span::raw(format!("{prefix}  ── diagnostics: ")).fg(theme::TEXT_MUTED),
+            Span::raw(path.to_string()).fg(theme::ACCENT),
+        ]));
+        for d in diags {
+            let (sev_label, sev_color) = match d.severity {
+                shuvarie_core::DiagnosticSeverity::Error => ("error", theme::ERROR),
+                shuvarie_core::DiagnosticSeverity::Warning => ("warning", theme::WARNING),
+                shuvarie_core::DiagnosticSeverity::Information => ("info", theme::ACCENT),
+                shuvarie_core::DiagnosticSeverity::Hint => ("hint", theme::TEXT_DIM),
+            };
+            let loc = format!("{}:{}", d.line, d.col);
+            let msg = d.message.chars().take(140).collect::<String>();
+            lines.push(Line::from(vec![
+                Span::raw(format!("{prefix}    {loc:<10} ")).fg(theme::TEXT_MUTED),
+                Span::raw(format!("{sev_label:<8} ")).fg(sev_color),
+                Span::raw(msg).fg(theme::TEXT_DIM),
+            ]));
         }
     }
 

@@ -17,6 +17,9 @@ pub struct Config {
 
     #[serde(default)]
     pub agent: AgentConfig,
+
+    #[serde(default)]
+    pub lsp: shuvarie_lsp::LspConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -95,6 +95,16 @@ pub enum AppMessage {
     SessionError {
         error: String,
     },
+    LspStatus {
+        servers: Vec<shuvarie_core::LspStatus>,
+    },
+    LspDiagnostics {
+        path: String,
+        diagnostics: Vec<shuvarie_core::DiagnosticInfo>,
+    },
+    LspError {
+        error: String,
+    },
 }
 
 #[derive(Debug)]
@@ -368,6 +378,11 @@ impl App {
                     path,
                     reason,
                 }),
+                CoreEvent::LspStatus { servers } => Some(AppMessage::LspStatus { servers }),
+                CoreEvent::LspDiagnostics { path, diagnostics } => {
+                    Some(AppMessage::LspDiagnostics { path, diagnostics })
+                }
+                CoreEvent::LspError { error } => Some(AppMessage::LspError { error }),
             },
         }
     }
@@ -751,6 +766,18 @@ impl App {
                 }
             }
             AppMessage::SessionError { error } => {
+                self.session.update(SessionMessage::ShowError { error });
+            }
+            AppMessage::LspStatus { servers } => {
+                self.session
+                    .sidebar
+                    .update(SidebarMessage::UpdateLsp { servers });
+            }
+            AppMessage::LspDiagnostics { path, diagnostics } => {
+                self.session
+                    .update(SessionMessage::LspDiagnostics { path, diagnostics });
+            }
+            AppMessage::LspError { error } => {
                 self.session.update(SessionMessage::ShowError { error });
             }
         }

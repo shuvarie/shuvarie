@@ -4,6 +4,7 @@ use shuvarie_catalog::TokenUsage;
 use shuvarie_llm::ProviderClient;
 
 use crate::approval::ApprovalGate;
+use crate::lsp_manager::SharedManager;
 use crate::tools;
 
 pub struct WorkerSet {
@@ -15,6 +16,7 @@ pub fn build_workers(
     client: ProviderClient,
     model: &str,
     gate: ApprovalGate,
+    lsp: SharedManager,
     worker_max_turns: usize,
 ) -> WorkerSet {
     let usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
@@ -25,7 +27,7 @@ pub fn build_workers(
             EXPLORER_PREAMBLE,
             client.clone(),
             model,
-            tools::read_tools(gate.clone()),
+            tools::read_tools(gate.clone(), lsp.clone()),
             Arc::clone(&usage),
             worker_max_turns,
         ),
@@ -45,7 +47,7 @@ pub fn build_workers(
             EDITOR_PREAMBLE,
             client,
             model,
-            tools::edit_tools(gate),
+            tools::edit_tools(gate, lsp),
             Arc::clone(&usage),
             worker_max_turns,
         ),
