@@ -14,6 +14,9 @@ pub struct Config {
 
     #[serde(default)]
     pub embedding: EmbeddingConfig,
+
+    #[serde(default)]
+    pub agent: AgentConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -45,6 +48,29 @@ fn default_true() -> bool {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct UiPrefs {}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AgentConfig {
+    #[serde(default)]
+    pub max_turns: usize,
+
+    #[serde(default)]
+    pub worker_max_turns: usize,
+}
+
+impl AgentConfig {
+    pub fn effective_max_turns(&self) -> usize {
+        effective(self.max_turns)
+    }
+
+    pub fn effective_worker_max_turns(&self) -> usize {
+        effective(self.worker_max_turns)
+    }
+}
+
+fn effective(value: usize) -> usize {
+    if value == 0 { usize::MAX } else { value }
+}
 
 pub fn config_dir() -> Result<PathBuf> {
     let dir = dirs::config_dir().ok_or_else(|| {

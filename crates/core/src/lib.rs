@@ -14,7 +14,7 @@ pub mod tools;
 
 pub use approval::ApprovalReason;
 pub use command::Command;
-pub use config::{Config, EmbeddingConfig, UiPrefs};
+pub use config::{AgentConfig, Config, EmbeddingConfig, UiPrefs};
 pub use connections::{Connections, ProviderConfig};
 pub use core_task::run;
 pub use error::{CoreError, Result};

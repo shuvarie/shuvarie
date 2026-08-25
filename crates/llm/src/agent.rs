@@ -36,6 +36,7 @@ pub struct WorkerRequest {
 }
 
 impl WorkerAgent {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: &str,
         description: &str,
@@ -44,6 +45,7 @@ impl WorkerAgent {
         model: &str,
         tools: Vec<Arc<dyn Tool>>,
         usage: Arc<std::sync::Mutex<TokenUsage>>,
+        max_turns: usize,
     ) -> Self {
         let (activity_tx, activity_rx) = mpsc::channel(64);
         Self {
@@ -56,7 +58,7 @@ impl WorkerAgent {
             activity_tx,
             activity_rx: Some(activity_rx),
             usage,
-            max_turns: 10,
+            max_turns,
         }
     }
 

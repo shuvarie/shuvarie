@@ -296,7 +296,10 @@ pub async fn run(
                 let preamble = crate::context::build_preamble(AGENT_PREAMBLE, &loaded_context);
                 let gate = ApprovalGate::new(approval_tx.clone());
                 let tools = crate::tools::all_tools(gate.clone());
-                let mut worker_set = crate::agents::build_workers(client.clone(), &model, gate);
+                let manager_turns = config.agent.effective_max_turns();
+                let worker_turns = config.agent.effective_worker_max_turns();
+                let mut worker_set =
+                    crate::agents::build_workers(client.clone(), &model, gate, worker_turns);
                 let stream = client
                     .stream(
                         &model,
@@ -305,6 +308,7 @@ pub async fn run(
                         &prior,
                         &tools,
                         &mut worker_set.workers,
+                        manager_turns,
                     )
                     .await;
                 let tx = event_tx.clone();
@@ -568,6 +572,8 @@ pub async fn run(
                                 &event_tx,
                                 content,
                                 true,
+                                config.agent.effective_max_turns(),
+                                config.agent.effective_worker_max_turns(),
                             )
                             .await;
                         }
@@ -640,6 +646,8 @@ pub async fn run(
                     &event_tx,
                     content,
                     false,
+                    config.agent.effective_max_turns(),
+                    config.agent.effective_worker_max_turns(),
                 )
                 .await;
             }
@@ -832,6 +840,8 @@ async fn self_replay_send(
     event_tx: &Sender<Event>,
     content: String,
     push_user: bool,
+    manager_turns: usize,
+    worker_turns: usize,
 ) {
     let Some(s) = session else {
         return;
@@ -884,7 +894,7 @@ async fn self_replay_send(
     let preamble = crate::context::build_preamble(AGENT_PREAMBLE, &loaded_context);
     let gate = ApprovalGate::new(approval_tx_local());
     let tools = crate::tools::all_tools(gate.clone());
-    let mut worker_set = crate::agents::build_workers(client.clone(), &model, gate);
+    let mut worker_set = crate::agents::build_workers(client.clone(), &model, gate, worker_turns);
     let stream = client
         .stream(
             &model,
@@ -893,6 +903,7 @@ async fn self_replay_send(
             &prior,
             &tools,
             &mut worker_set.workers,
+            manager_turns,
         )
         .await;
     let tx = event_tx.clone();

@@ -11,7 +11,12 @@ pub struct WorkerSet {
     pub usage: Arc<std::sync::Mutex<TokenUsage>>,
 }
 
-pub fn build_workers(client: ProviderClient, model: &str, gate: ApprovalGate) -> WorkerSet {
+pub fn build_workers(
+    client: ProviderClient,
+    model: &str,
+    gate: ApprovalGate,
+    worker_max_turns: usize,
+) -> WorkerSet {
     let usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
     let workers = vec![
         shuvarie_llm::WorkerAgent::new(
@@ -22,6 +27,7 @@ pub fn build_workers(client: ProviderClient, model: &str, gate: ApprovalGate) ->
             model,
             tools::read_tools(gate.clone()),
             Arc::clone(&usage),
+            worker_max_turns,
         ),
         shuvarie_llm::WorkerAgent::new(
             "run_tests",
@@ -31,6 +37,7 @@ pub fn build_workers(client: ProviderClient, model: &str, gate: ApprovalGate) ->
             model,
             tools::command_tools(gate.clone()),
             Arc::clone(&usage),
+            worker_max_turns,
         ),
         shuvarie_llm::WorkerAgent::new(
             "edit_files",
@@ -40,6 +47,7 @@ pub fn build_workers(client: ProviderClient, model: &str, gate: ApprovalGate) ->
             model,
             tools::edit_tools(gate),
             Arc::clone(&usage),
+            worker_max_turns,
         ),
     ];
     WorkerSet { workers, usage }

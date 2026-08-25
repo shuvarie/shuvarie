@@ -309,6 +309,7 @@ impl ProviderClient {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn stream(
         &self,
         model: &str,
@@ -317,6 +318,7 @@ impl ProviderClient {
         history: &[ChatMsg],
         tools: &[std::sync::Arc<dyn Tool>],
         workers: &mut [crate::agent::WorkerAgent],
+        max_turns: usize,
     ) -> StreamStream {
         use rig::streaming::StreamingChat;
 
@@ -368,11 +370,15 @@ impl ProviderClient {
             receivers: Vec<tokio::sync::mpsc::Receiver<StreamItem>>,
             worker_names: std::collections::HashSet<String>,
             mut file_rx: tokio::sync::mpsc::Receiver<FileChange>,
+            max_turns: usize,
         ) -> StreamStream
         where
             M: rig::completion::CompletionModel + 'static,
         {
-            let stream = agent.stream_chat(prompt, history).max_turns(20).await;
+            let stream = agent
+                .stream_chat(prompt, history)
+                .max_turns(max_turns)
+                .await;
             let mut tool_called = false;
             let mut accumulated = String::new();
             let mut tool_names: std::collections::HashMap<String, String> =
@@ -518,6 +524,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     file_rx,
+                    max_turns,
                 )
                 .await
             }
@@ -529,6 +536,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     file_rx,
+                    max_turns,
                 )
                 .await
             }
@@ -540,6 +548,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     file_rx,
+                    max_turns,
                 )
                 .await
             }
@@ -551,6 +560,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     file_rx,
+                    max_turns,
                 )
                 .await
             }
@@ -562,6 +572,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     file_rx,
+                    max_turns,
                 )
                 .await
             }
@@ -573,6 +584,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     file_rx,
+                    max_turns,
                 )
                 .await
             }
@@ -851,6 +863,7 @@ mod tests {
             "test-model",
             Vec::new(),
             usage,
+            10,
         );
         let err = worker
             .call(json!({}))
