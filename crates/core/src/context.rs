@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 const MAX_FILE_BYTES: usize = 64 * 1024;
 const MAX_TOTAL_BYTES: usize = 256 * 1024;
 
+#[derive(Clone)]
 pub struct LoadedContext {
     pub files: Vec<String>,
     pub content: String,
@@ -16,9 +17,25 @@ impl LoadedContext {
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
     }
+
+    pub fn remaining_budget(&self) -> usize {
+        MAX_TOTAL_BYTES.saturating_sub(self.content.len())
+    }
+
+    pub fn merged(mut self, other: LoadedContext) -> LoadedContext {
+        if other.content.is_empty() {
+            return self;
+        }
+        if !self.content.is_empty() {
+            self.content.push('\n');
+        }
+        self.content.push_str(&other.content);
+        self.files.extend(other.files);
+        self
+    }
 }
 
-pub fn load(root: &Path) -> LoadedContext {
+pub fn load_agents_md(root: &Path) -> LoadedContext {
     let mut files: Vec<String> = Vec::new();
     let mut content = String::new();
     let mut remaining = MAX_TOTAL_BYTES;
@@ -33,6 +50,14 @@ pub fn load(root: &Path) -> LoadedContext {
             &mut remaining,
         );
     }
+
+    LoadedContext::new(files, content)
+}
+
+pub fn load_context_dir(root: &Path, budget: usize) -> LoadedContext {
+    let mut files: Vec<String> = Vec::new();
+    let mut content = String::new();
+    let mut remaining = budget;
 
     let context_dir = root.join(".shuvarie").join("context");
     if context_dir.is_dir() && remaining > 0 {
@@ -58,6 +83,12 @@ pub fn load(root: &Path) -> LoadedContext {
     }
 
     LoadedContext::new(files, content)
+}
+
+pub fn load(root: &Path) -> LoadedContext {
+    let agents = load_agents_md(root);
+    let dir = load_context_dir(root, agents.remaining_budget());
+    agents.merged(dir)
 }
 
 fn push_file(
@@ -175,6 +206,29 @@ mod tests {
         let ctx = load_from_cwd();
         assert_eq!(ctx.files, vec![".shuvarie/context/notes.md"]);
         assert!(ctx.content.contains("notes"));
+        drop(dir);
+    }
+
+    #[test]
+    fn loads_agents_md_separately_from_context_dir() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("AGENTS.md", "project rules").unwrap();
+        std::fs::create_dir_all(".shuvarie/context").unwrap();
+        std::fs::write(".shuvarie/context/a.md", "aye").unwrap();
+
+        let agents = load_agents_md(std::path::Path::new("."));
+        assert_eq!(agents.files, vec!["AGENTS.md"]);
+        assert!(agents.content.contains("project rules"));
+        assert!(!agents.content.contains("aye"));
+
+        let dir_ctx = load_context_dir(std::path::Path::new("."), agents.remaining_budget());
+        assert_eq!(dir_ctx.files, vec![".shuvarie/context/a.md"]);
+        assert!(dir_ctx.content.contains("aye"));
+
+        let merged = agents.merged(dir_ctx);
+        assert_eq!(merged.files, vec!["AGENTS.md", ".shuvarie/context/a.md"]);
+        assert!(merged.content.contains("project rules"));
+        assert!(merged.content.contains("aye"));
         drop(dir);
     }
 

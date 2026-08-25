@@ -49,8 +49,9 @@ pub async fn run(
     }
 
     let workspace_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let agents_md_context = crate::context::load_agents_md(&workspace_root);
     let lsp = std::sync::Arc::new(tokio::sync::Mutex::new(shuvarie_lsp::LspManager::new(
-        workspace_root,
+        workspace_root.clone(),
         config.lsp.enabled,
         config.lsp.resolve(),
     )));
@@ -296,7 +297,12 @@ pub async fn run(
                             let guard = s.lock().await;
                             guard.messages[..guard.messages.len().saturating_sub(1)].to_vec()
                         };
-                        let loaded_context = crate::context::load_from_cwd();
+                        let loaded_context = agents_md_context
+                            .clone()
+                            .merged(crate::context::load_context_dir(
+                                &workspace_root,
+                                agents_md_context.remaining_budget(),
+                            ));
                         if !loaded_context.is_empty() {
                             let _ = event_tx
                                 .send(Event::ContextLoaded {
@@ -586,6 +592,8 @@ pub async fn run(
                                         true,
                                         config.agent.effective_max_turns(),
                                         config.agent.effective_worker_max_turns(),
+                                        &workspace_root,
+                                        &agents_md_context,
                                     )
                                     .await;
                                 }
@@ -661,6 +669,8 @@ pub async fn run(
                             false,
                             config.agent.effective_max_turns(),
                             config.agent.effective_worker_max_turns(),
+                            &workspace_root,
+                            &agents_md_context,
                         )
                         .await;
                     }
@@ -934,6 +944,8 @@ async fn self_replay_send(
     push_user: bool,
     manager_turns: usize,
     worker_turns: usize,
+    workspace_root: &Path,
+    agents_md_context: &crate::context::LoadedContext,
 ) {
     let Some(s) = session else {
         return;
@@ -975,7 +987,12 @@ async fn self_replay_send(
         let guard = s.lock().await;
         guard.messages[..guard.messages.len().saturating_sub(1)].to_vec()
     };
-    let loaded_context = crate::context::load_from_cwd();
+    let loaded_context = agents_md_context
+        .clone()
+        .merged(crate::context::load_context_dir(
+            workspace_root,
+            agents_md_context.remaining_budget(),
+        ));
     if !loaded_context.is_empty() {
         let _ = event_tx
             .send(Event::ContextLoaded {
