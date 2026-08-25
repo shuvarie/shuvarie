@@ -33,20 +33,37 @@ mod theme;
 mod utils;
 mod welcome;
 
-pub async fn run_tui(cmd_tx: Sender<Command>, mut event_rx: Receiver<CoreEvent>) -> io::Result<()> {
+pub async fn run_tui(cmd_tx: Sender<Command>, event_rx: Receiver<CoreEvent>) -> io::Result<()> {
     let mut term = PlatformTerminal::new()?;
     term.enter_raw_mode()?;
 
     let reader = term.event_reader();
-    let mut event_stream = EventStream::new(reader, |_| true);
+    let event_stream = EventStream::new(reader, |_| true);
 
     let mut rat = ratatui::Terminal::new(TerminaBackend::new(term))?;
+    let connections = Connections::load().map_err(|e| io::Error::other(e.to_string()))?;
+    let app = App::new(connections, cmd_tx);
+
     init_terminal(rat.backend_mut().terminal_mut())?;
 
-    let connections = Connections::load().map_err(|e| io::Error::other(e.to_string()))?;
-    let mut app = App::new(connections, cmd_tx);
+    let res: io::Result<()> = render_tui(app, &mut rat, event_rx, event_stream).await;
 
-    let res: io::Result<()> = 'render_loop: loop {
+    let deinit = deinit_terminal(rat.backend_mut().terminal_mut());
+    res.and(deinit)
+}
+
+/// Helper function for rendering TUI and handling errors
+async fn render_tui<B>(
+    mut app: App,
+    rat: &mut ratatui::Terminal<B>,
+    mut event_rx: Receiver<CoreEvent>,
+    mut event_stream: EventStream,
+) -> io::Result<()>
+where
+    B: Backend,
+    io::Error: From<<B as Backend>::Error>,
+{
+    'render_loop: loop {
         // Draw frame
         rat.draw(|frame| app.view(frame, frame.area()))?;
 
@@ -56,10 +73,7 @@ pub async fn run_tui(cmd_tx: Sender<Command>, mut event_rx: Receiver<CoreEvent>)
                 // Terminal event
                 ev = event_stream.next() => {
                     let Some(ev_result) = ev else { break 'render_loop Ok(()); };
-                    match ev_result {
-                        Ok(ev) => app.map_event(Event::Terminal(ev)),
-                        Err(err) => break 'render_loop Err(err),
-                    }
+                    app.map_event(Event::Terminal(ev_result?))
                 }
                 // Shuvarie core event
                 ev = event_rx.recv() => {
@@ -82,10 +96,7 @@ pub async fn run_tui(cmd_tx: Sender<Command>, mut event_rx: Receiver<CoreEvent>)
             }
             // Nothing changed. Keep listening.
         }
-    };
-
-    let deinit = deinit_terminal(rat.backend_mut().terminal_mut());
-    res.and(deinit)
+    }
 }
 
 fn init_terminal(terminal: &mut PlatformTerminal) -> io::Result<()> {

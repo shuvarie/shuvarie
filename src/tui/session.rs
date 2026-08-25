@@ -796,12 +796,12 @@ impl SessionScreen {
         let mut header = vec![Span::raw(format!("{prefix}{marker}")).fg(fg).bold()];
         header.push(Span::raw(format!(" {}", tool.name)).fg(theme::TEXT).bold());
         if !tool.args.is_empty() {
-            let args = &tool.args;
-            let args_display: String = if args.len() > 120 {
-                format!("{}…", &args[..120])
-            } else {
-                args.clone()
-            };
+            let args_display: String = tool
+                .args
+                .chars()
+                .take(120)
+                .map(|c| if c == '\n' { ' ' } else { c })
+                .collect();
             header.push(Span::raw(format!(" {args_display}")).fg(theme::TEXT_MUTED));
         }
         lines.push(Line::from(header));
