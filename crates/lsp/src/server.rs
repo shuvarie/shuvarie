@@ -8,6 +8,7 @@ use async_lsp::lsp_types::{
     ClientCapabilities, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, InitializeParams, InitializedParams, TextDocumentContentChangeEvent,
     TextDocumentIdentifier, TextDocumentItem, Url, VersionedTextDocumentIdentifier,
+    WorkspaceFolder,
 };
 use async_lsp::panic::CatchUnwindLayer;
 use async_lsp::router::Router;
@@ -114,18 +115,15 @@ impl Server {
 
     pub async fn initialize(&self, root_uri: Url) -> Result<(), String> {
         let mut socket = self.socket.clone();
-        #[allow(deprecated)]
         let init_params = InitializeParams {
             process_id: Some(std::process::id()),
-            root_uri: Some(root_uri),
-            workspace_folders: None,
-            initialization_options: None,
+            workspace_folders: Some(vec![WorkspaceFolder {
+                name: root_uri.to_string(),
+                uri: root_uri,
+            }]),
             capabilities: ClientCapabilities::default(),
-            trace: None,
             work_done_progress_params: Default::default(),
-            client_info: None,
-            locale: None,
-            root_path: None,
+            ..Default::default()
         };
         socket
             .initialize(init_params)
