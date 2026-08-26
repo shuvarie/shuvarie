@@ -15,7 +15,6 @@
 //! untouched (`RequestPatch.history` replaces the history for this turn
 //! only).
 
-use rig::OneOrMany;
 use rig::agent::hook::{CompletionCall, ToolResultEvent};
 use rig::agent::{
     AgentHook, CompletionCallAction, HookContext, RequestPatch, StepEventKind, ToolResultAction,
@@ -240,19 +239,18 @@ fn condense_message(msg: &Message) -> Message {
                 .map(|c| match c {
                     rig::completion::message::UserContent::ToolResult(tr) => {
                         rig::completion::message::UserContent::ToolResult(ToolResult {
-                            id: tr.id.clone(),
-                            call_id: tr.call_id.clone(),
-                            content: OneOrMany::one(ToolResultContent::Text(Text::new(
+                            call: tr.call.clone(),
+                            provider: tr.provider.clone(),
+                            name: tr.name.clone(),
+                            content: vec![ToolResultContent::Text(Text::new(
                                 "[tool result omitted to fit context budget]".to_string(),
-                            ))),
+                            ))],
                         })
                     }
                     other => other.clone(),
                 })
                 .collect();
-            Message::User {
-                content: OneOrMany::many(condensed).unwrap_or_else(|_| content.clone()),
-            }
+            Message::User { content: condensed }
         }
         _ => msg.clone(),
     }

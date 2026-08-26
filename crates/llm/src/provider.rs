@@ -374,8 +374,8 @@ impl ProviderClient {
             .collect();
         let file_rx = dynamic.1;
 
-        async fn build<M>(
-            agent: rig::agent::Agent<M>,
+        async fn build(
+            agent: rig::agent::Agent,
             prompt: rig::message::Message,
             history: Vec<rig::message::Message>,
             receivers: Vec<tokio::sync::mpsc::Receiver<StreamItem>>,
@@ -383,10 +383,7 @@ impl ProviderClient {
             mut file_rx: tokio::sync::mpsc::Receiver<FileChange>,
             max_turns: usize,
             tracker: std::sync::Arc<crate::context_hook::UsageTracker>,
-        ) -> StreamStream
-        where
-            M: rig::completion::CompletionModel + 'static,
-        {
+        ) -> StreamStream {
             let stream = agent
                 .stream_chat(prompt, history)
                 .max_turns(max_turns)
@@ -406,22 +403,9 @@ impl ProviderClient {
                     StreamItem::Delta { text: t.text }
                 }
                 Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
-                    rig::streaming::StreamedAssistantContent::Reasoning(reasoning),
+                    rig::streaming::StreamedAssistantContent::Reasoning { reasoning, .. },
                 )) => {
-                    let text: String = reasoning
-                        .content
-                        .iter()
-                        .filter_map(|c| match c {
-                            rig::completion::message::ReasoningContent::Text { text, .. } => {
-                                Some(text.clone())
-                            }
-                            rig::completion::message::ReasoningContent::Summary(s) => {
-                                Some(s.clone())
-                            }
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("");
+                    let text = reasoning.display_text();
                     if text.is_empty() {
                         StreamItem::Delta {
                             text: String::new(),
@@ -716,9 +700,10 @@ fn agent_with_tools<C>(
     dynamic: Vec<rig::tool::DynamicTool>,
     context_budget: Option<crate::context_hook::ContextBudget>,
     tracker: std::sync::Arc<crate::context_hook::UsageTracker>,
-) -> rig::agent::Agent<C::CompletionModel>
+) -> rig::agent::Agent
 where
     C: rig::client::CompletionClient + rig::prelude::AgentClientExt,
+    C::CompletionModel: 'static,
 {
     let builder = match preamble {
         Some(p) => client.agent(model).preamble(p),
@@ -734,18 +719,15 @@ where
     }
 }
 
-async fn run_worker_agent<M>(
-    agent: rig::agent::Agent<M>,
+async fn run_worker_agent(
+    agent: rig::agent::Agent,
     name: &str,
     prompt: rig::message::Message,
     activity_tx: tokio::sync::mpsc::Sender<StreamItem>,
     usage: std::sync::Arc<std::sync::Mutex<shuvarie_catalog::TokenUsage>>,
     max_turns: usize,
     mut file_rx: tokio::sync::mpsc::Receiver<FileChange>,
-) -> std::result::Result<String, String>
-where
-    M: rig::completion::CompletionModel + 'static,
-{
+) -> std::result::Result<String, String> {
     use rig::streaming::StreamingChat;
 
     let mut stream = agent
