@@ -93,12 +93,13 @@ Each result is a `(score, id, document)` tuple. Feed the docs into a completion 
 
 Modern agents can carry large tool lists, which wastes context and degrades output. Tool RAG stores tool definitions in a vector store and retrieves only the relevant ones at request time — saving context budget and token cost.
 
-Tools that should be retrievable implement `ToolEmbedding` (in addition to `Tool`) and are registered as dynamic tools:
+Tools that should be retrievable implement `ToolEmbedding` (in addition to `Tool`) and are registered as retrievable tools in a `ToolSet`:
 
 ```rust
-use rig::tool::ToolSet;
+use rig::tool::{ToolSet, ToolEmbedding};
 
-let toolset = ToolSet::builder().dynamic_tool(Adder).build();
+let mut toolset = ToolSet::default();
+toolset.add_retrieved_tool(Adder);
 let embeddings = EmbeddingsBuilder::new(embed_model.clone())
     .documents(toolset.schemas()?)?
     .build()
@@ -111,11 +112,11 @@ let index = vector_store.index(embed_model);
 let agent = openai_client
     .agent("gpt-5.5")
     .preamble("You are a calculator. Use the tools provided.")
-    .dynamic_tools(2, index, toolset)
+    .retrieved_tools(2, index, toolset)
     .build();
 ```
 
-`dynamic_tools(n, index, toolset)` takes max tools to retrieve, the index, and the toolset. At context-assembly time the agent uses RAG to fetch relevant tool definitions to send to the model; called tools are executed from the toolset. See `tools.md` for `ToolEmbedding`.
+`retrieved_tools(sample, index, toolset)` (the 0.42 name) takes max tools to retrieve, the index, and the toolset. At context-assembly time the agent uses RAG to fetch relevant tool definitions to send to the model; called tools are executed from the toolset. See `tools.md` for `ToolEmbedding`. (The old `dynamic_tools(n, index, toolset)` was renamed; `dynamic_tool`/`dynamic_tools` now attach `DynamicTool` values directly.)
 
 ## Modern RAG patterns
 

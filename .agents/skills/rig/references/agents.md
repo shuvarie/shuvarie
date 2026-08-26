@@ -27,6 +27,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `client.agent(model)` returns an `AgentBuilder`; `.preamble(...)`, `.temperature(...)`, `.build()` configure it.
 
+> **In 0.42 `Agent` is non-generic.** `client.agent(model)` erases the typed model into a `ModelHandle` when you call `.build()`. The built `rig::agent::Agent` is a concrete, model-agnostic type — write `Agent` (never `Agent<M>`) in function signatures. You can still call `.with_model(...)` / `.set_model(...)` / `.with_model_handle(...)` on an existing agent to swap its default model.
+
 ## What an agent is made of
 
 - **Base configuration** — completion model, system prompt (`preamble`), `temperature`, `max_tokens`, `additional_params`.
@@ -59,7 +61,7 @@ let res = tool_agent
 ### When a tool call goes wrong
 
 - **Your tool returns `Err`** → the error's string form is sent back to the model as the tool result and the loop continues. The model can retry with different args or explain the failure. Make tool errors descriptive.
-- **The model emits an invalid call** (unknown/disallowed tool name) → fails the prompt immediately by default. A hook can recover with `Flow::retry` / `Flow::repair` / `Flow::skip`; `.max_invalid_tool_call_retries(n)` bounds retry rounds (each retry also consumes turn budget). See `hooks.md`.
+- **The model emits an invalid call** (unknown/disallowed tool name) → fails the prompt immediately by default. A hook can recover with `InvalidToolCallAction::retry` / `repair` / `skip`; `.max_invalid_tool_call_retries(n)` bounds retry rounds (each retry also consumes turn budget). See `hooks.md`.
 
 ## Context
 
@@ -80,7 +82,8 @@ See `rag-and-vector-stores.md`.
 ## Tools
 
 - `AgentBuilder::tool(t)` — static tool, always offered.
-- `AgentBuilder::dynamic_tools(n, index, toolset)` — retrieve up to `n` relevant tools per request from a vector store (tool RAG).
+- `AgentBuilder::dynamic_tool(t)` / `dynamic_tools(vec)` — runtime-defined tools (`DynamicTool`), offered every turn.
+- `AgentBuilder::retrieved_tools(sample, index, toolset)` — retrieve up to `sample` relevant tools per request from a vector store (tool RAG). This is the 0.42 replacement for the old `dynamic_tools(n, index, toolset)`.
 
 ```rust
 let agent = openai
@@ -88,7 +91,7 @@ let agent = openai
     .preamble("You are a tool-using assistant.")
     .tool(calculator)
     .tool(web_search)
-    .dynamic_tools(2, tool_store, toolset)
+    .retrieved_tools(2, tool_store_index, toolset)
     .build();
 ```
 

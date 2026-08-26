@@ -85,7 +85,7 @@ let embeddings = EmbeddingsBuilder::new(model)
     .await?;
 ```
 
-Returns an iterator over `(T, OneOrMany<Embedding>)` — collect for use elsewhere or insert straight into a vector store.
+Returns a `Vec<(T, Vec<Embedding>)>` (ordered) — collect for use elsewhere or insert straight into a vector store. A document may produce one or many embeddings depending on how its `Embed` impl uses `TextEmbedder`.
 
 ## Storing embeddings
 

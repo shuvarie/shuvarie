@@ -6,14 +6,14 @@ description: >-
   clients (OpenAI, Anthropic, Gemini, Ollama, and 20+ others), build agents
   with tools and RAG context, stream completions token-by-token, extract typed
   structured output, manage conversation memory, and hook the agent loop for
-  guardrails and approvals. This skill covers Rig 0.41.x (the `rig` facade
+  guardrails and approvals. This skill covers Rig 0.42.x (the `rig` facade
   re-exporting `rig-core` and the optional `rig-agent` classic runtime) as used
   by the `shuvarie-llm` crate. Docs: guide at https://rig.rs/docs and API docs
   at https://docs.rs/rig/latest/rig/.
 license: MIT
 metadata:
   author: shuvarie
-  version: 0.41.0
+  version: 0.42.0
   category: Backend Development
   tags:
     - rust
@@ -32,7 +32,9 @@ metadata:
 
 Rig is a Rust library for building LLM-powered applications and agents. It gives you unified abstractions over **model providers** (OpenAI, Anthropic, Gemini, Cohere, Ollama, and 20+ others), **vector stores**, **tools**, and **RAG pipelines**, so you can wire up an agent in a few lines and scale to a production system without changing frameworks.
 
-This project (`shuvarie`) pins **Rig 0.41.0** in `crates/llm/Cargo.toml`. The `shuvarie-llm` crate is a thin wrapper over `rig` that exposes a `Provider` enum, model listing, and a streaming completion API; the root binary never calls `rig` directly (see `AGENTS.md`).
+This project (`shuvarie`) pins **Rig 0.42.0** in `crates/llm/Cargo.toml`. The `shuvarie-llm` crate is a thin wrapper over `rig` that exposes a `Provider` enum, model listing, and a streaming completion API; the root binary never calls `rig` directly (see `AGENTS.md`).
+
+> **Rig 0.42.0 removed the model type parameter from `Agent`.** `Agent` is no longer generic — a `rig::agent::Agent` has no `<M>`. `AgentBuilder` still takes a typed `CompletionModel` at construction (`.agent(model)` / `AgentBuilder::new(model)`), but the built `Agent` is model-agnostic. This is the biggest breaking change vs. 0.41 and is reflected throughout this skill (no `Agent<M>` anywhere; agent hooks take no model type parameter either). `StreamedAssistantContent::Reasoning` also changed from a tuple variant to a struct variant `{ reasoning, id }`, and message content is now `Vec<T>` (the `OneOrMany` container was removed).
 
 Official docs: **Guide** at https://rig.rs/docs and **API docs** at https://docs.rs/rig/latest/rig/.
 
@@ -48,7 +50,7 @@ Depend on the root `rig` facade for the full feature-gated surface, or on `rig-c
 
 ```toml
 [dependencies]
-rig = { version = "0.41", features = ["derive"] }
+rig = { version = "0.42", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -62,7 +64,11 @@ Before writing Rig code in this repo, know these constraints:
 - **Streaming tokens belong on the core task.** Use `StreamingPrompt`/`StreamingChat` on the core task and forward `MultiTurnStreamItem` / `StreamedAssistantContent` events to the TUI via the existing channel; do not pull a stream from `handle_event`/`view`.
 - **`schemars` v1.0 is required** for `JsonSchema` derives (tool args, extractors). Field descriptions move from `#[schemars(description = "...")]` to `///` doc comments; use `schemars::schema_for!(T)` (or `T::json_schema()`).
 - **OpenAI Responses API requires every parameter listed under `required`.** Include a `"required"` array in hand-written tool schemas, or use the macro's `required(...)` helper, or derive from `schemars::JsonSchema` (which marks non-`Option` fields required).
-- **`with_history` no longer appends (since 0.38).** `agent.prompt(...).with_history(hist)` does NOT append the new turn — record it yourself. `agent.chat(prompt, &mut hist)` DOES append (including tool calls/results) — don't double-push.
+- **`Agent` has no type parameter (0.42).** `client.agent(model)` / `AgentBuilder::new(model)` erase the model into a `ModelHandle`; the built `rig::agent::Agent` is a concrete, non-generic type. Function signatures take `rig::agent::Agent` (not `Agent<M>`), and `AgentHook` is not generic over a model.
+- **Message content is `Vec<T>`, not `OneOrMany<T>`.** `Message::User { content: Vec<UserContent> }`, `Message::Assistant { id: Option<String>, content: Vec<AssistantContent> }`. `OneOrMany` no longer exists. Construct `UserContent::text(..)` / `AssistantContent::text(..)` via the `Message::user`/`Message::assistant`/`UserContent::text`/`AssistantContent::text` helpers.
+- **`ToolResult`/`ToolCall` correlation changed.** `ToolCall { id: ToolCallId, provider: Option<ProviderCallId>, function, .. }`; `ToolResult { call: ToolCallId, provider: Option<ProviderCallId>, name, content: Vec<ToolResultContent> }`. There is no `id`/`call_id` string field — correlate with `ToolCall::id` (a `ToolCallId`, `String`-like) echoed as `ToolResult::call`. The streaming layer additionally correlates via `internal_call_id` on `StreamedAssistantContent::ToolCall` / `StreamedUserContent::ToolResult`.
+- **`StreamedAssistantContent::Reasoning` is a struct variant.** Match `Reasoning { reasoning, .. }` and read text via `reasoning.display_text()`; it is not a tuple variant.
+- **`with_history` no longer appends (since 0.38).** `agent.prompt(...).with_history(hist)` does NOT append the new turn — record it yourself. `agent.chat(prompt, &mut hist)` DOES append (including tool calls/results) — don't double-push. (The streaming surface's `StreamingPromptRequest` uses `.history(...)`, not `.with_history(...)`.)
 - **Query embeddings must match the stored model.** Vectors from different embedding models are not comparable; use the exact same model id at ingestion and query time.
 - **`max_turns` defaults to 0** = initial request + one follow-up after tool execution. Multi-step tool chains need `.max_turns(n)` or the run fails with `PromptError::MaxTurnsError` (which carries the history).
 - **Tool errors don't abort the prompt.** A `Tool::call` returning `Err` is sent back to the model as the tool result and the loop continues. Make error messages instructive (the model reads them to recover).
@@ -106,7 +112,7 @@ The flow is always: **provider → client → model → agent/extractor/index**.
 | a text answer to a one-off prompt | `Prompt` (`.prompt(...)`) |
 | a conversation that carries history | `Chat` (`.chat(prompt, &mut history)`) |
 | a typed struct instead of a string | `TypedPrompt` (`.prompt_typed(...)`) |
-| tokens as they arrive | `StreamingPrompt` / `StreamingChat` / `StreamingCompletion` |
+| tokens as they arrive | `StreamingPrompt` / `StreamingChat` |
 | to configure the request before dispatch | `Completion` (`.completion(...)` → `CompletionRequestBuilder`) |
 | to bypass the agent loop entirely | `CompletionModel` directly (`.completion_request(...).send()`) |
 
@@ -125,16 +131,16 @@ Use this to decide which reference file to load:
 **Need agents, `AgentBuilder`, the agent loop, `max_turns`, `ToolChoice`, context, manager-worker, or `extended_details`?**
 → Read `references/agents.md`
 
-**Need `AgentRunner` per-run controls (`max_turns`, `tool_concurrency`, `tool_extensions`, `conversation`, `add_hook`), or `AgentRun` (sans-IO state machine for durable approval flows)?**
+**Need `AgentRunner` per-run controls (`max_turns`, `tool_concurrency`, `tool_context`, `conversation`, `add_hook`), or `AgentRun` (sans-IO state machine for durable approval flows)?**
 → Read `references/agent-runner.md`
 
-**Need `AgentHook`, `StepEvent`, `Flow`, request overrides, guardrails, approvals, or invalid-tool-call recovery?**
+**Need `AgentHook`, per-event actions (`CompletionCallAction`/`ToolCallAction`/`ToolResultAction`/`InvalidToolCallAction`/`RequestPatch`), guardrails, approvals, or invalid-tool-call recovery?**
 → Read `references/hooks.md`
 
-**Need tools, `Tool` trait, `tool_macro`, `ToolEmbedding` (dynamic tools), tool servers, or MCP tools?**
+**Need tools, `Tool` trait, `PortableTool`/`DynamicTool`, `ToolContext`, `tool_macro`, `ToolEmbedding` (dynamic tools), tool servers, or MCP tools?**
 → Read `references/tools.md`
 
-**Need streaming, `StreamingPrompt`/`StreamingChat`/`StreamingCompletion`, `MultiTurnStreamItem`, `StreamedAssistantContent`, `stream_to_stdout`, or `PauseControl`?**
+**Need streaming, `StreamingPrompt`/`StreamingChat`, `MultiTurnStreamItem`, `StreamedAssistantContent` (Reasoning struct variant, `internal_call_id` correlation), or `stream_to_stdout`?**
 → Read `references/streaming.md`
 
 **Need structured output, `Extractor`, `ExtractionError`, or the Extractor-vs-`TypedPrompt` choice?**
@@ -161,26 +167,31 @@ Use this to decide which reference file to load:
 | `Chat` | `rig::completion::Chat` | `agent.chat(prompt, &mut history).await?` (appends) |
 | `TypedPrompt` | `rig::completion::TypedPrompt` | `agent.prompt_typed("...").await?` → `T` |
 | `Completion` | `rig::completion::Completion` | `agent.completion(...)` → `CompletionRequestBuilder` |
-| `CompletionModel` | `rig::completion::CompletionModel` | Provider trait: `completion(req)`, `stream(req)` |
+| `CompletionModel` | `rig::completion::CompletionModel` | Provider trait: `completion(req)`, `stream(req)`, `completion_request(...)` |
 | `CompletionRequestBuilder` | `rig::completion::CompletionRequestBuilder` | `.preamble(...)`, `.temperature(...)`, `.max_tokens(...)`, `.documents(...)`, `.tools(...)`, `.send()` |
-| `CompletionResponse` | `rig::completion::CompletionResponse` | `choice: OneOrMany<AssistantContent>`, `raw_response: T` |
-| `Message` | `rig::message::Message` | `Message::User { content }` / `Message::Assistant { content }`; `Message::user(...)`, `Message::assistant(...)` |
-| `AssistantContent` | `rig::message::AssistantContent` | `Text` / `ToolCall` / `Reasoning` |
+| `CompletionResponse` | `rig::completion::CompletionResponse` | `choice: Vec<AssistantContent>`, `raw_response: T` |
+| `Message` | `rig::message::Message` | `Message::User { content: Vec<UserContent> }` / `Message::Assistant { content: Vec<AssistantContent> }`; `Message::user(...)`, `Message::assistant(...)` |
+| `AssistantContent` | `rig::message::AssistantContent` | `Text` / `ToolCall` / `Reasoning` / `Image` |
 | `UserContent` | `rig::message::UserContent` | `Text` / `ToolResult` / `Image` / `Audio` / `Document` / `Video` |
 | `ToolChoice` | `rig::message::ToolChoice` | `Auto` / `None` / `Required` / `Specific { function_names }` |
-| `Usage` / `GetTokenUsage` | `rig::completion::{Usage, GetTokenUsage}` | input/output/total/cached/reasoning tokens |
-| `Agent` / `AgentBuilder` | `rig::agent::{Agent, AgentBuilder}` | model + preamble + context + tools + memory |
+| `ToolCallId` / `ProviderCallId` | `rig::message::{ToolCallId, ProviderCallId}` | correlation handles; `ToolCall::id` ↔ `ToolResult::call` |
+| `Usage` | `rig::completion::Usage` | input/output/total/cached/reasoning tokens |
+| `Agent` / `AgentBuilder` | `rig::agent::{Agent, AgentBuilder}` | model + preamble + context + tools + memory. **`Agent` is non-generic in 0.42** |
 | `AgentRunner` | `rig::agent::AgentRunner` | per-run driver: `.max_turns(n)`, `.tool_concurrency(n)`, `.add_hook(h)`, `.run()` |
 | `AgentRun` | `rig::agent::AgentRun` | sans-IO state machine (durable/resumable) |
-| `AgentHook` / `StepEvent` / `Flow` | `rig::agent::{AgentHook, StepEvent, Flow}` | observe/steer the loop |
-| `MultiTurnStreamItem` | `rig::agent::MultiTurnStreamItem` | `StreamAssistantItem(...)` / `FinalResponse(...)` |
+| `AgentHook` / `ModelTurnFinished` / `StepEventKind` | `rig::agent::{AgentHook, StepEventKind}` | typed methods per event (`on_completion_call`, `on_tool_call`, `on_tool_result`, …) returning per-event actions |
+| `MultiTurnStreamItem` | `rig::agent::MultiTurnStreamItem` | `StreamAssistantItem(...)` / `StreamUserItem(...)` / `CompletionCall(...)` / `FinalResponse(...)` |
 | `stream_to_stdout` | `rig::agent::stream_to_stdout` | helper to print a stream |
-| `Tool` / `ToolEmbedding` / `ToolSet` / `ToolError` | `rig::tool::{...}` | `const NAME`, `Args`, `Output`, `Error`, `definition`, `call` |
-| `tool_macro` / `rig_tool` | `#[rig::tool_macro(...)]` / `#[rig::rig_tool]` | function → `Tool` impl |
+| `Tool` / `ToolEmbedding` / `ToolSet` / `ToolExecutionError` | `rig::tool::{...}` | `const NAME`, `Args`, `Output`, `Error`, `description`, `parameters`, `call(&self, ctx, args)` |
+| `PortableTool` / `PortableDynamicTool` | `rig::tool::{PortableTool, PortableDynamicTool}` | runtime-independent tool contracts; `PortableDynamicTool::new(name, desc, params, callback)` |
+| `DynamicTool` | `rig::tool::DynamicTool` | classic contextual dynamic tool: `DynamicTool::new(name, desc, params, closure)`, `.from_portable(tool)` |
+| `ToolContext` | `rig::tool::ToolContext` | mutable per-call context passed to `Tool::call`; `require<T>()`, `insert_result<T>()` |
+| `tool_macro` / `rig_tool` | `#[rig::tool_macro(...)]` / `#[rig::rig_tool]` | function → `Tool` impl (both names re-exported from `rig_derive`) |
 | `ToolServer` / `ToolServerHandle` | `rig::tool::server::{ToolServer, ToolServerHandle}` | shared mutable tool set via message passing |
-| `StreamingPrompt` / `StreamingChat` / `StreamingCompletion` | `rig::streaming::{...}` | `stream_prompt(...).await`, `stream_chat(...)`, `stream_completion(...)` |
-| `StreamedAssistantContent` | `rig::streaming::StreamedAssistantContent` | `Text` / `ToolCall` delta / usage |
-| `PauseControl` | `rig::streaming::PauseControl` | pause/resume a stream |
+| `StreamingPrompt` / `StreamingChat` | `rig::streaming::{StreamingPrompt, StreamingChat}` | `stream_prompt(...).await`, `stream_chat(prompt, history).await` → `StreamingResult` |
+| `StreamedAssistantContent` | `rig::streaming::StreamedAssistantContent` | `Text` / `ToolCall { tool_call, internal_call_id }` / `ToolCallDelta { .. }` / `Reasoning { reasoning, id }` / `ReasoningDelta { .. }` |
+| `StreamedUserContent` | `rig::streaming::StreamedUserContent` | `ToolResult { tool_result, internal_call_id }` |
+| `MultiTurnStreamItem` | `rig::agent::MultiTurnStreamItem` | stream items: `StreamAssistantItem` / `StreamUserItem` / `ToolExecutionCommitted` / `CompletionCall` / `ModelTurnRetried` / `FinalResponse` |
 | `Extractor` / `ExtractionError` | `rig::extractor::{Extractor, ExtractionError}` | `client.extractor::<T>(id).build()`, `extract(...)` |
 | `Embed` (derive) | `rig::Embed` | `#[derive(rig::Embed)]` with `#[embed]` fields |
 | `Embed` (trait) | `rig::embeddings::Embed` | `fn embed(&self, &mut TextEmbedder) -> Result<(), EmbedError>` |
@@ -192,10 +203,10 @@ Use this to decide which reference file to load:
 | `VectorSearchRequest` | `rig::vector_store::VectorSearchRequest` | `.builder().query(...).samples(n).build()` |
 | `ConversationMemory` | `rig::memory::ConversationMemory` | `load` / `append` / `clear` (async) |
 | `InMemoryConversationMemory` | `rig::memory::InMemoryConversationMemory` | in-process; `.with_filter(...)` for policies |
-| `prelude` | `rig::prelude` | common imports + `AgentClientExt` |
+| `prelude` | `rig::prelude` | common imports + `AgentClientExt` + `CompletionClient` |
 | `schemars` | `rig::schemars` | re-export; **v1.0** required |
 
-## Provider List (rig-core 0.41)
+## Provider List (rig-core 0.42)
 
 `rig::providers::*` — each defines a `Client` and model constants: `anthropic`, `azure`, `chatgpt` (OAuth), `cohere`, `copilot`, `deepseek`, `doubleword`, `gemini`, `groq`, `huggingface`, `hyperbolic`, `llamafile`, `minimax`, `mira`, `mistral`, `moonshot`, `ollama`, `openai`, `openrouter`, `perplexity`, `together`, `voyageai`, `xai`, `xiaomimimo`, `zai`.
 
@@ -212,15 +223,18 @@ OpenAI-compatible vendors (Groq, Together, Hyperbolic, OpenRouter, DeepSeek, …
 ## Common Pitfalls
 
 1. **Calling `rig` from the root binary** — go through `shuvarie-llm` so the TUI stays provider-agnostic and the core task owns the async work.
-2. **Awaiting a stream on the TUI thread** — run `stream_prompt` on the core task and forward stream items over `mpsc` to the TUI.
+2. **Awaiting a stream on the TUI thread** — run `stream_prompt`/`stream_chat` on the core task and forward stream items over `mpsc` to the TUI.
 3. **Forgetting `max_turns` on multi-tool prompts** — default is 0 (one follow-up); chained tool calls fail with `MaxTurnsError`.
 4. **Double-appending history with `chat`** — `chat(prompt, &mut history)` already appends the turn (including tool calls/results). Don't push the user message / assistant reply again.
 5. **Mixing embedding models** — query embeddings must come from the exact same model id used to embed the stored documents.
 6. **Hand-writing tool `required` arrays wrong for OpenAI** — the Responses API requires every input parameter under `required`; use `schemars::JsonSchema` (non-`Option` fields are required) or the macro's `required(...)`.
-7. **Returning `Flow::cont()` from `InvalidToolCall`** — that's treated as `Flow::fail()` (fail-fast default). Opt into `retry`/`repair`/`skip` explicitly.
-8. **`override_request` with a narrow `active_tools` but a stale `ToolChoice`** — if you narrow tools, make sure any `tool_choice` still names an advertised tool, or Rig fails-closed.
-9. **Assuming `from_env()` works without the API key env var** — each provider reads a specific var (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `COHERE_API_KEY`, …); Ollama needs none.
-10. **Using `schemars` 0.8 idioms** — v1.0 is required; descriptions are `///` doc comments and the macro is `schemars::schema_for!`.
+7. **Writing `Agent<M>` or `AgentHook<M>` (pre-0.42 style)** — `Agent` is non-generic now; drop the type parameter. Agent hooks implement typed methods (`on_completion_call`, `on_tool_call`, …) with per-event action types, not a single `on_event`/`Flow`.
+8. **Using `OneOrMany`** — removed in 0.42. Message content is `Vec<T>`. Construct with `Message::user`/`Message::assistant` or `UserContent::text`/`AssistantContent::text`.
+9. **Matching `StreamedAssistantContent::Reasoning` as a tuple** — it is a struct variant `{ reasoning, id }`; use `reasoning.display_text()`.
+10. **Reading `ToolResult`/`ToolCall` string ids as `id`/`call_id` fields** — those are gone. Use `ToolCallId`/`ProviderCallId`; correlate `ToolCall::id` ↔ `ToolResult::call`, and `internal_call_id` on streamed items.
+11. **Assuming `from_env()` works without the API key env var** — each provider reads a specific var (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `COHERE_API_KEY`, …); Ollama needs none.
+12. **Using `schemars` 0.8 idioms** — v1.0 is required; descriptions are `///` doc comments and the macro is `schemars::schema_for!`.
+13. **Returning `Flow::cont()` from `InvalidToolCall`** — (0.41) that was treated as `Flow::fail()`. In 0.42, `on_invalid_tool_call` returns `Option<InvalidToolCallAction>`; returning `None` from every hook preserves fail-fast. Opt into retry/repair/skip explicitly.
 
 ## External Resources
 
@@ -238,13 +252,13 @@ OpenAI-compatible vendors (Groq, Together, Hyperbolic, OpenRouter, DeepSeek, …
 |------|-------------|
 | `SKILL.md` | Main entry point — quickstart, mental model, decision tree, cheat sheet, repo conventions |
 | `references/providers-and-clients.md` | `Client`/`Provider`/`ProviderBuilder`/`Capabilities` system, `ProviderClient`/`CompletionClient`/`EmbeddingsClient`/`ModelListingClient`/`VerifyClient`, auth types, custom base URLs, supported providers, writing a custom provider |
-| `references/completions.md` | `Prompt`/`Chat`/`TypedPrompt`/`Completion`, `CompletionModel`, `CompletionRequestBuilder`, `CompletionResponse`/`AssistantContent`, `Message`/`UserContent`, `Usage`/`GetTokenUsage`, `CompletionError` |
+| `references/completions.md` | `Prompt`/`Chat`/`TypedPrompt`, `CompletionModel`, `CompletionRequestBuilder`, `CompletionResponse`/`AssistantContent`, `Message`/`UserContent`, `Usage`, `CompletionError` |
 | `references/agents.md` | `Agent`/`AgentBuilder`, the agent loop, `max_turns`, `ToolChoice`, static + dynamic context, manager-worker, conversations & memory overview, `extended_details`, `additional_params` |
-| `references/agent-runner.md` | `AgentRunner` per-run controls (`max_turns`, `max_invalid_tool_call_retries`, `history`, `conversation`, `without_memory`, `tool_concurrency`, `tool_extensions`, `add_hook`), `run()` vs `stream()`, `AgentRun` sans-IO state machine |
-| `references/hooks.md` | `AgentHook::on_event`, `StepEvent` table, `Flow` action table, `RequestOverride`, guardrails/approvals, invalid-tool-call recovery (`fail`/`retry`/`repair`/`skip`), `observes`, composition & short-circuiting |
-| `references/tools.md` | `Tool` trait, `schemars` schema derivation, `tool_macro`/`rig_tool`, tool failures, designing good tools, static vs dynamic tools, `ToolEmbedding` + `ToolSet` (tool RAG), `ToolServer`, MCP tools via `rmcp` |
-| `references/streaming.md` | `StreamingPrompt`/`StreamingChat`/`StreamingCompletion`, `MultiTurnStreamItem`, `StreamedAssistantContent`, `StreamingCompletionResponse`, `stream_to_stdout`, `PauseControl`, per-chunk errors & backpressure |
-| `references/structured-output.md` | `Extractor`, target type derives, `extract(...)`, `ExtractionError` (`NoData`/`DeserializationError`/`PromptError`), preamble/context, batch, `Extractor` vs `TypedPrompt` |
+| `references/agent-runner.md` | `AgentRunner` per-run controls (`max_turns`, `max_invalid_tool_call_retries`, `history`, `conversation`, `without_memory`, `tool_concurrency`, `tool_context`, `add_hook`), `run()` vs `stream()`, `AgentRun` sans-IO state machine |
+| `references/hooks.md` | `AgentHook` typed methods + per-event action enums (`CompletionCallAction`/`ToolCallAction`/`ToolResultAction`/`ObservationAction`/…), `RequestPatch`, `InvalidToolCallAction`, `observes`, `HookStack` composition |
+| `references/tools.md` | `Tool` trait, `PortableTool`/`PortableDynamicTool` vs classic `DynamicTool`, `ToolContext`, `schemars` schema derivation, `tool_macro`/`rig_tool`, `ToolOutput`/`ToolExecutionError`, `ToolEmbedding` + `ToolSet`, `ToolServer`, MCP tools via `rmcp` |
+| `references/streaming.md` | `StreamingPrompt`/`StreamingChat`, `MultiTurnStreamItem`, `StreamedAssistantContent` (incl. struct `Reasoning`, `internal_call_id` correlation, `ToolExecutionCommitted`), `StreamingResult`, `stream_to_stdout`, per-item errors |
+| `references/structured-output.md` | `Extractor`, target type derives, `extract(...)`, `ExtractionError` (`NoData`/`DeserializationError`/`CompletionError`/`PromptError`), preamble/context, batch, `Extractor` vs `TypedPrompt` |
 | `references/embeddings.md` | `Embed` derive + manual impl, `TextEmbedder`, `EmbeddingsBuilder` (`.document`/`.documents`), `Embedding`, `InsertDocuments`, best practices |
 | `references/rag-and-vector-stores.md` | RAG phases, `VectorStoreIndex`/`InsertDocuments`, `InMemoryVectorStore`, `dynamic_context(n, index)`, `VectorSearchRequest`/`top_n`, tool RAG (`ToolEmbedding`/`ToolSet`/`dynamic_tools`), re-ranking, hybrid search, RAG-as-memory, limitations |
 | `references/memory.md` | `InMemoryConversationMemory`, `ConversationMemory` trait (`load`/`append`/`clear`), bypass rules, `rig-memory` policies (`SlidingWindowMemory`/`TokenWindowMemory`/`CompactingMemory`/`DemotingPolicyMemory`), manual history & compaction, long-term memory |

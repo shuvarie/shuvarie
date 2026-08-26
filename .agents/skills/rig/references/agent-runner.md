@@ -2,12 +2,12 @@
 
 `AgentRunner` is the driver behind Rig's high-level agent prompt APIs. `agent.prompt("...").await?` is the easy path; a runner gives you an explicit value for **one run**: one prompt, one set of per-run options, one call to `run()` or `stream()`.
 
-Official docs: https://rig.rs/docs/concepts/agentrunner · Source: https://github.com/0xPlaygrounds/rig/blob/main/crates/rig-core/src/agent/runner.rs
+Official docs: https://rig.rs/docs/concepts/agentrunner
 
 ## The three layers
 
-- **`Agent`** — reusable configuration: model, preamble, tools, RAG context, memory, default hooks.
-- **`AgentRunner`** — drives one prompt through the agent loop. Owns per-run options: turn limits, memory behavior, tool concurrency, tool extensions, hooks.
+- **`Agent`** — reusable configuration: model, preamble, tools, RAG context, memory, default hooks. Non-generic in 0.42.
+- **`AgentRunner`** — drives one prompt through the agent loop. Owns per-run options: turn limits, memory behavior, tool concurrency, per-call tool context, hooks.
 - **`AgentRun`** — lower-level, sans-IO state machine. Use only when you need to persist and resume the loop yourself (e.g. durable out-of-process approvals).
 
 | Want | Use |
@@ -15,8 +15,6 @@ Official docs: https://rig.rs/docs/concepts/agentrunner · Source: https://githu
 | Normal calls | `agent.prompt("...").await?` |
 | Explicit runner with per-run config | `agent.runner("...").run().await?` |
 | Hand-drive model + tool IO | `AgentRun` |
-
-> This page documents the `AgentRunner` API on Rig's main branch. If docs.rs latest doesn't show these symbols yet, use the linked GitHub source for exact signatures.
 
 ## Basic runner usage
 
@@ -48,20 +46,22 @@ Equivalent in spirit to `agent.prompt("...").max_turns(5).extended_details().awa
 
 | Method | What it changes |
 |--------|-----------------|
-| `max_turns(n)` | Max multi-turn depth before `PromptError::MaxTurnsError` |
+| `max_turns(n)` | Max total model-call budget before `PromptError::MaxTurnsError` |
 | `max_invalid_tool_call_retries(n)` | Retry budget for invalid-tool-call recovery (retries also consume turns) |
 | `history(messages)` | Explicit chat history — bypasses memory for the run |
 | `conversation(id)` | Conversation id used to load/save configured memory |
 | `without_memory()` | Disable memory load and save for this run |
 | `tool_concurrency(n)` | Execute up to `n` tool calls from one turn at once; `0` clamped to `1` |
-| `tool_extensions(ext)` | Pass runtime-only values to tools via `Tool::call_with_extensions` |
+| `tool_context(ctx)` | Attach a per-call `ToolContext` every tool executes with |
 | `add_hook(hook)` | Append a hook after any default hooks on the agent |
+
+> The 0.41 `tool_extensions(ext)` / `Tool::call_with_extensions` mechanism was **removed in 0.42**. Inject runtime-only values (auth tokens, session ids, request metadata) with `tool_context(ctx)` (a `ToolContext` readable via `ctx.require::<T>()` inside `Tool::call`). See `tools.md`.
 
 ### Turns and invalid-tool retries
 
 `max_turns` limits follow-up model calls after tool results. Past the limit → `PromptError::MaxTurnsError` with the history so far.
 
-`max_invalid_tool_call_retries` is separate — only applies when a hook recovers via `Flow::retry(...)`. Each retry re-asks the model and also consumes normal turn budget. See `hooks.md`.
+`max_invalid_tool_call_retries` is separate — only applies when a hook recovers via `InvalidToolCallAction::Retry(...)`. Each retry re-asks the model and also consumes normal turn budget. See `hooks.md`.
 
 ### Conversation memory
 
@@ -90,9 +90,9 @@ let response = agent
 
 Final message history is persisted in tool-call order. With `tool_concurrency > 1`, per-tool side effects (logs, spans, hook callbacks) may interleave in completion order — make them concurrency-safe.
 
-### Tool extensions
+### Tool context
 
-`tool_extensions` passes runtime-only values to tools (auth tokens, tenant IDs, request metadata, session state) the model should not see. Tools read them from `Tool::call_with_extensions`. Use for trusted application context — don't put secrets in the prompt just so a tool can read them.
+`tool_context(ctx)` attaches a `ToolContext` (a type map) to the run. Every tool the agent executes can read caller-provided values with `ctx.require::<T>()` — the model never sees them. Use for trusted application context (auth, tenant, session); don't put secrets in the prompt just so a tool can read them.
 
 ## Blocking and streaming runs
 

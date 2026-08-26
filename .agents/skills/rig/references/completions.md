@@ -11,11 +11,13 @@ Official docs: https://rig.rs/docs/concepts/completion · API: https://docs.rs/r
 | a text answer to a one-off prompt | `Prompt` (`.prompt(...)`) |
 | a conversation that carries history | `Chat` (`.chat(prompt, &mut history)`) |
 | a typed struct instead of a string | `TypedPrompt` (`.prompt_typed(...)`) |
-| tokens as they arrive | `StreamingPrompt`/`StreamingChat`/`StreamingCompletion` (see `streaming.md`) |
-| to configure the request before dispatch | `Completion` (`.completion(...)` → `CompletionRequestBuilder`) |
+| tokens as they arrive | `StreamingPrompt`/`StreamingChat` (see `streaming.md`) |
+| to configure the request before dispatch | `CompletionRequestBuilder` (via `model.completion_request(...)`) |
 | to bypass the agent loop entirely | `CompletionModel` directly (`.completion_request(...).send()`) |
 
 Most apps reach for an **Agent**, which implements the high-level traits *and* runs the agent loop. Drop to a bare `CompletionModel` when you need control over individual requests.
+
+> The `Completion` and `StreamingCompletion` high-level traits were **removed in 0.42**. Configure a single request through `CompletionModel::completion_request(prompt)` → `CompletionRequestBuilder` (a type alias for `CompletionRequestBuilder::builder(model, prompt)`), or build a `CompletionRequest` directly and call `CompletionModel::completion(req)` / `CompletionModel::stream(req)`.
 
 ## High-level traits
 
@@ -56,18 +58,6 @@ For whole-job structured extraction prefer an `Extractor` (see `structured-outpu
 
 ## Low-level control
 
-### `Completion` trait
-
-Returns a `CompletionRequestBuilder` you can adjust before dispatch. Fields pre-populated by the implementing type (e.g. an agent's preamble) can be overwritten:
-
-```rust
-pub trait Completion<M: CompletionModel> {
-    fn completion(
-        &self, prompt: &str, chat_history: Vec<Message>,
-    ) -> impl Future<Output = Result<CompletionRequestBuilder<M>, CompletionError>> + Send;
-}
-```
-
 ### Calling a `CompletionModel` directly
 
 `CompletionModel` is the provider interface — the trait each LLM backend implements with `completion` (and `stream`). Calling it directly is how you take full control of one request:
@@ -94,18 +84,19 @@ The builder also accepts `documents(...)` (context) and `tools(...)`. Call `.bui
 
 ```rust
 pub struct CompletionResponse<T> {
-    pub choice: OneOrMany<AssistantContent>,
+    pub choice: Vec<AssistantContent>,
     pub raw_response: T, // raw provider payload for debugging
 }
 ```
 
-`AssistantContent` — the three things a model can answer with:
+`AssistantContent` — the things a model can answer with:
 
 ```rust
 pub enum AssistantContent {
     Text(Text),
-    ToolCall(ToolCall),     // id + function name + JSON args
+    ToolCall(ToolCall),     // correlation id + function name + JSON args
     Reasoning(Reasoning),   // chain-of-thought (models that support it)
+    Image(Image),
 }
 ```
 
@@ -113,10 +104,13 @@ With an agent, tool calls are executed for you; at the bare-model layer you deci
 
 ## Messages
 
+In 0.42, message content is a plain `Vec<T>` — the `OneOrMany` container was removed:
+
 ```rust
 pub enum Message {
-    User { content: OneOrMany<UserContent> },
-    Assistant { content: OneOrMany<AssistantContent> },
+    System { content: String },
+    User { content: Vec<UserContent> },
+    Assistant { id: Option<String>, content: Vec<AssistantContent> },
 }
 ```
 
@@ -140,6 +134,27 @@ history.push(Message::user("What is Rust?"));
 history.push(Message::assistant("A systems programming language..."));
 ```
 
+`ToolCall` and `ToolResult` carry correlation handles instead of bare string ids:
+
+```rust
+pub struct ToolCall {
+    pub id: ToolCallId,                        // always present (minted if the provider gave none)
+    pub provider: Option<ProviderCallId>,      // provider-issued id, if any
+    pub function: ToolFunction,                // { name, arguments: serde_json::Value }
+    pub signature: Option<String>,
+    pub additional_params: Option<serde_json::Value>,
+}
+
+pub struct ToolResult {
+    pub call: ToolCallId,                      // echoes the answered ToolCall::id
+    pub provider: Option<ProviderCallId>,
+    pub name: String,                          // executed tool's name
+    pub content: Vec<ToolResultContent>,
+}
+```
+
+`ToolCallId`/`ProviderCallId` are `String`-like (`.as_str()`, `Display`). Correlate a result with its call via `call == answered_call.id`. Streaming additionally exposes an `internal_call_id` correlator (see `streaming.md`).
+
 ## Token usage
 
 Every completion response carries a `Usage`; the agent loop aggregates across turns. Read aggregated usage with `.extended_details()` on a prompt request (see `agents.md`).
@@ -156,7 +171,7 @@ pub struct Usage {
 }
 ```
 
-Implement `GetTokenUsage` on your raw response type when writing a provider. Zero-valued usage means the provider didn't report metrics.
+Zero-valued usage means the provider didn't report metrics. (The `GetTokenUsage` trait was removed in 0.42 — providers now surface usage directly on `Usage`.)
 
 ## Errors
 
@@ -164,13 +179,14 @@ Implement `GetTokenUsage` on your raw response type when writing a provider. Zer
 pub enum CompletionError {
     HttpError(reqwest::Error),
     JsonError(serde_json::Error),
+    UrlError(url::ParseError),
     RequestError(Box<dyn Error>),
     ResponseError(String),
     ProviderError(String),
 }
 ```
 
-Typed-output paths add `StructuredOutputError` wrapping `PromptError` (which carries `CompletionError`, `MaxTurnsError`, or a tool failure) or a deserialization failure. See https://rig.rs/docs/concepts/error_handling for transient-vs-fatal handling and retry.
+Typed-output paths add `StructuredOutputError` wrapping `PromptError` (which carries `CompletionError`, `MaxTurnsError`, `PromptCancelled`, `UnknownToolCall`, or a tool failure) or a deserialization failure. See https://rig.rs/docs/concepts/error_handling for transient-vs-fatal handling and retry.
 
 ## Project boundary (shuvarie)
 

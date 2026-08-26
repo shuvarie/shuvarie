@@ -55,7 +55,8 @@ let extractor = openai
 
 - `NoData` — model never called the submit tool; nothing was extracted.
 - `DeserializationError` — submitted JSON didn't match your type.
-- `PromptError` — underlying completion request failed.
+- `CompletionError` — the underlying completion request failed.
+- `PromptError` — a prompt-level failure (`MaxTurnsError`, `PromptCancelled`, `UnknownToolCall`, …).
 
 ```rust
 use rig::extractor::ExtractionError;
@@ -69,6 +70,8 @@ match extractor.extract("...").await {
 
 > `NoData` usually means the model was too weak to reliably call the submit tool. Prefer a more capable model for extraction-heavy workloads.
 
+Extraction also tracks usage: use `extract_with_usage(...)` / `extract_with_chat_history_with_usage(...)` to get an `ExtractionResponse { data, usage }` (usage accumulates across retry attempts). In 0.42 `Extractor`/`ExtractorBuilder` are model-agnostic (no `<M>` type parameter) — `.extract(...)` takes `impl Into<Message>`, and chat history is passed as `Vec<Message>`.
+
 ## Batch processing
 
 Extractors are cheap to reuse across many inputs — build once, extract in a loop:
@@ -77,13 +80,10 @@ Extractors are cheap to reuse across many inputs — build once, extract in a lo
 use rig::completion::CompletionModel;
 use rig::extractor::{Extractor, ExtractionError};
 
-async fn process_documents<M: CompletionModel, T>(
-    extractor: &Extractor<M, T>,
+async fn process_documents(
+    extractor: &Extractor<Person>,
     docs: Vec<String>,
-) -> Vec<Result<T, ExtractionError>>
-where
-    T: serde::de::DeserializeOwned + serde::Serialize + rig::schemars::JsonSchema + Send + Sync,
-{
+) -> Vec<Result<Person, ExtractionError>> {
     let mut results = Vec::new();
     for doc in docs {
         results.push(extractor.extract(&doc).await);

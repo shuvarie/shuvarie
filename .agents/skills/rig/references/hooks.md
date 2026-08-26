@@ -2,9 +2,9 @@
 
 Hooks let your code observe and steer the agent loop while `AgentRunner` drives the model and tool IO. Use them for logging, metrics, audit trails, approval flows, guardrails, request shaping, invalid-tool-call recovery, and streaming UI integration.
 
-Official docs: https://rig.rs/docs/concepts/hooks · Source: https://github.com/0xPlaygrounds/rig/blob/main/crates/rig-core/src/agent/hook.rs
+Official docs: https://rig.rs/docs/concepts/hooks
 
-A hook implements one method: `AgentHook::on_event`. It receives a `StepEvent` and returns a `Flow`. Hooks live on the `AgentRunner` (driver) layer — the lower-level `AgentRun` state machine stays sans-IO and serializable, so it has no hooks.
+A hook implements the `AgentHook` trait — a set of **typed methods, one per event**, each returning an event-specific action. (0.42 replaced the single `on_event(StepEvent) -> Flow` method of 0.41 with dedicated methods like `on_completion_call` → `CompletionCallAction` and `on_tool_call` → `ToolCallAction`.) Hooks live on the `AgentRunner` (driver) layer — the lower-level `AgentRun` state machine stays sans-IO and serializable, so it has no hooks. `AgentHook` is not generic over a model.
 
 ## Add hooks to a request, runner, or agent
 
@@ -36,118 +36,116 @@ Agent-level hooks run first; per-request/per-run hooks are appended after the de
 ## A minimal hook
 
 ```rust
-use rig::agent::{AgentHook, Flow, StepEvent};
+use rig::agent::{AgentHook, ToolCallAction, ToolCall, ToolResultAction, ToolResultEvent};
 use rig::completion::CompletionModel;
 
 struct ToolAudit;
 
-impl<M: CompletionModel> AgentHook<M> for ToolAudit {
-    async fn on_event(&self, event: StepEvent<'_, M>) -> Flow {
-        match event {
-            StepEvent::ToolCall { tool_name, args, .. } => {
-                println!("calling {tool_name} with {args}");
-            }
-            StepEvent::ToolResult { tool_name, result, .. } => {
-                println!("{tool_name} returned {result}");
-            }
-            _ => {}
-        }
-        Flow::cont()
+impl AgentHook for ToolAudit {
+    async fn on_tool_call(&self, _ctx: &HookContext, event: ToolCall<'_>) -> ToolCallAction {
+        println!("calling {} with {}", event.tool_name, event.args);
+        ToolCallAction::run()
+    }
+
+    async fn on_tool_result(&self, _ctx: &HookContext, event: ToolResultEvent<'_>) -> ToolResultAction {
+        println!("{} returned {}", event.tool_name, event.presentation.render());
+        ToolResultAction::keep()
     }
 }
 ```
 
-`StepEvent` borrows its payload, so hooks inspect without taking ownership.
+Event payloads borrow their data, so hooks inspect without taking ownership.
 
-## Hook events
+## Hook events and actions
 
-| Event | When it fires | Common uses |
-|-------|---------------|-------------|
-| `CompletionCall { prompt, history, turn }` | Before each model request | logging, metrics, per-turn request overrides |
-| `CompletionResponse { prompt, response }` | After a non-streaming model response | audit raw responses, count calls |
-| `InvalidToolCall(ctx)` | Model called unknown/disallowed tool | fail, retry, repair, skip |
-| `ToolCall { tool_name, args, .. }` | Before executing a valid tool | approvals, argument rewriting, deny/skip |
-| `ToolResult { tool_name, result, .. }` | After a tool returns | redact, truncate, normalize, log |
-| `TextDelta { delta, aggregated }` | Streaming only | live UI updates, content-policy cancellation |
-| `ToolCallDelta { .. }` | Streaming only | display partial tool-call args |
-| `StreamResponseFinish { prompt, response }` | Streaming text response finished | streaming-side metrics/cleanup |
+Each `AgentHook` method is named `on_<event>` and returns an event-specific action. Override only the methods you care about; the defaults observe-and-continue.
 
-`CompletionResponse` and `StreamResponseFinish` are suppressed for turns recovered by invalid-tool-call repair/skip/retry. Streaming-only events fire only on the streaming surface.
+| Method | Returns | Fires | Common uses |
+|--------|---------|-------|-------------|
+| `on_model_select` | `ModelSelectionAction` | Before each model call, after selection | route to another model per turn |
+| `on_completion_call` | `CompletionCallAction` | Before each model request | logging, metrics, per-turn request patches |
+| `on_completion_response` | `ObservationAction` | After a non-streaming model response | audit raw responses, count calls |
+| `on_model_turn_finished` | `ModelTurnAction` | At the end of a model turn | accept or reject/retry the turn |
+| `on_invalid_tool_call` | `Option<InvalidToolCallAction>` | Model called unknown/disallowed tool | fail, retry, repair, skip (see below) |
+| `on_tool_call` | `ToolCallAction` | Before executing a valid tool | approvals, argument rewriting, deny/skip |
+| `on_tool_result` | `ToolResultAction` | After a tool returns | redact, truncate, normalize, log |
+| `on_text_delta` | `ObservationAction` | Streaming only | live UI updates, content-policy cancellation |
+| `on_reasoning_delta` | `ObservationAction` | Streaming only | show thinking progress |
+| `on_tool_call_delta` | `ObservationAction` | Streaming only | display partial tool-call args |
+| `on_stream_response_finish` | `ObservationAction` | Streaming text response finished | streaming-side metrics/cleanup |
 
-## Flow actions
+`on_completion_response`/`on_stream_response_finish` are suppressed for turns recovered by invalid-tool-call repair/skip/retry. Streaming-only events fire only on the streaming surface.
 
-`Flow::cont()` = observe only. Other actions steer the run. The runner is **fail-closed**: if a hook returns an action an event cannot honor, Rig terminates with a diagnostic instead of silently ignoring it.
+## Action enums
 
-| Flow | Valid events | Effect |
-|------|--------------|--------|
-| `cont()` | all | Continue normally |
-| `terminate(reason)` | all | Stop with a cancellation error containing current history |
-| `override_request(RequestOverride)` | `CompletionCall` | Patch this turn's request only |
-| `rewrite_args(json)` | `ToolCall` | Execute the tool with replacement JSON args |
-| `skip(reason)` | `ToolCall`, `InvalidToolCall` | Don't execute; return `reason` to model as tool result |
-| `rewrite_result(result)` | `ToolResult` | Replace what the model sees as the tool output |
-| `fail()` | `InvalidToolCall` | Preserve default fail-fast |
-| `retry(feedback)` | `InvalidToolCall` | Append corrective feedback, ask model again |
-| `repair(tool_name)` | `InvalidToolCall` | Rewrite the tool name, revalidate against allowed tools |
+- **`CompletionCallAction`** — `Continue`, `Patch(RequestPatch)` (shape this turn), `Stop(reason)`.
+- **`ToolCallAction`** — `Run`, `Rewrite(args)`, `Skip(reason)`, `Stop(reason)`.
+- **`ToolResultAction`** — `Keep`, `Rewrite(ToolOutput)` / `rewrite(result)`, `Stop(reason)`.
+- **`ObservationAction`** — `Continue`, `Stop(reason)` (observed completion/turn-finish/text-delta/…).
+- **`ModelSelectionAction`** — `Continue`, `Select(model)`, `Stop(reason)`.
+- **`ModelTurnAction`** — `Continue`, `Retry(feedback)`, `Stop(reason)`.
+- **`InvalidToolCallAction`** — see "Invalid tool calls" below.
 
-Returning `Flow::cont()` for `InvalidToolCall` is treated as `Flow::fail()`.
+Each action enum has ergonomic constructors: `CompletionCallAction::continue_run()/patch(...)/stop(...)`, `ToolCallAction::run()/rewrite(...)/skip(...)/stop(...)`, `ToolResultAction::keep()/rewrite(...)/stop(...)`. A returned action an event cannot honor terminates the run with a diagnostic — the runner is fail-closed, it never silently ignores an action.
 
-## Request overrides
+## Request patches
 
-`Flow::override_request` from `CompletionCall` patches one turn without mutating the agent — phased agents: force a search on turn 1, lower temperature for a critical step, shrink the advertised tool list:
+`CompletionCallAction::Patch(RequestPatch)` shapes one turn without mutating the agent — phased agents: force a search on turn 1, lower temperature for a critical step, shrink the advertised tool list:
 
 ```rust
-use rig::agent::{AgentHook, Flow, RequestOverride, StepEvent};
+use rig::agent::{AgentHook, CompletionCallAction, CompletionCall, HookContext, RequestPatch};
 use rig::completion::CompletionModel;
 use rig::message::ToolChoice;
 
 struct ForceSearchFirst;
 
-impl<M: CompletionModel> AgentHook<M> for ForceSearchFirst {
-    async fn on_event(&self, event: StepEvent<'_, M>) -> Flow {
-        match event {
-            StepEvent::CompletionCall { turn: 1, .. } => Flow::override_request(
-                RequestOverride::new()
+impl AgentHook for ForceSearchFirst {
+    async fn on_completion_call(
+        &self,
+        _ctx: &HookContext,
+        event: CompletionCall<'_>,
+    ) -> CompletionCallAction {
+        if event.turn == 1 {
+            CompletionCallAction::patch(
+                RequestPatch::new()
                     .active_tools(["search_web"])
                     .tool_choice(ToolChoice::Specific {
                         function_names: vec!["search_web".to_string()],
                     })
                     .temperature(0.0),
-            ),
-            _ => Flow::cont(),
+            )
+        } else {
+            CompletionCallAction::continue_run()
         }
     }
 }
 ```
 
-Overrides are per-turn and non-sticky. `additional_params` are shallow-merged with the agent's; other fields replace the baseline for that turn. If you narrow `active_tools`, make sure any `tool_choice` still names an advertised tool.
+Patches are per-turn and non-sticky. `additional_params` are shallow-merged with the agent's; other fields replace the baseline for that turn. If you narrow `active_tools`, make sure any `tool_choice` still names an advertised tool.
 
 ## Guardrails and approvals
 
 ```rust
-use rig::agent::{AgentHook, Flow, StepEvent};
+use rig::agent::{AgentHook, HookContext, ToolCall, ToolCallAction};
 use rig::completion::CompletionModel;
 
 struct TransferPolicy { max_auto_transfer: u64 }
 
-impl<M: CompletionModel> AgentHook<M> for TransferPolicy {
-    async fn on_event(&self, event: StepEvent<'_, M>) -> Flow {
-        let StepEvent::ToolCall { tool_name, args, .. } = event else {
-            return Flow::cont();
-        };
-        if tool_name != "transfer_funds" {
-            return Flow::cont();
+impl AgentHook for TransferPolicy {
+    async fn on_tool_call(&self, _ctx: &HookContext, event: ToolCall<'_>) -> ToolCallAction {
+        if event.tool_name != "transfer_funds" {
+            return ToolCallAction::run();
         }
-        let amount = serde_json::from_str::<serde_json::Value>(args)
+        let amount = serde_json::from_str::<serde_json::Value>(event.args)
             .ok()
             .and_then(|v| v.get("amount").and_then(|a| a.as_u64()));
         match amount {
-            Some(n) if n <= self.max_auto_transfer => Flow::cont(),
-            Some(n) => Flow::skip(format!(
+            Some(n) if n <= self.max_auto_transfer => ToolCallAction::run(),
+            Some(n) => ToolCallAction::skip(format!(
                 "denied by policy: ${n} exceeds ${} automatic limit",
                 self.max_auto_transfer
             )),
-            None => Flow::skip("denied by policy: missing amount"),
+            None => ToolCallAction::skip("denied by policy: missing amount"),
         }
     }
 }
@@ -157,37 +155,39 @@ This is a guardrail, not a security boundary. Enforce real authorization inside 
 
 ## Invalid tool calls
 
-An invalid tool call is an unknown/unadvertised/disallowed tool name. Default: fail fast. A hook can recover:
+An invalid tool call is an unknown/unadvertised/disallowed tool name. Default: fail fast. A hook opts in to recovery by returning an `InvalidToolCallAction` (returning `None` from every hook preserves fail-fast):
 
 ```rust
-use rig::agent::{AgentHook, Flow, StepEvent};
+use rig::agent::{AgentHook, HookContext, InvalidToolCallAction, InvalidToolCallContext};
 use rig::completion::CompletionModel;
 
 struct RepairDefaultApi;
 
-impl<M: CompletionModel> AgentHook<M> for RepairDefaultApi {
-    async fn on_event(&self, event: StepEvent<'_, M>) -> Flow {
-        match event {
-            StepEvent::InvalidToolCall(ctx) if ctx.tool_name == "default_api" => {
-                Flow::repair("search_web")
-            }
-            StepEvent::InvalidToolCall(ctx) => {
-                Flow::retry(format!("Use one of: {:?}", ctx.available_tools))
-            }
-            _ => Flow::cont(),
+impl AgentHook for RepairDefaultApi {
+    async fn on_invalid_tool_call(
+        &self,
+        _ctx: &HookContext,
+        event: &InvalidToolCallContext,
+    ) -> Option<InvalidToolCallAction> {
+        match event.tool_name.as_str() {
+            "default_api" => Some(InvalidToolCallAction::repair("search_web")),
+            _ => Some(InvalidToolCallAction::retry(format!(
+                "Use one of: {:?}",
+                event.available_tools
+            ))),
         }
     }
 }
 ```
 
-- `fail()` — default fail-fast.
-- `retry(feedback)` — append corrective feedback and re-ask; bound with `max_invalid_tool_call_retries(n)`.
-- `repair(tool_name)` — rewrite the tool name and revalidate.
-- `skip(reason)` — synthetic tool result without executing. If any invalid call in a turn is skipped, Rig suppresses the turn's other tool calls too (returns synthetic "not executed" results). Skip is rejected under `ToolChoice::None`.
+- `InvalidToolCallAction::Fail` — default fail-fast.
+- `Retry(feedback)` — append corrective feedback and re-ask; bound with `max_invalid_tool_call_retries(n)`.
+- `Repair(tool_name)` — rewrite the tool name and revalidate against allowed tools.
+- `Skip(reason)` — synthetic tool result without executing. If any invalid call in a turn is skipped, Rig suppresses the turn's other tool calls too (returns synthetic "not executed" results). Skip is rejected under `ToolChoice::None`.
 
 ## Hook composition
 
-Hooks are stored in a `HookStack` and run in registration order. The first hook returning anything other than `Flow::cont()` wins for that event; later hooks aren't called for that event. If multiple policies must combine into one action, compose them inside a single hook.
+Hooks are stored in a `HookStack` and run in registration order. How results compose is event-dependent: model selections and `ToolCall`/`ToolResult` rewrites **chain** (each hook sees the previous hook's output), completion-call patches accumulate and merge, while model-turn steering and observe-only/recovery events use first-non-`Continue`-wins.
 
 ```rust
 let response = agent
@@ -200,28 +200,26 @@ let response = agent
 
 ## Streaming and `observes`
 
-Text/tool-call deltas can be frequent. Override `observes` so Rig can skip work when no hook cares about a high-frequency event kind:
+Text/reasoning/tool-call deltas can be frequent. Override `observes` so Rig can skip work when no hook cares about a high-frequency event kind:
 
 ```rust
-use rig::agent::{AgentHook, Flow, StepEvent, StepEventKind};
+use rig::agent::{AgentHook, HookContext, StepEventKind, ToolCall, ToolCallAction};
 use rig::completion::CompletionModel;
 
 struct ToolOnlyHook;
 
-impl<M: CompletionModel> AgentHook<M> for ToolOnlyHook {
+impl AgentHook for ToolOnlyHook {
     fn observes(&self, kind: StepEventKind) -> bool {
         matches!(kind, StepEventKind::ToolCall | StepEventKind::ToolResult)
     }
-    async fn on_event(&self, event: StepEvent<'_, M>) -> Flow {
-        if let StepEvent::ToolCall { tool_name, .. } = event {
-            println!("tool: {tool_name}");
-        }
-        Flow::cont()
+    async fn on_tool_call(&self, _ctx: &HookContext, event: ToolCall<'_>) -> ToolCallAction {
+        println!("tool: {}", event.tool_name);
+        ToolCallAction::run()
     }
 }
 ```
 
-Even with `observes`, `on_event` should still return `Flow::cont()` for events it ignores — a sibling hook may cause an event to be dispatched.
+Even with `observes`, hook methods should still return the continue action for events they ignore — a sibling hook may cause an event to be dispatched.
 
 ## Best practices
 

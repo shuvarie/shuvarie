@@ -32,20 +32,20 @@ pub trait ProviderClient {
 
 pub trait CompletionClient {
     type CompletionModel: CompletionModel;
-    fn completion_model(&self, model: &str) -> Self::CompletionModel;
-    fn agent(&self, model: &str) -> AgentBuilder<Self::CompletionModel>; // via AgentClientExt
+    fn completion_model(&self, model: impl Into<String>) -> Self::CompletionModel;
+    fn agent(&self, model: impl Into<String>) -> AgentBuilder; // via AgentClientExt
 }
 
 pub trait EmbeddingsClient {
     type EmbeddingModel: EmbeddingModel;
-    fn embedding_model(&self, model: &str) -> Self::EmbeddingModel;
+    fn embedding_model(&self, model: impl Into<String>) -> Self::EmbeddingModel;
 }
 
 // Plus: TranscriptionClient, ImageGenerationClient (image feature),
 // AudioGenerationClient (audio feature), ModelListingClient, VerifyClient.
 ```
 
-`AgentClientExt` (brought in by `use rig::prelude::*;`) provides the `client.agent(id)` shorthand that returns an `AgentBuilder`.
+`AgentClientExt` (brought in by `use rig::prelude::*;`) provides the `client.agent(id)` shorthand. In 0.42 `CompletionClient::completion_model` takes `impl Into<String>` (not `&str`), and `client.agent(id)` returns a model-agnostic `AgentBuilder` that erases the model into a `ModelHandle` on `.build()`.
 
 ## Capabilities system
 
@@ -121,7 +121,7 @@ let agent = client
 
 Swapping providers is usually just the import + the model id — the client methods are identical across providers.
 
-## Supported providers (rig-core 0.41)
+## Supported providers (rig-core 0.42)
 
 `rig::providers::*` — `anthropic`, `azure`, `chatgpt` (OAuth), `cohere`, `copilot`, `deepseek`, `doubleword`, `gemini`, `groq`, `huggingface`, `hyperbolic`, `llamafile`, `minimax`, `mira`, `mistral`, `moonshot`, `ollama`, `openai`, `openrouter`, `perplexity`, `together`, `voyageai`, `xai`, `xiaomimimo`, `zai`.
 

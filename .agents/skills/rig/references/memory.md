@@ -94,20 +94,19 @@ let agent = openai
 
 ## Managing history by hand
 
-Own the history yourself for custom storage/shaping. History is a `Vec<Message>`:
+Own the history yourself for custom storage/shaping. History is a `Vec<Message>` (in 0.42 message content is a plain `Vec<T>` — `OneOrMany` was removed):
 
 ```rust
 use rig::completion::Message;
-use rig::OneOrMany;
 use rig::message::{AssistantContent, UserContent};
 
 let mut conversation_history: Vec<Message> = Vec::new();
 conversation_history.push(Message::User {
-    content: OneOrMany::one(UserContent::text("Do you know the weather today?")),
+    content: vec![UserContent::text("Do you know the weather today?")],
 });
 conversation_history.push(Message::Assistant {
     id: None,
-    content: OneOrMany::one(AssistantContent::text("I don't have real-time data...")),
+    content: vec![AssistantContent::text("I don't have real-time data...")],
 });
 ```
 
