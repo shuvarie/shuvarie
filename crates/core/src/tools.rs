@@ -280,14 +280,18 @@ struct RunShell;
 
 impl Tool for RunShell {
     fn definition(&self) -> ToolDefinition {
+        #[cfg(unix)]
+        const DESCRIPTION: &str = "Run a shell command line in the workspace, executed through the system's Bourne shell (`sh -c`). Pipes, redirects, and shell operators work naturally. Captured stdout and stderr (combined) are returned, capped at 16 KB. The command is killed when it exceeds the timeout.";
+        #[cfg(windows)]
+        const DESCRIPTION: &str = "Run a shell command line in the workspace, executed through the system's PowerShell (`powershell -NoProfile -Command`). Pipes, redirects, and shell operators work naturally. Captured stdout and stderr (combined) are returned, capped at 16 KB. The command is killed when it exceeds the timeout.";
+
         ToolDefinition {
             name: "run_shell".into(),
-            description: "Run a shell command line in the workspace, executed through the system shell (`sh -c` on Unix, `powershell -NoProfile -Command` on Windows). Pipes, redirects, and shell operators work naturally. Captured stdout and stderr (combined) are returned, capped at 16 KB. The command is killed when it exceeds the timeout."
-                .to_string(),
+            description: DESCRIPTION.to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string", "description": "Shell command line to run (passed to `sh -c` / `powershell -NoProfile -Command`)" },
+                    "command": { "type": "string", "description": "Shell command line to run" },
                     "cwd": { "type": "string", "description": "Working directory, relative to the workspace root. Defaults to the workspace root" },
                     "timeout_secs": { "type": "integer", "minimum": 1, "description": "Timeout in seconds (default 30)" }
                 },
@@ -369,21 +373,25 @@ impl Tool for RunShell {
 }
 
 #[cfg(unix)]
+#[inline]
 fn shell_bin() -> &'static str {
     "sh"
 }
 
 #[cfg(unix)]
+#[inline]
 fn shell_args(cmd: &mut tokio::process::Command, command: &str) {
     cmd.arg("-c").arg(command);
 }
 
 #[cfg(windows)]
+#[inline]
 fn shell_bin() -> &'static str {
     "powershell"
 }
 
 #[cfg(windows)]
+#[inline]
 fn shell_args(cmd: &mut tokio::process::Command, command: &str) {
     cmd.arg("-NoProfile").arg("-Command").arg(command);
 }
