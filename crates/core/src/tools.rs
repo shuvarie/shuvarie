@@ -773,13 +773,11 @@ pub fn edit_tools(gate: ApprovalGate, lsp: SharedManager) -> Vec<std::sync::Arc<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::MutexGuard;
     use tempfile::TempDir;
 
-    static CWD_LOCK: Mutex<()> = Mutex::new(());
-
     fn tempdir() -> (TempDir, MutexGuard<'static, ()>) {
-        let guard = CWD_LOCK.lock().unwrap();
+        let guard = crate::test_util::test_util::lock_cwd();
         let dir = TempDir::new().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
         (dir, guard)

@@ -23,6 +23,14 @@ fn temp_connections_path(name: &str) -> PathBuf {
     dir.join("shuvarie").join("connections.toml")
 }
 
+async fn recv_skills_loaded(event_rx: &mut tokio::sync::mpsc::Receiver<Event>) {
+    let ev = event_rx.recv().await.expect("event");
+    assert!(
+        matches!(ev, Event::SkillsLoaded { .. }),
+        "expected SkillsLoaded as the first startup event, got {ev:?}"
+    );
+}
+
 #[tokio::test]
 async fn ping_pong() {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
@@ -39,6 +47,7 @@ async fn ping_pong() {
         event_tx,
     ));
     cmd_tx.send(Command::Ping).await.unwrap();
+    recv_skills_loaded(&mut event_rx).await;
     let ev = event_rx.recv().await.expect("event");
     assert!(matches!(ev, Event::Pong));
     drop(cmd_tx);
@@ -200,6 +209,7 @@ async fn cancel_with_no_active_stream_keeps_task_alive() {
     cmd_tx.send(Command::CancelStream).await.unwrap();
     cmd_tx.send(Command::Ping).await.unwrap();
 
+    recv_skills_loaded(&mut event_rx).await;
     let ev = event_rx.recv().await.expect("event");
     assert!(
         matches!(ev, Event::Pong),
@@ -390,6 +400,7 @@ async fn no_load_current_skips_session_loaded_on_startup() {
 
     cmd_tx.send(Command::Ping).await.unwrap();
 
+    recv_skills_loaded(&mut event_rx).await;
     let ev = event_rx.recv().await.expect("event");
     assert!(
         matches!(ev, Event::Pong),

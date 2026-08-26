@@ -105,6 +105,9 @@ pub enum AppMessage {
     LspError {
         error: String,
     },
+    SkillsLoaded {
+        skills: Vec<shuvarie_core::Skill>,
+    },
 }
 
 #[derive(Debug)]
@@ -395,6 +398,7 @@ impl App {
                     Some(AppMessage::LspDiagnostics { path, diagnostics })
                 }
                 CoreEvent::LspError { error } => Some(AppMessage::LspError { error }),
+                CoreEvent::SkillsLoaded { skills } => Some(AppMessage::SkillsLoaded { skills }),
             },
         }
     }
@@ -791,6 +795,11 @@ impl App {
             }
             AppMessage::LspError { error } => {
                 self.session.update(SessionMessage::ShowError { error });
+            }
+            AppMessage::SkillsLoaded { skills } => {
+                self.session
+                    .sidebar
+                    .update(SidebarMessage::UpdateSkills { skills });
             }
         }
         None

@@ -108,4 +108,7 @@ pub enum Event {
     LspError {
         error: String,
     },
+    SkillsLoaded {
+        skills: Vec<crate::Skill>,
+    },
 }

@@ -60,6 +60,13 @@ pub async fn run(
     // Don't fire immediately on the first tick.
     lsp_pump_tick.reset();
 
+    let skills = crate::skills::Skills::load(&workspace_root, &config.skills);
+    let _ = event_tx
+        .send(Event::SkillsLoaded {
+            skills: skills.skills.clone(),
+        })
+        .await;
+
     if load_current {
         load_most_recent_session(&mut store, &mut session, &event_tx).await;
     }
@@ -310,7 +317,11 @@ pub async fn run(
                                 })
                                 .await;
                         }
-                        let preamble = crate::context::build_preamble(AGENT_PREAMBLE, &loaded_context);
+                        let base = match skills.preamble_section() {
+                            Some(section) => format!("{AGENT_PREAMBLE}\n\n{section}"),
+                            None => AGENT_PREAMBLE.to_string(),
+                        };
+                        let preamble = crate::context::build_preamble(&base, &loaded_context);
                         let gate = ApprovalGate::new(approval_tx.clone());
                         let tools = crate::tools::all_tools(gate.clone(), lsp.clone());
                         let manager_turns = config.agent.effective_max_turns();
@@ -594,6 +605,7 @@ pub async fn run(
                                         config.agent.effective_worker_max_turns(),
                                         &workspace_root,
                                         &agents_md_context,
+                                        &skills,
                                     )
                                     .await;
                                 }
@@ -671,6 +683,7 @@ pub async fn run(
                             config.agent.effective_worker_max_turns(),
                             &workspace_root,
                             &agents_md_context,
+                            &skills,
                         )
                         .await;
                     }
@@ -946,6 +959,7 @@ async fn self_replay_send(
     worker_turns: usize,
     workspace_root: &Path,
     agents_md_context: &crate::context::LoadedContext,
+    skills: &crate::skills::Skills,
 ) {
     let Some(s) = session else {
         return;
@@ -1000,7 +1014,11 @@ async fn self_replay_send(
             })
             .await;
     }
-    let preamble = crate::context::build_preamble(AGENT_PREAMBLE, &loaded_context);
+    let base = match skills.preamble_section() {
+        Some(section) => format!("{AGENT_PREAMBLE}\n\n{section}"),
+        None => AGENT_PREAMBLE.to_string(),
+    };
+    let preamble = crate::context::build_preamble(&base, &loaded_context);
     let gate = ApprovalGate::new(approval_tx_local());
     let tools = crate::tools::all_tools(gate.clone(), lsp.clone());
     let mut worker_set =

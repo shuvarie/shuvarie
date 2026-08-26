@@ -4,7 +4,7 @@ use ratatui::layout::{Alignment, Rect};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph};
 use shuvarie_catalog::TokenUsage;
-use shuvarie_core::LspStatus;
+use shuvarie_core::{LspStatus, Skill};
 use termina::event::KeyEvent;
 
 use crate::tui::{components::VersionBar, utils::locale::ToDecSepNum};
@@ -24,6 +24,7 @@ pub struct Sidebar {
     pub context_length: Option<u64>,
     pub lsp_servers: Vec<LspStatus>,
     pub lsp_enabled: bool,
+    pub skills: Vec<Skill>,
     dirty: Cell<bool>,
     lines_cache: RefCell<Vec<Line<'static>>>,
 }
@@ -45,6 +46,9 @@ pub enum SidebarMessage {
     UpdateLsp {
         servers: Vec<LspStatus>,
     },
+    UpdateSkills {
+        skills: Vec<Skill>,
+    },
 }
 
 impl Sidebar {
@@ -62,6 +66,7 @@ impl Sidebar {
             context_length: None,
             lsp_servers: Vec::new(),
             lsp_enabled: true,
+            skills: Vec::new(),
             dirty: Cell::new(true),
             lines_cache: RefCell::new(Vec::new()),
         }
@@ -98,6 +103,9 @@ impl Sidebar {
             }
             SidebarMessage::UpdateLsp { servers } => {
                 self.lsp_servers = servers;
+            }
+            SidebarMessage::UpdateSkills { skills } => {
+                self.skills = skills;
             }
         }
     }
@@ -221,7 +229,21 @@ impl Sidebar {
         lines.push(Line::from(""));
 
         lines.push(Line::from("Skills").fg(theme::ACCENT).bold());
-        lines.push(Line::from("  inactive").fg(theme::TEXT_MUTED));
+        if self.skills.is_empty() {
+            lines.push(Line::from("  none").fg(theme::TEXT_MUTED));
+        } else {
+            for skill in &self.skills {
+                lines.push(
+                    Line::from(format!("  {}", skill.name))
+                        .fg(theme::TEXT)
+                        .bold(),
+                );
+                if !skill.description.is_empty() {
+                    lines
+                        .push(Line::from(format!("    {}", skill.description)).fg(theme::TEXT_DIM));
+                }
+            }
+        }
 
         lines
     }
