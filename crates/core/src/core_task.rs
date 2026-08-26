@@ -30,22 +30,43 @@ enum StreamOutcome {
     Overflowed { compacted: bool },
 }
 
+/// Shared state owned by the core task's run loop, threaded through the
+/// turn-streaming helpers. Bundles the long-lived run-loop state plus the
+/// per-turn parameters derived once from config, so the helpers take a single
+/// `&mut CoreCtx` instead of a long parameter list.
+struct CoreCtx {
+    store: Store,
+    connections: Connections,
+    clients: HashMap<String, ProviderClient>,
+    embedding_setup: Option<EmbeddingSetup>,
+    lsp: std::sync::Arc<tokio::sync::Mutex<shuvarie_lsp::LspManager>>,
+    active_stream: Option<AbortHandle>,
+    turn_state: Option<Arc<Mutex<TurnState>>>,
+    event_tx: Sender<Event>,
+    stream_done_tx: Sender<StreamOutcome>,
+    approval_tx: Sender<ApprovalRequest>,
+    config: Config,
+    workspace_root: PathBuf,
+    agents_md_context: crate::context::LoadedContext,
+    skills: crate::skills::Skills,
+    session: Option<Arc<Mutex<Session>>>,
+    manager_turns: usize,
+    worker_turns: usize,
+    max_output_chars: usize,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     config: Config,
-    mut connections: Connections,
-    mut store: Store,
+    connections: Connections,
+    store: Store,
     load_current: bool,
     config_path: Option<PathBuf>,
     connections_path: Option<PathBuf>,
     mut cmd_rx: Receiver<Command>,
     event_tx: Sender<Event>,
 ) {
-    let mut clients: HashMap<String, ProviderClient> = HashMap::new();
-    let mut session: Option<Arc<Mutex<Session>>> = None;
-    let mut active_stream: Option<AbortHandle> = None;
     let mut semantic_search: Option<AbortHandle> = None;
-    let mut turn_state: Option<Arc<Mutex<TurnState>>> = None;
     let (stream_done_tx, mut stream_done_rx) = tokio::sync::mpsc::channel::<StreamOutcome>(1);
     let mut overflow_retries: usize = 0;
     const MAX_OVERFLOW_RETRIES: usize = 3;
@@ -55,6 +76,7 @@ pub async fn run(
     let mut next_approval_id: u64 = 0;
     let mut always_approve = false;
 
+    let mut clients: HashMap<String, ProviderClient> = HashMap::new();
     let embedding_setup = embeddings::setup(&config, &connections, &mut clients);
     if let Some(setup) = embedding_setup.clone() {
         let store_backfill = store.clone();
@@ -82,8 +104,31 @@ pub async fn run(
         })
         .await;
 
+    let manager_turns = config.agent.effective_max_turns();
+    let worker_turns = config.agent.effective_worker_max_turns();
+    let max_output_chars = config.context.tool_output_max_chars;
+    let mut ctx = CoreCtx {
+        store,
+        connections,
+        clients,
+        embedding_setup,
+        lsp,
+        active_stream: None,
+        turn_state: None,
+        event_tx,
+        stream_done_tx,
+        approval_tx,
+        config,
+        workspace_root,
+        agents_md_context,
+        skills,
+        session: None,
+        manager_turns,
+        worker_turns,
+        max_output_chars,
+    };
     if load_current {
-        load_most_recent_session(&mut store, &mut session, &event_tx).await;
+        load_most_recent_session(&mut ctx.store, &mut ctx.session, &ctx.event_tx).await;
     }
 
     loop {
@@ -92,13 +137,13 @@ pub async fn run(
                 let Some(cmd) = cmd else { break };
                 match cmd {
                     Command::Ping => {
-                        let _ = event_tx.send(Event::Pong).await;
+                        let _ = ctx.event_tx.send(Event::Pong).await;
                     }
                     Command::ListModels { provider_name } => {
-                        let client = match client_for(&mut clients, &mut connections, &provider_name) {
+                        let client = match client_for(&mut ctx.clients, &mut ctx.connections, &provider_name) {
                             Ok(c) => c,
                             Err(e) => {
-                                let _ = event_tx
+                                let _ = ctx.event_tx
                                     .send(Event::ModelsError {
                                         provider_name,
                                         error: e,
@@ -113,7 +158,7 @@ pub async fn run(
                                 for model in &mut models {
                                     shuvarie_catalog::enrich(provider, model);
                                 }
-                                let _ = event_tx
+                                let _ = ctx.event_tx
                                     .send(Event::ModelsLoaded {
                                         provider_name,
                                         models,
@@ -121,7 +166,7 @@ pub async fn run(
                                     .await;
                             }
                             Err(e) => {
-                                let _ = event_tx
+                                let _ = ctx.event_tx
                                     .send(Event::ModelsError {
                                         provider_name,
                                         error: e.to_string(),
@@ -131,91 +176,91 @@ pub async fn run(
                         }
                     }
                     Command::AddProvider { name, config: pc } => {
-                        connections.providers.insert(name.clone(), pc);
-                        clients.remove(&name);
+                        ctx.connections.providers.insert(name.clone(), pc);
+                        ctx.clients.remove(&name);
                         persist(
-                            &config,
-                            &connections,
+                            &ctx.config,
+                            &ctx.connections,
                             config_path.as_deref(),
                             connections_path.as_deref(),
-                            &event_tx,
+                            &ctx.event_tx,
                         )
                         .await;
                     }
                     Command::RemoveProvider { name } => {
-                        connections.providers.remove(&name);
-                        clients.remove(&name);
-                        if connections.active_provider.as_deref() == Some(name.as_str()) {
-                            connections.active_provider = None;
-                            connections.active_model = None;
+                        ctx.connections.providers.remove(&name);
+                        ctx.clients.remove(&name);
+                        if ctx.connections.active_provider.as_deref() == Some(name.as_str()) {
+                            ctx.connections.active_provider = None;
+                            ctx.connections.active_model = None;
                         }
                         persist(
-                            &config,
-                            &connections,
+                            &ctx.config,
+                            &ctx.connections,
                             config_path.as_deref(),
                             connections_path.as_deref(),
-                            &event_tx,
+                            &ctx.event_tx,
                         )
                         .await;
                     }
                     Command::SetActiveProvider { name } => {
-                        if connections.providers.contains_key(&name) {
-                            connections.active_provider = Some(name.clone());
-                            if !clients.contains_key(&name)
-                                && let Some(pc) = connections.providers.get(&name)
+                        if ctx.connections.providers.contains_key(&name) {
+                            ctx.connections.active_provider = Some(name.clone());
+                            if !ctx.clients.contains_key(&name)
+                                && let Some(pc) = ctx.connections.providers.get(&name)
                                 && let Ok(client) = build_client(pc)
                             {
-                                clients.insert(name.clone(), client);
+                                ctx.clients.insert(name.clone(), client);
                             }
                             persist(
-                                &config,
-                                &connections,
+                                &ctx.config,
+                                &ctx.connections,
                                 config_path.as_deref(),
                                 connections_path.as_deref(),
-                                &event_tx,
+                                &ctx.event_tx,
                             )
                             .await;
                         }
                     }
                     Command::SetActiveModel { model } => {
-                        connections.active_model = Some(model);
+                        ctx.connections.active_model = Some(model);
                         persist(
-                            &config,
-                            &connections,
+                            &ctx.config,
+                            &ctx.connections,
                             config_path.as_deref(),
                             connections_path.as_deref(),
-                            &event_tx,
+                            &ctx.event_tx,
                         )
                         .await;
                     }
                     Command::SaveConfig => {
                         persist(
-                            &config,
-                            &connections,
+                            &ctx.config,
+                            &ctx.connections,
                             config_path.as_deref(),
                             connections_path.as_deref(),
-                            &event_tx,
+                            &ctx.event_tx,
                         )
                         .await;
                     }
                     Command::StartSession => {
                         always_approve = false;
                         overflow_retries = 0;
-                        session = Some(Arc::new(Mutex::new(Session::new())));
-                        let _ = event_tx.send(Event::SessionStarted).await;
+                        ctx.session = Some(Arc::new(Mutex::new(Session::new())));
+                        let _ = ctx.event_tx.send(Event::SessionStarted).await;
                     }
                     Command::NewSession => {
-                        if stream_busy(&active_stream, &event_tx).await {
+                        if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
                         }
                         always_approve = false;
                         overflow_retries = 0;
-                        session = Some(Arc::new(Mutex::new(Session::new())));
-                        let _ = event_tx.send(Event::SessionStarted).await;
+                        ctx.session = Some(Arc::new(Mutex::new(Session::new())));
+                        let _ = ctx.event_tx.send(Event::SessionStarted).await;
                     }
                     Command::SendMessage { content } => {
-                        if active_stream.as_ref().is_some_and(|h| !h.is_finished()) {
-                            let _ = event_tx
+                        if ctx.active_stream.as_ref().is_some_and(|h| !h.is_finished()) {
+                            let _ = ctx.event_tx
                                 .send(Event::StreamError {
                                     error: "a reply is already streaming".into(),
                                 })
@@ -223,33 +268,34 @@ pub async fn run(
                             continue;
                         }
                         overflow_retries = 0;
-                        active_stream = None;
-                        if session.is_none() {
-                            session = Some(Arc::new(Mutex::new(Session::new())));
-                            let _ = event_tx.send(Event::SessionStarted).await;
+                        ctx.active_stream = None;
+                        if ctx.session.is_none() {
+                            ctx.session = Some(Arc::new(Mutex::new(Session::new())));
+                            let _ = ctx.event_tx.send(Event::SessionStarted).await;
                         }
-                        let s = session.as_ref().unwrap();
+                        let s = ctx.session.as_ref().unwrap();
                         s.lock().await.push_user(content.clone());
 
                         {
                             let mut guard = s.lock().await;
                             if guard.id.is_none() {
                                 let title = title_for(&content);
-                                match store
+                                match ctx
+                                    .store
                                     .create_session(
                                         &title,
-                                        connections.active_provider.as_deref(),
-                                        connections.active_model.as_deref(),
+                                        ctx.connections.active_provider.as_deref(),
+                                        ctx.connections.active_model.as_deref(),
                                     )
                                     .await
                                 {
                                     Ok(id) => {
                                         guard.id = Some(id);
                                         guard.title = Some(title.clone());
-                                        let _ = event_tx.send(Event::SessionCreated { id, title }).await;
+                                        let _ = ctx.event_tx.send(Event::SessionCreated { id, title }).await;
                                     }
                                     Err(e) => {
-                                        let _ = event_tx
+                                        let _ = ctx.event_tx
                                             .send(Event::StreamError {
                                                 error: format!("failed to create session: {e}"),
                                             })
@@ -260,13 +306,14 @@ pub async fn run(
                             }
                             let id = guard.id.unwrap();
                             let seq = guard.messages.len() - 1;
-                            let msg = store
+                            let msg = ctx
+                                .store
                                 .append_message(id, guard.messages.last().unwrap().role, &content)
                                 .await;
                             match msg {
                                 Ok(msg) => {
-                                    if let Some(setup) = &embedding_setup {
-                                        let store_idx = store.clone();
+                                    if let Some(setup) = &ctx.embedding_setup {
+                                        let store_idx = ctx.store.clone();
                                         let setup_idx = setup.clone();
                                         let content_idx = msg.content.clone();
                                         tokio::spawn(async move {
@@ -283,7 +330,7 @@ pub async fn run(
                                     }
                                 }
                                 Err(e) => {
-                                    let _ = event_tx
+                                    let _ = ctx.event_tx
                                         .send(Event::StreamError {
                                             error: format!("failed to persist message: {e}"),
                                         })
@@ -293,139 +340,29 @@ pub async fn run(
                             }
                         }
 
-                        let Some(provider_name) = connections.active_provider.clone() else {
-                            let _ = event_tx
-                                .send(Event::StreamError {
-                                    error: "no active provider".into(),
-                                })
-                                .await;
-                            continue;
-                        };
-                        let Some(model) = connections.active_model.clone() else {
-                            let _ = event_tx
-                                .send(Event::StreamError {
-                                    error: "no active model".into(),
-                                })
-                                .await;
-                            continue;
-                        };
-
-                        let client = match client_for(&mut clients, &mut connections, &provider_name) {
-                            Ok(c) => c,
-                            Err(e) => {
-                                let _ = event_tx.send(Event::StreamError { error: e }).await;
-                                continue;
-                            }
-                        };
-
-                        let prior: Vec<shuvarie_llm::ChatMsg> = {
-                            let guard = s.lock().await;
-                            guard.history_for_send()
-                        };
-                        let loaded_context = agents_md_context
-                            .clone()
-                            .merged(crate::context::load_context_dir(
-                                &workspace_root,
-                                agents_md_context.remaining_budget(),
-                            ));
-                        if !loaded_context.is_empty() {
-                            let _ = event_tx
-                                .send(Event::ContextLoaded {
-                                    paths: loaded_context.files.clone(),
-                                })
-                                .await;
-                        }
-                        let base = match skills.preamble_section() {
-                            Some(section) => format!("{AGENT_PREAMBLE}\n\n{section}"),
-                            None => AGENT_PREAMBLE.to_string(),
-                        };
-                        let preamble = crate::context::build_preamble(&base, &loaded_context);
-                        let gate = ApprovalGate::new(approval_tx.clone());
-                        let max_output_chars = config.context.tool_output_max_chars;
-                        let budget = context_budget(
-                            &config,
-                            client.kind(),
-                            &model,
-                        );
-                        let tools = crate::tools::all_tools(
-                            gate.clone(),
-                            lsp.clone(),
-                            crate::tools::ReadCache::new(),
-                            max_output_chars,
-                        );
-                        let manager_turns = config.agent.effective_max_turns();
-                        let worker_turns = config.agent.effective_worker_max_turns();
-                        let mut worker_set = crate::agents::build_workers(
-                            client.clone(),
-                            &model,
-                            gate,
-                            lsp.clone(),
-                            worker_turns,
-                            max_output_chars,
-                            budget.clone(),
-                        );
-                        let stream = client
-                            .stream(
-                                &model,
-                                Some(&preamble),
-                                &content,
-                                &prior,
-                                &tools,
-                                &mut worker_set.workers,
-                                manager_turns,
-                                budget,
-                            )
-                            .await;
-                        let tx = event_tx.clone();
-                        let session_shared = s.clone();
-                        let client_shared = client.clone();
-                        let store_shared = store.clone();
-                        let model_shared = model.clone();
-                        let worker_usage = worker_set.usage;
-                        let embedding_shared = embedding_setup.clone();
-                        let turn_state_shared = Arc::new(Mutex::new(TurnState::default()));
-                        let stream_done = stream_done_tx.clone();
-                        turn_state = Some(turn_state_shared.clone());
-                        active_stream = Some(
-                            tokio::spawn(async move {
-                                stream_stream_to_events(
-                                    stream,
-                                    session_shared,
-                                    client_shared,
-                                    store_shared,
-                                    model_shared,
-                                    worker_usage,
-                                    embedding_shared,
-                                    tx,
-                                    turn_state_shared,
-                                    stream_done,
-                                )
-                                .await;
-                            })
-                            .abort_handle(),
-                        );
+                        ctx.self_replay_send(content, false).await;
                     }
                     Command::CancelStream => {
-                        if let Some(handle) = active_stream.take()
+                        if let Some(handle) = ctx.active_stream.take()
                             && !handle.is_finished()
                         {
                             handle.abort();
                             persist_interrupted_turn(
-                                turn_state.take(),
-                                &mut store,
-                                &session,
-                                &event_tx,
+                                ctx.turn_state.take(),
+                                &mut ctx.store,
+                                &ctx.session,
+                                &ctx.event_tx,
                             )
                             .await;
-                            let _ = event_tx.send(Event::StreamCancelled).await;
+                            let _ = ctx.event_tx.send(Event::StreamCancelled).await;
                         }
                     }
-                    Command::ListSessions => match store.list_sessions().await {
+                    Command::ListSessions => match ctx.store.list_sessions().await {
                         Ok(sessions) => {
-                            let _ = event_tx.send(Event::SessionsLoaded { sessions }).await;
+                            let _ = ctx.event_tx.send(Event::SessionsLoaded { sessions }).await;
                         }
                         Err(e) => {
-                            let _ = event_tx
+                            let _ = ctx.event_tx
                                 .send(Event::SessionError {
                                     error: e.to_string(),
                                 })
@@ -433,15 +370,15 @@ pub async fn run(
                         }
                     },
                     Command::LoadSession { id } => {
-                        if stream_busy(&active_stream, &event_tx).await {
+                        if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
                         }
                         always_approve = false;
-                        match store.load_session(id).await {
+                        match ctx.store.load_session(id).await {
                             Ok(stored) => {
                                 let loaded = Session::from_stored(stored);
-                                session = Some(Arc::new(Mutex::new(loaded.clone())));
-                                let _ = event_tx
+                                ctx.session = Some(Arc::new(Mutex::new(loaded.clone())));
+                                let _ = ctx.event_tx
                                     .send(Event::SessionLoaded {
                                         id,
                                         title: loaded.title.clone().unwrap_or_default(),
@@ -450,7 +387,7 @@ pub async fn run(
                                     .await;
                             }
                             Err(e) => {
-                                let _ = event_tx
+                                let _ = ctx.event_tx
                                     .send(Event::SessionError {
                                         error: e.to_string(),
                                     })
@@ -459,20 +396,20 @@ pub async fn run(
                         }
                     }
                     Command::DeleteSession { id } => {
-                        if stream_busy(&active_stream, &event_tx).await {
+                        if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
                         }
-                        match store.delete_session(id).await {
+                        match ctx.store.delete_session(id).await {
                             Ok(()) => {
-                                if let Some(s) = &session
+                                if let Some(s) = &ctx.session
                                     && s.lock().await.id == Some(id)
                                 {
                                     *s.lock().await = Session::new();
                                 }
-                                let _ = event_tx.send(Event::SessionDeleted { id }).await;
+                                let _ = ctx.event_tx.send(Event::SessionDeleted { id }).await;
                             }
                             Err(e) => {
-                                let _ = event_tx
+                                let _ = ctx.event_tx
                                     .send(Event::SessionError {
                                         error: e.to_string(),
                                     })
@@ -483,13 +420,13 @@ pub async fn run(
                     Command::SearchHistory { query } => {
                         let query = query.trim().to_string();
                         if query.is_empty() {
-                            let _ = event_tx.send(Event::SearchResults { hits: vec![] }).await;
+                            let _ = ctx.event_tx.send(Event::SearchResults { hits: vec![] }).await;
                             continue;
                         }
-                        let mut fts_hits = match store.search_messages(&query, SEARCH_LIMIT).await {
+                        let mut fts_hits = match ctx.store.search_messages(&query, SEARCH_LIMIT).await {
                             Ok(hits) => hits,
                             Err(e) => {
-                                let _ = event_tx
+                                let _ = ctx.event_tx
                                     .send(Event::SearchError {
                                         error: e.to_string(),
                                     })
@@ -497,13 +434,13 @@ pub async fn run(
                                 continue;
                             }
                         };
-                        if let Some(setup) = &embedding_setup {
+                        if let Some(setup) = &ctx.embedding_setup {
                             if let Some(handle) = semantic_search.take() {
                                 handle.abort();
                             }
-                            let store_sem = store.clone();
+                            let store_sem = ctx.store.clone();
                             let setup_sem = setup.clone();
-                            let tx_sem = event_tx.clone();
+                            let tx_sem = ctx.event_tx.clone();
                             let fts_sem = std::mem::take(&mut fts_hits);
                             let query_sem = query.clone();
                             semantic_search = Some(
@@ -532,7 +469,7 @@ pub async fn run(
                                 .abort_handle(),
                             );
                         }
-                        let _ = event_tx.send(Event::SearchResults { hits: fts_hits }).await;
+                        let _ = ctx.event_tx.send(Event::SearchResults { hits: fts_hits }).await;
                     }
                     Command::ApproveTool { id, approved, always } => {
                         if always {
@@ -543,31 +480,31 @@ pub async fn run(
                         }
                     }
                     Command::UndoLastTurn => {
-                        if stream_busy(&active_stream, &event_tx).await {
+                        if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
                         }
-                        let Some(s) = &session else { continue; };
+                        let Some(s) = &ctx.session else { continue; };
                         let session_id = s.lock().await.id;
                         let Some(sid) = session_id else { continue; };
-                        match undo_last_turn(&mut store, sid).await {
+                        match undo_last_turn(&mut ctx.store, sid).await {
                             Ok(true) => {
-                                if let Ok(stored) = store.load_session(sid).await {
+                                if let Ok(stored) = ctx.store.load_session(sid).await {
                                     let loaded = Session::from_stored(stored);
                                     *s.lock().await = loaded.clone();
-                                    let _ = event_tx
+                                    let _ = ctx.event_tx
                                         .send(Event::TurnReverted { session: loaded })
                                         .await;
                                 }
                             }
                             Ok(false) => {
-                                let _ = event_tx
+                                let _ = ctx.event_tx
                                     .send(Event::SessionError {
                                         error: "nothing to undo".into(),
                                     })
                                     .await;
                             }
                             Err(e) => {
-                                let _ = event_tx
+                                let _ = ctx.event_tx
                                     .send(Event::SessionError {
                                         error: format!("undo failed: {e}"),
                                     })
@@ -576,31 +513,31 @@ pub async fn run(
                         }
                     }
                     Command::Redo => {
-                        if stream_busy(&active_stream, &event_tx).await {
+                        if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
                         }
-                        let Some(s) = &session else { continue; };
+                        let Some(s) = &ctx.session else { continue; };
                         let session_id = s.lock().await.id;
                         let Some(sid) = session_id else { continue; };
-                        match redo_turn(&mut store, sid).await {
+                        match redo_turn(&mut ctx.store, sid).await {
                             Ok(true) => {
-                                if let Ok(stored) = store.load_session(sid).await {
+                                if let Ok(stored) = ctx.store.load_session(sid).await {
                                     let loaded = Session::from_stored(stored);
                                     *s.lock().await = loaded.clone();
-                                    let _ = event_tx
+                                    let _ = ctx.event_tx
                                         .send(Event::TurnRestored { session: loaded })
                                         .await;
                                 }
                             }
                             Ok(false) => {
-                                let _ = event_tx
+                                let _ = ctx.event_tx
                                     .send(Event::SessionError {
                                         error: "nothing to redo".into(),
                                     })
                                     .await;
                             }
                             Err(e) => {
-                                let _ = event_tx
+                                let _ = ctx.event_tx
                                     .send(Event::SessionError {
                                         error: format!("redo failed: {e}"),
                                     })
@@ -609,58 +546,37 @@ pub async fn run(
                         }
                     }
                     Command::Replay => {
-                        if stream_busy(&active_stream, &event_tx).await {
+                        if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
                         }
-                        let Some(s) = &session else { continue; };
+                        let Some(s) = &ctx.session else { continue; };
                         let session_id = s.lock().await.id;
                         let Some(sid) = session_id else { continue; };
                         let last_user_content = s.lock().await.messages.iter().rev()
                             .find(|m| m.role == shuvarie_llm::Role::User)
                             .map(|m| m.content.clone());
-                        match undo_last_turn(&mut store, sid).await {
+                        match undo_last_turn(&mut ctx.store, sid).await {
                             Ok(true) => {
-                                if let Ok(stored) = store.load_session(sid).await {
+                                if let Ok(stored) = ctx.store.load_session(sid).await {
                                     let loaded = Session::from_stored(stored);
                                     *s.lock().await = loaded.clone();
-                                    let _ = event_tx
+                                    let _ = ctx.event_tx
                                         .send(Event::TurnReverted { session: loaded })
                                         .await;
                                 }
                                 if let Some(content) = last_user_content {
-                                    self_replay_send(
-                                        &mut store,
-                                        &session,
-                                        &mut connections,
-                                        &mut clients,
-                                        &embedding_setup,
-                                        &lsp,
-                                        &mut active_stream,
-                                        &mut turn_state,
-                                        &event_tx,
-                                        &stream_done_tx,
-                                        content,
-                                        true,
-                                        config.agent.effective_max_turns(),
-                                        config.agent.effective_worker_max_turns(),
-                                        config.context.tool_output_max_chars,
-                                        &config,
-                                        &workspace_root,
-                                        &agents_md_context,
-                                        &skills,
-                                    )
-                                    .await;
+                                    ctx.self_replay_send(content, true).await;
                                 }
                             }
                             Ok(false) => {
-                                let _ = event_tx
+                                let _ = ctx.event_tx
                                     .send(Event::SessionError {
                                         error: "nothing to replay".into(),
                                     })
                                     .await;
                             }
                             Err(e) => {
-                                let _ = event_tx
+                                let _ = ctx.event_tx
                                     .send(Event::SessionError {
                                         error: format!("replay failed: {e}"),
                                     })
@@ -669,71 +585,52 @@ pub async fn run(
                         }
                     }
                     Command::Resume => {
-                        if stream_busy(&active_stream, &event_tx).await {
+                        if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
                         }
-                        let Some(s) = &session else { continue; };
+                        let Some(s) = &ctx.session else { continue; };
                         let last_is_interrupted = s.lock().await.last_assistant_interrupted();
                         if !last_is_interrupted {
-                            let _ = event_tx
+                            let _ = ctx.event_tx
                                 .send(Event::SessionError {
                                     error: "stream was not interrupted".into(),
                                 })
                                 .await;
                             continue;
                         }
-                        resume_last_turn(
-                            &mut store,
-                            &session,
-                            &mut connections,
-                            &mut clients,
-                            &embedding_setup,
-                            &lsp,
-                            &mut active_stream,
-                            &mut turn_state,
-                            &event_tx,
-                            &stream_done_tx,
-                            config.agent.effective_max_turns(),
-                            config.agent.effective_worker_max_turns(),
-                            config.context.tool_output_max_chars,
-                            &config,
-                            &workspace_root,
-                            &agents_md_context,
-                            &skills,
-                        )
-                        .await;
+                        ctx.resume_last_turn().await;
                     }
                     Command::LspStart { name } => {
-                        let mut mgr = lsp.lock().await;
+                        let mut mgr = ctx.lsp.lock().await;
                         match mgr.start(&name).await {
                             Ok(()) => {
-                                emit_lsp_status(&mgr, &event_tx).await;
+                                emit_lsp_status(&mgr, &ctx.event_tx).await;
                             }
                             Err(e) => {
-                                let _ = event_tx.send(Event::LspError { error: e }).await;
+                                let _ = ctx.event_tx.send(Event::LspError { error: e }).await;
                             }
                         }
                     }
                     Command::LspStop { name } => {
-                        let mut mgr = lsp.lock().await;
+                        let mut mgr = ctx.lsp.lock().await;
                         if let Err(e) = mgr.stop(&name).await {
-                            let _ = event_tx.send(Event::LspError { error: e }).await;
+                            let _ = ctx.event_tx.send(Event::LspError { error: e }).await;
                         }
-                        emit_lsp_status(&mgr, &event_tx).await;
+                        emit_lsp_status(&mgr, &ctx.event_tx).await;
                     }
                     Command::LspRestart { name } => {
-                        let mut mgr = lsp.lock().await;
+                        let mut mgr = ctx.lsp.lock().await;
                         match mgr.restart(&name).await {
                             Ok(()) => {
-                                emit_lsp_status(&mgr, &event_tx).await;
+                                emit_lsp_status(&mgr, &ctx.event_tx).await;
                             }
                             Err(e) => {
-                                let _ = event_tx.send(Event::LspError { error: e }).await;
+                                let _ = ctx.event_tx.send(Event::LspError { error: e }).await;
                             }
                         }
                     }
                     Command::LspList { all, filter } => {
-                        let mgr = lsp.lock().await;
+                        let mgr = ctx.lsp.lock().await;
                         let entries = mgr.list(all, filter.as_deref());
                         let mut text = String::new();
                         if entries.is_empty() {
@@ -748,7 +645,7 @@ pub async fn run(
                                 ));
                             }
                         }
-                        let _ = event_tx
+                        let _ = ctx.event_tx
                             .send(Event::LspStatus {
                                 servers: mgr.status_snapshot(),
                             })
@@ -759,12 +656,12 @@ pub async fn run(
                     }
                 }
             }
-            _ = lsp_pump_tick.tick(), if lsp.try_lock().map(|m| m.has_active_servers()).unwrap_or(false) => {
-                let mut mgr = lsp.lock().await;
+            _ = lsp_pump_tick.tick(), if ctx.lsp.try_lock().map(|m| m.has_active_servers()).unwrap_or(false) => {
+                let mut mgr = ctx.lsp.lock().await;
                 let updates = mgr.pump_diagnostics().await;
                 let had_updates = !updates.is_empty();
                 for upd in updates {
-                    let _ = event_tx
+                    let _ = ctx.event_tx
                         .send(Event::LspDiagnostics {
                             path: upd.path,
                             diagnostics: upd.diagnostics,
@@ -772,7 +669,7 @@ pub async fn run(
                         .await;
                 }
                 if had_updates {
-                    emit_lsp_status(&mgr, &event_tx).await;
+                    emit_lsp_status(&mgr, &ctx.event_tx).await;
                 }
             }
             approval = approval_rx.recv() => {
@@ -784,7 +681,7 @@ pub async fn run(
                 let id = next_approval_id;
                 next_approval_id = next_approval_id.wrapping_add(1);
                 pending_approvals.insert(id, req.respond);
-                let _ = event_tx
+                let _ = ctx.event_tx
                     .send(Event::ApprovalRequest {
                         id,
                         tool: req.tool,
@@ -802,29 +699,10 @@ pub async fn run(
                     StreamOutcome::Overflowed { compacted } => {
                         if compacted && overflow_retries < MAX_OVERFLOW_RETRIES {
                             overflow_retries += 1;
-                            resume_last_turn(
-                                &mut store,
-                                &session,
-                                &mut connections,
-                                &mut clients,
-                                &embedding_setup,
-                                &lsp,
-                                &mut active_stream,
-                                &mut turn_state,
-                                &event_tx,
-                                &stream_done_tx,
-                                config.agent.effective_max_turns(),
-                                config.agent.effective_worker_max_turns(),
-                                config.context.tool_output_max_chars,
-                                &config,
-                                &workspace_root,
-                                &agents_md_context,
-                                &skills,
-                            )
-                            .await;
+                            ctx.resume_last_turn().await;
                         } else {
                             overflow_retries = 0;
-                            let _ = event_tx
+                            let _ = ctx.event_tx
                                 .send(Event::StreamError {
                                     error: "context budget exceeded and compaction could not keep up; \
                                             start a new message or resume to continue"
@@ -1000,225 +878,175 @@ async fn redo_turn(store: &mut Store, session_id: u64) -> Result<bool, String> {
     Ok(true)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn self_replay_send(
-    store: &mut Store,
-    session: &Option<Arc<Mutex<Session>>>,
-    connections: &mut Connections,
-    clients: &mut HashMap<String, ProviderClient>,
-    embedding_setup: &Option<EmbeddingSetup>,
-    lsp: &std::sync::Arc<tokio::sync::Mutex<shuvarie_lsp::LspManager>>,
-    active_stream: &mut Option<AbortHandle>,
-    turn_state_slot: &mut Option<Arc<Mutex<TurnState>>>,
-    event_tx: &Sender<Event>,
-    stream_done_tx: &Sender<StreamOutcome>,
-    content: String,
-    push_user: bool,
-    manager_turns: usize,
-    worker_turns: usize,
-    max_output_chars: usize,
-    config: &Config,
-    workspace_root: &Path,
-    agents_md_context: &crate::context::LoadedContext,
-    skills: &crate::skills::Skills,
-) {
-    let Some(s) = session else {
-        return;
-    };
-    if push_user {
-        let mut guard = s.lock().await;
-        guard.push_user(content.clone());
-        let id = guard.id;
-        if let Some(id) = id {
-            let _ = store
-                .append_message(id, guard.messages.last().unwrap().role, &content)
+impl CoreCtx {
+    /// Build a stream for the given user content and spawn the event-forwarding
+    /// task. When `push_user` is set, the content is first appended as a user
+    /// message (used by `SendMessage`); otherwise it is re-sent as-is (used by
+    /// replay/resume).
+    async fn self_replay_send(&mut self, content: String, push_user: bool) {
+        let Some(s) = &self.session else {
+            return;
+        };
+        if push_user {
+            let mut guard = s.lock().await;
+            guard.push_user(content.clone());
+            let id = guard.id;
+            if let Some(id) = id {
+                let _ = self
+                    .store
+                    .append_message(id, guard.messages.last().unwrap().role, &content)
+                    .await;
+            }
+        }
+        let Some(provider_name) = self.connections.active_provider.clone() else {
+            let _ = self
+                .event_tx
+                .send(Event::StreamError {
+                    error: "no active provider".into(),
+                })
+                .await;
+            return;
+        };
+        let Some(model) = self.connections.active_model.clone() else {
+            let _ = self
+                .event_tx
+                .send(Event::StreamError {
+                    error: "no active model".into(),
+                })
+                .await;
+            return;
+        };
+        let client = match client_for(&mut self.clients, &mut self.connections, &provider_name) {
+            Ok(c) => c.clone(),
+            Err(e) => {
+                let _ = self.event_tx.send(Event::StreamError { error: e }).await;
+                return;
+            }
+        };
+        let prior: Vec<shuvarie_llm::ChatMsg> = {
+            let guard = s.lock().await;
+            guard.history_for_send()
+        };
+        let loaded_context =
+            self.agents_md_context
+                .clone()
+                .merged(crate::context::load_context_dir(
+                    &self.workspace_root,
+                    self.agents_md_context.remaining_budget(),
+                ));
+        if !loaded_context.is_empty() {
+            let _ = self
+                .event_tx
+                .send(Event::ContextLoaded {
+                    paths: loaded_context.files.clone(),
+                })
                 .await;
         }
-    }
-    let Some(provider_name) = connections.active_provider.clone() else {
-        let _ = event_tx
-            .send(Event::StreamError {
-                error: "no active provider".into(),
-            })
-            .await;
-        return;
-    };
-    let Some(model) = connections.active_model.clone() else {
-        let _ = event_tx
-            .send(Event::StreamError {
-                error: "no active model".into(),
-            })
-            .await;
-        return;
-    };
-    let client = match client_for(clients, connections, &provider_name) {
-        Ok(c) => c.clone(),
-        Err(e) => {
-            let _ = event_tx.send(Event::StreamError { error: e }).await;
-            return;
-        }
-    };
-    let prior: Vec<shuvarie_llm::ChatMsg> = {
-        let guard = s.lock().await;
-        guard.history_for_send()
-    };
-    let loaded_context = agents_md_context
-        .clone()
-        .merged(crate::context::load_context_dir(
-            workspace_root,
-            agents_md_context.remaining_budget(),
-        ));
-    if !loaded_context.is_empty() {
-        let _ = event_tx
-            .send(Event::ContextLoaded {
-                paths: loaded_context.files.clone(),
-            })
-            .await;
-    }
-    let base = match skills.preamble_section() {
-        Some(section) => format!("{AGENT_PREAMBLE}\n\n{section}"),
-        None => AGENT_PREAMBLE.to_string(),
-    };
-    let preamble = crate::context::build_preamble(&base, &loaded_context);
-    let gate = ApprovalGate::new(approval_tx_local());
-    let tools = crate::tools::all_tools(
-        gate.clone(),
-        lsp.clone(),
-        crate::tools::ReadCache::new(),
-        max_output_chars,
-    );
-    let budget = context_budget(config, client.kind(), &model);
-    let mut worker_set = crate::agents::build_workers(
-        client.clone(),
-        &model,
-        gate,
-        lsp.clone(),
-        worker_turns,
-        max_output_chars,
-        budget.clone(),
-    );
-    let stream = client
-        .stream(
+        let base = match self.skills.preamble_section() {
+            Some(section) => format!("{AGENT_PREAMBLE}\n\n{section}"),
+            None => AGENT_PREAMBLE.to_string(),
+        };
+        let preamble = crate::context::build_preamble(&base, &loaded_context);
+        let gate = ApprovalGate::new(self.approval_tx.clone());
+        let tools = crate::tools::all_tools(
+            gate.clone(),
+            self.lsp.clone(),
+            crate::tools::ReadCache::new(),
+            self.max_output_chars,
+        );
+        let budget = context_budget(&self.config, client.kind(), &model);
+        let mut worker_set = crate::agents::build_workers(
+            client.clone(),
             &model,
-            Some(&preamble),
-            &content,
-            &prior,
-            &tools,
-            &mut worker_set.workers,
-            manager_turns,
-            budget,
-        )
-        .await;
-    let tx = event_tx.clone();
-    let session_shared = s.clone();
-    let client_shared = client.clone();
-    let store_shared = store.clone();
-    let model_shared = model.clone();
-    let worker_usage = worker_set.usage;
-    let embedding_shared = embedding_setup.clone();
-    let turn_state_shared = Arc::new(Mutex::new(TurnState::default()));
-    let stream_done = stream_done_tx.clone();
-    *turn_state_slot = Some(turn_state_shared.clone());
-    *active_stream = Some(
-        tokio::spawn(async move {
-            stream_stream_to_events(
-                stream,
-                session_shared,
-                client_shared,
-                store_shared,
-                model_shared,
-                worker_usage,
-                embedding_shared,
-                tx,
-                turn_state_shared,
-                stream_done,
+            gate,
+            self.lsp.clone(),
+            self.worker_turns,
+            self.max_output_chars,
+            budget.clone(),
+        );
+        let stream = client
+            .stream(
+                &model,
+                Some(&preamble),
+                &content,
+                &prior,
+                &tools,
+                &mut worker_set.workers,
+                self.manager_turns,
+                budget,
             )
             .await;
-        })
-        .abort_handle(),
-    );
-}
-
-fn approval_tx_local() -> tokio::sync::mpsc::Sender<ApprovalRequest> {
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<ApprovalRequest>(64);
-    tokio::spawn(async move { while rx.recv().await.is_some() {} });
-    tx
-}
-
-/// Delete the interrupted assistant turn (message + tool calls) and re-stream
-/// from the last user message. Used by the manual `Resume` command and by the
-/// auto-continue path after a context overflow.
-#[allow(clippy::too_many_arguments)]
-async fn resume_last_turn(
-    store: &mut Store,
-    session: &Option<Arc<Mutex<Session>>>,
-    connections: &mut Connections,
-    clients: &mut HashMap<String, ProviderClient>,
-    embedding_setup: &Option<EmbeddingSetup>,
-    lsp: &std::sync::Arc<tokio::sync::Mutex<shuvarie_lsp::LspManager>>,
-    active_stream: &mut Option<AbortHandle>,
-    turn_state: &mut Option<Arc<Mutex<TurnState>>>,
-    event_tx: &Sender<Event>,
-    stream_done_tx: &Sender<StreamOutcome>,
-    manager_turns: usize,
-    worker_turns: usize,
-    max_output_chars: usize,
-    config: &Config,
-    workspace_root: &Path,
-    agents_md_context: &crate::context::LoadedContext,
-    skills: &crate::skills::Skills,
-) {
-    let Some(s) = session else {
-        return;
-    };
-    let (session_id, last_user_content) = {
-        let guard = s.lock().await;
-        let sid = guard.id;
-        let last_user = guard
-            .messages
-            .iter()
-            .rev()
-            .find(|m| m.role == shuvarie_llm::Role::User)
-            .map(|m| m.content.clone());
-        (sid, last_user)
-    };
-    let Some(sid) = session_id else {
-        return;
-    };
-    let Some(content) = last_user_content else {
-        return;
-    };
-    if let Ok(Some((_user_msg, assistant_msg))) = store.last_turn(sid).await {
-        let _ = store.delete_tool_calls_for_message(assistant_msg.id).await;
-        let _ = store.delete_message(assistant_msg.id).await;
+        let tx = self.event_tx.clone();
+        let session_shared = s.clone();
+        let client_shared = client.clone();
+        let store_shared = self.store.clone();
+        let model_shared = model.clone();
+        let worker_usage = worker_set.usage;
+        let embedding_shared = self.embedding_setup.clone();
+        let turn_state_shared = Arc::new(Mutex::new(TurnState::default()));
+        let stream_done = self.stream_done_tx.clone();
+        self.turn_state = Some(turn_state_shared.clone());
+        self.active_stream = Some(
+            tokio::spawn(async move {
+                stream_stream_to_events(
+                    stream,
+                    session_shared,
+                    client_shared,
+                    store_shared,
+                    model_shared,
+                    worker_usage,
+                    embedding_shared,
+                    tx,
+                    turn_state_shared,
+                    stream_done,
+                )
+                .await;
+            })
+            .abort_handle(),
+        );
     }
-    if let Ok(stored) = store.load_session(sid).await {
-        let loaded = Session::from_stored(stored);
-        *s.lock().await = loaded.clone();
-        let _ = event_tx.send(Event::TurnReverted { session: loaded }).await;
+
+    /// Delete the interrupted assistant turn (message + tool calls) and re-stream
+    /// from the last user message. Used by the manual `Resume` command and by the
+    /// auto-continue path after a context overflow.
+    async fn resume_last_turn(&mut self) {
+        let Some(s) = &self.session else {
+            return;
+        };
+        let (session_id, last_user_content) = {
+            let guard = s.lock().await;
+            let sid = guard.id;
+            let last_user = guard
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == shuvarie_llm::Role::User)
+                .map(|m| m.content.clone());
+            (sid, last_user)
+        };
+        let Some(sid) = session_id else {
+            return;
+        };
+        let Some(content) = last_user_content else {
+            return;
+        };
+        if let Ok(Some((_user_msg, assistant_msg))) = self.store.last_turn(sid).await {
+            let _ = self
+                .store
+                .delete_tool_calls_for_message(assistant_msg.id)
+                .await;
+            let _ = self.store.delete_message(assistant_msg.id).await;
+        }
+        if let Ok(stored) = self.store.load_session(sid).await {
+            let loaded = Session::from_stored(stored);
+            *s.lock().await = loaded.clone();
+            let _ = self
+                .event_tx
+                .send(Event::TurnReverted { session: loaded })
+                .await;
+        }
+        self.self_replay_send(content, false).await;
     }
-    self_replay_send(
-        store,
-        session,
-        connections,
-        clients,
-        embedding_setup,
-        lsp,
-        active_stream,
-        turn_state,
-        event_tx,
-        stream_done_tx,
-        content,
-        false,
-        manager_turns,
-        worker_turns,
-        max_output_chars,
-        config,
-        workspace_root,
-        agents_md_context,
-        skills,
-    )
-    .await;
 }
 
 async fn load_most_recent_session(
