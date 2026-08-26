@@ -38,6 +38,9 @@ pub enum StreamItem {
         text: String,
         usage: TokenUsage,
     },
+    /// The run was stopped because the context budget was exceeded. The
+    /// caller should compact the session history before continuing.
+    Overflow,
     Error {
         message: String,
     },

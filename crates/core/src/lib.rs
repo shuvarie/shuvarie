@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod approval;
 pub mod command;
+pub mod compaction;
 pub mod config;
 pub mod connections;
 pub mod context;
@@ -17,7 +18,7 @@ pub mod tools;
 
 pub use approval::ApprovalReason;
 pub use command::Command;
-pub use config::{AgentConfig, Config, EmbeddingConfig, SkillsConfig, UiPrefs};
+pub use config::{AgentConfig, Config, ContextConfig, EmbeddingConfig, SkillsConfig, UiPrefs};
 pub use connections::{Connections, ProviderConfig};
 pub use core_task::run;
 pub use error::{CoreError, Result};

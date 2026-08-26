@@ -21,6 +21,7 @@ pub struct WorkerAgent {
     activity_rx: Option<mpsc::Receiver<StreamItem>>,
     usage: Arc<std::sync::Mutex<TokenUsage>>,
     max_turns: usize,
+    context_budget: Option<crate::context_hook::ContextBudget>,
 }
 
 pub struct WorkerRequest {
@@ -33,6 +34,7 @@ pub struct WorkerRequest {
     pub activity_tx: mpsc::Sender<StreamItem>,
     pub usage: Arc<std::sync::Mutex<TokenUsage>>,
     pub max_turns: usize,
+    pub context_budget: Option<crate::context_hook::ContextBudget>,
 }
 
 impl WorkerAgent {
@@ -46,6 +48,7 @@ impl WorkerAgent {
         tools: Vec<Arc<dyn Tool>>,
         usage: Arc<std::sync::Mutex<TokenUsage>>,
         max_turns: usize,
+        context_budget: Option<crate::context_hook::ContextBudget>,
     ) -> Self {
         let (activity_tx, activity_rx) = mpsc::channel(64);
         Self {
@@ -59,6 +62,7 @@ impl WorkerAgent {
             activity_rx: Some(activity_rx),
             usage,
             max_turns,
+            context_budget,
         }
     }
 
@@ -92,6 +96,7 @@ impl Clone for WorkerAgent {
             activity_rx: None,
             usage: Arc::clone(&self.usage),
             max_turns: self.max_turns,
+            context_budget: self.context_budget.clone(),
         }
     }
 }
@@ -132,6 +137,7 @@ impl Tool for WorkerAgent {
             activity_tx: self.activity_tx.clone(),
             usage: Arc::clone(&self.usage),
             max_turns: self.max_turns,
+            context_budget: self.context_budget.clone(),
         };
         let name = self.name.clone();
         Box::pin(async move {

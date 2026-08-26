@@ -138,6 +138,12 @@ name = "cost"
 ty = "F64"
 storage_ty = { Float = 8 }
 
+[[schema.tables.columns]]
+id = { table = 1, index = 13 }
+name = "summary"
+ty = "Bool"
+storage_ty = "Bool"
+
 [[schema.tables.indices]]
 id = { table = 1, index = 0 }
 name = "index_messages_by_id"

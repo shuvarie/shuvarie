@@ -227,9 +227,12 @@ impl ProviderClient {
         let (dynamic, file_rx) = dynamic_tools(&req.tools);
         let activity_tx = req.activity_tx.clone();
         let usage = Arc::clone(&req.usage);
+        let tracker = crate::context_hook::UsageTracker::new();
+        let budget = req.context_budget.clone();
         match &self.list {
             ListImpl::OpenAi(c) => {
-                let agent = agent_with_tools(c, &req.model, Some(&req.preamble), dynamic);
+                let agent =
+                    agent_with_tools(c, &req.model, Some(&req.preamble), dynamic, budget, tracker);
                 run_worker_agent(
                     agent,
                     &req.name,
@@ -242,7 +245,8 @@ impl ProviderClient {
                 .await
             }
             ListImpl::OpenRouter(c) => {
-                let agent = agent_with_tools(c, &req.model, Some(&req.preamble), dynamic);
+                let agent =
+                    agent_with_tools(c, &req.model, Some(&req.preamble), dynamic, budget, tracker);
                 run_worker_agent(
                     agent,
                     &req.name,
@@ -255,7 +259,8 @@ impl ProviderClient {
                 .await
             }
             ListImpl::DeepSeek(c) => {
-                let agent = agent_with_tools(c, &req.model, Some(&req.preamble), dynamic);
+                let agent =
+                    agent_with_tools(c, &req.model, Some(&req.preamble), dynamic, budget, tracker);
                 run_worker_agent(
                     agent,
                     &req.name,
@@ -268,7 +273,8 @@ impl ProviderClient {
                 .await
             }
             ListImpl::Anthropic(c) => {
-                let agent = agent_with_tools(c, &req.model, Some(&req.preamble), dynamic);
+                let agent =
+                    agent_with_tools(c, &req.model, Some(&req.preamble), dynamic, budget, tracker);
                 run_worker_agent(
                     agent,
                     &req.name,
@@ -281,7 +287,8 @@ impl ProviderClient {
                 .await
             }
             ListImpl::Gemini(c) => {
-                let agent = agent_with_tools(c, &req.model, Some(&req.preamble), dynamic);
+                let agent =
+                    agent_with_tools(c, &req.model, Some(&req.preamble), dynamic, budget, tracker);
                 run_worker_agent(
                     agent,
                     &req.name,
@@ -294,7 +301,8 @@ impl ProviderClient {
                 .await
             }
             ListImpl::Ollama(c) => {
-                let agent = agent_with_tools(c, &req.model, Some(&req.preamble), dynamic);
+                let agent =
+                    agent_with_tools(c, &req.model, Some(&req.preamble), dynamic, budget, tracker);
                 run_worker_agent(
                     agent,
                     &req.name,
@@ -319,9 +327,12 @@ impl ProviderClient {
         tools: &[std::sync::Arc<dyn Tool>],
         workers: &mut [crate::agent::WorkerAgent],
         max_turns: usize,
+        context_budget: Option<crate::context_hook::ContextBudget>,
     ) -> StreamStream {
         use rig::streaming::StreamingChat;
 
+        let tracker = crate::context_hook::UsageTracker::new();
+        let tracker_for_hook = tracker.clone();
         let user_msg = rig::message::Message::user(prompt.to_string());
         let rig_history: Vec<rig::message::Message> = history
             .iter()
@@ -371,6 +382,7 @@ impl ProviderClient {
             worker_names: std::collections::HashSet<String>,
             mut file_rx: tokio::sync::mpsc::Receiver<FileChange>,
             max_turns: usize,
+            tracker: std::sync::Arc<crate::context_hook::UsageTracker>,
         ) -> StreamStream
         where
             M: rig::completion::CompletionModel + 'static,
@@ -385,6 +397,7 @@ impl ProviderClient {
                 std::collections::HashMap::new();
             let mut pending_workers: std::collections::VecDeque<String> =
                 std::collections::VecDeque::new();
+            let tracker_clone = tracker.clone();
             let main = stream.map(move |item| match item {
                 Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
                     rig::streaming::StreamedAssistantContent::Text(t),
@@ -505,12 +518,23 @@ impl ProviderClient {
                         usage: crate::usage::token_usage_from_rig(resp.usage),
                     }
                 }
+                Ok(rig::agent::MultiTurnStreamItem::CompletionCall(call)) => {
+                    tracker_clone.record(call.usage);
+                    StreamItem::Delta {
+                        text: String::new(),
+                    }
+                }
                 Ok(_) => StreamItem::Delta {
                     text: String::new(),
                 },
-                Err(e) => StreamItem::Error {
-                    message: e.to_string(),
-                },
+                Err(e) => {
+                    let message = e.to_string();
+                    if message.contains(crate::context_hook::OVERFLOW_REASON) {
+                        StreamItem::Overflow
+                    } else {
+                        StreamItem::Error { message }
+                    }
+                }
             });
             Box::pin(merge_streams(main, receivers))
         }
@@ -518,73 +542,121 @@ impl ProviderClient {
         match &self.list {
             ListImpl::OpenAi(c) => {
                 build(
-                    agent_with_tools(c, model, preamble, dynamic.0),
+                    agent_with_tools(
+                        c,
+                        model,
+                        preamble,
+                        dynamic.0,
+                        context_budget,
+                        tracker_for_hook,
+                    ),
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
                     file_rx,
                     max_turns,
+                    tracker,
                 )
                 .await
             }
             ListImpl::OpenRouter(c) => {
                 build(
-                    agent_with_tools(c, model, preamble, dynamic.0),
+                    agent_with_tools(
+                        c,
+                        model,
+                        preamble,
+                        dynamic.0,
+                        context_budget,
+                        tracker_for_hook,
+                    ),
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
                     file_rx,
                     max_turns,
+                    tracker,
                 )
                 .await
             }
             ListImpl::DeepSeek(c) => {
                 build(
-                    agent_with_tools(c, model, preamble, dynamic.0),
+                    agent_with_tools(
+                        c,
+                        model,
+                        preamble,
+                        dynamic.0,
+                        context_budget,
+                        tracker_for_hook,
+                    ),
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
                     file_rx,
                     max_turns,
+                    tracker,
                 )
                 .await
             }
             ListImpl::Anthropic(c) => {
                 build(
-                    agent_with_tools(c, model, preamble, dynamic.0),
+                    agent_with_tools(
+                        c,
+                        model,
+                        preamble,
+                        dynamic.0,
+                        context_budget,
+                        tracker_for_hook,
+                    ),
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
                     file_rx,
                     max_turns,
+                    tracker,
                 )
                 .await
             }
             ListImpl::Gemini(c) => {
                 build(
-                    agent_with_tools(c, model, preamble, dynamic.0),
+                    agent_with_tools(
+                        c,
+                        model,
+                        preamble,
+                        dynamic.0,
+                        context_budget,
+                        tracker_for_hook,
+                    ),
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
                     file_rx,
                     max_turns,
+                    tracker,
                 )
                 .await
             }
             ListImpl::Ollama(c) => {
                 build(
-                    agent_with_tools(c, model, preamble, dynamic.0),
+                    agent_with_tools(
+                        c,
+                        model,
+                        preamble,
+                        dynamic.0,
+                        context_budget,
+                        tracker_for_hook,
+                    ),
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
                     file_rx,
                     max_turns,
+                    tracker,
                 )
                 .await
             }
@@ -642,6 +714,8 @@ fn agent_with_tools<C>(
     model: &str,
     preamble: Option<&str>,
     dynamic: Vec<rig::tool::DynamicTool>,
+    context_budget: Option<crate::context_hook::ContextBudget>,
+    tracker: std::sync::Arc<crate::context_hook::UsageTracker>,
 ) -> rig::agent::Agent<C::CompletionModel>
 where
     C: rig::client::CompletionClient + rig::prelude::AgentClientExt,
@@ -650,7 +724,14 @@ where
         Some(p) => client.agent(model).preamble(p),
         None => client.agent(model).without_preamble(),
     };
-    builder.dynamic_tools(dynamic).build()
+    if let Some(budget) = context_budget {
+        builder
+            .dynamic_tools(dynamic)
+            .add_hook(crate::context_hook::ContextHook::new(budget, tracker))
+            .build()
+    } else {
+        builder.dynamic_tools(dynamic).build()
+    }
 }
 
 async fn run_worker_agent<M>(
@@ -864,6 +945,7 @@ mod tests {
             Vec::new(),
             usage,
             10,
+            None,
         );
         let err = worker
             .call(json!({}))

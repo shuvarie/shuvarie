@@ -302,7 +302,7 @@ pub async fn run(
 
                         let prior: Vec<shuvarie_llm::ChatMsg> = {
                             let guard = s.lock().await;
-                            guard.messages[..guard.messages.len().saturating_sub(1)].to_vec()
+                            guard.history_for_send()
                         };
                         let loaded_context = agents_md_context
                             .clone()
@@ -323,11 +323,29 @@ pub async fn run(
                         };
                         let preamble = crate::context::build_preamble(&base, &loaded_context);
                         let gate = ApprovalGate::new(approval_tx.clone());
-                        let tools = crate::tools::all_tools(gate.clone(), lsp.clone());
+                        let max_output_chars = config.context.tool_output_max_chars;
+                        let budget = context_budget(
+                            &config,
+                            client.kind(),
+                            &model,
+                        );
+                        let tools = crate::tools::all_tools(
+                            gate.clone(),
+                            lsp.clone(),
+                            crate::tools::ReadCache::new(),
+                            max_output_chars,
+                        );
                         let manager_turns = config.agent.effective_max_turns();
                         let worker_turns = config.agent.effective_worker_max_turns();
-                        let mut worker_set =
-                            crate::agents::build_workers(client.clone(), &model, gate, lsp.clone(), worker_turns);
+                        let mut worker_set = crate::agents::build_workers(
+                            client.clone(),
+                            &model,
+                            gate,
+                            lsp.clone(),
+                            worker_turns,
+                            max_output_chars,
+                            budget.clone(),
+                        );
                         let stream = client
                             .stream(
                                 &model,
@@ -337,6 +355,7 @@ pub async fn run(
                                 &tools,
                                 &mut worker_set.workers,
                                 manager_turns,
+                                budget,
                             )
                             .await;
                         let tx = event_tx.clone();
@@ -603,6 +622,8 @@ pub async fn run(
                                         true,
                                         config.agent.effective_max_turns(),
                                         config.agent.effective_worker_max_turns(),
+                                        config.context.tool_output_max_chars,
+                                        &config,
                                         &workspace_root,
                                         &agents_md_context,
                                         &skills,
@@ -681,6 +702,8 @@ pub async fn run(
                             false,
                             config.agent.effective_max_turns(),
                             config.agent.effective_worker_max_turns(),
+                            config.context.tool_output_max_chars,
+                            &config,
                             &workspace_root,
                             &agents_md_context,
                             &skills,
@@ -957,6 +980,8 @@ async fn self_replay_send(
     push_user: bool,
     manager_turns: usize,
     worker_turns: usize,
+    max_output_chars: usize,
+    config: &Config,
     workspace_root: &Path,
     agents_md_context: &crate::context::LoadedContext,
     skills: &crate::skills::Skills,
@@ -999,7 +1024,7 @@ async fn self_replay_send(
     };
     let prior: Vec<shuvarie_llm::ChatMsg> = {
         let guard = s.lock().await;
-        guard.messages[..guard.messages.len().saturating_sub(1)].to_vec()
+        guard.history_for_send()
     };
     let loaded_context = agents_md_context
         .clone()
@@ -1020,9 +1045,22 @@ async fn self_replay_send(
     };
     let preamble = crate::context::build_preamble(&base, &loaded_context);
     let gate = ApprovalGate::new(approval_tx_local());
-    let tools = crate::tools::all_tools(gate.clone(), lsp.clone());
-    let mut worker_set =
-        crate::agents::build_workers(client.clone(), &model, gate, lsp.clone(), worker_turns);
+    let tools = crate::tools::all_tools(
+        gate.clone(),
+        lsp.clone(),
+        crate::tools::ReadCache::new(),
+        max_output_chars,
+    );
+    let budget = context_budget(config, client.kind(), &model);
+    let mut worker_set = crate::agents::build_workers(
+        client.clone(),
+        &model,
+        gate,
+        lsp.clone(),
+        worker_turns,
+        max_output_chars,
+        budget.clone(),
+    );
     let stream = client
         .stream(
             &model,
@@ -1032,6 +1070,7 @@ async fn self_replay_send(
             &tools,
             &mut worker_set.workers,
             manager_turns,
+            budget,
         )
         .await;
     let tx = event_tx.clone();
@@ -1357,6 +1396,48 @@ async fn stream_stream_to_events(
                 let _ = event_tx.send(Event::StreamError { error: message }).await;
                 break;
             }
+            shuvarie_llm::StreamItem::Overflow => {
+                persist_stream_error(
+                    assistant_message_id,
+                    &pending_text,
+                    &pending_reasoning,
+                    &session,
+                    &mut store,
+                )
+                .await;
+                let _ = event_tx
+                    .send(Event::StreamError {
+                        error: "context budget exceeded — compacting session history; \
+                                start a new message or resume to continue"
+                            .into(),
+                    })
+                    .await;
+                // Run compaction: summarize the head of the stored session
+                // so the next turn sends [summary, tail] instead of the full
+                // history.
+                if let Some(sid) = session.lock().await.id
+                    && let Ok(stored) = store.load_session(sid).await
+                    && let Some(plan) = crate::compaction::select_plan(&stored.messages)
+                {
+                    let head = &stored.messages[..plan.head_count];
+                    let head_text = crate::compaction::serialize_head(head);
+                    match crate::compaction::summarize(&client, &model, &head_text).await {
+                        Ok(summary) => {
+                            if let Ok(msg) = store.append_summary(sid, &summary).await {
+                                session.lock().await.summary_seq = Some(msg.seq);
+                            }
+                        }
+                        Err(e) => {
+                            let _ = event_tx
+                                .send(Event::StreamError {
+                                    error: format!("compaction failed: {e}"),
+                                })
+                                .await;
+                        }
+                    }
+                }
+                break;
+            }
         }
     }
 }
@@ -1559,6 +1640,26 @@ async fn persist(
                 .await;
         }
     }
+}
+
+/// Build a [`ContextBudget`] for the active model from the catalog's known
+/// context length (or the config's fallback) and the `[context]` settings.
+/// Returns `None` when context management is disabled.
+fn context_budget(
+    config: &Config,
+    provider: shuvarie_catalog::Provider,
+    model: &str,
+) -> Option<shuvarie_llm::ContextBudget> {
+    if !config.context.enabled {
+        return None;
+    }
+    let context_length = shuvarie_catalog::resolve(provider, model)
+        .map(|e| e.context_length)
+        .unwrap_or(config.context.fallback_context_length);
+    Some(shuvarie_llm::ContextBudget::new(
+        context_length,
+        config.context.reserved,
+    ))
 }
 
 #[cfg(test)]

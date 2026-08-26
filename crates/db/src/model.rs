@@ -74,6 +74,7 @@ pub struct Message {
     pub cached_input_tokens: u64,
     pub reasoning_tokens: u64,
     pub cost: f64,
+    pub summary: bool,
     #[has_many]
     pub embeddings: toasty::Deferred<Vec<MessageEmbedding>>,
     #[has_many]

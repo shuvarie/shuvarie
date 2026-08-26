@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use shuvarie_llm::{DiffLine, DiffLineKind, FileChange, Tool, ToolDefinition, ToolOutput};
@@ -12,6 +13,31 @@ const MAX_READ_BYTES: usize = 64 * 1024;
 const MAX_COMMAND_OUTPUT: usize = 16 * 1024;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
+type ReadKey = (String, Option<u64>, Option<u64>);
+
+/// Per-turn dedupe cache for `read_file`: tracks `(path, offset, limit)` keys
+/// that have already been returned to the model this turn. Repeated identical
+/// reads get a short note instead of re-sending file content, which keeps the
+/// agent loop from blowing up the context by re-reading the same large file.
+#[derive(Clone, Default)]
+pub struct ReadCache {
+    seen: Arc<Mutex<std::collections::HashSet<ReadKey>>>,
+}
+
+impl ReadCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns `true` if this exact `(path, offset, limit)` was already read
+    /// this turn, otherwise records it and returns `false`.
+    fn mark(&self, path: &str, offset: Option<u64>, limit: Option<u64>) -> bool {
+        let key = (path.to_string(), offset, limit);
+        let mut seen = self.seen.lock().unwrap();
+        !seen.insert(key)
+    }
+}
+
 fn arg_value(args: &Value, key: &str) -> Result<String, String> {
     args.get(key)
         .and_then(Value::as_str)
@@ -22,6 +48,8 @@ fn arg_value(args: &Value, key: &str) -> Result<String, String> {
 struct ReadFile {
     gate: ApprovalGate,
     lsp: Option<SharedManager>,
+    read_cache: ReadCache,
+    max_output_chars: usize,
 }
 
 impl Tool for ReadFile {
@@ -48,10 +76,17 @@ impl Tool for ReadFile {
     ) -> Pin<Box<dyn Future<Output = Result<ToolOutput, String>> + Send>> {
         let gate = self.gate.clone();
         let lsp = self.lsp.clone();
+        let read_cache = self.read_cache.clone();
+        let max_output_chars = self.max_output_chars;
         Box::pin(async move {
             let path = arg_value(&args, "path")?;
             let offset = args.get("offset").and_then(Value::as_u64);
             let limit = args.get("limit").and_then(Value::as_u64);
+            if read_cache.mark(&path, offset, limit) {
+                return Ok(ToolOutput::text(format!(
+                    "(already read {path} — see the earlier result; use a different offset/limit to re-read a range)"
+                )));
+            }
             let (abs, reason) = resolve_checked(&path)?;
             if let Some(reason) = reason {
                 gate.request("read_file", &path, reason).await?;
@@ -83,6 +118,13 @@ impl Tool for ReadFile {
             let mut out = String::new();
             for (i, line) in lines[start..end].iter().enumerate() {
                 out.push_str(&format!("{:>6} | {line}\n", start + i + 1));
+            }
+            if max_output_chars > 0 && out.chars().count() > max_output_chars {
+                let omitted = out.chars().count() - max_output_chars;
+                let truncated: String = out.chars().take(max_output_chars).collect();
+                return Ok(ToolOutput::text(format!(
+                    "{truncated}… (output truncated: {omitted} chars omitted — use offset/limit to read more of {path})"
+                )));
             }
             Ok(ToolOutput::text(out))
         })
@@ -715,11 +757,18 @@ impl Tool for Lsp {
     }
 }
 
-pub fn all_tools(gate: ApprovalGate, lsp: SharedManager) -> Vec<std::sync::Arc<dyn Tool>> {
+pub fn all_tools(
+    gate: ApprovalGate,
+    lsp: SharedManager,
+    read_cache: ReadCache,
+    max_output_chars: usize,
+) -> Vec<std::sync::Arc<dyn Tool>> {
     vec![
         std::sync::Arc::new(ReadFile {
             gate: gate.clone(),
             lsp: Some(lsp.clone()),
+            read_cache: read_cache.clone(),
+            max_output_chars,
         }),
         std::sync::Arc::new(WriteFile {
             gate: gate.clone(),
@@ -736,11 +785,18 @@ pub fn all_tools(gate: ApprovalGate, lsp: SharedManager) -> Vec<std::sync::Arc<d
     ]
 }
 
-pub fn read_tools(gate: ApprovalGate, lsp: SharedManager) -> Vec<std::sync::Arc<dyn Tool>> {
+pub fn read_tools(
+    gate: ApprovalGate,
+    lsp: SharedManager,
+    read_cache: ReadCache,
+    max_output_chars: usize,
+) -> Vec<std::sync::Arc<dyn Tool>> {
     vec![
         std::sync::Arc::new(ReadFile {
             gate: gate.clone(),
             lsp: Some(lsp.clone()),
+            read_cache,
+            max_output_chars,
         }),
         std::sync::Arc::new(ListDir { gate: gate.clone() }),
         std::sync::Arc::new(Grep { gate }),
@@ -752,11 +808,18 @@ pub fn command_tools(_gate: ApprovalGate) -> Vec<std::sync::Arc<dyn Tool>> {
     vec![std::sync::Arc::new(RunShell)]
 }
 
-pub fn edit_tools(gate: ApprovalGate, lsp: SharedManager) -> Vec<std::sync::Arc<dyn Tool>> {
+pub fn edit_tools(
+    gate: ApprovalGate,
+    lsp: SharedManager,
+    read_cache: ReadCache,
+    max_output_chars: usize,
+) -> Vec<std::sync::Arc<dyn Tool>> {
     vec![
         std::sync::Arc::new(ReadFile {
             gate: gate.clone(),
             lsp: Some(lsp.clone()),
+            read_cache,
+            max_output_chars,
         }),
         std::sync::Arc::new(WriteFile {
             gate: gate.clone(),
@@ -792,25 +855,28 @@ mod tests {
         None
     }
 
+    fn read_file_tool() -> ReadFile {
+        ReadFile {
+            gate: gate(),
+            lsp: no_lsp(),
+            read_cache: ReadCache::new(),
+            max_output_chars: 0,
+        }
+    }
+
     #[tokio::test]
     async fn read_file_with_range() {
         let (dir, _guard) = tempdir();
         std::fs::write("a.txt", "one\ntwo\nthree\n").unwrap();
-        let out = ReadFile {
-            gate: gate(),
-            lsp: no_lsp(),
-        }
-        .call(json!({ "path": "a.txt", "offset": 2, "limit": 1 }))
-        .await
-        .unwrap();
+        let out = read_file_tool()
+            .call(json!({ "path": "a.txt", "offset": 2, "limit": 1 }))
+            .await
+            .unwrap();
         assert!(out.text.contains("two"), "{}", out.text);
-        let err = ReadFile {
-            gate: gate(),
-            lsp: no_lsp(),
-        }
-        .call(json!({ "path": "missing.txt" }))
-        .await
-        .unwrap_err();
+        let err = read_file_tool()
+            .call(json!({ "path": "missing.txt" }))
+            .await
+            .unwrap_err();
         assert!(err.contains("missing.txt"));
         drop(dir);
     }
@@ -819,13 +885,10 @@ mod tests {
     async fn read_refuses_binary() {
         let (dir, _guard) = tempdir();
         std::fs::write("bin.dat", [0, 1, 2, 3]).unwrap();
-        let err = ReadFile {
-            gate: gate(),
-            lsp: no_lsp(),
-        }
-        .call(json!({ "path": "bin.dat" }))
-        .await
-        .unwrap_err();
+        let err = read_file_tool()
+            .call(json!({ "path": "bin.dat" }))
+            .await
+            .unwrap_err();
         assert!(err.contains("binary"));
         drop(dir);
     }
@@ -975,6 +1038,47 @@ mod tests {
         let new = "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nL\n";
         let diff = compute_diff(old, new);
         assert!(diff.iter().any(|l| l.kind == DiffLineKind::Ellipsis));
+    }
+
+    #[tokio::test]
+    async fn read_cache_dedupes_repeated_reads() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("dup.txt", "line\n").unwrap();
+        let cache = ReadCache::new();
+        let tool = ReadFile {
+            gate: gate(),
+            lsp: no_lsp(),
+            read_cache: cache.clone(),
+            max_output_chars: 0,
+        };
+        let first = tool.call(json!({ "path": "dup.txt" })).await.unwrap();
+        assert!(first.text.contains("line"));
+        let second = tool.call(json!({ "path": "dup.txt" })).await.unwrap();
+        assert!(second.text.contains("already read"), "{}", second.text);
+        assert!(!second.text.contains("line |"));
+        let ranged = tool
+            .call(json!({ "path": "dup.txt", "offset": 1, "limit": 1 }))
+            .await
+            .unwrap();
+        assert!(ranged.text.contains("line"), "{}", ranged.text);
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn read_truncates_large_output() {
+        let (dir, _guard) = tempdir();
+        let big = "x".repeat(10_000) + "\n";
+        std::fs::write("big.txt", &big).unwrap();
+        let tool = ReadFile {
+            gate: gate(),
+            lsp: no_lsp(),
+            read_cache: ReadCache::new(),
+            max_output_chars: 100,
+        };
+        let out = tool.call(json!({ "path": "big.txt" })).await.unwrap();
+        assert!(out.text.contains("truncated"), "{}", out.text);
+        assert!(out.text.chars().count() < big.len() + 200);
+        drop(dir);
     }
 
     #[test]

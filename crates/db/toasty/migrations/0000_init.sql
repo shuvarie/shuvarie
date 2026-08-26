@@ -20,7 +20,8 @@ CREATE TABLE "messages" (
     "total_tokens" INTEGER NOT NULL,
     "cached_input_tokens" INTEGER NOT NULL,
     "reasoning_tokens" INTEGER NOT NULL,
-    "cost" REAL NOT NULL
+    "cost" REAL NOT NULL,
+    "summary" INTEGER NOT NULL DEFAULT 0
 );
 -- #[toasty::breakpoint]
 CREATE INDEX "index_messages_by_session_id" ON "messages" ("session_id");

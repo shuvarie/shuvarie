@@ -20,6 +20,10 @@ pub struct Session {
     pub output_tokens: u64,
     pub reasoning_tokens: u64,
     pub cached_tokens: u64,
+    /// The `seq` of the most recent compaction summary message, if any.
+    /// Messages before this seq are replaced by the summary when building the
+    /// history sent to the LLM.
+    pub summary_seq: Option<u64>,
 }
 
 impl Session {
@@ -55,6 +59,9 @@ impl Session {
             }
             if m.interrupted {
                 s.interrupted.insert(m.seq, true);
+            }
+            if m.summary {
+                s.summary_seq = Some(m.seq);
             }
         }
         s.tool_records = stored
@@ -109,5 +116,19 @@ impl Session {
         self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
         self.reasoning_tokens = self.reasoning_tokens.saturating_add(usage.reasoning_tokens);
         self.cached_tokens = self.cached_tokens.saturating_add(usage.cached_input_tokens);
+    }
+
+    /// Build the chat history to send to the LLM for a new turn: all messages
+    /// except the last (the pending user message), with compaction applied —
+    /// everything before the most recent summary message is dropped (the
+    /// summary replaces it).
+    pub fn history_for_send(&self) -> Vec<ChatMsg> {
+        let total = self.messages.len();
+        let end = total.saturating_sub(1);
+        if end == 0 {
+            return Vec::new();
+        }
+        let begin = self.summary_seq.map(|s| (s as usize).min(end)).unwrap_or(0);
+        self.messages[begin..end].to_vec()
     }
 }

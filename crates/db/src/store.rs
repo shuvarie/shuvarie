@@ -43,6 +43,7 @@ pub struct StoredMessage {
     pub cached_input_tokens: u64,
     pub reasoning_tokens: u64,
     pub cost: f64,
+    pub summary: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -113,6 +114,7 @@ impl From<Message> for StoredMessage {
             cached_input_tokens: m.cached_input_tokens,
             reasoning_tokens: m.reasoning_tokens,
             cost: m.cost,
+            summary: m.summary,
         }
     }
 }
@@ -282,6 +284,7 @@ impl Store {
             cached_input_tokens: 0,
             reasoning_tokens: 0,
             cost: 0.0,
+            summary: false,
         })
         .exec(&mut self.db)
         .await
@@ -313,6 +316,7 @@ impl Store {
             cached_input_tokens: usage.cached_input_tokens,
             reasoning_tokens: usage.reasoning_tokens,
             cost,
+            summary: false,
         })
         .exec(&mut self.db)
         .await
@@ -344,6 +348,34 @@ impl Store {
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
         Ok(())
+    }
+
+    pub async fn append_summary(
+        &mut self,
+        session_id: u64,
+        content: &str,
+    ) -> Result<StoredMessage> {
+        let seq = self.next_seq(session_id).await?;
+        let msg = toasty::create!(Message {
+            session_id,
+            seq,
+            role: MsgRole::Assistant,
+            content: content.to_string(),
+            reasoning: String::new(),
+            interrupted: false,
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            cached_input_tokens: 0,
+            reasoning_tokens: 0,
+            cost: 0.0,
+            summary: true,
+        })
+        .exec(&mut self.db)
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
+        self.touch_session(session_id).await?;
+        Ok(StoredMessage::from(msg))
     }
 
     pub async fn set_interrupted(&mut self, message_id: u64, interrupted: bool) -> Result<()> {

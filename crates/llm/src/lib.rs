@@ -1,4 +1,5 @@
 pub mod agent;
+mod context_hook;
 mod error;
 pub mod file_change;
 pub mod message;
@@ -9,6 +10,8 @@ pub mod tool;
 mod usage;
 
 pub use agent::WorkerAgent;
+pub use agent::WorkerRequest;
+pub use context_hook::{ContextBudget, ContextHook, OVERFLOW_REASON, UsageTracker};
 pub use error::{LlmError, Result};
 pub use file_change::{DiffLine, DiffLineKind, FileChange};
 pub use message::{ChatMsg, Role};

@@ -120,6 +120,7 @@ pub struct ContextActivity {
 pub struct SessionScreen {
     pub input: TextArea,
     pub messages: Vec<(Role, String)>,
+    pub summary_indices: std::collections::HashSet<usize>,
     pub tools: Vec<ToolActivity>,
     pub context: Vec<ContextActivity>,
     pub reasoning: Vec<(usize, String)>,
@@ -148,6 +149,7 @@ impl SessionScreen {
         Self {
             input: TextArea::with_max_height("Type a message…", 8),
             messages: Vec::new(),
+            summary_indices: std::collections::HashSet::new(),
             tools: Vec::new(),
             context: Vec::new(),
             reasoning: Vec::new(),
@@ -419,6 +421,7 @@ impl SessionScreen {
             }
             SessionMessage::Reset => {
                 self.messages.clear();
+                self.summary_indices.clear();
                 self.tools.clear();
                 self.context.clear();
                 self.reasoning.clear();
@@ -450,6 +453,10 @@ impl SessionScreen {
                     reasoning_tokens: session.reasoning_tokens,
                 };
                 let cost = session.cost;
+                self.summary_indices = match session.summary_seq {
+                    Some(seq) => std::iter::once(seq as usize).collect(),
+                    None => std::collections::HashSet::new(),
+                };
                 self.messages = session
                     .messages
                     .into_iter()
@@ -637,6 +644,10 @@ impl SessionScreen {
             reasoning_tokens: session.reasoning_tokens,
         };
         let cost = session.cost;
+        self.summary_indices = match session.summary_seq {
+            Some(seq) => std::iter::once(seq as usize).collect(),
+            None => std::collections::HashSet::new(),
+        };
         self.messages = session
             .messages
             .into_iter()
@@ -750,6 +761,13 @@ impl SessionScreen {
                     self.push_context_lines(lines, context);
                 }
                 self.push_reasoning_lines(lines, i);
+                if self.summary_indices.contains(&i) {
+                    lines.push(Line::from(
+                        Span::raw("◈ summary of earlier conversation")
+                            .fg(theme::ACCENT)
+                            .italic(),
+                    ));
+                }
                 if content.is_empty() {
                     for tool in &tool_lines {
                         self.push_tool_lines(lines, tool);

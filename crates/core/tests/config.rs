@@ -171,11 +171,11 @@ fn load_from_missing_file_returns_default() {
 }
 
 #[test]
-fn default_agent_config_is_unlimited() {
+fn default_agent_config_is_bounded() {
     let config = Config::default();
-    assert_eq!(config.agent.max_turns, 0);
+    assert_eq!(config.agent.max_turns, 30);
     assert_eq!(config.agent.worker_max_turns, 0);
-    assert_eq!(config.agent.effective_max_turns(), usize::MAX);
+    assert_eq!(config.agent.effective_max_turns(), 30);
     assert_eq!(config.agent.effective_worker_max_turns(), usize::MAX);
 }
 
@@ -195,7 +195,7 @@ fn agent_config_round_trip_with_limits() {
 fn agent_config_defaults_when_section_absent() {
     let toml_str = "[ui]\n[embedding]\nenabled = false\n";
     let parsed: Config = toml::from_str(toml_str).expect("deserialize");
-    assert_eq!(parsed.agent.max_turns, 0);
+    assert_eq!(parsed.agent.max_turns, 30);
     assert_eq!(parsed.agent.worker_max_turns, 0);
-    assert_eq!(parsed.agent.effective_max_turns(), usize::MAX);
+    assert_eq!(parsed.agent.effective_max_turns(), 30);
 }

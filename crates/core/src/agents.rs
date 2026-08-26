@@ -5,7 +5,7 @@ use shuvarie_llm::ProviderClient;
 
 use crate::approval::ApprovalGate;
 use crate::lsp_manager::SharedManager;
-use crate::tools;
+use crate::tools::{self, ReadCache};
 
 pub struct WorkerSet {
     pub workers: Vec<shuvarie_llm::WorkerAgent>,
@@ -18,6 +18,8 @@ pub fn build_workers(
     gate: ApprovalGate,
     lsp: SharedManager,
     worker_max_turns: usize,
+    max_output_chars: usize,
+    context_budget: Option<shuvarie_llm::ContextBudget>,
 ) -> WorkerSet {
     let usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
     let workers = vec![
@@ -27,9 +29,15 @@ pub fn build_workers(
             EXPLORER_PREAMBLE,
             client.clone(),
             model,
-            tools::read_tools(gate.clone(), lsp.clone()),
+            tools::read_tools(
+                gate.clone(),
+                lsp.clone(),
+                ReadCache::new(),
+                max_output_chars,
+            ),
             Arc::clone(&usage),
             worker_max_turns,
+            context_budget.clone(),
         ),
         shuvarie_llm::WorkerAgent::new(
             "run_tests",
@@ -40,6 +48,7 @@ pub fn build_workers(
             tools::command_tools(gate.clone()),
             Arc::clone(&usage),
             worker_max_turns,
+            None,
         ),
         shuvarie_llm::WorkerAgent::new(
             "edit_files",
@@ -47,9 +56,10 @@ pub fn build_workers(
             EDITOR_PREAMBLE,
             client,
             model,
-            tools::edit_tools(gate, lsp),
+            tools::edit_tools(gate, lsp, ReadCache::new(), max_output_chars),
             Arc::clone(&usage),
             worker_max_turns,
+            context_budget,
         ),
     ];
     WorkerSet { workers, usage }
