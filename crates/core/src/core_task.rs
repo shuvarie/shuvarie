@@ -18,6 +18,18 @@ use crate::embeddings::{self, EmbeddingSetup};
 use crate::event::Event;
 use crate::session::Session;
 
+/// How a streamed turn ended, reported back to the run loop so it can decide
+/// whether to auto-continue after a context overflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamOutcome {
+    /// The turn completed normally (or was cancelled/errored).
+    Finished,
+    /// The turn was stopped because the context budget overflowed. `compacted`
+    /// is true when the session history was successfully summarized so the
+    /// next turn can continue with `[summary, tail]`.
+    Overflowed { compacted: bool },
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     config: Config,
@@ -34,6 +46,9 @@ pub async fn run(
     let mut active_stream: Option<AbortHandle> = None;
     let mut semantic_search: Option<AbortHandle> = None;
     let mut turn_state: Option<Arc<Mutex<TurnState>>> = None;
+    let (stream_done_tx, mut stream_done_rx) = tokio::sync::mpsc::channel::<StreamOutcome>(1);
+    let mut overflow_retries: usize = 0;
+    const MAX_OVERFLOW_RETRIES: usize = 3;
 
     let (approval_tx, mut approval_rx) = tokio::sync::mpsc::channel::<ApprovalRequest>(64);
     let mut pending_approvals: HashMap<u64, oneshot::Sender<bool>> = HashMap::new();
@@ -185,6 +200,7 @@ pub async fn run(
                     }
                     Command::StartSession => {
                         always_approve = false;
+                        overflow_retries = 0;
                         session = Some(Arc::new(Mutex::new(Session::new())));
                         let _ = event_tx.send(Event::SessionStarted).await;
                     }
@@ -193,6 +209,7 @@ pub async fn run(
                             continue;
                         }
                         always_approve = false;
+                        overflow_retries = 0;
                         session = Some(Arc::new(Mutex::new(Session::new())));
                         let _ = event_tx.send(Event::SessionStarted).await;
                     }
@@ -205,6 +222,7 @@ pub async fn run(
                                 .await;
                             continue;
                         }
+                        overflow_retries = 0;
                         active_stream = None;
                         if session.is_none() {
                             session = Some(Arc::new(Mutex::new(Session::new())));
@@ -366,6 +384,7 @@ pub async fn run(
                         let worker_usage = worker_set.usage;
                         let embedding_shared = embedding_setup.clone();
                         let turn_state_shared = Arc::new(Mutex::new(TurnState::default()));
+                        let stream_done = stream_done_tx.clone();
                         turn_state = Some(turn_state_shared.clone());
                         active_stream = Some(
                             tokio::spawn(async move {
@@ -379,6 +398,7 @@ pub async fn run(
                                     embedding_shared,
                                     tx,
                                     turn_state_shared,
+                                    stream_done,
                                 )
                                 .await;
                             })
@@ -618,6 +638,7 @@ pub async fn run(
                                         &mut active_stream,
                                         &mut turn_state,
                                         &event_tx,
+                                        &stream_done_tx,
                                         content,
                                         true,
                                         config.agent.effective_max_turns(),
@@ -652,43 +673,16 @@ pub async fn run(
                             continue;
                         }
                         let Some(s) = &session else { continue; };
-                        let (session_id, last_user_content) = {
-                            let guard = s.lock().await;
-                            let last_is_interrupted = guard.last_assistant_interrupted();
-                            if !last_is_interrupted {
-                                drop(guard);
-                                let _ = event_tx
-                                    .send(Event::SessionError {
-                                        error: "stream was not interrupted".into(),
-                                    })
-                                    .await;
-                                continue;
-                            }
-                            let sid = guard.id;
-                            let last_user = guard
-                                .messages
-                                .iter()
-                                .rev()
-                                .find(|m| m.role == shuvarie_llm::Role::User)
-                                .map(|m| m.content.clone());
-                            (sid, last_user)
-                        };
-                        let Some(sid) = session_id else { continue; };
-                        let Some(content) = last_user_content else { continue; };
-                        if let Ok(Some((_user_msg, assistant_msg))) = store.last_turn(sid).await {
-                            let _ = store
-                                .delete_tool_calls_for_message(assistant_msg.id)
-                                .await;
-                            let _ = store.delete_message(assistant_msg.id).await;
-                        }
-                        if let Ok(stored) = store.load_session(sid).await {
-                            let loaded = Session::from_stored(stored);
-                            *s.lock().await = loaded.clone();
+                        let last_is_interrupted = s.lock().await.last_assistant_interrupted();
+                        if !last_is_interrupted {
                             let _ = event_tx
-                                .send(Event::TurnReverted { session: loaded })
+                                .send(Event::SessionError {
+                                    error: "stream was not interrupted".into(),
+                                })
                                 .await;
+                            continue;
                         }
-                        self_replay_send(
+                        resume_last_turn(
                             &mut store,
                             &session,
                             &mut connections,
@@ -698,8 +692,7 @@ pub async fn run(
                             &mut active_stream,
                             &mut turn_state,
                             &event_tx,
-                            content,
-                            false,
+                            &stream_done_tx,
                             config.agent.effective_max_turns(),
                             config.agent.effective_worker_max_turns(),
                             config.context.tool_output_max_chars,
@@ -799,6 +792,48 @@ pub async fn run(
                         reason: req.reason,
                     })
                     .await;
+            }
+            outcome = stream_done_rx.recv() => {
+                let Some(outcome) = outcome else { continue };
+                match outcome {
+                    StreamOutcome::Finished => {
+                        overflow_retries = 0;
+                    }
+                    StreamOutcome::Overflowed { compacted } => {
+                        if compacted && overflow_retries < MAX_OVERFLOW_RETRIES {
+                            overflow_retries += 1;
+                            resume_last_turn(
+                                &mut store,
+                                &session,
+                                &mut connections,
+                                &mut clients,
+                                &embedding_setup,
+                                &lsp,
+                                &mut active_stream,
+                                &mut turn_state,
+                                &event_tx,
+                                &stream_done_tx,
+                                config.agent.effective_max_turns(),
+                                config.agent.effective_worker_max_turns(),
+                                config.context.tool_output_max_chars,
+                                &config,
+                                &workspace_root,
+                                &agents_md_context,
+                                &skills,
+                            )
+                            .await;
+                        } else {
+                            overflow_retries = 0;
+                            let _ = event_tx
+                                .send(Event::StreamError {
+                                    error: "context budget exceeded and compaction could not keep up; \
+                                            start a new message or resume to continue"
+                                        .into(),
+                                })
+                                .await;
+                        }
+                    }
+                }
             }
         }
     }
@@ -976,6 +1011,7 @@ async fn self_replay_send(
     active_stream: &mut Option<AbortHandle>,
     turn_state_slot: &mut Option<Arc<Mutex<TurnState>>>,
     event_tx: &Sender<Event>,
+    stream_done_tx: &Sender<StreamOutcome>,
     content: String,
     push_user: bool,
     manager_turns: usize,
@@ -1081,6 +1117,7 @@ async fn self_replay_send(
     let worker_usage = worker_set.usage;
     let embedding_shared = embedding_setup.clone();
     let turn_state_shared = Arc::new(Mutex::new(TurnState::default()));
+    let stream_done = stream_done_tx.clone();
     *turn_state_slot = Some(turn_state_shared.clone());
     *active_stream = Some(
         tokio::spawn(async move {
@@ -1094,6 +1131,7 @@ async fn self_replay_send(
                 embedding_shared,
                 tx,
                 turn_state_shared,
+                stream_done,
             )
             .await;
         })
@@ -1105,6 +1143,82 @@ fn approval_tx_local() -> tokio::sync::mpsc::Sender<ApprovalRequest> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<ApprovalRequest>(64);
     tokio::spawn(async move { while rx.recv().await.is_some() {} });
     tx
+}
+
+/// Delete the interrupted assistant turn (message + tool calls) and re-stream
+/// from the last user message. Used by the manual `Resume` command and by the
+/// auto-continue path after a context overflow.
+#[allow(clippy::too_many_arguments)]
+async fn resume_last_turn(
+    store: &mut Store,
+    session: &Option<Arc<Mutex<Session>>>,
+    connections: &mut Connections,
+    clients: &mut HashMap<String, ProviderClient>,
+    embedding_setup: &Option<EmbeddingSetup>,
+    lsp: &std::sync::Arc<tokio::sync::Mutex<shuvarie_lsp::LspManager>>,
+    active_stream: &mut Option<AbortHandle>,
+    turn_state: &mut Option<Arc<Mutex<TurnState>>>,
+    event_tx: &Sender<Event>,
+    stream_done_tx: &Sender<StreamOutcome>,
+    manager_turns: usize,
+    worker_turns: usize,
+    max_output_chars: usize,
+    config: &Config,
+    workspace_root: &Path,
+    agents_md_context: &crate::context::LoadedContext,
+    skills: &crate::skills::Skills,
+) {
+    let Some(s) = session else {
+        return;
+    };
+    let (session_id, last_user_content) = {
+        let guard = s.lock().await;
+        let sid = guard.id;
+        let last_user = guard
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == shuvarie_llm::Role::User)
+            .map(|m| m.content.clone());
+        (sid, last_user)
+    };
+    let Some(sid) = session_id else {
+        return;
+    };
+    let Some(content) = last_user_content else {
+        return;
+    };
+    if let Ok(Some((_user_msg, assistant_msg))) = store.last_turn(sid).await {
+        let _ = store.delete_tool_calls_for_message(assistant_msg.id).await;
+        let _ = store.delete_message(assistant_msg.id).await;
+    }
+    if let Ok(stored) = store.load_session(sid).await {
+        let loaded = Session::from_stored(stored);
+        *s.lock().await = loaded.clone();
+        let _ = event_tx.send(Event::TurnReverted { session: loaded }).await;
+    }
+    self_replay_send(
+        store,
+        session,
+        connections,
+        clients,
+        embedding_setup,
+        lsp,
+        active_stream,
+        turn_state,
+        event_tx,
+        stream_done_tx,
+        content,
+        false,
+        manager_turns,
+        worker_turns,
+        max_output_chars,
+        config,
+        workspace_root,
+        agents_md_context,
+        skills,
+    )
+    .await;
 }
 
 async fn load_most_recent_session(
@@ -1174,6 +1288,7 @@ async fn stream_stream_to_events(
     embedding_setup: Option<EmbeddingSetup>,
     event_tx: Sender<Event>,
     turn_state: Arc<Mutex<TurnState>>,
+    stream_done_tx: Sender<StreamOutcome>,
 ) {
     use futures_util::StreamExt;
 
@@ -1185,6 +1300,7 @@ async fn stream_stream_to_events(
     let mut turn_tool_records: Vec<crate::tool_record::ToolRecord> = Vec::new();
     let mut pending_tool_args: std::collections::HashMap<String, (String, Option<String>)> =
         std::collections::HashMap::new();
+    let mut outcome = StreamOutcome::Finished;
 
     while let Some(item) = stream.next().await {
         match item {
@@ -1407,14 +1523,15 @@ async fn stream_stream_to_events(
                 .await;
                 let _ = event_tx
                     .send(Event::StreamError {
-                        error: "context budget exceeded — compacting session history; \
-                                start a new message or resume to continue"
-                            .into(),
+                        error:
+                            "context budget exceeded — compacting session history and continuing"
+                                .into(),
                     })
                     .await;
                 // Run compaction: summarize the head of the stored session
                 // so the next turn sends [summary, tail] instead of the full
                 // history.
+                let mut compacted = false;
                 if let Some(sid) = session.lock().await.id
                     && let Ok(stored) = store.load_session(sid).await
                     && let Some(plan) = crate::compaction::select_plan(&stored.messages)
@@ -1425,6 +1542,7 @@ async fn stream_stream_to_events(
                         Ok(summary) => {
                             if let Ok(msg) = store.append_summary(sid, &summary).await {
                                 session.lock().await.summary_seq = Some(msg.seq);
+                                compacted = true;
                             }
                         }
                         Err(e) => {
@@ -1436,10 +1554,12 @@ async fn stream_stream_to_events(
                         }
                     }
                 }
+                outcome = StreamOutcome::Overflowed { compacted };
                 break;
             }
         }
     }
+    let _ = stream_done_tx.send(outcome).await;
 }
 
 async fn ensure_assistant_row(
@@ -1696,6 +1816,7 @@ mod tests {
         let store = Store::open_in_memory().await.unwrap();
         let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
         let turn_state = Arc::new(Mutex::new(TurnState::default()));
+        let (stream_done_tx, _stream_done_rx) = tokio::sync::mpsc::channel(1);
         tokio::spawn(async move {
             stream_stream_to_events(
                 stream,
@@ -1707,6 +1828,7 @@ mod tests {
                 None,
                 event_tx,
                 turn_state,
+                stream_done_tx,
             )
             .await;
         });
@@ -1755,6 +1877,7 @@ mod tests {
         let store = Store::open_in_memory().await.unwrap();
         let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
         let turn_state = Arc::new(Mutex::new(TurnState::default()));
+        let (stream_done_tx, _stream_done_rx) = tokio::sync::mpsc::channel(1);
         tokio::spawn(async move {
             stream_stream_to_events(
                 stream,
@@ -1766,6 +1889,7 @@ mod tests {
                 None,
                 event_tx,
                 turn_state,
+                stream_done_tx,
             )
             .await;
         });
@@ -1834,6 +1958,7 @@ mod tests {
             ..TokenUsage::default()
         }));
         let turn_state = Arc::new(Mutex::new(TurnState::default()));
+        let (stream_done_tx, _stream_done_rx) = tokio::sync::mpsc::channel(1);
         tokio::spawn(async move {
             stream_stream_to_events(
                 stream,
@@ -1845,6 +1970,7 @@ mod tests {
                 None,
                 event_tx,
                 turn_state,
+                stream_done_tx,
             )
             .await;
         });

@@ -11,6 +11,11 @@
 //! growth inherent to multi-turn agent loops (each model call re-sends the
 //! full accumulated conversation, including every prior tool result).
 //!
+//! Trimming alone keeps the run going; the run is only stopped when the real
+//! cumulative input-token usage (tracked from the stream side) crosses the
+//! budget, which signals that the conversation genuinely no longer fits and
+//! the caller should compact the session history before continuing.
+//!
 //! Only what is *sent* changes — rig's run state and persistence are
 //! untouched (`RequestPatch.history` replaces the history for this turn
 //! only).
@@ -29,10 +34,6 @@ use std::sync::{Arc, Mutex};
 pub const OVERFLOW_REASON: &str = "context overflow";
 
 const CHARS_PER_TOKEN: usize = 4;
-
-fn estimate_tokens(s: &str) -> u64 {
-    (s.chars().count() / CHARS_PER_TOKEN) as u64
-}
 
 fn message_text_len(msg: &Message) -> usize {
     match msg {
@@ -164,12 +165,9 @@ impl ContextHook {
     }
 
     fn estimate_request(&self, prompt: &Message, history: &[Message]) -> u64 {
-        let prompt_tokens = estimate_tokens(&message_text_len(prompt).to_string());
-        let history_tokens: u64 = history
-            .iter()
-            .map(|m| estimate_tokens(&message_text_len(m).to_string()))
-            .sum();
-        prompt_tokens + history_tokens
+        let prompt_chars = message_text_len(prompt) as u64;
+        let history_chars: u64 = history.iter().map(|m| message_text_len(m) as u64).sum();
+        (prompt_chars + history_chars) / CHARS_PER_TOKEN as u64
     }
 
     /// Build a trimmed history that fits within the usable budget, keeping
@@ -275,7 +273,7 @@ impl AgentHook for ContextHook {
             None
         };
         async move {
-            if overflow_flagged || estimate >= usable || tracker_input >= usable {
+            if overflow_flagged || tracker_input >= usable {
                 return CompletionCallAction::Stop(OVERFLOW_REASON.to_string());
             }
             match trimmed {
@@ -309,5 +307,63 @@ impl AgentHook for ContextHook {
 
     fn observes(&self, _kind: StepEventKind) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rig::completion::message::{Message, Text, UserContent};
+
+    fn user_msg(text: &str) -> Message {
+        Message::User {
+            content: vec![UserContent::Text(Text::new(text.to_string()))],
+        }
+    }
+
+    #[test]
+    fn estimate_request_uses_chars_per_token() {
+        let hook = ContextHook::new(ContextBudget::new(128_000, 20_000), UsageTracker::new());
+        let prompt = user_msg("x");
+        let history = vec![user_msg(&"y".repeat(4_000))];
+        // 4000 chars / 4 = 1000 tokens (plus the 1-char prompt).
+        let est = hook.estimate_request(&prompt, &history);
+        assert_eq!(est, 1000);
+    }
+
+    #[test]
+    fn trim_history_condenses_old_tool_results() {
+        let budget = ContextBudget::new(128_000, 20_000);
+        let hook = ContextHook::new(budget, UsageTracker::new());
+        let big = "z".repeat(100_000);
+        let history = vec![
+            Message::User {
+                content: vec![UserContent::ToolResult(
+                    rig::completion::message::ToolResult {
+                        call: rig::completion::message::ToolCallId::mint(),
+                        provider: None,
+                        name: "read_file".into(),
+                        content: vec![rig::completion::message::ToolResultContent::Text(
+                            Text::new(big.clone()),
+                        )],
+                    },
+                )],
+            },
+            user_msg("recent user"),
+        ];
+        let trimmed = hook.trim_history(&history);
+        assert_eq!(trimmed.len(), 2);
+        let condensed = &trimmed[0];
+        let Message::User { content } = condensed else {
+            panic!("expected user message");
+        };
+        let has_marker = content.iter().any(|c| match c {
+            UserContent::ToolResult(tr) => tr
+                .content
+                .iter()
+                .any(|cc| matches!(cc, rig::completion::message::ToolResultContent::Text(t) if t.text.contains("omitted"))),
+            _ => false,
+        });
+        assert!(has_marker, "old tool result should be condensed");
     }
 }
