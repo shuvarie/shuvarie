@@ -53,21 +53,45 @@ impl Session {
                 content: m.content.clone(),
             })
             .collect();
+        // Map each stored message's DB `seq`/`id` to its dense position in
+        // `messages`. The DB seq is not guaranteed to be contiguous (undo/redo
+        // and resume delete rows and re-append with higher seqs), so anything
+        // keyed by the raw seq must be translated to the dense index that the
+        // rest of the pipeline (and the TUI) expects.
+        let seq_to_index: HashMap<u64, usize> = stored
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (m.seq, i))
+            .collect();
+        let id_to_index: HashMap<u64, usize> = stored
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (m.id, i))
+            .collect();
         for m in &stored.messages {
+            let idx = seq_to_index.get(&m.seq).copied().unwrap_or_default();
             if !m.reasoning.is_empty() {
-                s.reasoning.insert(m.seq, m.reasoning.clone());
+                s.reasoning.insert(idx as u64, m.reasoning.clone());
             }
             if m.interrupted {
-                s.interrupted.insert(m.seq, true);
+                s.interrupted.insert(idx as u64, true);
             }
             if m.summary {
-                s.summary_seq = Some(m.seq);
+                s.summary_seq = Some(idx as u64);
             }
         }
         s.tool_records = stored
             .tool_calls
             .into_iter()
-            .map(ToolRecord::from_stored)
+            .map(|tc| {
+                let mut record = ToolRecord::from_stored(tc);
+                if let Some(idx) = id_to_index.get(&record.message_id) {
+                    record.message_seq = *idx as u64;
+                }
+                record
+            })
             .collect();
         s
     }

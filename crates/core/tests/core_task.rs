@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use shuvarie_catalog::Provider;
-use shuvarie_core::{Command, Config, Connections, Event, ProviderConfig, run};
+use shuvarie_core::{Command, Config, Connections, Event, ProviderConfig, Session, run};
 use shuvarie_db::Store;
 
 fn empty_config() -> Config {
@@ -409,4 +409,108 @@ async fn no_load_current_skips_session_loaded_on_startup() {
 
     drop(cmd_tx);
     let _ = handle.await;
+}
+
+#[tokio::test]
+async fn reload_reconstructs_tool_records_at_dense_message_indices() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let sid = store
+        .create_session("t", Some("ollama"), Some("model"))
+        .await
+        .unwrap();
+
+    let _user = store
+        .append_message(sid, shuvarie_llm::Role::User, "hello")
+        .await
+        .unwrap();
+    let assistant = store
+        .append_message(sid, shuvarie_llm::Role::Assistant, "text")
+        .await
+        .unwrap();
+    // `ToolCall.seq` is a per-message tool ordinal (0), not the message seq (1).
+    store
+        .append_tool_call(
+            sid,
+            assistant.id,
+            0,
+            "read_file",
+            "{}",
+            "out",
+            true,
+            None,
+            "",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let stored = store.load_session(sid).await.unwrap();
+    let session = Session::from_stored(stored);
+
+    assert_eq!(session.messages.len(), 2);
+    assert_eq!(session.tool_records.len(), 1);
+    // The tool must be attributed to the assistant message's dense index, not
+    // the raw tool ordinal.
+    assert_eq!(session.tool_records[0].message_id, assistant.id);
+    assert_eq!(session.tool_records[0].message_seq, 1);
+}
+
+#[tokio::test]
+async fn reload_after_redo_maps_tools_to_new_dense_indices() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let sid = store
+        .create_session("t", Some("ollama"), Some("model"))
+        .await
+        .unwrap();
+
+    let _user = store
+        .append_message(sid, shuvarie_llm::Role::User, "hello")
+        .await
+        .unwrap();
+    let first = store
+        .append_message(sid, shuvarie_llm::Role::Assistant, "old")
+        .await
+        .unwrap();
+    store
+        .append_tool_call(
+            sid, first.id, 0, "grep", "{}", "out", true, None, "", None, None,
+        )
+        .await
+        .unwrap();
+
+    // Simulate redo: delete the assistant turn (tool calls + message), then
+    // re-append a fresh assistant row with a higher seq and its own tool call.
+    store.delete_tool_calls_for_message(first.id).await.unwrap();
+    store.delete_message(first.id).await.unwrap();
+    let second = store
+        .append_message(sid, shuvarie_llm::Role::Assistant, "new")
+        .await
+        .unwrap();
+    store
+        .append_tool_call(
+            sid,
+            second.id,
+            0,
+            "read_file",
+            "{}",
+            "out",
+            true,
+            None,
+            "",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let stored = store.load_session(sid).await.unwrap();
+    let session = Session::from_stored(stored);
+
+    assert_eq!(session.messages.len(), 2);
+    assert_eq!(session.tool_records.len(), 1);
+    assert_eq!(session.tool_records[0].message_id, second.id);
+    // The tool must be mapped to the assistant's dense index (1), regardless of
+    // the re-append bumping the DB seq above the row count.
+    assert_eq!(session.tool_records[0].message_seq, 1);
 }

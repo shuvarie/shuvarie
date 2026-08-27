@@ -1215,6 +1215,7 @@ async fn stream_stream_to_events(
                     output: output.clone(),
                     ok,
                     worker: worker.clone(),
+                    message_id: assistant_message_id.unwrap_or_default(),
                     message_seq: assistant_seq,
                     file_change: file_change.clone(),
                     original_content: original.clone(),
@@ -1448,13 +1449,14 @@ async fn persist_interrupted_turn(
     session: &Option<Arc<Mutex<Session>>>,
     _event_tx: &Sender<Event>,
 ) {
-    let (text, reasoning, msg_id) = match turn_state {
+    let (text, reasoning, msg_id, tool_records) = match turn_state {
         Some(ts_arc) => {
             let ts = ts_arc.lock().await;
             (
                 ts.pending_text.clone(),
                 ts.pending_reasoning.clone(),
                 ts.assistant_message_id,
+                ts.tool_records.clone(),
             )
         }
         None => return,
@@ -1486,6 +1488,7 @@ async fn persist_interrupted_turn(
             let seq = g.messages.len() - 1;
             g.reasoning.insert(seq as u64, reasoning);
             g.interrupted.insert(seq as u64, true);
+            g.tool_records.extend(tool_records);
         }
     } else if !text.is_empty()
         && store
