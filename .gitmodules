@@ -1,0 +1,3 @@
+[submodule "vendor/selune"]
+	path = vendor/selune
+	url = git@github.com:chardoncs/selune.git
