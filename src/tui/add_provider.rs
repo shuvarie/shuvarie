@@ -453,7 +453,7 @@ impl AddProviderForm {
             Layout::vertical([Length(2), Length(1), Min(0), Length(1)]).areas(inner);
 
         frame.render_widget(
-            Paragraph::new("Select a provider:").fg(theme::TEXT),
+            Paragraph::new("Select a provider template:").fg(theme::TEXT),
             heading_area,
         );
 
