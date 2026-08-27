@@ -1,6 +1,6 @@
 use futures_util::StreamExt;
+use selune::ProviderType;
 use serde_json::Value;
-use shuvarie_catalog::Provider;
 use std::sync::Arc;
 
 use crate::file_change::FileChange;
@@ -11,7 +11,7 @@ use crate::{LlmError, Result};
 
 #[derive(Debug, Clone)]
 pub struct ProviderClient {
-    kind: Provider,
+    kind: ProviderType,
     base_url: String,
     list: ListImpl,
 }
@@ -20,17 +20,20 @@ pub struct ProviderClient {
 enum ListImpl {
     OpenAi(rig::providers::openai::Client),
     OpenRouter(rig::providers::openrouter::Client),
-    DeepSeek(rig::providers::deepseek::Client),
     Anthropic(rig::providers::anthropic::Client),
     Gemini(rig::providers::gemini::Client),
     Ollama(rig::providers::ollama::Client),
 }
 
 impl ProviderClient {
-    pub fn build(kind: Provider, api_key: Option<&str>, base_url: Option<&str>) -> Result<Self> {
-        let base_url = kind.effective_base_url(base_url);
+    pub fn build(
+        kind: ProviderType,
+        api_key: Option<&str>,
+        base_url: Option<&str>,
+    ) -> Result<Self> {
+        let base_url = base_url.unwrap_or("").to_string();
         let list = match kind {
-            Provider::OpenAiCompatible => {
+            ProviderType::Openai | ProviderType::OpenaiCompat | ProviderType::Vercel => {
                 let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
                 let client = rig::providers::openai::Client::builder()
                     .api_key(key)
@@ -39,7 +42,7 @@ impl ProviderClient {
                     .map_err(|e| LlmError::Provider(e.to_string()))?;
                 ListImpl::OpenAi(client)
             }
-            Provider::OpenRouter => {
+            ProviderType::Openrouter => {
                 let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
                 let client = rig::providers::openrouter::Client::builder()
                     .api_key(key)
@@ -48,34 +51,7 @@ impl ProviderClient {
                     .map_err(|e| LlmError::Provider(e.to_string()))?;
                 ListImpl::OpenRouter(client)
             }
-            Provider::Groq => {
-                let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
-                let client = rig::providers::openai::Client::builder()
-                    .api_key(key)
-                    .base_url(&base_url)
-                    .build()
-                    .map_err(|e| LlmError::Provider(e.to_string()))?;
-                ListImpl::OpenAi(client)
-            }
-            Provider::Together => {
-                let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
-                let client = rig::providers::openai::Client::builder()
-                    .api_key(key)
-                    .base_url(&base_url)
-                    .build()
-                    .map_err(|e| LlmError::Provider(e.to_string()))?;
-                ListImpl::OpenAi(client)
-            }
-            Provider::DeepSeek => {
-                let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
-                let client = rig::providers::deepseek::Client::builder()
-                    .api_key(key)
-                    .base_url(&base_url)
-                    .build()
-                    .map_err(|e| LlmError::Provider(e.to_string()))?;
-                ListImpl::DeepSeek(client)
-            }
-            Provider::Anthropic => {
+            ProviderType::Anthropic => {
                 let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
                 let client = rig::providers::anthropic::Client::builder()
                     .api_key(key)
@@ -84,7 +60,7 @@ impl ProviderClient {
                     .map_err(|e| LlmError::Provider(e.to_string()))?;
                 ListImpl::Anthropic(client)
             }
-            Provider::Gemini => {
+            ProviderType::Google => {
                 let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
                 let client = rig::providers::gemini::Client::builder()
                     .api_key(key)
@@ -93,7 +69,7 @@ impl ProviderClient {
                     .map_err(|e| LlmError::Provider(e.to_string()))?;
                 ListImpl::Gemini(client)
             }
-            Provider::Ollama => {
+            ProviderType::Ollama => {
                 let client = rig::providers::ollama::Client::builder()
                     .api_key(api_key.unwrap_or(""))
                     .base_url(&base_url)
@@ -101,14 +77,16 @@ impl ProviderClient {
                     .map_err(|e| LlmError::Provider(e.to_string()))?;
                 ListImpl::Ollama(client)
             }
-            Provider::OllamaCloud => {
+            ProviderType::Azure | ProviderType::Bedrock | ProviderType::GoogleVertex => {
+                // These providers are not yet wired to a dedicated rig client;
+                // fall back to an OpenAI-compatible client at the configured URL.
                 let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
-                let client = rig::providers::ollama::Client::builder()
+                let client = rig::providers::openai::Client::builder()
                     .api_key(key)
                     .base_url(&base_url)
                     .build()
                     .map_err(|e| LlmError::Provider(e.to_string()))?;
-                ListImpl::Ollama(client)
+                ListImpl::OpenAi(client)
             }
         };
         Ok(Self {
@@ -118,7 +96,7 @@ impl ProviderClient {
         })
     }
 
-    pub fn kind(&self) -> Provider {
+    pub fn kind(&self) -> ProviderType {
         self.kind
     }
 
@@ -129,13 +107,12 @@ impl ProviderClient {
     pub fn supports_embeddings(&self) -> bool {
         matches!(
             self.kind,
-            Provider::OpenAiCompatible
-                | Provider::OpenRouter
-                | Provider::Groq
-                | Provider::Together
-                | Provider::Gemini
-                | Provider::Ollama
-                | Provider::OllamaCloud
+            ProviderType::Openai
+                | ProviderType::OpenaiCompat
+                | ProviderType::Openrouter
+                | ProviderType::Google
+                | ProviderType::Ollama
+                | ProviderType::Vercel
         )
     }
 
@@ -200,13 +177,12 @@ impl ProviderClient {
         Ok(out)
     }
 
-    pub async fn list_models(&self) -> Result<Vec<shuvarie_catalog::ModelInfo>> {
+    pub async fn list_models(&self) -> Result<Vec<crate::ModelInfo>> {
         use rig::client::ModelListingClient;
 
         let models = match &self.list {
             ListImpl::OpenAi(c) => c.list_models().await,
             ListImpl::OpenRouter(c) => c.list_models().await,
-            ListImpl::DeepSeek(c) => c.list_models().await,
             ListImpl::Anthropic(c) => c.list_models().await,
             ListImpl::Gemini(c) => c.list_models().await,
             ListImpl::Ollama(c) => c.list_models().await,
@@ -245,20 +221,6 @@ impl ProviderClient {
                 .await
             }
             ListImpl::OpenRouter(c) => {
-                let agent =
-                    agent_with_tools(c, &req.model, Some(&req.preamble), dynamic, budget, tracker);
-                run_worker_agent(
-                    agent,
-                    &req.name,
-                    user_msg,
-                    activity_tx,
-                    usage,
-                    req.max_turns,
-                    file_rx,
-                )
-                .await
-            }
-            ListImpl::DeepSeek(c) => {
                 let agent =
                     agent_with_tools(c, &req.model, Some(&req.preamble), dynamic, budget, tracker);
                 run_worker_agent(
@@ -564,26 +526,6 @@ impl ProviderClient {
                 )
                 .await
             }
-            ListImpl::DeepSeek(c) => {
-                build(
-                    agent_with_tools(
-                        c,
-                        model,
-                        preamble,
-                        dynamic.0,
-                        context_budget,
-                        tracker_for_hook,
-                    ),
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    file_rx,
-                    max_turns,
-                    tracker,
-                )
-                .await
-            }
             ListImpl::Anthropic(c) => {
                 build(
                     agent_with_tools(
@@ -724,7 +666,7 @@ async fn run_worker_agent(
     name: &str,
     prompt: rig::message::Message,
     activity_tx: tokio::sync::mpsc::Sender<StreamItem>,
-    usage: std::sync::Arc<std::sync::Mutex<shuvarie_catalog::TokenUsage>>,
+    usage: std::sync::Arc<std::sync::Mutex<crate::TokenUsage>>,
     max_turns: usize,
     mut file_rx: tokio::sync::mpsc::Receiver<FileChange>,
 ) -> std::result::Result<String, String> {
@@ -736,7 +678,7 @@ async fn run_worker_agent(
         .await;
 
     let mut text = String::new();
-    let mut usage_aggregate = shuvarie_catalog::TokenUsage::default();
+    let mut usage_aggregate = crate::TokenUsage::default();
     let mut tool_names: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     while let Some(item) = stream.next().await {
@@ -913,11 +855,9 @@ mod tests {
 
     #[tokio::test]
     async fn worker_missing_task_returns_error() {
-        let client = ProviderClient::build(Provider::Ollama, None, None).unwrap();
+        let client = ProviderClient::build(selune::ProviderType::Ollama, None, None).unwrap();
         let (_activity_tx, _activity_rx) = tokio::sync::mpsc::channel::<StreamItem>(8);
-        let usage = Arc::new(std::sync::Mutex::new(
-            shuvarie_catalog::TokenUsage::default(),
-        ));
+        let usage = Arc::new(std::sync::Mutex::new(crate::TokenUsage::default()));
         let worker = crate::agent::WorkerAgent::new(
             "test_worker",
             "a test worker",
@@ -938,16 +878,9 @@ mod tests {
 
     #[test]
     fn supports_embeddings_by_provider() {
-        let ok = [
-            Provider::OpenAiCompatible,
-            Provider::OpenRouter,
-            Provider::Groq,
-            Provider::Together,
-            Provider::Gemini,
-            Provider::Ollama,
-            Provider::OllamaCloud,
-        ];
-        let no = [Provider::Anthropic, Provider::DeepSeek];
+        use selune::ProviderType::*;
+        let ok = [Openai, OpenaiCompat, Openrouter, Google, Ollama, Vercel];
+        let no = [Anthropic, Azure, Bedrock, GoogleVertex];
         for p in ok {
             let client = ProviderClient::build(p, Some("k"), None).unwrap();
             assert!(
@@ -963,7 +896,8 @@ mod tests {
 
     #[tokio::test]
     async fn embed_unsupported_provider_errors() {
-        let client = ProviderClient::build(Provider::Anthropic, Some("k"), None).unwrap();
+        let client =
+            ProviderClient::build(selune::ProviderType::Anthropic, Some("k"), None).unwrap();
         let err = client
             .embed("some-model", 768, &["hello".to_string()])
             .await
@@ -973,7 +907,7 @@ mod tests {
 
     #[tokio::test]
     async fn embed_empty_input_returns_empty() {
-        let client = ProviderClient::build(Provider::Ollama, None, None).unwrap();
+        let client = ProviderClient::build(selune::ProviderType::Ollama, None, None).unwrap();
         let out = client.embed("m", 384, &[]).await.unwrap();
         assert!(out.is_empty());
     }

@@ -33,8 +33,11 @@ pub fn setup(
     let client = match clients.get(&provider_name) {
         Some(c) => c.clone(),
         None => {
-            let c = ProviderClient::build(pc.kind, pc.api_key.as_deref(), pc.base_url.as_deref())
-                .ok()?;
+            let providers = crate::catalog::providers();
+            let kind = crate::catalog::provider_type(&providers, &pc.kind);
+            let base_url =
+                crate::catalog::base_url_for(&providers, &pc.kind, pc.base_url.as_deref());
+            let c = ProviderClient::build(kind, pc.api_key.as_deref(), Some(&base_url)).ok()?;
             clients.insert(provider_name.clone(), c.clone());
             c
         }
@@ -42,16 +45,18 @@ pub fn setup(
     if !client.supports_embeddings() {
         return None;
     }
+    let providers = crate::catalog::providers();
+    let kind = crate::catalog::provider_type(&providers, &pc.kind);
     let model = config
         .embedding
         .model
         .clone()
-        .unwrap_or_else(|| default_model(pc.kind));
+        .unwrap_or_else(|| default_model(kind));
     let dims = config
         .embedding
         .dimensions
         .map(|d| d as usize)
-        .unwrap_or_else(|| default_dims(pc.kind));
+        .unwrap_or_else(|| default_dims(kind));
     Some(EmbeddingSetup {
         client,
         model,
@@ -59,19 +64,17 @@ pub fn setup(
     })
 }
 
-pub fn default_model(kind: shuvarie_catalog::Provider) -> String {
+pub fn default_model(kind: selune::ProviderType) -> String {
     match kind {
-        shuvarie_catalog::Provider::Ollama | shuvarie_catalog::Provider::OllamaCloud => {
-            "nomic-embed-text".to_string()
-        }
-        shuvarie_catalog::Provider::Gemini => "gemini-embedding-001".to_string(),
+        selune::ProviderType::Ollama => "nomic-embed-text".to_string(),
+        selune::ProviderType::Google => "gemini-embedding-001".to_string(),
         _ => "text-embedding-3-small".to_string(),
     }
 }
 
-pub fn default_dims(kind: shuvarie_catalog::Provider) -> usize {
+pub fn default_dims(kind: selune::ProviderType) -> usize {
     match kind {
-        shuvarie_catalog::Provider::Ollama | shuvarie_catalog::Provider::OllamaCloud => 768,
+        selune::ProviderType::Ollama => 768,
         _ => 1536,
     }
 }
@@ -210,14 +213,9 @@ mod tests {
 
     #[test]
     fn defaults_per_provider() {
-        assert_eq!(
-            default_model(shuvarie_catalog::Provider::Ollama),
-            "nomic-embed-text"
-        );
-        assert_eq!(
-            default_model(shuvarie_catalog::Provider::OpenAiCompatible),
-            "text-embedding-3-small"
-        );
-        assert_eq!(default_dims(shuvarie_catalog::Provider::Ollama), 768);
+        use selune::ProviderType::*;
+        assert_eq!(default_model(Ollama), "nomic-embed-text");
+        assert_eq!(default_model(OpenaiCompat), "text-embedding-3-small");
+        assert_eq!(default_dims(Ollama), 768);
     }
 }

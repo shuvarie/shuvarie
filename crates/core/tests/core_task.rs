@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use shuvarie_catalog::Provider;
 use shuvarie_core::{Command, Config, Connections, Event, ProviderConfig, Session, run};
 use shuvarie_db::Store;
 
@@ -75,7 +74,7 @@ async fn add_provider_emits_saved() {
     cmd_tx
         .send(Command::AddProvider {
             name: "shuvarie-test-add".into(),
-            config: ProviderConfig::new(Provider::Ollama, None, None),
+            config: ProviderConfig::new("ollama", None, None),
         })
         .await
         .unwrap();
@@ -110,10 +109,9 @@ async fn remove_provider_clears_active() {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
     let mut connections = empty_connections();
-    connections.providers.insert(
-        "p1".into(),
-        ProviderConfig::new(Provider::Ollama, None, None),
-    );
+    connections
+        .providers
+        .insert("p1".into(), ProviderConfig::new("ollama", None, None));
     connections.active_provider = Some("p1".into());
 
     let handle = tokio::spawn(run(
@@ -225,10 +223,9 @@ async fn double_send_while_streaming_is_rejected() {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
     let mut connections = empty_connections();
-    connections.providers.insert(
-        "ollama".into(),
-        ProviderConfig::new(Provider::Ollama, None, None),
-    );
+    connections
+        .providers
+        .insert("ollama".into(), ProviderConfig::new("ollama", None, None));
     connections.active_provider = Some("ollama".into());
     connections.active_model = Some("test-model".into());
 
@@ -278,10 +275,9 @@ async fn send_message_persists_session_and_messages() {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
     let mut connections = empty_connections();
-    connections.providers.insert(
-        "ollama".into(),
-        ProviderConfig::new(Provider::Ollama, None, None),
-    );
+    connections
+        .providers
+        .insert("ollama".into(), ProviderConfig::new("ollama", None, None));
     connections.active_provider = Some("ollama".into());
     connections.active_model = Some("test-model".into());
 

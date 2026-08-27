@@ -77,6 +77,14 @@ pub async fn run(
     let mut always_approve = false;
 
     let mut clients: HashMap<String, ProviderClient> = HashMap::new();
+    // Refresh the provider catalog from the service (falling back to embedded)
+    // before wiring up clients, so pricing/context/embedding lookups see fresh
+    // data. Bounded so an unreachable catalog never blocks startup.
+    let refresh = tokio::task::spawn_blocking(crate::catalog::refresh);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), refresh)
+        .await
+        .map(|r| r.unwrap_or_default())
+        .unwrap_or_default();
     let embedding_setup = embeddings::setup(&config, &connections, &mut clients);
     if let Some(setup) = embedding_setup.clone() {
         let store_backfill = store.clone();
@@ -154,9 +162,21 @@ pub async fn run(
                         };
                         match client.list_models().await {
                             Ok(mut models) => {
-                                let provider = client.kind();
-                                for model in &mut models {
-                                    shuvarie_catalog::enrich(provider, model);
+                                let kind = ctx
+                                    .connections
+                                    .providers
+                                    .get(&provider_name)
+                                    .map(|pc| pc.kind.clone())
+                                    .unwrap_or_default();
+                                let catalog_provider = crate::catalog::providers();
+                                let provider = crate::catalog::find_provider(
+                                    &catalog_provider,
+                                    &kind,
+                                );
+                                if let Some(provider) = provider {
+                                    for model in &mut models {
+                                        crate::catalog::enrich(provider, model);
+                                    }
                                 }
                                 let _ = ctx.event_tx
                                     .send(Event::ModelsLoaded {
@@ -777,7 +797,7 @@ async fn undo_last_turn(store: &mut Store, session_id: u64) -> Result<bool, Stri
         .tool_calls_for_message(assistant_msg.id)
         .await
         .map_err(|e| e.to_string())?;
-    let usage = shuvarie_catalog::TokenUsage {
+    let usage = shuvarie_llm::TokenUsage {
         input_tokens: assistant_msg.input_tokens,
         output_tokens: assistant_msg.output_tokens,
         total_tokens: assistant_msg.total_tokens,
@@ -954,7 +974,16 @@ impl CoreCtx {
             crate::tools::ReadCache::new(),
             self.max_output_chars,
         );
-        let budget = context_budget(&self.config, client.kind(), &model);
+        let provider_name_for_catalog = self
+            .connections
+            .providers
+            .get(&provider_name)
+            .map(|pc| pc.kind.clone());
+        let catalog_provider = crate::catalog::providers();
+        let catalog_provider = provider_name_for_catalog
+            .and_then(|kind| crate::catalog::find_provider(&catalog_provider, &kind))
+            .cloned();
+        let budget = context_budget(&self.config, catalog_provider.as_ref(), &model);
         let mut worker_set = crate::agents::build_workers(
             client.clone(),
             &model,
@@ -992,6 +1021,7 @@ impl CoreCtx {
                     stream,
                     session_shared,
                     client_shared,
+                    catalog_provider,
                     store_shared,
                     model_shared,
                     worker_usage,
@@ -1110,9 +1140,10 @@ async fn stream_stream_to_events(
     mut stream: shuvarie_llm::StreamStream,
     session: Arc<Mutex<Session>>,
     client: ProviderClient,
+    catalog_provider: Option<selune::Provider>,
     mut store: Store,
     model: String,
-    worker_usage: Arc<std::sync::Mutex<shuvarie_catalog::TokenUsage>>,
+    worker_usage: Arc<std::sync::Mutex<shuvarie_llm::TokenUsage>>,
     embedding_setup: Option<EmbeddingSetup>,
     event_tx: Sender<Event>,
     turn_state: Arc<Mutex<TurnState>>,
@@ -1252,7 +1283,7 @@ async fn stream_stream_to_events(
                 let mut guard = session.lock().await;
                 let combined = {
                     let worker_usage = worker_usage.lock().unwrap();
-                    shuvarie_catalog::TokenUsage {
+                    shuvarie_llm::TokenUsage {
                         input_tokens: usage.input_tokens + worker_usage.input_tokens,
                         output_tokens: usage.output_tokens + worker_usage.output_tokens,
                         total_tokens: usage.total_tokens + worker_usage.total_tokens,
@@ -1262,7 +1293,10 @@ async fn stream_stream_to_events(
                     }
                 };
                 guard.push_assistant(text.clone());
-                let cost = shuvarie_catalog::estimate_cost(client.kind(), &model, &combined);
+                let cost = catalog_provider
+                    .as_ref()
+                    .map(|p| crate::catalog::estimate_cost(p, &model, &combined))
+                    .unwrap_or(0.0);
                 guard.add_usage(combined, cost);
                 let id = guard.id;
                 let seq = guard.messages.len() - 1;
@@ -1413,7 +1447,7 @@ async fn ensure_assistant_row(
             "",
             reasoning,
             false,
-            shuvarie_catalog::TokenUsage::default(),
+            shuvarie_llm::TokenUsage::default(),
             0.0,
         )
         .await
@@ -1478,7 +1512,7 @@ async fn persist_interrupted_turn(
                 &text,
                 &reasoning,
                 true,
-                shuvarie_catalog::TokenUsage::default(),
+                shuvarie_llm::TokenUsage::default(),
                 0.0,
             )
             .await;
@@ -1497,7 +1531,7 @@ async fn persist_interrupted_turn(
                 &text,
                 &reasoning,
                 true,
-                shuvarie_catalog::TokenUsage::default(),
+                shuvarie_llm::TokenUsage::default(),
                 0.0,
             )
             .await
@@ -1511,8 +1545,10 @@ async fn persist_interrupted_turn(
 }
 
 fn build_client(pc: &ProviderConfig) -> Result<ProviderClient, String> {
-    ProviderClient::build(pc.kind, pc.api_key.as_deref(), pc.base_url.as_deref())
-        .map_err(|e| e.to_string())
+    let providers = crate::catalog::providers();
+    let kind = crate::catalog::provider_type(&providers, &pc.kind);
+    let base_url = crate::catalog::base_url_for(&providers, &pc.kind, pc.base_url.as_deref());
+    ProviderClient::build(kind, pc.api_key.as_deref(), Some(&base_url)).map_err(|e| e.to_string())
 }
 
 async fn persist_stream_error(
@@ -1538,7 +1574,7 @@ async fn persist_stream_error(
                 pending_text,
                 pending_reasoning,
                 true,
-                shuvarie_catalog::TokenUsage::default(),
+                shuvarie_llm::TokenUsage::default(),
                 0.0,
             )
             .await;
@@ -1549,7 +1585,7 @@ async fn persist_stream_error(
                 pending_text,
                 pending_reasoning,
                 true,
-                shuvarie_catalog::TokenUsage::default(),
+                shuvarie_llm::TokenUsage::default(),
                 0.0,
             )
             .await;
@@ -1598,14 +1634,15 @@ async fn persist(
 /// Returns `None` when context management is disabled.
 fn context_budget(
     config: &Config,
-    provider: shuvarie_catalog::Provider,
+    provider: Option<&selune::Provider>,
     model: &str,
 ) -> Option<shuvarie_llm::ContextBudget> {
     if !config.context.enabled {
         return None;
     }
-    let context_length = shuvarie_catalog::resolve(provider, model)
-        .map(|e| e.context_length)
+    let context_length = provider
+        .and_then(|p| crate::catalog::context_length(p, model))
+        .map(|n| n.max(0) as u64)
         .unwrap_or(config.context.fallback_context_length);
     Some(shuvarie_llm::ContextBudget::new(
         context_length,
@@ -1616,12 +1653,13 @@ fn context_budget(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shuvarie_catalog::{Provider, TokenUsage};
+    use selune::ProviderType;
     use shuvarie_llm::StreamItem;
+    use shuvarie_llm::TokenUsage;
 
     #[tokio::test]
     async fn stream_events_forward_and_accumulate_usage() {
-        let client = ProviderClient::build(Provider::Ollama, None, None).unwrap();
+        let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
         let session = Arc::new(Mutex::new(Session::new()));
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(16);
 
@@ -1653,6 +1691,7 @@ mod tests {
                 stream,
                 session_shared,
                 client,
+                None,
                 store,
                 "ollama-model".into(),
                 worker_usage,
@@ -1691,7 +1730,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_error_forwards_and_leaves_session_clean() {
-        let client = ProviderClient::build(Provider::Ollama, None, None).unwrap();
+        let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
         let session = Arc::new(Mutex::new(Session::new()));
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(16);
 
@@ -1714,6 +1753,7 @@ mod tests {
                 stream,
                 session_shared,
                 client,
+                None,
                 store,
                 "ollama-model".into(),
                 worker_usage,
@@ -1743,7 +1783,7 @@ mod tests {
 
     #[tokio::test]
     async fn worker_events_forward_and_usage_accumulates() {
-        let client = ProviderClient::build(Provider::Ollama, None, None).unwrap();
+        let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
         let session = Arc::new(Mutex::new(Session::new()));
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(16);
 
@@ -1795,6 +1835,7 @@ mod tests {
                 stream,
                 session_shared,
                 client,
+                None,
                 store,
                 "ollama-model".into(),
                 worker_usage,

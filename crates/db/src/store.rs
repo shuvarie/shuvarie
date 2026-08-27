@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use shuvarie_catalog::TokenUsage;
 use shuvarie_llm::Role;
+use shuvarie_llm::TokenUsage;
 use toasty::db::Driver;
 use toasty::schema::db;
 use toasty::stmt::{List, Query, Type};

@@ -1,25 +1,16 @@
 use std::collections::HashMap;
 
-use shuvarie_catalog::Provider;
 use shuvarie_core::{Config, Connections, ProviderConfig};
 
 fn sample_connections() -> Connections {
     let mut providers = HashMap::new();
     providers.insert(
         "my-openai".to_string(),
-        ProviderConfig::new(
-            Provider::OpenAiCompatible,
-            Some("sk-test".to_string()),
-            None,
-        ),
+        ProviderConfig::new("openai", Some("sk-test".to_string()), None),
     );
     providers.insert(
         "local-ollama".to_string(),
-        ProviderConfig::new(
-            Provider::Ollama,
-            None,
-            Some("http://localhost:11434".into()),
-        ),
+        ProviderConfig::new("ollama", None, Some("http://localhost:11434".into())),
     );
     Connections {
         providers,
@@ -63,11 +54,7 @@ fn missing_active_provider_has_no_connected_providers() {
     let connections = Connections {
         providers: HashMap::from([(
             "my-openai".to_string(),
-            ProviderConfig::new(
-                Provider::OpenAiCompatible,
-                Some("sk-test".to_string()),
-                None,
-            ),
+            ProviderConfig::new("openai", Some("sk-test".to_string()), None),
         )]),
         active_provider: None,
         active_model: None,
@@ -90,7 +77,7 @@ fn active_provider_without_key_has_no_connected_providers() {
     let connections = Connections {
         providers: HashMap::from([(
             "my-openai".to_string(),
-            ProviderConfig::new(Provider::OpenAiCompatible, None, None),
+            ProviderConfig::new("openai", None, None),
         )]),
         active_provider: Some("my-openai".to_string()),
         active_model: None,
@@ -109,7 +96,7 @@ fn ollama_without_key_is_connected() {
     let connections = Connections {
         providers: HashMap::from([(
             "local".to_string(),
-            ProviderConfig::new(Provider::Ollama, None, None),
+            ProviderConfig::new("ollama", None, None),
         )]),
         active_provider: Some("local".to_string()),
         active_model: None,
@@ -122,7 +109,7 @@ fn ollama_cloud_without_key_is_not_connected() {
     let connections = Connections {
         providers: HashMap::from([(
             "cloud".to_string(),
-            ProviderConfig::new(Provider::OllamaCloud, None, None),
+            ProviderConfig::new("ollama-cloud", None, None),
         )]),
         active_provider: Some("cloud".to_string()),
         active_model: None,
@@ -135,7 +122,7 @@ fn ollama_cloud_with_key_is_connected() {
     let connections = Connections {
         providers: HashMap::from([(
             "cloud".to_string(),
-            ProviderConfig::new(Provider::OllamaCloud, Some("ollama-key".to_string()), None),
+            ProviderConfig::new("ollama-cloud", Some("ollama-key".to_string()), None),
         )]),
         active_provider: Some("cloud".to_string()),
         active_model: None,

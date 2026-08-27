@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use shuvarie_catalog::TokenUsage;
+use crate::TokenUsage;
 
 use crate::ProviderClient;
 use crate::stream::StreamItem;

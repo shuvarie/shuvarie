@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use shuvarie_catalog::TokenUsage;
 use shuvarie_db::StoredSession;
 use shuvarie_llm::ChatMsg;
+use shuvarie_llm::TokenUsage;
 
 use crate::tool_record::ToolRecord;
 

@@ -1,5 +1,6 @@
 pub mod agents;
 pub mod approval;
+pub mod catalog;
 pub mod command;
 pub mod compaction;
 pub mod config;
@@ -24,8 +25,7 @@ pub use core_task::run;
 pub use error::{CoreError, Result};
 pub use event::Event;
 pub use session::Session;
-pub use shuvarie_catalog::{ModelInfo, Provider};
 pub use shuvarie_db::{MsgRole, SearchHit, SearchSource, SessionSummary};
-pub use shuvarie_llm::{ChatMsg, Role};
+pub use shuvarie_llm::{ChatMsg, ModelInfo, Role, TokenUsage};
 pub use shuvarie_lsp::{DiagnosticInfo, DiagnosticSeverity, LspStatus, ServerStatus};
 pub use skills::{Skill, Skills};

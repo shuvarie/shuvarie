@@ -2,7 +2,7 @@ use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
 use ratatui::style::Modifier;
 use ratatui::widgets::{Clear, List, ListItem, Paragraph, Wrap};
-use shuvarie_catalog::Provider;
+use selune::Provider;
 use termina::event::{KeyCode, KeyEvent};
 
 use crate::tui::utils::{alt, ctrl};
@@ -51,7 +51,7 @@ pub enum AddProviderOutcome {
     None,
     Cancel,
     Submit {
-        kind: Provider,
+        kind: String,
         name: String,
         api_key: Option<String>,
         base_url: Option<String>,
@@ -65,6 +65,7 @@ pub struct AddProviderForm {
     kind_viewport_height: u16,
     pub search: Search,
     pub filtered: Vec<usize>,
+    providers: Vec<Provider>,
     pub name: InputBuffer,
     pub api_key: InputBuffer,
     pub base_url: InputBuffer,
@@ -74,14 +75,15 @@ pub struct AddProviderForm {
 }
 
 impl AddProviderForm {
-    pub fn new(existing_names: &[String]) -> Self {
+    pub fn new(providers: Vec<Provider>, existing_names: &[String]) -> Self {
         Self {
             stage: AddProviderStage::SelectKind,
             kind_selected: 0,
             kind_offset: 0,
             kind_viewport_height: 0,
             search: Search::new(),
-            filtered: (0..Provider::ALL.len()).collect(),
+            filtered: (0..providers.len()).collect(),
+            providers,
             name: InputBuffer::new(),
             api_key: InputBuffer::new(),
             base_url: InputBuffer::new(),
@@ -91,20 +93,20 @@ impl AddProviderForm {
         }
     }
 
-    fn kind(&self) -> Provider {
+    fn kind(&self) -> &Provider {
         let idx = self
             .filtered
             .get(self.kind_selected)
             .copied()
             .unwrap_or(0)
-            .min(Provider::ALL.len() - 1);
-        Provider::ALL[idx]
+            .min(self.providers.len().saturating_sub(1));
+        &self.providers[idx]
     }
 
     fn refilter(&mut self) {
-        self.filtered = self.search.filter_indices(Provider::ALL.len(), |i| {
-            Provider::ALL[i].display_name().to_string()
-        });
+        self.filtered = self
+            .search
+            .filter_indices(self.providers.len(), |i| self.providers[i].name.clone());
         self.kind_selected = 0;
         self.kind_offset = 0;
         self.recompute_kind_offset();
@@ -131,12 +133,11 @@ impl AddProviderForm {
     }
 
     fn transition_to_details(&mut self) {
-        let kind = self.kind();
-        let default_name = self.compute_default_name(kind.display_name());
+        let default_name = self.compute_default_name(&self.kind().name);
         self.name.set(&default_name);
         self.base_url.clear();
-        if let Some(url) = kind.default_base_url() {
-            self.base_url.set(url);
+        if let Some(url) = shuvarie_core::catalog::api_endpoint(self.kind()) {
+            self.base_url.set(&url);
         }
         self.api_key.clear();
         self.stage = AddProviderStage::Details;
@@ -364,10 +365,13 @@ impl AddProviderForm {
             return AddProviderOutcome::None;
         }
         let kind = self.kind();
-        let api_key = if kind.requires_api_key() {
+        let kind_id = kind.id.0.clone();
+        let kind_name = kind.name.clone();
+        let requires_key = shuvarie_core::catalog::requires_api_key(kind);
+        let api_key = if requires_key {
             let k = self.api_key.value.trim().to_string();
             if k.is_empty() {
-                self.error = Some(format!("{} requires an API key", kind.display_name()));
+                self.error = Some(format!("{kind_name} requires an API key"));
                 return AddProviderOutcome::None;
             }
             Some(k)
@@ -380,7 +384,7 @@ impl AddProviderForm {
             Some(self.base_url.value.trim().to_string())
         };
         AddProviderOutcome::Submit {
-            kind,
+            kind: kind_id,
             name,
             api_key,
             base_url,
@@ -463,10 +467,7 @@ impl AddProviderForm {
             .skip(self.kind_offset)
             .take(list_area.height as usize)
             .map(|(i, &orig)| {
-                render_list_item(
-                    Provider::ALL[orig].display_name().to_string(),
-                    i == self.kind_selected,
-                )
+                render_list_item(self.providers[orig].name.clone(), i == self.kind_selected)
             })
             .collect();
         frame.render_widget(List::new(visible), list_area);
@@ -487,12 +488,12 @@ impl AddProviderForm {
         let popup = centered_rect(60, 55, area);
         frame.render_widget(Clear, popup);
         let kind = self.kind();
-        let title = format!("Add Provider — {}", kind.display_name());
+        let title = format!("Add Provider — {}", kind.name);
         let block = theme::overlay_block(&title);
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
 
-        let needs_key = kind.requires_api_key();
+        let needs_key = shuvarie_core::catalog::requires_api_key(kind);
 
         let name_line = self.field_line("Name", &self.name, FormField::Name, "");
         let url_line = self.field_line("Base URL", &self.base_url, FormField::BaseUrl, "");
@@ -521,7 +522,7 @@ impl AddProviderForm {
 
 impl Default for AddProviderForm {
     fn default() -> Self {
-        Self::new(&[])
+        Self::new(Vec::new(), &[])
     }
 }
 
@@ -537,8 +538,35 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 mod tests {
     use super::*;
 
+    fn test_providers() -> Vec<Provider> {
+        vec![
+            Provider {
+                name: "OpenAI".into(),
+                id: selune::InferenceProvider("openai".into()),
+                api_key: Some("$OPENAI_API_KEY".into()),
+                api_endpoint: Some("https://api.openai.com/v1".into()),
+                r#type: Some(selune::ProviderType::Openai),
+                default_large_model_id: None,
+                default_small_model_id: None,
+                models: Vec::new(),
+                default_headers: None,
+            },
+            Provider {
+                name: "Ollama".into(),
+                id: selune::InferenceProvider("ollama".into()),
+                api_key: None,
+                api_endpoint: Some("http://localhost:11434".into()),
+                r#type: Some(selune::ProviderType::Ollama),
+                default_large_model_id: None,
+                default_small_model_id: None,
+                models: Vec::new(),
+                default_headers: None,
+            },
+        ]
+    }
+
     fn form_with_query(query: &str) -> AddProviderForm {
-        let mut form = AddProviderForm::new(&[]);
+        let mut form = AddProviderForm::new(test_providers(), &[]);
         if !query.is_empty() {
             form.search.query = query.into();
             form.refilter();
@@ -549,20 +577,19 @@ mod tests {
     #[test]
     fn empty_query_lists_all_kinds() {
         let form = form_with_query("");
-        assert_eq!(form.filtered.len(), Provider::ALL.len());
-        assert_eq!(form.filtered, (0..Provider::ALL.len()).collect::<Vec<_>>());
+        assert_eq!(form.filtered.len(), 2);
+        assert_eq!(form.filtered, vec![0, 1]);
     }
 
     #[test]
     fn query_filters_kinds() {
         let form = form_with_query("open");
         assert!(!form.filtered.is_empty());
-        assert!(form.filtered.iter().all(|&i| {
-            Provider::ALL[i]
-                .display_name()
-                .to_lowercase()
-                .contains("open")
-        }));
+        assert!(
+            form.filtered
+                .iter()
+                .all(|&i| { form.providers[i].name.to_lowercase().contains("open") })
+        );
     }
 
     #[test]
@@ -575,28 +602,19 @@ mod tests {
     fn kind_resolves_through_filtered() {
         let mut form = form_with_query("ollama");
         form.kind_selected = 0;
-        assert_eq!(form.kind(), Provider::Ollama);
-        assert!(form.filtered.contains(&(Provider::Ollama as usize)));
-    }
-
-    #[test]
-    fn cloud_query_resolves_to_ollama_cloud() {
-        let mut form = form_with_query("cloud");
-        form.kind_selected = 0;
-        assert_eq!(form.kind(), Provider::OllamaCloud);
-        assert!(form.filtered.contains(&(Provider::OllamaCloud as usize)));
+        assert_eq!(form.kind().id.0, "ollama");
     }
 
     #[test]
     fn kind_falls_back_when_filtered_empty() {
         let form = form_with_query("zzzzzz");
-        assert_eq!(form.kind(), Provider::ALL[0]);
+        assert_eq!(form.kind().id.0, "openai");
     }
 
     #[test]
     fn search_update_refilters_and_resets_selection() {
-        let mut form = AddProviderForm::new(&[]);
-        form.kind_selected = 3;
+        let mut form = AddProviderForm::new(test_providers(), &[]);
+        form.kind_selected = 1;
         form.update(AddProviderMessage::Search(SearchMessage::Input('o')));
         assert!(!form.filtered.is_empty());
         assert_eq!(form.kind_selected, 0);

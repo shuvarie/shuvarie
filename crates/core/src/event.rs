@@ -1,6 +1,6 @@
-use shuvarie_catalog::{ModelInfo, TokenUsage};
 use shuvarie_db::SessionSummary;
 use shuvarie_llm::FileChange;
+use shuvarie_llm::{ModelInfo, TokenUsage};
 
 use crate::approval::ApprovalReason;
 

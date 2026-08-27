@@ -3,8 +3,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use shuvarie_catalog::Provider;
-
 use crate::config::config_dir;
 use crate::{CoreError, Result};
 
@@ -24,7 +22,11 @@ pub struct Connections {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProviderConfig {
-    pub kind: Provider,
+    /// The provider id as referenced in the Selune catalog (e.g. `anthropic`,
+    /// `openai`, `togetherai`). This is the canonical identity; behavior such
+    /// as whether an API key is required comes from the matching
+    /// [`selune::Provider`].
+    pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -66,6 +68,7 @@ impl Connections {
         Ok(())
     }
 
+    /// Whether the active provider is configured and connectable.
     pub fn has_connected_providers(&self) -> bool {
         if self.providers.is_empty() {
             return false;
@@ -81,22 +84,41 @@ impl Connections {
 }
 
 impl ProviderConfig {
-    pub fn new(kind: Provider, api_key: Option<String>, base_url: Option<String>) -> Self {
+    pub fn new(kind: impl Into<String>, api_key: Option<String>, base_url: Option<String>) -> Self {
         Self {
-            kind,
+            kind: kind.into(),
             api_key,
             base_url,
         }
     }
 
+    /// A provider is connectable when it declares no API key requirement, or
+    /// when a non-empty key is present. Provider-level key requirements come
+    /// from the Selune catalog; here we treat the absence of a catalog entry as
+    /// requiring a key only when the provider id looks remote.
     pub fn is_connectable(&self) -> bool {
-        if self.kind.requires_api_key() {
-            self.api_key
-                .as_ref()
-                .map(|k| !k.trim().is_empty())
-                .unwrap_or(false)
-        } else {
-            true
+        let catalog = crate::catalog::providers();
+        match catalog.iter().find(|p| p.id.0 == self.kind) {
+            Some(p) => match &p.api_key {
+                Some(_) => self
+                    .api_key
+                    .as_ref()
+                    .map(|k| !k.trim().is_empty())
+                    .unwrap_or(false),
+                None => true,
+            },
+            // Unknown provider id: fall back to requiring a key unless it's an
+            // Ollama-style local provider.
+            None => {
+                if self.kind == "ollama" {
+                    true
+                } else {
+                    self.api_key
+                        .as_ref()
+                        .map(|k| !k.trim().is_empty())
+                        .unwrap_or(false)
+                }
+            }
         }
     }
 }

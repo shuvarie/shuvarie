@@ -101,9 +101,7 @@ pub async fn summarize(
          {head_text}\n---"
     );
     let (activity_tx, mut activity_rx) = tokio::sync::mpsc::channel::<shuvarie_llm::StreamItem>(16);
-    let usage = std::sync::Arc::new(std::sync::Mutex::new(
-        shuvarie_catalog::TokenUsage::default(),
-    ));
+    let usage = std::sync::Arc::new(std::sync::Mutex::new(shuvarie_llm::TokenUsage::default()));
     let req = shuvarie_llm::WorkerRequest {
         client: client.clone(),
         name: "compaction".to_string(),

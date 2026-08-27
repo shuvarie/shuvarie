@@ -1,5 +1,6 @@
 use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
+use ratatui::style::Modifier;
 use ratatui::widgets::{Clear, List, ListItem, Paragraph};
 use shuvarie_core::ModelInfo;
 use termina::event::{KeyCode, KeyEvent};
@@ -20,6 +21,7 @@ pub enum ModelPickerMessage {
     Resize { viewport_height: u16 },
 }
 
+#[derive(Debug, PartialEq)]
 pub enum ModelPickerEffect {
     Selected { model: String },
     Close,
@@ -61,6 +63,22 @@ impl ModelPicker {
         self.search.clear();
     }
 
+    /// Whether the raw search query is offered as a selectable first row.
+    /// Enabled only when a query is typed and no model matches it.
+    fn query_row(&self) -> Option<String> {
+        let q = self.search.query.trim();
+        if q.is_empty() || !self.filtered.is_empty() {
+            return None;
+        }
+        Some(q.to_string())
+    }
+
+    /// Total number of visible rows (the query row, when present, plus the
+    /// matched models).
+    fn visible_len(&self) -> usize {
+        self.filtered.len() + usize::from(self.query_row().is_some())
+    }
+
     fn refilter(&mut self) {
         self.filtered = self
             .search
@@ -72,7 +90,7 @@ impl ModelPicker {
 
     fn recompute_offset(&mut self) {
         let vh = self.viewport_height as usize;
-        let len = self.filtered.len();
+        let len = self.visible_len();
         self.offset = scroll_offset_for(self.selected, self.offset, vh, len);
     }
 
@@ -105,17 +123,16 @@ impl ModelPicker {
                 Some(ModelPickerEffect::Close)
             }
             ModelPickerMessage::Next => {
-                if !self.filtered.is_empty() {
-                    self.selected = (self.selected + 1).min(self.filtered.len() - 1);
+                let len = self.visible_len();
+                if len > 0 {
+                    self.selected = (self.selected + 1).min(len - 1);
                     self.recompute_offset();
                 }
                 None
             }
             ModelPickerMessage::Prev => {
-                if !self.filtered.is_empty() {
-                    self.selected = self.selected.saturating_sub(1);
-                    self.recompute_offset();
-                }
+                self.selected = self.selected.saturating_sub(1);
+                self.recompute_offset();
                 None
             }
             ModelPickerMessage::Search(m) => {
@@ -124,8 +141,7 @@ impl ModelPicker {
                 None
             }
             ModelPickerMessage::Select => {
-                if let Some(&orig) = self.filtered.get(self.selected) {
-                    let model = self.models[orig].id.clone();
+                if let Some(model) = self.selected_model() {
                     self.close();
                     return Some(ModelPickerEffect::Selected { model });
                 }
@@ -139,6 +155,23 @@ impl ModelPicker {
                 None
             }
         }
+    }
+
+    /// The model id of the currently selected row, if any. Row 0 is the raw
+    /// query when the query row is active; otherwise rows map into `filtered`.
+    fn selected_model(&self) -> Option<String> {
+        if self.query_row().is_some() {
+            if self.selected == 0 {
+                return self.query_row();
+            }
+            return self
+                .filtered
+                .get(self.selected - 1)
+                .map(|&orig| self.models[orig].id.clone());
+        }
+        self.filtered
+            .get(self.selected)
+            .map(|&orig| self.models[orig].id.clone())
     }
 
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -156,37 +189,107 @@ impl ModelPicker {
 
         self.search.view(frame, input_area, "/ to search models");
 
-        let visible: Vec<ListItem> = self
-            .filtered
-            .iter()
-            .enumerate()
-            .skip(self.offset)
-            .take(list_area.height as usize)
-            .map(|(idx, &orig)| {
-                let m = &self.models[orig];
-                let mut line = vec![Span::raw(m.display_name().to_string()).fg(theme::TEXT)];
-                if let Some(ctx) = m.context_length {
-                    line.push(Span::raw(format!(" · {}k ctx", ctx / 1024)).fg(theme::TEXT_MUTED));
-                }
-                render_list_item_line(Line::from(line), idx == self.selected)
-            })
-            .collect();
-        frame.render_widget(List::new(visible), list_area);
+        let mut items: Vec<ListItem> = Vec::new();
+        let query_row_present = self.query_row().is_some();
+        if let Some(q) = self.query_row() {
+            let mut line = vec![
+                Span::raw(format!("Use \"{q}\""))
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ];
+            line.push(Span::raw("  (no match)").fg(theme::TEXT_MUTED));
+            items.push(render_list_item_line(Line::from(line), self.selected == 0));
+        }
+        let skip = self.offset.saturating_sub(usize::from(query_row_present));
+        let row_base = self.selected.saturating_sub(usize::from(query_row_present));
+        for (idx, &orig) in self.filtered.iter().enumerate().skip(skip) {
+            let m = &self.models[orig];
+            let mut line = vec![Span::raw(m.display_name().to_string()).fg(theme::TEXT)];
+            if let Some(ctx) = m.context_length {
+                line.push(Span::raw(format!(" · {}k ctx", ctx / 1024)).fg(theme::TEXT_MUTED));
+            }
+            items.push(render_list_item_line(Line::from(line), idx == row_base));
+        }
+        frame.render_widget(List::new(items), list_area);
 
-        frame.render_widget(
-            Paragraph::new(theme::help_line(&[
-                ("Enter", "select"),
-                ("Esc", "close"),
-                ("↑↓", "navigate"),
-            ]))
-            .fg(theme::TEXT_MUTED),
-            hint_area,
-        );
+        let hint = if self.query_row().is_some() {
+            theme::help_line(&[("Enter", "use query"), ("Esc", "close"), ("↑↓", "navigate")])
+        } else {
+            theme::help_line(&[("Enter", "select"), ("Esc", "close"), ("↑↓", "navigate")])
+        };
+        frame.render_widget(Paragraph::new(hint).fg(theme::TEXT_MUTED), hint_area);
     }
 }
 
 impl Default for ModelPicker {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn models() -> Vec<ModelInfo> {
+        vec![
+            ModelInfo {
+                id: "gpt-5".into(),
+                name: Some("GPT-5".into()),
+                context_length: Some(400000),
+            },
+            ModelInfo {
+                id: "claude-sonnet-4-5".into(),
+                name: Some("Claude Sonnet 4.5".into()),
+                context_length: Some(200000),
+            },
+        ]
+    }
+
+    fn picker_with_query(q: &str) -> ModelPicker {
+        let mut p = ModelPicker::new();
+        p.open(&models());
+        p.search.query = q.into();
+        p.refilter();
+        p
+    }
+
+    #[test]
+    fn empty_query_lists_all() {
+        let p = picker_with_query("");
+        assert_eq!(p.filtered.len(), 2);
+        assert_eq!(p.query_row(), None);
+    }
+
+    #[test]
+    fn match_query_has_no_query_row() {
+        let p = picker_with_query("gpt");
+        assert_eq!(p.filtered.len(), 1);
+        assert_eq!(p.query_row(), None);
+    }
+
+    #[test]
+    fn no_match_query_shows_query_row() {
+        let p = picker_with_query("my-custom-model");
+        assert!(p.filtered.is_empty());
+        assert_eq!(p.query_row(), Some("my-custom-model".to_string()));
+    }
+
+    #[test]
+    fn select_query_row_returns_raw_query() {
+        let mut p = picker_with_query("custom-xyz");
+        p.selected = 0;
+        assert_eq!(
+            p.update(ModelPickerMessage::Select),
+            Some(ModelPickerEffect::Selected {
+                model: "custom-xyz".into()
+            })
+        );
+    }
+
+    #[test]
+    fn visible_len_counts_query_row() {
+        let p = picker_with_query("zzz");
+        assert_eq!(p.visible_len(), 1);
     }
 }

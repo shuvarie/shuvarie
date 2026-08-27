@@ -544,7 +544,8 @@ impl App {
                         CommandMenuEffect::AddProvider => {
                             let names: Vec<String> =
                                 self.ctx.connections.providers.keys().cloned().collect();
-                            self.add_provider_form = Some(AddProviderForm::new(&names));
+                            let providers = shuvarie_core::catalog::providers();
+                            self.add_provider_form = Some(AddProviderForm::new(providers, &names));
                             self.overlay = Overlay::AddProvider;
                             return None;
                         }
@@ -604,7 +605,8 @@ impl App {
                         WelcomeEffect::AddProvider => {
                             let names: Vec<String> =
                                 self.ctx.connections.providers.keys().cloned().collect();
-                            self.add_provider_form = Some(AddProviderForm::new(&names));
+                            let providers = shuvarie_core::catalog::providers();
+                            self.add_provider_form = Some(AddProviderForm::new(providers, &names));
                             self.overlay = Overlay::AddProvider;
                         }
                     }

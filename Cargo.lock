@@ -7122,6 +7122,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",
@@ -7661,6 +7662,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "selune"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7939,8 +7950,8 @@ dependencies = [
  "futures-util",
  "nucleo",
  "ratatui",
+ "selune",
  "serde_json",
- "shuvarie-catalog",
  "shuvarie-core",
  "shuvarie-db",
  "shuvarie-highlight",
@@ -7952,14 +7963,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "shuvarie-catalog"
-version = "0.1.0"
-dependencies = [
- "serde",
- "toml",
-]
-
-[[package]]
 name = "shuvarie-core"
 version = "0.1.0"
 dependencies = [
@@ -7967,10 +7970,10 @@ dependencies = [
  "futures-util",
  "ignore",
  "regex",
+ "selune",
  "serde",
  "serde_json",
  "serde_yaml",
- "shuvarie-catalog",
  "shuvarie-db",
  "shuvarie-llm",
  "shuvarie-lsp",
@@ -7987,9 +7990,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "jiff",
+ "selune",
  "serde",
  "serde_json",
- "shuvarie-catalog",
  "shuvarie-llm",
  "tempfile",
  "thiserror 2.0.20",
@@ -8015,9 +8018,9 @@ dependencies = [
  "futures-core",
  "futures-util",
  "rig",
+ "selune",
  "serde",
  "serde_json",
- "shuvarie-catalog",
  "thiserror 2.0.20",
  "tokio",
 ]

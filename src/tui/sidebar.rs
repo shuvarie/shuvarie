@@ -3,8 +3,8 @@ use std::cell::{Cell, RefCell};
 use ratatui::layout::{Alignment, Rect};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph};
-use shuvarie_catalog::TokenUsage;
 use shuvarie_core::{LspStatus, Skill};
+use shuvarie_llm::TokenUsage;
 use termina::event::KeyEvent;
 
 use crate::tui::{components::VersionBar, utils::locale::ToDecSepNum};

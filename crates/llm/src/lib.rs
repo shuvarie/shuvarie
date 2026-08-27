@@ -3,11 +3,11 @@ mod context_hook;
 mod error;
 pub mod file_change;
 pub mod message;
-mod model;
+pub mod model;
 pub mod provider;
 pub mod stream;
 pub mod tool;
-mod usage;
+pub mod usage;
 
 pub use agent::WorkerAgent;
 pub use agent::WorkerRequest;
@@ -15,6 +15,8 @@ pub use context_hook::{ContextBudget, ContextHook, OVERFLOW_REASON, UsageTracker
 pub use error::{LlmError, Result};
 pub use file_change::{DiffLine, DiffLineKind, FileChange};
 pub use message::{ChatMsg, Role};
+pub use model::ModelInfo;
 pub use provider::ProviderClient;
 pub use stream::{StreamItem, StreamStream};
 pub use tool::{Tool, ToolDefinition, ToolOutput};
+pub use usage::TokenUsage;

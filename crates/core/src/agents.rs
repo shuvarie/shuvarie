@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use shuvarie_catalog::TokenUsage;
 use shuvarie_llm::ProviderClient;
+use shuvarie_llm::TokenUsage;
 
 use crate::approval::ApprovalGate;
 use crate::lsp_manager::SharedManager;
