@@ -235,37 +235,6 @@ impl LspManager {
         out
     }
 
-    pub async fn on_file_open(&mut self, path: &Path, content: &str) {
-        if !self.enabled {
-            return;
-        }
-        let Some(lang) = language_for_extension(&self.specs, path) else {
-            return;
-        };
-        let spec = match self.specs.get(&lang) {
-            Some(s) => s,
-            None => return,
-        };
-        if !spec.auto_start {
-            return;
-        }
-        if !self.servers.contains_key(&lang) {
-            if registry::probe(&spec.command[0]).is_none() {
-                return;
-            }
-            if self.start(&lang).await.is_err() {
-                return;
-            }
-        }
-        let Some(server) = self.servers.get(&lang) else {
-            return;
-        };
-        let Some(uri) = to_file_url(path) else {
-            return;
-        };
-        server.did_open(&uri, &lang, content).await;
-    }
-
     pub async fn on_file_change(&mut self, path: &Path, content: &str) {
         if !self.enabled {
             return;
@@ -314,6 +283,51 @@ impl LspManager {
 
     pub fn diagnostics_for(&self, path: &str) -> Vec<DiagnosticInfo> {
         self.diagnostics.get(path).cloned().unwrap_or_default()
+    }
+
+    /// Open the given files with their matching LSP servers (starting the
+    /// server if needed, regardless of `auto_start`) so the server publishes
+    /// diagnostics for them. Returns the workspace-relative paths of the files
+    /// that were opened. Files with no known language or a missing server
+    /// binary are skipped.
+    pub async fn analyze(&mut self, files: &[PathBuf]) -> Result<Vec<String>, String> {
+        if !self.enabled {
+            return Err("LSP is disabled in config".into());
+        }
+        let mut opened = Vec::new();
+        for path in files {
+            let Some(lang) = language_for_extension(&self.specs, path) else {
+                continue;
+            };
+            let spec = match self.specs.get(&lang) {
+                Some(s) => s,
+                None => continue,
+            };
+            if spec.command.is_empty() || registry::probe(&spec.command[0]).is_none() {
+                continue;
+            }
+            if !self.servers.contains_key(&lang) && self.start(&lang).await.is_err() {
+                continue;
+            }
+            let Some(server) = self.servers.get(&lang) else {
+                continue;
+            };
+            let Some(uri) = to_file_url(path) else {
+                continue;
+            };
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            server.did_open(&uri, &lang, &content).await;
+            let rel = path
+                .strip_prefix(&self.workspace_root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .into_owned();
+            opened.push(rel);
+        }
+        Ok(opened)
     }
 }
 

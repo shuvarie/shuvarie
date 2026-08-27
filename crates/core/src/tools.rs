@@ -47,7 +47,6 @@ fn arg_value(args: &Value, key: &str) -> Result<String, String> {
 
 struct ReadFile {
     gate: ApprovalGate,
-    lsp: Option<SharedManager>,
     read_cache: ReadCache,
     max_output_chars: usize,
 }
@@ -75,7 +74,6 @@ impl Tool for ReadFile {
         args: Value,
     ) -> Pin<Box<dyn Future<Output = Result<ToolOutput, String>> + Send>> {
         let gate = self.gate.clone();
-        let lsp = self.lsp.clone();
         let read_cache = self.read_cache.clone();
         let max_output_chars = self.max_output_chars;
         Box::pin(async move {
@@ -100,12 +98,6 @@ impl Tool for ReadFile {
             }
             let content_owned =
                 String::from_utf8_lossy(&data[..data.len().min(MAX_READ_BYTES)]).into_owned();
-            if let Some(lsp) = &lsp {
-                lsp.lock()
-                    .await
-                    .on_file_open(Path::new(&path), &content_owned)
-                    .await;
-            }
             let lines: Vec<&str> = content_owned.lines().collect();
             let start = offset.unwrap_or(1).max(1) as usize - 1;
             let end = match limit {
@@ -685,18 +677,22 @@ impl Tool for Lsp {
         ToolDefinition {
             name: "lsp".into(),
             description: "Manage Language Server Protocol (LSP) servers for the workspace. \
-                `action` is one of `start` | `stop` | `restart` | `list`. For `start`/`stop`/`restart`, \
+                `action` is one of `start` | `stop` | `restart` | `list` | `analyze`. For `start`/`stop`/`restart`, \
                 `name` is the exact server id (a language like `rust`, `go`, `typescript`). \
                 For `list`, `name` is an optional substring/fuzzy filter (matched against server \
                 name + language), and `all` controls whether to list all configured servers \
-                (true) or only the currently running ones (false, the default)."
+                (true) or only the currently running ones (false, the default). \
+                For `analyze`, `path` is a file or directory (defaults to the workspace root); \
+                the matching server is started if needed and the file(s) are opened so the \
+                server publishes diagnostics, which are returned."
                 .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": ["start", "stop", "restart", "list"], "description": "Action to perform" },
+                    "action": { "type": "string", "enum": ["start", "stop", "restart", "list", "analyze"], "description": "Action to perform" },
                     "name": { "type": "string", "description": "Server name (exact id for start/stop/restart; substring filter for list)" },
-                    "all": { "type": "boolean", "description": "For `list`: list all configured servers instead of only running ones (default false)" }
+                    "all": { "type": "boolean", "description": "For `list`: list all configured servers instead of only running ones (default false)" },
+                    "path": { "type": "string", "description": "For `analyze`: file or directory to analyze (defaults to the workspace root)" }
                 },
                 "required": ["action"]
             }),
@@ -716,6 +712,9 @@ impl Tool for Lsp {
                 .to_string();
             let name = args.get("name").and_then(Value::as_str).map(String::from);
             let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
+            if action == "analyze" {
+                return analyze_paths(&lsp, args.get("path").and_then(Value::as_str)).await;
+            }
             let mut mgr = lsp.lock().await;
             match action.as_str() {
                 "start" => {
@@ -765,6 +764,90 @@ impl Tool for Lsp {
     }
 }
 
+const ANALYZE_MAX_FILES: usize = 50;
+const ANALYZE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+const ANALYZE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// `lsp analyze [path]`: open the target file(s) with their LSP server and
+/// return the published diagnostics. The manager lock is released between
+/// polls so the core task's diagnostic pump can drain `publishDiagnostics`
+/// into the manager's map.
+async fn analyze_paths(lsp: &SharedManager, path: Option<&str>) -> Result<ToolOutput, String> {
+    let target = path.unwrap_or(".");
+    let abs = resolve(target)?;
+    let mut files: Vec<PathBuf> = Vec::new();
+    if abs.is_dir() {
+        let mut walk = ignore::WalkBuilder::new(&abs)
+            .hidden(false)
+            .git_ignore(true)
+            .build();
+        for entry in walk.by_ref().flatten() {
+            if files.len() >= ANALYZE_MAX_FILES {
+                break;
+            }
+            if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                files.push(entry.into_path());
+            }
+        }
+    } else {
+        files.push(abs);
+    }
+    if files.is_empty() {
+        return Ok(ToolOutput::text("no files to analyze"));
+    }
+    let opened = {
+        let mut mgr = lsp.lock().await;
+        mgr.analyze(&files).await?
+    };
+    if opened.is_empty() {
+        return Ok(ToolOutput::text(
+            "no files matched a configured LSP server (check [lsp] config)",
+        ));
+    }
+    let deadline = std::time::Instant::now() + ANALYZE_TIMEOUT;
+    let mut out = String::new();
+    loop {
+        let (pending, rendered) = {
+            let mgr = lsp.lock().await;
+            let mut pending = Vec::new();
+            let mut rendered = String::new();
+            for rel in &opened {
+                let diags = mgr.diagnostics_for(rel);
+                if diags.is_empty() {
+                    pending.push(rel.clone());
+                    continue;
+                }
+                for d in &diags {
+                    rendered.push_str(&format!(
+                        "{}:{}:{}: {}: {}\n",
+                        rel,
+                        d.line,
+                        d.col,
+                        d.severity.as_str(),
+                        d.message
+                    ));
+                }
+            }
+            (pending, rendered)
+        };
+        out.push_str(&rendered);
+        if pending.is_empty() || std::time::Instant::now() >= deadline {
+            if pending.is_empty() {
+                break;
+            }
+            for rel in &pending {
+                out.push_str(&format!("{rel}: no diagnostics published\n"));
+            }
+            break;
+        }
+        tokio::time::sleep(ANALYZE_POLL_INTERVAL).await;
+    }
+    if out.is_empty() {
+        out.push_str("no diagnostics");
+    }
+    Ok(ToolOutput::text(out))
+}
+
 pub fn all_tools(
     gate: ApprovalGate,
     lsp: SharedManager,
@@ -774,7 +857,6 @@ pub fn all_tools(
     vec![
         std::sync::Arc::new(ReadFile {
             gate: gate.clone(),
-            lsp: Some(lsp.clone()),
             read_cache: read_cache.clone(),
             max_output_chars,
         }),
@@ -802,7 +884,6 @@ pub fn read_tools(
     vec![
         std::sync::Arc::new(ReadFile {
             gate: gate.clone(),
-            lsp: Some(lsp.clone()),
             read_cache,
             max_output_chars,
         }),
@@ -825,7 +906,6 @@ pub fn edit_tools(
     vec![
         std::sync::Arc::new(ReadFile {
             gate: gate.clone(),
-            lsp: Some(lsp.clone()),
             read_cache,
             max_output_chars,
         }),
@@ -866,7 +946,6 @@ mod tests {
     fn read_file_tool() -> ReadFile {
         ReadFile {
             gate: gate(),
-            lsp: no_lsp(),
             read_cache: ReadCache::new(),
             max_output_chars: 0,
         }
@@ -1055,7 +1134,6 @@ mod tests {
         let cache = ReadCache::new();
         let tool = ReadFile {
             gate: gate(),
-            lsp: no_lsp(),
             read_cache: cache.clone(),
             max_output_chars: 0,
         };
@@ -1079,7 +1157,6 @@ mod tests {
         std::fs::write("big.txt", &big).unwrap();
         let tool = ReadFile {
             gate: gate(),
-            lsp: no_lsp(),
             read_cache: ReadCache::new(),
             max_output_chars: 100,
         };
