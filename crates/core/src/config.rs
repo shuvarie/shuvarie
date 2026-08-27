@@ -36,7 +36,7 @@ fn default_agent_config() -> AgentConfig {
 }
 
 fn default_max_turns() -> usize {
-    30
+    0
 }
 
 /// Context-window management: bounds the input tokens sent to the LLM per model
