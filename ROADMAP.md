@@ -129,6 +129,27 @@ Milestone M7.1 ships; the M7.2 catalog milestone ships; M7.3 multi-agent orchest
 - Workspace/checkout integration (git branch/commit checkout, git status/diff awareness).
 - Export/import sessions.
 
+## M10+ — Tool parity with OpenCode
+
+The OpenCode codebase (`./opencode/packages/opencode/src/tool/`) defines a rich built-in tool roster. Shuvarie already has seven tools (`read_file`, `write_file`, `edit_file`, `run_shell`, `list_dir`, `grep`, `lsp` — `tools.rs`), three worker agents (`explore_workspace`, `run_tests`, `edit_files` — `agents.rs`), an approval gate, inline diff review, and a skills system. This milestone closes the gap by replicating the remaining OpenCode tools and behaviors that fit Shuvarie's architecture, and by hardening the ones we have.
+
+Reference roster from OpenCode (`tool/registry.ts`, plus the individual tool modules):
+`invalid`, `question`, `shell`, `read`, `glob`, `grep`, `edit`, `write`, `task`, `webfetch`, `todo`, `websearch`, `skill`, `apply_patch`, `lsp`, `plan`, `execute` (code-mode), plus plugin/MCP tools and subagents.
+
+Mapping to Shuvarie today: `shell`≈`run_shell`, `read`≈`read_file`, `edit`≈`edit_file`, `write`≈`write_file`, `grep`≈`grep`, `lsp`≈`lsp`, `task`≈`explore_workspace`/`run_tests`/`edit_files`, `skill`≈skills system. Missing or underdeveloped: `glob`, `webfetch`, `todo`, `websearch`, `apply_patch`, `question`, `plan`, `invalid`.
+
+- [ ] **M10.1 — Glob tool.** Add a `glob` agent tool (`glob.rs`) mirroring OpenCode's `glob.ts`: recursive pattern matching over the workspace, returning matched paths with a count cap, honoring `.gitignore`/hidden-path exclusions consistent with the existing `walk_dir`/`resolve_checked` logic, and gated by the same `ApprovalGate` when the pattern resolves outside the workspace. Reuse a glob crate (e.g. `globset`) rather than hand-rolling. Deferred: fuzzy match mode and per-directory depth limits.
+- [ ] **M10.2 — Todo tool.** Add a `todo` agent tool (`todo.rs`) mirroring OpenCode's `todo.ts`: a small session-scoped task list the agent can create/update/complete, rendered inline in the chat pane (distinct marker, e.g. `▸`/`☑`) and persisted per-session in the DB. This gives the agent a working-memory structure beyond raw tool outputs. Deferred: reordering and priority.
+- [ ] **M10.3 — WebFetch tool.** Add a `webfetch` agent tool (`webfetch.rs`) mirroring OpenCode's `webfetch.ts`: fetch a URL and return its content as text/markdown, with a size cap and `… (truncated)` marker consistent with `read_file`'s output cap. Needs a `[context]`-style cap for network output and an HTTP client in the core task. Deferred: `websearch` (provider-gated) and parallel fetching.
+- [ ] **M10.4 — Question tool.** Add a `question` agent tool (`question.rs`) mirroring OpenCode's `question.ts`: the agent can ask the user a question with multiple-choice options; the TUI renders an inline prompt (or reuses the `ApprovalPrompt` overlay pattern) and returns the choice to the model. Wire a user-answer channel through the core task like the existing `ApprovalGate` (mpsc + oneshot). Deferred: free-text answers.
+- [ ] **M10.5 — ApplyPatch tool.** Add an `apply_patch` agent tool (`apply_patch.rs`) mirroring OpenCode's `apply_patch.ts`: apply a git-style unified diff to the workspace. Shuvarie already has `compute_diff` (via `similar::TextDiff`) — add the reverse direction (apply a `TextDiff`/unified diff to produce `new` content), produce a `FileChange::Edit` so it reuses inline diff review + undo/redo, and gate it like `edit_file`. Deferred: OpenCode's model-dependent swap between `edit`/`apply_patch`.
+- [ ] **M10.6 — Shell hardening.** Bring `run_shell` (`tools.rs`) closer to OpenCode's `shell`: optional per-command timeout (already present), streaming command output back to the TUI, and an explicit `dir` working-directory argument. Deferred: interactive pty-backed commands and `Ctrl+C` handoff to the child process.
+- [ ] **M10.7 — Read/write parity.** Match OpenCode's `read`/`write` capabilities: byte-exact ranges for `read_file` (currently char-offset based), an explicit `write` mode for `write_file` (create-vs-overwrite) with safe partial writes, and output truncation via a shared cap utility. Deferred: file-change revert on denied approval.
+- [ ] **M10.8 — Tool output truncation utility.** Add a shared `truncate` helper (mirroring OpenCode's `truncate.ts`) that all tools use to bound outputs consistently (char/byte caps, `… (use offset/limit)` marker, spill to a temp file for very large outputs), replacing the ad-hoc caps in `read_file`/`grep`. Deferred: output-path spill surfaced to the TUI.
+- [ ] **M10.9 — Plan tool.** Add an experimental `plan` tool (`plan.rs`) mirroring OpenCode's `plan.ts` (CLI-gated): enter a planning mode that suspends tool execution and asks the user to approve the plan before edits proceed, and exit when approved. Deferred: a first-class plan-mode TUI overlay.
+
+Deferred (not in scope for this milestone): `websearch` (needs a search provider), plugin tools + MCP (a separate subsystem), `invalid` (no-op placeholder), `code-mode`/`execute`, and agent-to-agent nesting (workers calling workers). The `task`/worker agent parity (per-worker model choice, deeper nesting) remains on the M7.3 follow-up list.
+
 ## Non-goals (for now)
 
 - Being a general-purpose chat client unrelated to coding tasks.
