@@ -1172,7 +1172,7 @@ mod tests {
     async fn write_creates_parents() {
         let (dir, _guard) = tempdir();
         let mut ctx = new_ctx();
-        let out = WriteFile {
+        let _out = WriteFile {
             gate: gate(),
             lsp: no_lsp(),
         }
@@ -1206,7 +1206,7 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("occurrence"));
         let mut ctx = new_ctx();
-        let out = EditFile {
+        let _out = EditFile {
             gate: gate(),
             lsp: no_lsp(),
         }
