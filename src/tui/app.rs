@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use ratatui::prelude::*;
-use shuvarie_core::{Connections, Event as CoreEvent, ModelInfo};
+use shuvarie_core::{Connections, Event as CoreEvent, Model};
 use termina::Event as TermEvent;
 use termina::event::{KeyCode, KeyEventKind};
 use tokio::sync::mpsc::Sender;
@@ -71,7 +71,7 @@ pub enum AppMessage {
     },
     ModelsLoaded {
         provider_name: String,
-        models: Vec<ModelInfo>,
+        models: Vec<Model>,
     },
     ModelsError {
         provider_name: String,
@@ -129,7 +129,7 @@ pub struct App {
     pub session_picker: SessionPicker,
     pub history_search: HistorySearch,
     pub approval: ApprovalPrompt,
-    pub models: HashMap<String, Vec<ModelInfo>>,
+    pub models: HashMap<String, Vec<Model>>,
     pending_model_pick: Option<String>,
     quit: bool,
 }
@@ -860,7 +860,7 @@ impl App {
             .get(provider)?
             .iter()
             .find(|m| m.id == model)
-            .and_then(|m| m.context_length)
+            .and_then(|m| m.context_length.map(u64::from))
     }
 
     fn reload_config(&mut self) {

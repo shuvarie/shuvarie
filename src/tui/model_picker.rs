@@ -2,7 +2,7 @@ use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
 use ratatui::style::Modifier;
 use ratatui::widgets::{Clear, List, ListItem, Paragraph};
-use shuvarie_core::ModelInfo;
+use shuvarie_core::Model;
 use termina::event::{KeyCode, KeyEvent};
 
 use crate::tui::utils::ctrl;
@@ -29,7 +29,7 @@ pub enum ModelPickerEffect {
 
 pub struct ModelPicker {
     pub open: bool,
-    pub models: Vec<ModelInfo>,
+    pub models: Vec<Model>,
     pub filtered: Vec<usize>,
     pub selected: usize,
     pub offset: usize,
@@ -50,7 +50,7 @@ impl ModelPicker {
         }
     }
 
-    pub fn open(&mut self, models: &[ModelInfo]) {
+    pub fn open(&mut self, models: &[Model]) {
         self.open = true;
         self.models = models.to_vec();
         self.search.clear();
@@ -192,11 +192,9 @@ impl ModelPicker {
         let mut items: Vec<ListItem> = Vec::new();
         let query_row_present = self.query_row().is_some();
         if let Some(q) = self.query_row() {
-            let mut line = vec![
-                Span::raw(format!("Use \"{q}\""))
-                    .fg(theme::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ];
+            let mut line = vec![Span::raw(format!("Use \"{q}\""))
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD)];
             line.push(Span::raw("  (no match)").fg(theme::TEXT_MUTED));
             items.push(render_list_item_line(Line::from(line), self.selected == 0));
         }
@@ -204,7 +202,8 @@ impl ModelPicker {
         let row_base = self.selected.saturating_sub(usize::from(query_row_present));
         for (idx, &orig) in self.filtered.iter().enumerate().skip(skip) {
             let m = &self.models[orig];
-            let mut line = vec![Span::raw(m.display_name().to_string()).fg(theme::TEXT)];
+            let mut line =
+                vec![Span::raw(shuvarie_llm::display_name(m).to_string()).fg(theme::TEXT)];
             if let Some(ctx) = m.context_length {
                 line.push(Span::raw(format!(" · {}k ctx", ctx / 1024)).fg(theme::TEXT_MUTED));
             }
@@ -231,17 +230,27 @@ impl Default for ModelPicker {
 mod tests {
     use super::*;
 
-    fn models() -> Vec<ModelInfo> {
+    fn models() -> Vec<Model> {
         vec![
-            ModelInfo {
+            Model {
                 id: "gpt-5".into(),
                 name: Some("GPT-5".into()),
                 context_length: Some(400000),
+                description: None,
+                r#type: None,
+                created_at: None,
+                owned_by: None,
+                max_output_tokens: None,
             },
-            ModelInfo {
+            Model {
                 id: "claude-sonnet-4-5".into(),
                 name: Some("Claude Sonnet 4.5".into()),
                 context_length: Some(200000),
+                description: None,
+                r#type: None,
+                created_at: None,
+                owned_by: None,
+                max_output_tokens: None,
             },
         ]
     }

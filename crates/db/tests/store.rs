@@ -37,6 +37,7 @@ async fn append_and_load_messages_in_order() {
                 total_tokens: 30,
                 cached_input_tokens: 4,
                 reasoning_tokens: 5,
+                ..Default::default()
             },
             0.0012,
         )

@@ -1,10 +1,10 @@
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
-use shuvarie_llm::{DiffLine, DiffLineKind, FileChange, Tool, ToolDefinition, ToolOutput};
+use shuvarie_llm::{
+    DiffLine, DiffLineKind, FileChange, Tool, ToolContext, ToolExecutionError, ToolOutput,
+};
 
 use crate::approval::{ApprovalGate, ApprovalReason};
 use crate::lsp_manager::SharedManager;
@@ -52,31 +52,38 @@ struct ReadFile {
 }
 
 impl Tool for ReadFile {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "read_file".into(),
-            description: "Read a text file from the workspace, optionally restricted to a line range. Returns the requested lines or an error when the path does not exist, is a directory, or contains binary data."
-                .to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Path of the file, relative to the workspace root" },
-                    "offset": { "type": "integer", "minimum": 1, "description": "First line to read (1-based). Defaults to 1" },
-                    "limit": { "type": "integer", "minimum": 1, "description": "Maximum number of lines to read. Defaults to all lines" }
-                },
-                "required": ["path"]
-            }),
-        }
+    const NAME: &'static str = "read_file";
+
+    type Args = Value;
+    type Output = ToolOutput;
+    type Error = ToolExecutionError;
+
+    fn description(&self) -> String {
+        "Read a text file from the workspace, optionally restricted to a line range. Returns the requested lines or an error when the path does not exist, is a directory, or contains binary data."
+            .to_string()
     }
 
-    fn call(
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Path of the file, relative to the workspace root" },
+                "offset": { "type": "integer", "minimum": 1, "description": "First line to read (1-based). Defaults to 1" },
+                "limit": { "type": "integer", "minimum": 1, "description": "Maximum number of lines to read. Defaults to all lines" }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn call(
         &self,
+        _ctx: &mut ToolContext,
         args: Value,
-    ) -> Pin<Box<dyn Future<Output = Result<ToolOutput, String>> + Send>> {
+    ) -> Result<ToolOutput, ToolExecutionError> {
         let gate = self.gate.clone();
         let read_cache = self.read_cache.clone();
         let max_output_chars = self.max_output_chars;
-        Box::pin(async move {
+        let result: Result<ToolOutput, String> = async move {
             let path = arg_value(&args, "path")?;
             let offset = args.get("offset").and_then(Value::as_u64);
             let limit = args.get("limit").and_then(Value::as_u64);
@@ -119,7 +126,9 @@ impl Tool for ReadFile {
                 )));
             }
             Ok(ToolOutput::text(out))
-        })
+        }
+        .await;
+        result.map_err(ToolExecutionError::other)
     }
 }
 
@@ -129,29 +138,36 @@ struct WriteFile {
 }
 
 impl Tool for WriteFile {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "write_file".into(),
-            description: "Create or overwrite a file in the working directory, creating parent directories as needed."
-                .to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Relative path of the file to write" },
-                    "content": { "type": "string", "description": "Full new contents of the file" }
-                },
-                "required": ["path", "content"]
-            }),
-        }
+    const NAME: &'static str = "write_file";
+
+    type Args = Value;
+    type Output = ToolOutput;
+    type Error = ToolExecutionError;
+
+    fn description(&self) -> String {
+        "Create or overwrite a file in the working directory, creating parent directories as needed."
+            .to_string()
     }
 
-    fn call(
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Relative path of the file to write" },
+                "content": { "type": "string", "description": "Full new contents of the file" }
+            },
+            "required": ["path", "content"]
+        })
+    }
+
+    async fn call(
         &self,
+        ctx: &mut ToolContext,
         args: Value,
-    ) -> Pin<Box<dyn Future<Output = Result<ToolOutput, String>> + Send>> {
+    ) -> Result<ToolOutput, ToolExecutionError> {
         let gate = self.gate.clone();
         let lsp = self.lsp.clone();
-        Box::pin(async move {
+        let result: Result<ToolOutput, String> = async move {
             let path = arg_value(&args, "path")?;
             let content = arg_value(&args, "content")?;
             let (abs, reason) = resolve_for_write_checked(&path)?;
@@ -170,15 +186,16 @@ impl Tool for WriteFile {
                     .on_file_change(Path::new(&path), &content)
                     .await;
             }
-            Ok(ToolOutput::with_file_change(
-                format!("wrote {} bytes to {path}", content.len()),
-                FileChange::Write {
-                    path,
-                    content,
-                    original,
-                },
-            ))
-        })
+            let summary = format!("wrote {} bytes to {path}", content.len());
+            ctx.insert_result(FileChange::Write {
+                path,
+                content,
+                original,
+            });
+            Ok(ToolOutput::text(summary))
+        }
+        .await;
+        result.map_err(ToolExecutionError::other)
     }
 }
 
@@ -188,31 +205,38 @@ struct EditFile {
 }
 
 impl Tool for EditFile {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "edit_file".into(),
-            description: "Replace text in an existing file with a string replacement. When `old` appears more than once and `occurrence` is unset the edit is rejected; pass `occurrence` to pick the nth match (1-based)."
-                .to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Relative path of the file to edit" },
-                    "old": { "type": "string", "description": "Exact text to find (must appear in the file)" },
-                    "new": { "type": "string", "description": "Replacement text" },
-                    "occurrence": { "type": "integer", "minimum": 1, "description": "Which match to replace (1-based). Required when `old` appears multiple times" }
-                },
-                "required": ["path", "old", "new"]
-            }),
-        }
+    const NAME: &'static str = "edit_file";
+
+    type Args = Value;
+    type Output = ToolOutput;
+    type Error = ToolExecutionError;
+
+    fn description(&self) -> String {
+        "Replace text in an existing file with a string replacement. When `old` appears more than once and `occurrence` is unset the edit is rejected; pass `occurrence` to pick the nth match (1-based)."
+            .to_string()
     }
 
-    fn call(
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Relative path of the file to edit" },
+                "old": { "type": "string", "description": "Exact text to find (must appear in the file)" },
+                "new": { "type": "string", "description": "Replacement text" },
+                "occurrence": { "type": "integer", "minimum": 1, "description": "Which match to replace (1-based). Required when `old` appears multiple times" }
+            },
+            "required": ["path", "old", "new"]
+        })
+    }
+
+    async fn call(
         &self,
+        ctx: &mut ToolContext,
         args: Value,
-    ) -> Pin<Box<dyn Future<Output = Result<ToolOutput, String>> + Send>> {
+    ) -> Result<ToolOutput, ToolExecutionError> {
         let gate = self.gate.clone();
         let lsp = self.lsp.clone();
-        Box::pin(async move {
+        let result: Result<ToolOutput, String> = async move {
             let path = arg_value(&args, "path")?;
             let old = arg_value(&args, "old")?;
             let new = arg_value(&args, "new")?;
@@ -255,48 +279,56 @@ impl Tool for EditFile {
                     .on_file_change(Path::new(&path), &edited)
                     .await;
             }
-            Ok(ToolOutput::with_file_change(
-                format!("edited {path}: replaced 1 of {} occurrences", matches.len()),
-                FileChange::Edit {
-                    path,
-                    diff,
-                    original: content,
-                    new: edited,
-                },
-            ))
-        })
+            let summary = format!("edited {path}: replaced 1 of {} occurrences", matches.len());
+            ctx.insert_result(FileChange::Edit {
+                path,
+                diff,
+                original: content,
+                new: edited,
+            });
+            Ok(ToolOutput::text(summary))
+        }
+        .await;
+        result.map_err(ToolExecutionError::other)
     }
 }
 
 struct RunShell;
 
 impl Tool for RunShell {
-    fn definition(&self) -> ToolDefinition {
+    const NAME: &'static str = "run_shell";
+
+    type Args = Value;
+    type Output = ToolOutput;
+    type Error = ToolExecutionError;
+
+    fn description(&self) -> String {
         #[cfg(unix)]
         const DESCRIPTION: &str = "Run a shell command line in the workspace, executed through the system's Bourne shell (`sh -c`). Pipes, redirects, and shell operators work naturally. Captured stdout and stderr (combined) are returned, capped at 16 KB. The command is killed when it exceeds the timeout.";
         #[cfg(windows)]
         const DESCRIPTION: &str = "Run a shell command line in the workspace, executed through the system's PowerShell (`powershell -NoProfile -Command`). Pipes, redirects, and shell operators work naturally. Captured stdout and stderr (combined) are returned, capped at 16 KB. The command is killed when it exceeds the timeout.";
 
-        ToolDefinition {
-            name: "run_shell".into(),
-            description: DESCRIPTION.to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "command": { "type": "string", "description": "Shell command line to run" },
-                    "cwd": { "type": "string", "description": "Working directory, relative to the workspace root. Defaults to the workspace root" },
-                    "timeout_secs": { "type": "integer", "minimum": 1, "description": "Timeout in seconds (default 30)" }
-                },
-                "required": ["command"]
-            }),
-        }
+        DESCRIPTION.to_string()
     }
 
-    fn call(
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "command": { "type": "string", "description": "Shell command line to run" },
+                "cwd": { "type": "string", "description": "Working directory, relative to the workspace root. Defaults to the workspace root" },
+                "timeout_secs": { "type": "integer", "minimum": 1, "description": "Timeout in seconds (default 30)" }
+            },
+            "required": ["command"]
+        })
+    }
+
+    async fn call(
         &self,
+        _ctx: &mut ToolContext,
         args: Value,
-    ) -> Pin<Box<dyn Future<Output = Result<ToolOutput, String>> + Send>> {
-        Box::pin(async move {
+    ) -> Result<ToolOutput, ToolExecutionError> {
+        let result: Result<ToolOutput, String> = async move {
             let command = arg_value(&args, "command")?;
             let cwd = args.get("cwd").and_then(Value::as_str);
             let timeout_secs = args
@@ -360,7 +392,9 @@ impl Tool for RunShell {
             } else {
                 Ok(ToolOutput::text(format!("exit {status}:\n{capped}")))
             }
-        })
+        }
+        .await;
+        result.map_err(ToolExecutionError::other)
     }
 }
 
@@ -393,27 +427,34 @@ struct ListDir {
 }
 
 impl Tool for ListDir {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "list_dir".into(),
-            description: "List the entries of a directory, one per line (directories suffixed with '/'). Entries are sorted by name."
-                .to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Directory to list, relative to the workspace root (defaults to the root itself)" }
-                },
-                "required": []
-            }),
-        }
+    const NAME: &'static str = "list_dir";
+
+    type Args = Value;
+    type Output = ToolOutput;
+    type Error = ToolExecutionError;
+
+    fn description(&self) -> String {
+        "List the entries of a directory, one per line (directories suffixed with '/'). Entries are sorted by name."
+            .to_string()
     }
 
-    fn call(
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Directory to list, relative to the workspace root (defaults to the root itself)" }
+            },
+            "required": []
+        })
+    }
+
+    async fn call(
         &self,
+        _ctx: &mut ToolContext,
         args: Value,
-    ) -> Pin<Box<dyn Future<Output = Result<ToolOutput, String>> + Send>> {
+    ) -> Result<ToolOutput, ToolExecutionError> {
         let gate = self.gate.clone();
-        Box::pin(async move {
+        let result: Result<ToolOutput, String> = async move {
             let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
             let (abs, reason) = resolve_checked(path)?;
             if let Some(reason) = reason {
@@ -437,7 +478,9 @@ impl Tool for ListDir {
             } else {
                 Ok(ToolOutput::text(names.join("\n")))
             }
-        })
+        }
+        .await;
+        result.map_err(ToolExecutionError::other)
     }
 }
 
@@ -446,30 +489,37 @@ struct Grep {
 }
 
 impl Tool for Grep {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "grep".into(),
-            description: "Recursively search text files for a regular expression, printing `path:line: content`. Results are capped (default 200)."
-                .to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "pattern": { "type": "string", "description": "Regular expression to search for" },
-                    "path": { "type": "string", "description": "Directory or file to search, relative to the workspace root (defaults to the workspace root)" },
-                    "include": { "type": "string", "description": "Only search files whose name contains this string (e.g. '.rs')" },
-                    "max_results": { "type": "integer", "minimum": 1, "description": "Maximum number of matches (default 200)" }
-                },
-                "required": ["pattern"]
-            }),
-        }
+    const NAME: &'static str = "grep";
+
+    type Args = Value;
+    type Output = ToolOutput;
+    type Error = ToolExecutionError;
+
+    fn description(&self) -> String {
+        "Recursively search text files for a regular expression, printing `path:line: content`. Results are capped (default 200)."
+            .to_string()
     }
 
-    fn call(
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "pattern": { "type": "string", "description": "Regular expression to search for" },
+                "path": { "type": "string", "description": "Directory or file to search, relative to the workspace root (defaults to the workspace root)" },
+                "include": { "type": "string", "description": "Only search files whose name contains this string (e.g. '.rs')" },
+                "max_results": { "type": "integer", "minimum": 1, "description": "Maximum number of matches (default 200)" }
+            },
+            "required": ["pattern"]
+        })
+    }
+
+    async fn call(
         &self,
+        _ctx: &mut ToolContext,
         args: Value,
-    ) -> Pin<Box<dyn Future<Output = Result<ToolOutput, String>> + Send>> {
+    ) -> Result<ToolOutput, ToolExecutionError> {
         let gate = self.gate.clone();
-        Box::pin(async move {
+        let result: Result<ToolOutput, String> = async move {
             let pattern = arg_value(&args, "pattern")?;
             let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
             let include = args.get("include").and_then(Value::as_str);
@@ -529,7 +579,9 @@ impl Tool for Grep {
             } else {
                 Ok(ToolOutput::text(out))
             }
-        })
+        }
+        .await;
+        result.map_err(ToolExecutionError::other)
     }
 }
 
@@ -673,10 +725,14 @@ struct Lsp {
 }
 
 impl Tool for Lsp {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "lsp".into(),
-            description: "Manage Language Server Protocol (LSP) servers for the workspace. \
+    const NAME: &'static str = "lsp";
+
+    type Args = Value;
+    type Output = ToolOutput;
+    type Error = ToolExecutionError;
+
+    fn description(&self) -> String {
+        "Manage Language Server Protocol (LSP) servers for the workspace. \
                 `action` is one of `start` | `stop` | `restart` | `list` | `analyze`. For `start`/`stop`/`restart`, \
                 `name` is the exact server id (a language like `rust`, `go`, `typescript`). \
                 For `list`, `name` is an optional substring/fuzzy filter (matched against server \
@@ -685,26 +741,29 @@ impl Tool for Lsp {
                 For `analyze`, `path` is a file or directory (defaults to the workspace root); \
                 the matching server is started if needed and the file(s) are opened so the \
                 server publishes diagnostics, which are returned."
-                .to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "action": { "type": "string", "enum": ["start", "stop", "restart", "list", "analyze"], "description": "Action to perform" },
-                    "name": { "type": "string", "description": "Server name (exact id for start/stop/restart; substring filter for list)" },
-                    "all": { "type": "boolean", "description": "For `list`: list all configured servers instead of only running ones (default false)" },
-                    "path": { "type": "string", "description": "For `analyze`: file or directory to analyze (defaults to the workspace root)" }
-                },
-                "required": ["action"]
-            }),
-        }
+            .to_string()
     }
 
-    fn call(
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "enum": ["start", "stop", "restart", "list", "analyze"], "description": "Action to perform" },
+                "name": { "type": "string", "description": "Server name (exact id for start/stop/restart; substring filter for list)" },
+                "all": { "type": "boolean", "description": "For `list`: list all configured servers instead of only running ones (default false)" },
+                "path": { "type": "string", "description": "For `analyze`: file or directory to analyze (defaults to the workspace root)" }
+            },
+            "required": ["action"]
+        })
+    }
+
+    async fn call(
         &self,
+        _ctx: &mut ToolContext,
         args: Value,
-    ) -> Pin<Box<dyn Future<Output = Result<ToolOutput, String>> + Send>> {
+    ) -> Result<ToolOutput, ToolExecutionError> {
         let lsp = self.lsp.clone();
-        Box::pin(async move {
+        let result: Result<ToolOutput, String> = async move {
             let action = args
                 .get("action")
                 .and_then(Value::as_str)
@@ -760,7 +819,9 @@ impl Tool for Lsp {
                 }
                 other => Err(format!("unknown LSP action '{other}'")),
             }
-        })
+        }
+        .await;
+        result.map_err(ToolExecutionError::other)
     }
 }
 
@@ -853,25 +914,34 @@ pub fn all_tools(
     lsp: SharedManager,
     read_cache: ReadCache,
     max_output_chars: usize,
-) -> Vec<std::sync::Arc<dyn Tool>> {
+) -> Vec<shuvarie_llm::DynamicTool> {
     vec![
-        std::sync::Arc::new(ReadFile {
-            gate: gate.clone(),
-            read_cache: read_cache.clone(),
-            max_output_chars,
-        }),
-        std::sync::Arc::new(WriteFile {
-            gate: gate.clone(),
-            lsp: Some(lsp.clone()),
-        }),
-        std::sync::Arc::new(EditFile {
-            gate: gate.clone(),
-            lsp: Some(lsp.clone()),
-        }),
-        std::sync::Arc::new(RunShell),
-        std::sync::Arc::new(ListDir { gate: gate.clone() }),
-        std::sync::Arc::new(Grep { gate }),
-        std::sync::Arc::new(Lsp { lsp }),
+        shuvarie_llm::into_dynamic(
+            "read_file",
+            ReadFile {
+                gate: gate.clone(),
+                read_cache: read_cache.clone(),
+                max_output_chars,
+            },
+        ),
+        shuvarie_llm::into_dynamic(
+            "write_file",
+            WriteFile {
+                gate: gate.clone(),
+                lsp: Some(lsp.clone()),
+            },
+        ),
+        shuvarie_llm::into_dynamic(
+            "edit_file",
+            EditFile {
+                gate: gate.clone(),
+                lsp: Some(lsp.clone()),
+            },
+        ),
+        shuvarie_llm::into_dynamic("run_shell", RunShell),
+        shuvarie_llm::into_dynamic("list_dir", ListDir { gate: gate.clone() }),
+        shuvarie_llm::into_dynamic("grep", Grep { gate }),
+        shuvarie_llm::into_dynamic("lsp", Lsp { lsp }),
     ]
 }
 
@@ -880,21 +950,24 @@ pub fn read_tools(
     lsp: SharedManager,
     read_cache: ReadCache,
     max_output_chars: usize,
-) -> Vec<std::sync::Arc<dyn Tool>> {
+) -> Vec<shuvarie_llm::DynamicTool> {
     vec![
-        std::sync::Arc::new(ReadFile {
-            gate: gate.clone(),
-            read_cache,
-            max_output_chars,
-        }),
-        std::sync::Arc::new(ListDir { gate: gate.clone() }),
-        std::sync::Arc::new(Grep { gate }),
-        std::sync::Arc::new(Lsp { lsp }),
+        shuvarie_llm::into_dynamic(
+            "read_file",
+            ReadFile {
+                gate: gate.clone(),
+                read_cache,
+                max_output_chars,
+            },
+        ),
+        shuvarie_llm::into_dynamic("list_dir", ListDir { gate: gate.clone() }),
+        shuvarie_llm::into_dynamic("grep", Grep { gate }),
+        shuvarie_llm::into_dynamic("lsp", Lsp { lsp }),
     ]
 }
 
-pub fn command_tools(_gate: ApprovalGate) -> Vec<std::sync::Arc<dyn Tool>> {
-    vec![std::sync::Arc::new(RunShell)]
+pub fn command_tools(_gate: ApprovalGate) -> Vec<shuvarie_llm::DynamicTool> {
+    vec![shuvarie_llm::into_dynamic("run_shell", RunShell)]
 }
 
 pub fn edit_tools(
@@ -902,22 +975,31 @@ pub fn edit_tools(
     lsp: SharedManager,
     read_cache: ReadCache,
     max_output_chars: usize,
-) -> Vec<std::sync::Arc<dyn Tool>> {
+) -> Vec<shuvarie_llm::DynamicTool> {
     vec![
-        std::sync::Arc::new(ReadFile {
-            gate: gate.clone(),
-            read_cache,
-            max_output_chars,
-        }),
-        std::sync::Arc::new(WriteFile {
-            gate: gate.clone(),
-            lsp: Some(lsp.clone()),
-        }),
-        std::sync::Arc::new(EditFile {
-            gate,
-            lsp: Some(lsp.clone()),
-        }),
-        std::sync::Arc::new(Lsp { lsp }),
+        shuvarie_llm::into_dynamic(
+            "read_file",
+            ReadFile {
+                gate: gate.clone(),
+                read_cache,
+                max_output_chars,
+            },
+        ),
+        shuvarie_llm::into_dynamic(
+            "write_file",
+            WriteFile {
+                gate: gate.clone(),
+                lsp: Some(lsp.clone()),
+            },
+        ),
+        shuvarie_llm::into_dynamic(
+            "edit_file",
+            EditFile {
+                gate,
+                lsp: Some(lsp.clone()),
+            },
+        ),
+        shuvarie_llm::into_dynamic("lsp", Lsp { lsp }),
     ]
 }
 
@@ -943,6 +1025,10 @@ mod tests {
         None
     }
 
+    fn new_ctx() -> ToolContext {
+        ToolContext::new()
+    }
+
     fn read_file_tool() -> ReadFile {
         ReadFile {
             gate: gate(),
@@ -956,15 +1042,22 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::write("a.txt", "one\ntwo\nthree\n").unwrap();
         let out = read_file_tool()
-            .call(json!({ "path": "a.txt", "offset": 2, "limit": 1 }))
+            .call(
+                &mut new_ctx(),
+                json!({ "path": "a.txt", "offset": 2, "limit": 1 }),
+            )
             .await
             .unwrap();
-        assert!(out.text.contains("two"), "{}", out.text);
+        assert!(
+            out.as_text().unwrap().contains("two"),
+            "{}",
+            out.as_text().unwrap()
+        );
         let err = read_file_tool()
-            .call(json!({ "path": "missing.txt" }))
+            .call(&mut new_ctx(), json!({ "path": "missing.txt" }))
             .await
             .unwrap_err();
-        assert!(err.contains("missing.txt"));
+        assert!(err.to_string().contains("missing.txt"));
         drop(dir);
     }
 
@@ -973,27 +1066,31 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::write("bin.dat", [0, 1, 2, 3]).unwrap();
         let err = read_file_tool()
-            .call(json!({ "path": "bin.dat" }))
+            .call(&mut new_ctx(), json!({ "path": "bin.dat" }))
             .await
             .unwrap_err();
-        assert!(err.contains("binary"));
+        assert!(err.to_string().contains("binary"));
         drop(dir);
     }
 
     #[tokio::test]
     async fn write_creates_parents() {
         let (dir, _guard) = tempdir();
+        let mut ctx = new_ctx();
         let out = WriteFile {
             gate: gate(),
             lsp: no_lsp(),
         }
-        .call(json!({ "path": "sub/deep/f.txt", "content": "hello" }))
+        .call(
+            &mut ctx,
+            json!({ "path": "sub/deep/f.txt", "content": "hello" }),
+        )
         .await
         .unwrap();
         assert_eq!(std::fs::read_to_string("sub/deep/f.txt").unwrap(), "hello");
         assert!(matches!(
-            out.file_change,
-            Some(FileChange::Write { ref path, .. }) if path == "sub/deep/f.txt"
+            ctx.result::<FileChange>(),
+            Some(FileChange::Write { path, .. }) if path == "sub/deep/f.txt"
         ));
         drop(dir);
     }
@@ -1006,30 +1103,40 @@ mod tests {
             gate: gate(),
             lsp: no_lsp(),
         }
-        .call(json!({ "path": "e.txt", "old": "a", "new": "x" }))
+        .call(
+            &mut new_ctx(),
+            json!({ "path": "e.txt", "old": "a", "new": "x" }),
+        )
         .await
         .unwrap_err();
-        assert!(err.contains("occurrence"));
+        assert!(err.to_string().contains("occurrence"));
+        let mut ctx = new_ctx();
         let out = EditFile {
             gate: gate(),
             lsp: no_lsp(),
         }
-        .call(json!({ "path": "e.txt", "old": "a", "new": "x", "occurrence": 2 }))
+        .call(
+            &mut ctx,
+            json!({ "path": "e.txt", "old": "a", "new": "x", "occurrence": 2 }),
+        )
         .await
         .unwrap();
         assert_eq!(std::fs::read_to_string("e.txt").unwrap(), "a b x");
         assert!(matches!(
-            out.file_change,
-            Some(FileChange::Edit { ref diff, .. }) if !diff.is_empty()
+            ctx.result::<FileChange>(),
+            Some(FileChange::Edit { diff, .. }) if !diff.is_empty()
         ));
         let err = EditFile {
             gate: gate(),
             lsp: no_lsp(),
         }
-        .call(json!({ "path": "e.txt", "old": "zzz", "new": "x" }))
+        .call(
+            &mut new_ctx(),
+            json!({ "path": "e.txt", "old": "zzz", "new": "x" }),
+        )
         .await
         .unwrap_err();
-        assert!(err.contains("not found"));
+        assert!(err.to_string().contains("not found"));
         drop(dir);
     }
 
@@ -1037,15 +1144,18 @@ mod tests {
     async fn run_shell_success_and_timeout() {
         let (dir, _guard) = tempdir();
         let out = RunShell
-            .call(json!({ "command": "echo hello" }))
+            .call(&mut new_ctx(), json!({ "command": "echo hello" }))
             .await
             .unwrap();
-        assert!(out.text.contains("hello"));
+        assert!(out.as_text().unwrap().contains("hello"));
         let err = RunShell
-            .call(json!({ "command": "sleep 5", "timeout_secs": 1 }))
+            .call(
+                &mut new_ctx(),
+                json!({ "command": "sleep 5", "timeout_secs": 1 }),
+            )
             .await
             .unwrap_err();
-        assert!(err.contains("timed out"));
+        assert!(err.to_string().contains("timed out"));
         drop(dir);
     }
 
@@ -1053,10 +1163,10 @@ mod tests {
     async fn run_shell_failure_returns_error() {
         let (dir, _guard) = tempdir();
         let err = RunShell
-            .call(json!({ "command": "exit 3" }))
+            .call(&mut new_ctx(), json!({ "command": "exit 3" }))
             .await
             .unwrap_err();
-        assert!(err.contains("3"));
+        assert!(err.to_string().contains("3"));
         drop(dir);
     }
 
@@ -1064,10 +1174,17 @@ mod tests {
     async fn run_shell_supports_pipes() {
         let (dir, _guard) = tempdir();
         let out = RunShell
-            .call(json!({ "command": "echo hello world | grep world" }))
+            .call(
+                &mut new_ctx(),
+                json!({ "command": "echo hello world | grep world" }),
+            )
             .await
             .unwrap();
-        assert!(out.text.contains("world"), "{}", out.text);
+        assert!(
+            out.as_text().unwrap().contains("world"),
+            "{}",
+            out.as_text().unwrap()
+        );
         drop(dir);
     }
 
@@ -1076,8 +1193,11 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::create_dir("zdir").unwrap();
         std::fs::write("afile", "").unwrap();
-        let out = ListDir { gate: gate() }.call(json!({})).await.unwrap();
-        let lines: Vec<&str> = out.text.lines().collect();
+        let out = ListDir { gate: gate() }
+            .call(&mut new_ctx(), json!({}))
+            .await
+            .unwrap();
+        let lines: Vec<&str> = out.as_text().unwrap().lines().collect();
         assert_eq!(lines, vec!["afile", "zdir/"]);
         drop(dir);
     }
@@ -1088,16 +1208,16 @@ mod tests {
         std::fs::write("r.rs", "fn main() {}\n").unwrap();
         std::fs::write("r.txt", "hello fn world\n").unwrap();
         let out = Grep { gate: gate() }
-            .call(json!({ "pattern": "fn", "include": ".rs" }))
+            .call(&mut new_ctx(), json!({ "pattern": "fn", "include": ".rs" }))
             .await
             .unwrap();
-        assert!(out.text.contains("r.rs:1"));
-        assert!(!out.text.contains("r.txt"));
+        assert!(out.as_text().unwrap().contains("r.rs:1"));
+        assert!(!out.as_text().unwrap().contains("r.txt"));
         let none = Grep { gate: gate() }
-            .call(json!({ "pattern": "zzzz" }))
+            .call(&mut new_ctx(), json!({ "pattern": "zzzz" }))
             .await
             .unwrap();
-        assert!(none.text.contains("no matches"));
+        assert!(none.as_text().unwrap().contains("no matches"));
         drop(dir);
     }
 
@@ -1137,16 +1257,33 @@ mod tests {
             read_cache: cache.clone(),
             max_output_chars: 0,
         };
-        let first = tool.call(json!({ "path": "dup.txt" })).await.unwrap();
-        assert!(first.text.contains("line"));
-        let second = tool.call(json!({ "path": "dup.txt" })).await.unwrap();
-        assert!(second.text.contains("already read"), "{}", second.text);
-        assert!(!second.text.contains("line |"));
-        let ranged = tool
-            .call(json!({ "path": "dup.txt", "offset": 1, "limit": 1 }))
+        let first = tool
+            .call(&mut new_ctx(), json!({ "path": "dup.txt" }))
             .await
             .unwrap();
-        assert!(ranged.text.contains("line"), "{}", ranged.text);
+        assert!(first.as_text().unwrap().contains("line"));
+        let second = tool
+            .call(&mut new_ctx(), json!({ "path": "dup.txt" }))
+            .await
+            .unwrap();
+        assert!(
+            second.as_text().unwrap().contains("already read"),
+            "{}",
+            second.as_text().unwrap()
+        );
+        assert!(!second.as_text().unwrap().contains("line |"));
+        let ranged = tool
+            .call(
+                &mut new_ctx(),
+                json!({ "path": "dup.txt", "offset": 1, "limit": 1 }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            ranged.as_text().unwrap().contains("line"),
+            "{}",
+            ranged.as_text().unwrap()
+        );
         drop(dir);
     }
 
@@ -1160,9 +1297,16 @@ mod tests {
             read_cache: ReadCache::new(),
             max_output_chars: 100,
         };
-        let out = tool.call(json!({ "path": "big.txt" })).await.unwrap();
-        assert!(out.text.contains("truncated"), "{}", out.text);
-        assert!(out.text.chars().count() < big.len() + 200);
+        let out = tool
+            .call(&mut new_ctx(), json!({ "path": "big.txt" }))
+            .await
+            .unwrap();
+        assert!(
+            out.as_text().unwrap().contains("truncated"),
+            "{}",
+            out.as_text().unwrap()
+        );
+        assert!(out.as_text().unwrap().chars().count() < big.len() + 200);
         drop(dir);
     }
 

@@ -803,6 +803,7 @@ async fn undo_last_turn(store: &mut Store, session_id: u64) -> Result<bool, Stri
         total_tokens: assistant_msg.total_tokens,
         cached_input_tokens: assistant_msg.cached_input_tokens,
         reasoning_tokens: assistant_msg.reasoning_tokens,
+        ..Default::default()
     };
     let entry = shuvarie_db::UndoEntry {
         turn_seq: assistant_msg.seq,
@@ -999,7 +1000,7 @@ impl CoreCtx {
                 Some(&preamble),
                 &content,
                 &prior,
-                &tools,
+                tools,
                 &mut worker_set.workers,
                 self.manager_turns,
                 budget,
@@ -1283,14 +1284,7 @@ async fn stream_stream_to_events(
                 let mut guard = session.lock().await;
                 let combined = {
                     let worker_usage = worker_usage.lock().unwrap();
-                    shuvarie_llm::TokenUsage {
-                        input_tokens: usage.input_tokens + worker_usage.input_tokens,
-                        output_tokens: usage.output_tokens + worker_usage.output_tokens,
-                        total_tokens: usage.total_tokens + worker_usage.total_tokens,
-                        cached_input_tokens: usage.cached_input_tokens
-                            + worker_usage.cached_input_tokens,
-                        reasoning_tokens: usage.reasoning_tokens + worker_usage.reasoning_tokens,
-                    }
+                    usage + *worker_usage
                 };
                 guard.push_assistant(text.clone());
                 let cost = catalog_provider

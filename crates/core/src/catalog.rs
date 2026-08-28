@@ -52,11 +52,11 @@ pub fn context_length(provider: &Provider, model_id: &str) -> Option<i64> {
 }
 
 /// Fill a model's missing runtime context length from the catalog, if known.
-pub fn enrich(provider: &Provider, info: &mut shuvarie_llm::ModelInfo) {
+pub fn enrich(provider: &Provider, info: &mut shuvarie_llm::Model) {
     if info.context_length.is_none()
         && let Some(ctx) = context_length(provider, &info.id)
     {
-        info.context_length = Some(ctx.max(0) as u64);
+        info.context_length = Some(ctx.max(0) as u32);
     }
 }
 
@@ -64,7 +64,13 @@ pub fn enrich(provider: &Provider, info: &mut shuvarie_llm::ModelInfo) {
 /// Falls back to the provider's first model's rates (or 0) when unknown.
 pub fn estimate_cost(provider: &Provider, model_id: &str, usage: &TokenUsage) -> f64 {
     let (input_rate, output_rate, cache_read_rate) = find_model(provider, model_id)
-        .map(|m| (m.cost.input.unwrap_or(0.0), m.cost.output.unwrap_or(0.0), m.cost.cache_read.unwrap_or(0.0)))
+        .map(|m| {
+            (
+                m.cost.input.unwrap_or(0.0),
+                m.cost.output.unwrap_or(0.0),
+                m.cost.cache_read.unwrap_or(0.0),
+            )
+        })
         .unwrap_or_else(|| default_rates(provider));
     let input = usage.input_tokens as f64 / 1e6 * input_rate;
     let cached = usage.cached_input_tokens as f64 / 1e6 * cache_read_rate * CACHE_READ_FACTOR;
@@ -79,7 +85,13 @@ fn default_rates(provider: &Provider) -> (f64, f64, f64) {
     provider
         .models
         .first()
-        .map(|m| (m.cost.input.unwrap_or(0.0), m.cost.output.unwrap_or(0.0), m.cost.cache_read.unwrap_or(0.0)))
+        .map(|m| {
+            (
+                m.cost.input.unwrap_or(0.0),
+                m.cost.output.unwrap_or(0.0),
+                m.cost.cache_read.unwrap_or(0.0),
+            )
+        })
         .unwrap_or((0.0, 0.0, 0.0))
 }
 

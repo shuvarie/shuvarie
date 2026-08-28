@@ -451,6 +451,7 @@ impl SessionScreen {
                     total_tokens: session.tokens,
                     cached_input_tokens: session.cached_tokens,
                     reasoning_tokens: session.reasoning_tokens,
+                    ..Default::default()
                 };
                 let cost = session.cost;
                 self.summary_indices = match session.summary_seq {
@@ -642,6 +643,7 @@ impl SessionScreen {
             total_tokens: session.tokens,
             cached_input_tokens: session.cached_tokens,
             reasoning_tokens: session.reasoning_tokens,
+            ..Default::default()
         };
         let cost = session.cost;
         self.summary_indices = match session.summary_seq {

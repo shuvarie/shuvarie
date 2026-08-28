@@ -1,6 +1,6 @@
 use shuvarie_db::SessionSummary;
 use shuvarie_llm::FileChange;
-use shuvarie_llm::{ModelInfo, TokenUsage};
+use shuvarie_llm::{Model, TokenUsage};
 
 use crate::approval::ApprovalReason;
 
@@ -9,7 +9,7 @@ pub enum Event {
     Pong,
     ModelsLoaded {
         provider_name: String,
-        models: Vec<ModelInfo>,
+        models: Vec<Model>,
     },
     ModelsError {
         provider_name: String,

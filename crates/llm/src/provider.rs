@@ -3,10 +3,9 @@ use selune::ProviderType;
 use serde_json::Value;
 use std::sync::Arc;
 
-use crate::file_change::FileChange;
 use crate::message::ChatMsg;
 use crate::stream::{StreamItem, StreamStream};
-use crate::tool::Tool;
+use crate::tool::{DynamicTool, FileChangeHook};
 use crate::{LlmError, Result};
 
 #[derive(Debug, Clone)]
@@ -177,7 +176,7 @@ impl ProviderClient {
         Ok(out)
     }
 
-    pub async fn list_models(&self) -> Result<Vec<crate::ModelInfo>> {
+    pub async fn list_models(&self) -> Result<Vec<crate::Model>> {
         use rig::client::ModelListingClient;
 
         let models = match &self.list {
@@ -189,10 +188,7 @@ impl ProviderClient {
         }
         .map_err(|e| LlmError::Model(e.to_string()))?;
 
-        Ok(models
-            .iter()
-            .map(crate::model::model_info_from_rig)
-            .collect())
+        Ok(models.data)
     }
 
     pub async fn run_worker(
@@ -200,15 +196,22 @@ impl ProviderClient {
         req: &crate::agent::WorkerRequest,
     ) -> std::result::Result<String, String> {
         let user_msg = rig::message::Message::user(req.task.clone());
-        let (dynamic, file_rx) = dynamic_tools(&req.tools);
         let activity_tx = req.activity_tx.clone();
         let usage = Arc::clone(&req.usage);
         let tracker = crate::context_hook::UsageTracker::new();
         let budget = req.context_budget.clone();
+        let file_hook = FileChangeHook::new();
         match &self.list {
             ListImpl::OpenAi(c) => {
-                let agent =
-                    agent_with_tools(c, &req.model, Some(&req.preamble), dynamic, budget, tracker);
+                let agent = agent_with_tools(
+                    c,
+                    &req.model,
+                    Some(&req.preamble),
+                    req.tools.clone(),
+                    budget,
+                    tracker,
+                    file_hook.clone(),
+                );
                 run_worker_agent(
                     agent,
                     &req.name,
@@ -216,13 +219,20 @@ impl ProviderClient {
                     activity_tx,
                     usage,
                     req.max_turns,
-                    file_rx,
+                    file_hook,
                 )
                 .await
             }
             ListImpl::OpenRouter(c) => {
-                let agent =
-                    agent_with_tools(c, &req.model, Some(&req.preamble), dynamic, budget, tracker);
+                let agent = agent_with_tools(
+                    c,
+                    &req.model,
+                    Some(&req.preamble),
+                    req.tools.clone(),
+                    budget,
+                    tracker,
+                    file_hook.clone(),
+                );
                 run_worker_agent(
                     agent,
                     &req.name,
@@ -230,13 +240,20 @@ impl ProviderClient {
                     activity_tx,
                     usage,
                     req.max_turns,
-                    file_rx,
+                    file_hook,
                 )
                 .await
             }
             ListImpl::Anthropic(c) => {
-                let agent =
-                    agent_with_tools(c, &req.model, Some(&req.preamble), dynamic, budget, tracker);
+                let agent = agent_with_tools(
+                    c,
+                    &req.model,
+                    Some(&req.preamble),
+                    req.tools.clone(),
+                    budget,
+                    tracker,
+                    file_hook.clone(),
+                );
                 run_worker_agent(
                     agent,
                     &req.name,
@@ -244,13 +261,20 @@ impl ProviderClient {
                     activity_tx,
                     usage,
                     req.max_turns,
-                    file_rx,
+                    file_hook,
                 )
                 .await
             }
             ListImpl::Gemini(c) => {
-                let agent =
-                    agent_with_tools(c, &req.model, Some(&req.preamble), dynamic, budget, tracker);
+                let agent = agent_with_tools(
+                    c,
+                    &req.model,
+                    Some(&req.preamble),
+                    req.tools.clone(),
+                    budget,
+                    tracker,
+                    file_hook.clone(),
+                );
                 run_worker_agent(
                     agent,
                     &req.name,
@@ -258,13 +282,20 @@ impl ProviderClient {
                     activity_tx,
                     usage,
                     req.max_turns,
-                    file_rx,
+                    file_hook,
                 )
                 .await
             }
             ListImpl::Ollama(c) => {
-                let agent =
-                    agent_with_tools(c, &req.model, Some(&req.preamble), dynamic, budget, tracker);
+                let agent = agent_with_tools(
+                    c,
+                    &req.model,
+                    Some(&req.preamble),
+                    req.tools.clone(),
+                    budget,
+                    tracker,
+                    file_hook.clone(),
+                );
                 run_worker_agent(
                     agent,
                     &req.name,
@@ -272,7 +303,7 @@ impl ProviderClient {
                     activity_tx,
                     usage,
                     req.max_turns,
-                    file_rx,
+                    file_hook,
                 )
                 .await
             }
@@ -286,7 +317,7 @@ impl ProviderClient {
         preamble: Option<&str>,
         prompt: &str,
         history: &[ChatMsg],
-        tools: &[std::sync::Arc<dyn Tool>],
+        tools: Vec<DynamicTool>,
         workers: &mut [crate::agent::WorkerAgent],
         max_turns: usize,
         context_budget: Option<crate::context_hook::ContextBudget>,
@@ -301,32 +332,9 @@ impl ProviderClient {
             .cloned()
             .map(rig::message::Message::from)
             .collect();
-        let mut dynamic = dynamic_tools(tools);
+        let mut dynamic = tools;
         for worker in workers.iter() {
-            let def = worker.definition();
-            let worker = std::sync::Arc::new(worker.clone());
-            dynamic.0.push(rig::tool::DynamicTool::new(
-                def.name,
-                def.description,
-                def.parameters,
-                move |_ctx, args| {
-                    let worker = std::sync::Arc::clone(&worker);
-                    Box::pin(async move {
-                        worker
-                            .call(args)
-                            .await
-                            .map(|out| rig::tool::ToolOutput::text(out.text))
-                            .map_err(|message| {
-                                let error = serde_json::json!({ "error": message });
-                                rig::tool::ToolExecutionError::new(
-                                    rig::tool::ToolErrorKind::Other,
-                                    message,
-                                )
-                                .with_model_output(rig::tool::ToolOutput::json(error))
-                            })
-                    })
-                },
-            ));
+            dynamic.push(crate::tool::into_dynamic(worker.name(), worker.clone()));
         }
         let worker_names: std::collections::HashSet<String> =
             workers.iter().map(|w| w.name().to_string()).collect();
@@ -334,7 +342,7 @@ impl ProviderClient {
             .iter_mut()
             .filter_map(crate::agent::WorkerAgent::take_activity_receiver)
             .collect();
-        let file_rx = dynamic.1;
+        let file_hook = FileChangeHook::new();
 
         async fn build(
             agent: rig::agent::Agent,
@@ -342,7 +350,7 @@ impl ProviderClient {
             history: Vec<rig::message::Message>,
             receivers: Vec<tokio::sync::mpsc::Receiver<StreamItem>>,
             worker_names: std::collections::HashSet<String>,
-            mut file_rx: tokio::sync::mpsc::Receiver<FileChange>,
+            file_hook: FileChangeHook,
             max_turns: usize,
             tracker: std::sync::Arc<crate::context_hook::UsageTracker>,
         ) -> StreamStream {
@@ -444,7 +452,7 @@ impl ProviderClient {
                             output,
                             ok,
                             worker: None,
-                            file_change: file_rx.try_recv().ok(),
+                            file_change: file_hook.take(&internal_call_id),
                         },
                         None => StreamItem::WorkerResult {
                             name: pending_workers.pop_front().unwrap_or_default(),
@@ -461,7 +469,7 @@ impl ProviderClient {
                     };
                     StreamItem::Done {
                         text,
-                        usage: crate::usage::token_usage_from_rig(resp.usage),
+                        usage: resp.usage,
                     }
                 }
                 Ok(rig::agent::MultiTurnStreamItem::CompletionCall(call)) => {
@@ -492,15 +500,16 @@ impl ProviderClient {
                         c,
                         model,
                         preamble,
-                        dynamic.0,
+                        dynamic,
                         context_budget,
                         tracker_for_hook,
+                        file_hook.clone(),
                     ),
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
-                    file_rx,
+                    file_hook,
                     max_turns,
                     tracker,
                 )
@@ -512,15 +521,16 @@ impl ProviderClient {
                         c,
                         model,
                         preamble,
-                        dynamic.0,
+                        dynamic,
                         context_budget,
                         tracker_for_hook,
+                        file_hook.clone(),
                     ),
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
-                    file_rx,
+                    file_hook,
                     max_turns,
                     tracker,
                 )
@@ -532,15 +542,16 @@ impl ProviderClient {
                         c,
                         model,
                         preamble,
-                        dynamic.0,
+                        dynamic,
                         context_budget,
                         tracker_for_hook,
+                        file_hook.clone(),
                     ),
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
-                    file_rx,
+                    file_hook,
                     max_turns,
                     tracker,
                 )
@@ -552,15 +563,16 @@ impl ProviderClient {
                         c,
                         model,
                         preamble,
-                        dynamic.0,
+                        dynamic,
                         context_budget,
                         tracker_for_hook,
+                        file_hook.clone(),
                     ),
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
-                    file_rx,
+                    file_hook,
                     max_turns,
                     tracker,
                 )
@@ -572,15 +584,16 @@ impl ProviderClient {
                         c,
                         model,
                         preamble,
-                        dynamic.0,
+                        dynamic,
                         context_budget,
                         tracker_for_hook,
+                        file_hook.clone(),
                     ),
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
-                    file_rx,
+                    file_hook,
                     max_turns,
                     tracker,
                 )
@@ -590,58 +603,14 @@ impl ProviderClient {
     }
 }
 
-fn dynamic_tools(
-    tools: &[std::sync::Arc<dyn Tool>],
-) -> (
-    Vec<rig::tool::DynamicTool>,
-    tokio::sync::mpsc::Receiver<FileChange>,
-) {
-    let (file_tx, file_rx) = tokio::sync::mpsc::channel(64);
-    let dynamic = tools
-        .iter()
-        .map(|tool| {
-            let def = tool.definition();
-            let tool = std::sync::Arc::clone(tool);
-            let file_tx = file_tx.clone();
-            rig::tool::DynamicTool::new(
-                def.name.clone(),
-                def.description.clone(),
-                def.parameters.clone(),
-                move |_ctx, args| {
-                    let tool = std::sync::Arc::clone(&tool);
-                    let file_tx = file_tx.clone();
-                    Box::pin(async move {
-                        tool.call(args)
-                            .await
-                            .map(|out| {
-                                if let Some(change) = out.file_change {
-                                    let _ = file_tx.try_send(change);
-                                }
-                                rig::tool::ToolOutput::text(out.text)
-                            })
-                            .map_err(|message| {
-                                let error = serde_json::json!({ "error": message });
-                                rig::tool::ToolExecutionError::new(
-                                    rig::tool::ToolErrorKind::Other,
-                                    message,
-                                )
-                                .with_model_output(rig::tool::ToolOutput::json(error))
-                            })
-                    })
-                },
-            )
-        })
-        .collect();
-    (dynamic, file_rx)
-}
-
 fn agent_with_tools<C>(
     client: &C,
     model: &str,
     preamble: Option<&str>,
-    dynamic: Vec<rig::tool::DynamicTool>,
+    dynamic: Vec<DynamicTool>,
     context_budget: Option<crate::context_hook::ContextBudget>,
     tracker: std::sync::Arc<crate::context_hook::UsageTracker>,
+    file_hook: FileChangeHook,
 ) -> rig::agent::Agent
 where
     C: rig::client::CompletionClient + rig::prelude::AgentClientExt,
@@ -655,9 +624,10 @@ where
         builder
             .dynamic_tools(dynamic)
             .add_hook(crate::context_hook::ContextHook::new(budget, tracker))
+            .add_hook(file_hook)
             .build()
     } else {
-        builder.dynamic_tools(dynamic).build()
+        builder.dynamic_tools(dynamic).add_hook(file_hook).build()
     }
 }
 
@@ -668,7 +638,7 @@ async fn run_worker_agent(
     activity_tx: tokio::sync::mpsc::Sender<StreamItem>,
     usage: std::sync::Arc<std::sync::Mutex<crate::TokenUsage>>,
     max_turns: usize,
-    mut file_rx: tokio::sync::mpsc::Receiver<FileChange>,
+    file_hook: FileChangeHook,
 ) -> std::result::Result<String, String> {
     use rig::streaming::StreamingChat;
 
@@ -737,12 +707,12 @@ async fn run_worker_agent(
                         output,
                         ok,
                         worker: Some(name.to_string()),
-                        file_change: file_rx.try_recv().ok(),
+                        file_change: file_hook.take(&internal_call_id),
                     })
                     .await;
             }
             Ok(rig::agent::MultiTurnStreamItem::FinalResponse(resp)) => {
-                usage_aggregate = crate::usage::token_usage_from_rig(resp.usage);
+                usage_aggregate = resp.usage;
             }
             Ok(_) => {}
             Err(e) => {
@@ -794,6 +764,7 @@ fn tokio_rx_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool::Tool;
     use futures_util::StreamExt;
     use serde_json::json;
 
@@ -870,10 +841,13 @@ mod tests {
             None,
         );
         let err = worker
-            .call(json!({}))
+            .call(&mut crate::tool::ToolContext::new(), json!({}))
             .await
             .expect_err("missing task should fail");
-        assert!(err.contains("task"), "error should mention task: {err}");
+        assert!(
+            err.to_string().contains("task"),
+            "error should mention task: {err}"
+        );
     }
 
     #[test]
