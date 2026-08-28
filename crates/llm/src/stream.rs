@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::pin::Pin;
 
 use crate::file_change::FileChange;
+use crate::todo::TodoUpdate;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamItem {
@@ -24,6 +25,7 @@ pub enum StreamItem {
         ok: bool,
         worker: Option<String>,
         file_change: Option<FileChange>,
+        todo_update: Option<TodoUpdate>,
     },
     WorkerStart {
         name: String,

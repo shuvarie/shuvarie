@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use shuvarie_db::StoredSession;
 use shuvarie_llm::ChatMsg;
+use shuvarie_llm::TodoItem;
 use shuvarie_llm::TokenUsage;
 
 use crate::tool_record::ToolRecord;
@@ -14,6 +15,7 @@ pub struct Session {
     pub reasoning: HashMap<u64, String>,
     pub interrupted: HashMap<u64, bool>,
     pub tool_records: Vec<ToolRecord>,
+    pub todos: Vec<TodoItem>,
     pub tokens: u64,
     pub cost: f64,
     pub input_tokens: u64,
@@ -93,6 +95,15 @@ impl Session {
                 record
             })
             .collect();
+        s.todos = stored
+            .todos
+            .into_iter()
+            .map(|t| TodoItem {
+                content: t.content,
+                status: t.status,
+                priority: t.priority,
+            })
+            .collect();
         s
     }
 
@@ -103,6 +114,7 @@ impl Session {
         self.reasoning.clear();
         self.interrupted.clear();
         self.tool_records.clear();
+        self.todos.clear();
         self.tokens = 0;
         self.cost = 0.0;
         self.input_tokens = 0;

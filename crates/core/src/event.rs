@@ -1,6 +1,6 @@
 use shuvarie_db::SessionSummary;
 use shuvarie_llm::FileChange;
-use shuvarie_llm::{Model, TokenUsage};
+use shuvarie_llm::{Model, TodoUpdate, TokenUsage};
 
 use crate::approval::ApprovalReason;
 
@@ -44,6 +44,7 @@ pub enum Event {
         output: String,
         worker: Option<String>,
         file_change: Option<FileChange>,
+        todo_update: Option<TodoUpdate>,
     },
     WorkerStarted {
         name: String,

@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use shuvarie_llm::{
-    DiffLine, DiffLineKind, FileChange, Tool, ToolContext, ToolExecutionError, ToolOutput,
+    DiffLine, DiffLineKind, FileChange, TodoItem, TodoUpdate, Tool, ToolContext,
+    ToolExecutionError, ToolOutput,
 };
 
 use crate::approval::{ApprovalGate, ApprovalReason};
@@ -1002,6 +1003,82 @@ async fn analyze_paths(lsp: &SharedManager, path: Option<&str>) -> Result<ToolOu
     Ok(ToolOutput::text(out))
 }
 
+/// Maintains the session-scoped task list. The model sends the full updated
+/// list on every call (mirroring OpenCode's `todowrite`); the new state is
+/// attached to the `ToolContext` as a [`TodoUpdate`] so the core task can
+/// persist it and the TUI can render it.
+struct Todo;
+
+impl Tool for Todo {
+    const NAME: &'static str = "todo";
+
+    type Args = Value;
+    type Output = ToolOutput;
+    type Error = ToolExecutionError;
+
+    fn description(&self) -> String {
+        "Maintain a session-scoped task list. Use it for multi-step work: create the list \
+         up front, then update it as you make progress. Each call replaces the whole list, \
+         so always send every item. Each item has a `content` (brief description), a `status` \
+         of `pending`, `in_progress`, `completed`, or `cancelled`, and a `priority` of `high`, \
+         `medium`, or `low`. Keep exactly one item `in_progress` at a time, and mark an item \
+         `completed` only after you have actually verified the work is done."
+            .to_string()
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "todos": {
+                    "type": "array",
+                    "description": "The updated todo list",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": { "type": "string", "description": "Brief description of the task" },
+                            "status": { "type": "string", "description": "pending, in_progress, completed, or cancelled" },
+                            "priority": { "type": "string", "description": "high, medium, or low" }
+                        },
+                        "required": ["content", "status", "priority"]
+                    }
+                }
+            },
+            "required": ["todos"]
+        })
+    }
+
+    async fn call(
+        &self,
+        ctx: &mut ToolContext,
+        args: Value,
+    ) -> Result<ToolOutput, ToolExecutionError> {
+        let todos: Vec<TodoItem> = args
+            .get("todos")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| {
+                        let content = item.get("content").and_then(Value::as_str)?;
+                        let status = item.get("status").and_then(Value::as_str)?;
+                        let priority = item.get("priority").and_then(Value::as_str)?;
+                        Some(TodoItem {
+                            content: content.to_string(),
+                            status: status.to_string(),
+                            priority: priority.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        ctx.insert_result(TodoUpdate {
+            todos: todos.clone(),
+        });
+        let remaining = todos.iter().filter(|t| t.status != "completed").count();
+        Ok(ToolOutput::text(format!("{remaining} todos")))
+    }
+}
+
 pub fn all_tools(
     gate: ApprovalGate,
     lsp: SharedManager,
@@ -1036,6 +1113,7 @@ pub fn all_tools(
         shuvarie_llm::into_dynamic("grep", Grep { gate: gate.clone() }),
         shuvarie_llm::into_dynamic("glob", Glob { gate }),
         shuvarie_llm::into_dynamic("lsp", Lsp { lsp }),
+        shuvarie_llm::into_dynamic("todo", Todo),
     ]
 }
 

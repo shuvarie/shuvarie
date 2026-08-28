@@ -39,6 +39,7 @@ pub enum SessionMessage {
         output: String,
         worker: Option<String>,
         file_change: Option<FileChange>,
+        todo_update: Option<shuvarie_llm::TodoUpdate>,
     },
     WorkerStarted {
         name: String,
@@ -103,6 +104,7 @@ pub struct ToolActivity {
     pub message_index: usize,
     pub text_offset: usize,
     pub file_change: Option<FileChange>,
+    pub todo_list: Option<Vec<shuvarie_llm::TodoItem>>,
 }
 
 impl ToolActivity {
@@ -123,6 +125,7 @@ pub struct SessionScreen {
     pub summary_indices: std::collections::HashSet<usize>,
     pub tools: Vec<ToolActivity>,
     pub context: Vec<ContextActivity>,
+    pub todos: Vec<shuvarie_llm::TodoItem>,
     pub reasoning: Vec<(usize, String)>,
     pub expanded_reasoning: std::collections::HashSet<usize>,
     pub streaming: bool,
@@ -152,6 +155,7 @@ impl SessionScreen {
             summary_indices: std::collections::HashSet::new(),
             tools: Vec::new(),
             context: Vec::new(),
+            todos: Vec::new(),
             reasoning: Vec::new(),
             expanded_reasoning: std::collections::HashSet::new(),
             streaming: false,
@@ -265,6 +269,7 @@ impl SessionScreen {
                     message_index: self.messages.len(),
                     text_offset: self.pending.len(),
                     file_change: None,
+                    todo_list: None,
                 });
                 self.streaming = true;
                 self.status = Some(format!("tool: {}", self.tools.last().unwrap().name));
@@ -278,6 +283,7 @@ impl SessionScreen {
                 output,
                 worker,
                 file_change,
+                todo_update,
             } => {
                 if let Some(tool) = self.tools.iter_mut().find(|t| {
                     t.name == name && t.worker == worker && matches!(t.status, ToolStatus::Running)
@@ -289,6 +295,12 @@ impl SessionScreen {
                     };
                     tool.output = output;
                     tool.file_change = file_change;
+                    if let Some(update) = &todo_update {
+                        tool.todo_list = Some(update.todos.clone());
+                        self.todos = update.todos.clone();
+                        self.sidebar
+                            .update(SidebarMessage::UpdateTodos(update.todos.clone()));
+                    }
                 }
                 self.status = None;
                 self.mark_scroll_dirty();
@@ -305,6 +317,7 @@ impl SessionScreen {
                     message_index: self.messages.len(),
                     text_offset: self.pending.len(),
                     file_change: None,
+                    todo_list: None,
                 });
                 self.streaming = true;
                 self.status = Some(format!("worker: {}", self.tools.last().unwrap().name));
@@ -424,6 +437,7 @@ impl SessionScreen {
                 self.summary_indices.clear();
                 self.tools.clear();
                 self.context.clear();
+                self.todos.clear();
                 self.reasoning.clear();
                 self.expanded_reasoning.clear();
                 self.streaming = false;
@@ -454,6 +468,7 @@ impl SessionScreen {
                     ..Default::default()
                 };
                 let cost = session.cost;
+                let todos = session.todos.clone();
                 self.summary_indices = match session.summary_seq {
                     Some(seq) => std::iter::once(seq as usize).collect(),
                     None => std::collections::HashSet::new(),
@@ -479,8 +494,11 @@ impl SessionScreen {
                         message_index: tr.message_seq as usize,
                         text_offset: 0,
                         file_change: tr.file_change.clone(),
+                        todo_list: None,
                     })
                     .collect();
+                self.todos = todos.clone();
+                self.sidebar.update(SidebarMessage::UpdateTodos(todos));
                 self.context.clear();
                 self.reasoning = session
                     .reasoning
@@ -555,14 +573,21 @@ impl SessionScreen {
             ),
         };
         let input_height = self.input.desired_height(content_area.width as usize);
+        let todo_bar_height = if self.todos.iter().any(|t| t.status == "in_progress") {
+            1
+        } else {
+            0
+        };
         let [
             title_area,
+            todo_bar_area,
             history_area,
             input_area,
             status_area,
             footer_area,
         ] = Layout::vertical([
             Length(1),
+            Length(todo_bar_height),
             Min(0),
             Length(input_height),
             Length(1),
@@ -576,6 +601,29 @@ impl SessionScreen {
                 .alignment(Alignment::Center),
             title_area,
         );
+
+        if todo_bar_height > 0 {
+            let active: Vec<&shuvarie_llm::TodoItem> = self
+                .todos
+                .iter()
+                .filter(|t| t.status == "in_progress")
+                .collect();
+            let mut spans: Vec<Span> = Vec::new();
+            for (i, todo) in active.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::raw("  ·  ").fg(theme::TEXT_MUTED));
+                }
+                spans.push(Span::raw("▸ ").fg(theme::ACCENT).bold());
+                let content: String = todo.content.chars().take(60).collect();
+                spans.push(Span::raw(content).fg(theme::TEXT));
+            }
+            frame.render_widget(
+                Paragraph::new(Line::from(spans))
+                    .bg(theme::SURFACE)
+                    .alignment(Alignment::Left),
+                todo_bar_area,
+            );
+        }
 
         let history_block = Block::new().padding(Padding::horizontal(2));
         let history_inner = history_block.inner(history_area);
@@ -646,6 +694,7 @@ impl SessionScreen {
             ..Default::default()
         };
         let cost = session.cost;
+        let todos = session.todos.clone();
         self.summary_indices = match session.summary_seq {
             Some(seq) => std::iter::once(seq as usize).collect(),
             None => std::collections::HashSet::new(),
@@ -671,8 +720,11 @@ impl SessionScreen {
                 message_index: tr.message_seq as usize,
                 text_offset: 0,
                 file_change: tr.file_change.clone(),
+                todo_list: None,
             })
             .collect();
+        self.todos = todos.clone();
+        self.sidebar.update(SidebarMessage::UpdateTodos(todos));
         self.reasoning = session
             .reasoning
             .iter()
@@ -864,6 +916,10 @@ impl SessionScreen {
     }
 
     fn push_tool_lines(&self, lines: &mut Vec<Line>, tool: &ToolActivity) {
+        if let Some(todos) = &tool.todo_list {
+            self.push_todo_lines(lines, todos);
+            return;
+        }
         let (marker, fg) = match tool.status {
             ToolStatus::Running => ("›", theme::ACCENT),
             ToolStatus::Ok => ("✓", theme::SUCCESS),
@@ -906,6 +962,30 @@ impl SessionScreen {
                 FileChange::Write { path, .. } => path,
             };
             self.push_diagnostics_lines(lines, path, prefix);
+        }
+    }
+
+    fn push_todo_lines(&self, lines: &mut Vec<Line>, todos: &[shuvarie_llm::TodoItem]) {
+        lines.push(Line::from(vec![
+            Span::raw("▸ ").fg(theme::ACCENT).bold(),
+            Span::raw("todos").fg(theme::TEXT).bold(),
+        ]));
+        for todo in todos {
+            let (marker, fg) = match todo.status.as_str() {
+                "completed" => ("☑", theme::SUCCESS),
+                "in_progress" => ("▸", theme::ACCENT),
+                "cancelled" => ("☐", theme::TEXT_MUTED),
+                _ => ("☐", theme::TEXT_DIM),
+            };
+            let content: String = todo.content.chars().take(120).collect();
+            lines.push(Line::from(vec![
+                Span::raw(format!("  {marker} ")).fg(fg).bold(),
+                Span::raw(content).fg(if todo.status == "in_progress" {
+                    theme::TEXT
+                } else {
+                    theme::TEXT_DIM
+                }),
+            ]));
         }
     }
 

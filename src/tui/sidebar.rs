@@ -4,6 +4,7 @@ use ratatui::layout::{Alignment, Rect};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph};
 use shuvarie_core::{LspStatus, Skill};
+use shuvarie_llm::TodoItem;
 use shuvarie_llm::TokenUsage;
 use termina::event::KeyEvent;
 
@@ -25,6 +26,7 @@ pub struct Sidebar {
     pub lsp_servers: Vec<LspStatus>,
     pub lsp_enabled: bool,
     pub skills: Vec<Skill>,
+    pub todos: Vec<TodoItem>,
     dirty: Cell<bool>,
     lines_cache: RefCell<Vec<Line<'static>>>,
 }
@@ -49,6 +51,7 @@ pub enum SidebarMessage {
     UpdateSkills {
         skills: Vec<Skill>,
     },
+    UpdateTodos(Vec<TodoItem>),
 }
 
 impl Sidebar {
@@ -67,6 +70,7 @@ impl Sidebar {
             lsp_servers: Vec::new(),
             lsp_enabled: true,
             skills: Vec::new(),
+            todos: Vec::new(),
             dirty: Cell::new(true),
             lines_cache: RefCell::new(Vec::new()),
         }
@@ -106,6 +110,9 @@ impl Sidebar {
             }
             SidebarMessage::UpdateSkills { skills } => {
                 self.skills = skills;
+            }
+            SidebarMessage::UpdateTodos(todos) => {
+                self.todos = todos;
             }
         }
     }
@@ -243,6 +250,26 @@ impl Sidebar {
                         .push(Line::from(format!("    {}", skill.description)).fg(theme::TEXT_DIM));
                 }
             }
+        }
+        lines.push(Line::from(""));
+
+        lines.push(Line::from("Todo").fg(theme::ACCENT).bold());
+        if self.todos.is_empty() {
+            lines.push(Line::from("  none").fg(theme::TEXT_MUTED));
+        } else {
+            let done = self
+                .todos
+                .iter()
+                .filter(|t| t.status == "completed")
+                .count();
+            let total = self.todos.len();
+            lines.push(
+                Line::from(format!("  {done}/{total} done")).fg(if done == total {
+                    theme::SUCCESS
+                } else {
+                    theme::TEXT_DIM
+                }),
+            );
         }
 
         lines

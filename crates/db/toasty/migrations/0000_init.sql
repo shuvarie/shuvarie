@@ -73,3 +73,14 @@ CREATE TABLE "message_embeddings" (
 CREATE INDEX "index_message_embeddings_by_message_id" ON "message_embeddings" ("message_id");
 -- #[toasty::breakpoint]
 CREATE INDEX "index_message_embeddings_by_session_id" ON "message_embeddings" ("session_id");
+-- #[toasty::breakpoint]
+CREATE TABLE "todos" (
+    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "session_id" INTEGER NOT NULL,
+    "position" INTEGER NOT NULL,
+    "content" TEXT NOT NULL,
+    "status" TEXT NOT NULL,
+    "priority" TEXT NOT NULL
+);
+-- #[toasty::breakpoint]
+CREATE INDEX "index_todos_by_session_id" ON "todos" ("session_id");

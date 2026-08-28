@@ -7,7 +7,7 @@ use toasty::schema::db;
 use toasty::stmt::{List, Query, Type};
 
 use crate::error::{DbError, Result};
-use crate::model::{Message, MessageEmbedding, MsgRole, Session, ToolCall, UndoLog};
+use crate::model::{Message, MessageEmbedding, MsgRole, Session, Todo, ToolCall, UndoLog};
 
 static MIGRATIONS: toasty::migration::MigrationSet = toasty::embed_migrations!();
 
@@ -27,6 +27,7 @@ pub struct StoredSession {
     pub model: Option<String>,
     pub messages: Vec<StoredMessage>,
     pub tool_calls: Vec<StoredToolCall>,
+    pub todos: Vec<StoredTodo>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +61,16 @@ pub struct StoredToolCall {
     pub file_change_json: String,
     pub original_content: Option<String>,
     pub new_content: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredTodo {
+    pub id: u64,
+    pub session_id: u64,
+    pub position: u64,
+    pub content: String,
+    pub status: String,
+    pub priority: String,
 }
 
 #[derive(Debug, Clone)]
@@ -138,6 +149,19 @@ impl From<ToolCall> for StoredToolCall {
     }
 }
 
+impl From<Todo> for StoredTodo {
+    fn from(t: Todo) -> Self {
+        Self {
+            id: t.id,
+            session_id: t.session_id,
+            position: t.position,
+            content: t.content,
+            status: t.status,
+            priority: t.priority,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Store {
     db: toasty::Db,
@@ -171,7 +195,8 @@ impl Store {
                 Message,
                 MessageEmbedding,
                 ToolCall,
-                UndoLog
+                UndoLog,
+                Todo
             ))
             .build(driver)
             .await
@@ -215,6 +240,7 @@ impl Store {
             .ok_or(DbError::NotFound { id })?;
         let messages = self.messages_for_session(id).await?;
         let tool_calls = self.tool_calls_for_session(id).await?;
+        let todos = self.todos_for_session(id).await?;
         Ok(StoredSession {
             id: session.id,
             title: session.title,
@@ -222,6 +248,7 @@ impl Store {
             model: session.model,
             messages,
             tool_calls,
+            todos,
         })
     }
 
@@ -237,6 +264,7 @@ impl Store {
         };
         let messages = self.messages_for_session(session.id).await?;
         let tool_calls = self.tool_calls_for_session(session.id).await?;
+        let todos = self.todos_for_session(session.id).await?;
         Ok(Some(StoredSession {
             id: session.id,
             title: session.title,
@@ -244,6 +272,7 @@ impl Store {
             model: session.model,
             messages,
             tool_calls,
+            todos,
         }))
     }
 
@@ -437,6 +466,42 @@ impl Store {
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
         Ok(rows.into_iter().map(StoredToolCall::from).collect())
+    }
+
+    /// Replace the session's todo list wholesale (the `todo` tool sends the
+    /// full list on every call).
+    pub async fn set_todos(
+        &mut self,
+        session_id: u64,
+        todos: &[shuvarie_llm::TodoItem],
+    ) -> Result<()> {
+        Todo::filter_by_session_id(session_id)
+            .delete()
+            .exec(&mut self.db)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        for (position, todo) in todos.iter().enumerate() {
+            toasty::create!(Todo {
+                session_id,
+                position: position as u64,
+                content: todo.content.clone(),
+                status: todo.status.clone(),
+                priority: todo.priority.clone(),
+            })
+            .exec(&mut self.db)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    async fn todos_for_session(&mut self, session_id: u64) -> Result<Vec<StoredTodo>> {
+        let rows = Todo::filter_by_session_id(session_id)
+            .order_by(Todo::fields().position().asc())
+            .exec(&mut self.db)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        Ok(rows.into_iter().map(StoredTodo::from).collect())
     }
 
     pub async fn truncate_undo_log(&mut self, session_id: u64) -> Result<()> {

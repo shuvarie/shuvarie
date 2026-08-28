@@ -192,9 +192,11 @@ impl ModelPicker {
         let mut items: Vec<ListItem> = Vec::new();
         let query_row_present = self.query_row().is_some();
         if let Some(q) = self.query_row() {
-            let mut line = vec![Span::raw(format!("Use \"{q}\""))
-                .fg(theme::ACCENT)
-                .add_modifier(Modifier::BOLD)];
+            let mut line = vec![
+                Span::raw(format!("Use \"{q}\""))
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ];
             line.push(Span::raw("  (no match)").fg(theme::TEXT_MUTED));
             items.push(render_list_item_line(Line::from(line), self.selected == 0));
         }
@@ -202,8 +204,7 @@ impl ModelPicker {
         let row_base = self.selected.saturating_sub(usize::from(query_row_present));
         for (idx, &orig) in self.filtered.iter().enumerate().skip(skip) {
             let m = &self.models[orig];
-            let mut line =
-                vec![Span::raw(m.display_name().to_string()).fg(theme::TEXT)];
+            let mut line = vec![Span::raw(m.display_name().to_string()).fg(theme::TEXT)];
             if let Some(ctx) = m.context_length {
                 line.push(Span::raw(format!(" · {}k ctx", ctx / 1024)).fg(theme::TEXT_MUTED));
             }

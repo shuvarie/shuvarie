@@ -134,3 +134,16 @@ pub struct MessageEmbedding {
     pub content: String,
     pub vec: Vec<u8>,
 }
+
+#[derive(Debug, toasty::Model)]
+pub struct Todo {
+    #[key]
+    #[auto]
+    pub id: u64,
+    #[index]
+    pub session_id: u64,
+    pub position: u64,
+    pub content: String,
+    pub status: String,
+    pub priority: String,
+}

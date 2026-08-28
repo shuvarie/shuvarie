@@ -5,6 +5,7 @@ use rig::agent::hook::{HookContext, ToolResultEvent};
 use rig::agent::{AgentHook, ToolResultAction};
 
 use crate::file_change::FileChange;
+use crate::todo::TodoUpdate;
 
 pub use rig::completion::ToolDefinition;
 pub use rig::tool::{
@@ -62,6 +63,41 @@ impl AgentHook for FileChangeHook {
                 .lock()
                 .unwrap()
                 .insert(event.internal_call_id.to_string(), change.clone());
+        }
+        async { ToolResultAction::Keep }
+    }
+}
+
+/// Captures host-only [`TodoUpdate`]s that the `todo` tool attaches to its
+/// [`ToolContext`], keyed by the tool call's `internal_call_id` so the stream
+/// can correlate them with the corresponding `ToolResult`.
+#[derive(Clone, Default)]
+pub struct TodoHook {
+    updates: Arc<Mutex<HashMap<String, TodoUpdate>>>,
+}
+
+impl TodoHook {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Take the `TodoUpdate` recorded for a tool call, if any.
+    pub fn take(&self, internal_call_id: &str) -> Option<TodoUpdate> {
+        self.updates.lock().unwrap().remove(internal_call_id)
+    }
+}
+
+impl AgentHook for TodoHook {
+    fn on_tool_result(
+        &self,
+        _ctx: &HookContext,
+        event: ToolResultEvent<'_>,
+    ) -> impl futures_util::Future<Output = ToolResultAction> + Send {
+        if let Some(update) = event.tool_context.result::<TodoUpdate>() {
+            self.updates
+                .lock()
+                .unwrap()
+                .insert(event.internal_call_id.to_string(), update.clone());
         }
         async { ToolResultAction::Keep }
     }
