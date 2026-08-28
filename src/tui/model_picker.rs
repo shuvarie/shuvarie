@@ -203,7 +203,7 @@ impl ModelPicker {
         for (idx, &orig) in self.filtered.iter().enumerate().skip(skip) {
             let m = &self.models[orig];
             let mut line =
-                vec![Span::raw(shuvarie_llm::display_name(m).to_string()).fg(theme::TEXT)];
+                vec![Span::raw(m.display_name().to_string()).fg(theme::TEXT)];
             if let Some(ctx) = m.context_length {
                 line.push(Span::raw(format!(" · {}k ctx", ctx / 1024)).fg(theme::TEXT_MUTED));
             }
