@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 dirs = "6"
 futures-util = { version = "0.3", default-features = false, features = ["std", "alloc"] }
+globset = "0.4"
 ignore = "0.4"
 regex = "1"
 serde = { version = "1", features = ["derive"] }

@@ -7968,6 +7968,7 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "futures-util",
+ "globset",
  "ignore",
  "regex",
  "selune",
