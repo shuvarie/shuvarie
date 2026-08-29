@@ -258,10 +258,6 @@ impl Sidebar {
                         .fg(theme::TEXT)
                         .bold(),
                 );
-                if !skill.description.is_empty() {
-                    lines
-                        .push(Line::from(format!("    {}", skill.description)).fg(theme::TEXT_DIM));
-                }
             }
         }
         lines.push(Line::from(""));
