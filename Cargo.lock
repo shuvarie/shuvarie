@@ -3153,6 +3153,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "frameplay-lib"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e43dfad5ad0bfc44409b2a7bdf77edf19fb710821062ddf965fb6adf6db17cdb"
+
+[[package]]
 name = "fs4"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7947,6 +7953,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "color-eyre",
+ "frameplay-lib",
  "futures-util",
  "nucleo",
  "ratatui",

@@ -36,6 +36,7 @@ pub struct SessionPicker {
     viewport_height: u16,
     pub confirm_delete: bool,
     pub active_id: Option<u64>,
+    pub loading: bool,
 }
 
 impl SessionPicker {
@@ -48,6 +49,7 @@ impl SessionPicker {
             viewport_height: 0,
             confirm_delete: false,
             active_id: None,
+            loading: false,
         }
     }
 
@@ -58,15 +60,18 @@ impl SessionPicker {
         self.offset = 0;
         self.confirm_delete = false;
         self.active_id = active_id;
+        self.loading = true;
     }
 
     pub fn close(&mut self) {
         self.open = false;
         self.confirm_delete = false;
+        self.loading = false;
     }
 
     pub fn set_sessions(&mut self, sessions: Vec<SessionSummary>) {
         self.sessions = sessions;
+        self.loading = false;
         self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
         self.recompute_offset();
     }
@@ -198,19 +203,29 @@ impl SessionPicker {
 
         let [list_area, hint_area] = Layout::vertical([Min(0), Length(1)]).areas(inner);
 
-        let visible: Vec<ListItem> = self
-            .sessions
-            .iter()
-            .enumerate()
-            .skip(self.offset)
-            .take(list_area.height as usize)
-            .map(|(idx, s)| {
-                let marker = theme::active_marker(Some(s.id) == self.active_id);
-                let content = format!("{marker}{} · {} msgs", s.title, s.message_count);
-                render_list_item(content, idx == self.selected)
-            })
-            .collect();
-        frame.render_widget(List::new(visible), list_area);
+        if self.loading && self.sessions.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    super::spinner::spinner(),
+                    Span::raw(" loading sessions…").fg(theme::TEXT_MUTED),
+                ])),
+                list_area,
+            );
+        } else {
+            let visible: Vec<ListItem> = self
+                .sessions
+                .iter()
+                .enumerate()
+                .skip(self.offset)
+                .take(list_area.height as usize)
+                .map(|(idx, s)| {
+                    let marker = theme::active_marker(Some(s.id) == self.active_id);
+                    let content = format!("{marker}{} · {} msgs", s.title, s.message_count);
+                    render_list_item(content, idx == self.selected)
+                })
+                .collect();
+            frame.render_widget(List::new(visible), list_area);
+        }
 
         let hint = if self.confirm_delete {
             theme::help_line(&[("Ctrl+D", "confirm delete"), ("Esc", "cancel")])

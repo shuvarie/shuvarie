@@ -87,7 +87,7 @@ pub enum SessionMessage {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ToolStatus {
     Running,
     Ok,
@@ -129,6 +129,7 @@ pub struct SessionScreen {
     pub reasoning: Vec<(usize, String)>,
     pub expanded_reasoning: std::collections::HashSet<usize>,
     pub streaming: bool,
+    pub busy: bool,
     pub pending: String,
     pub pending_reasoning: String,
     pub interrupted: bool,
@@ -159,6 +160,7 @@ impl SessionScreen {
             reasoning: Vec::new(),
             expanded_reasoning: std::collections::HashSet::new(),
             streaming: false,
+            busy: false,
             pending: String::new(),
             pending_reasoning: String::new(),
             interrupted: false,
@@ -212,6 +214,7 @@ impl SessionScreen {
                     match effect {
                         TextAreaEffect::Submit { content } => {
                             self.messages.push((Role::User, content.clone()));
+                            self.busy = true;
                             self.status = Some("thinking…".to_string());
                             self.mark_committed_dirty();
                             self.mark_scroll_dirty();
@@ -235,6 +238,7 @@ impl SessionScreen {
                     self.streaming = true;
                     self.pending.clear();
                 }
+                self.busy = true;
                 self.pending.push_str(&content);
                 self.status = Some("streaming…".to_string());
                 self.mark_scroll_dirty();
@@ -245,6 +249,7 @@ impl SessionScreen {
                 if !self.streaming {
                     self.streaming = true;
                 }
+                self.busy = true;
                 self.pending_reasoning.push_str(&content);
                 self.mark_scroll_dirty();
                 self.follow_bottom();
@@ -272,6 +277,7 @@ impl SessionScreen {
                     todo_list: None,
                 });
                 self.streaming = true;
+                self.busy = true;
                 self.status = Some(format!("tool: {}", self.tools.last().unwrap().name));
                 self.mark_scroll_dirty();
                 self.follow_bottom();
@@ -320,6 +326,7 @@ impl SessionScreen {
                     todo_list: None,
                 });
                 self.streaming = true;
+                self.busy = true;
                 self.status = Some(format!("worker: {}", self.tools.last().unwrap().name));
                 self.mark_scroll_dirty();
                 self.follow_bottom();
@@ -355,6 +362,7 @@ impl SessionScreen {
                     self.streaming = false;
                     self.interrupted = false;
                 }
+                self.busy = false;
                 self.status = None;
                 self.mark_committed_dirty();
                 self.mark_scroll_dirty();
@@ -381,6 +389,7 @@ impl SessionScreen {
                     }
                     self.streaming = false;
                 }
+                self.busy = false;
                 self.status = Some(format!("error: {error}"));
                 self.mark_committed_dirty();
                 self.mark_scroll_dirty();
@@ -407,6 +416,7 @@ impl SessionScreen {
                     }
                     self.streaming = false;
                 }
+                self.busy = false;
                 self.status = None;
                 self.mark_committed_dirty();
                 self.mark_scroll_dirty();
@@ -441,6 +451,7 @@ impl SessionScreen {
                 self.reasoning.clear();
                 self.expanded_reasoning.clear();
                 self.streaming = false;
+                self.busy = false;
                 self.pending.clear();
                 self.pending_reasoning.clear();
                 self.interrupted = false;
@@ -507,6 +518,7 @@ impl SessionScreen {
                     .collect();
                 self.expanded_reasoning.clear();
                 self.streaming = false;
+                self.busy = false;
                 self.pending.clear();
                 self.pending_reasoning.clear();
                 self.interrupted = interrupted;
@@ -651,10 +663,13 @@ impl SessionScreen {
         self.input.view(frame, input_area);
 
         if let Some(status) = &self.status {
-            frame.render_widget(
-                Paragraph::new(status.as_str()).fg(theme::TEXT_MUTED),
-                status_area,
-            );
+            let mut spans = Vec::new();
+            if self.busy {
+                spans.push(super::spinner::spinner());
+                spans.push(Span::raw(" "));
+            }
+            spans.push(Span::raw(status.as_str()).fg(theme::TEXT_MUTED));
+            frame.render_widget(Paragraph::new(Line::from(spans)), status_area);
         }
 
         if let Some(error) = &self.error {
@@ -676,6 +691,11 @@ impl SessionScreen {
     }
 
     fn mark_scroll_dirty(&self) {
+        self.scroll_dirty.set(true);
+    }
+
+    /// Mark the scroll view dirty so an animated spinner re-renders.
+    pub fn mark_spinner_dirty(&self) {
         self.scroll_dirty.set(true);
     }
 
@@ -731,6 +751,7 @@ impl SessionScreen {
             .map(|(seq, text)| (*seq as usize, text.clone()))
             .collect();
         self.streaming = false;
+        self.busy = false;
         self.pending.clear();
         self.pending_reasoning.clear();
         self.interrupted = interrupted;
@@ -831,7 +852,13 @@ impl SessionScreen {
                     } else {
                         "(tool output only — no text reply)"
                     };
-                    lines.push(Line::from(Span::raw(placeholder).fg(theme::TEXT_MUTED)));
+                    let mut spans = Vec::new();
+                    if self.streaming && i == self.messages.len() {
+                        spans.push(super::spinner::spinner());
+                        spans.push(Span::raw(" "));
+                    }
+                    spans.push(Span::raw(placeholder).fg(theme::TEXT_MUTED));
+                    lines.push(Line::from(spans));
                 } else {
                     self.push_interleaved(lines, content, &tool_lines);
                 }
@@ -921,7 +948,7 @@ impl SessionScreen {
             return;
         }
         let (marker, fg) = match tool.status {
-            ToolStatus::Running => ("›", theme::ACCENT),
+            ToolStatus::Running => ("", theme::ACCENT),
             ToolStatus::Ok => ("✓", theme::SUCCESS),
             ToolStatus::Failed => ("✗", theme::ERROR),
         };
@@ -930,7 +957,15 @@ impl SessionScreen {
             Some(_) => ("  ", marker, fg),
             None => ("", marker, fg),
         };
-        let mut header = vec![Span::raw(format!("{prefix}{marker}")).fg(fg).bold()];
+        let mut header = Vec::new();
+        if tool.status == ToolStatus::Running {
+            if !prefix.is_empty() {
+                header.push(Span::raw(prefix).fg(theme::TEXT_MUTED));
+            }
+            header.push(super::spinner::spinner());
+        } else {
+            header.push(Span::raw(format!("{prefix}{marker}")).fg(fg).bold());
+        }
         header.push(Span::raw(format!(" {}", tool.name)).fg(theme::TEXT).bold());
         if !tool.args.is_empty() {
             let args_display: String = tool

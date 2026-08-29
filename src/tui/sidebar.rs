@@ -122,6 +122,11 @@ impl Sidebar {
         None
     }
 
+    /// Mark the cached lines dirty so an animated spinner re-renders.
+    pub fn mark_dirty(&self) {
+        self.dirty.set(true);
+    }
+
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
         let block = Block::new()
             .bg(theme::SURFACE)
@@ -206,14 +211,22 @@ impl Sidebar {
             for s in &self.lsp_servers {
                 let (marker, color) = match s.status {
                     shuvarie_core::ServerStatus::Running => ("✓", theme::SUCCESS),
-                    shuvarie_core::ServerStatus::Starting => ("⟳", theme::WARNING),
-                    shuvarie_core::ServerStatus::Stopping => ("⟳", theme::WARNING),
+                    shuvarie_core::ServerStatus::Starting => ("", theme::WARNING),
+                    shuvarie_core::ServerStatus::Stopping => ("", theme::WARNING),
                     shuvarie_core::ServerStatus::Stopped => ("○", theme::TEXT_MUTED),
                     shuvarie_core::ServerStatus::Failed => ("✗", theme::ERROR),
                 };
                 let mut row = vec![
                     Span::raw("  ").fg(theme::TEXT_MUTED),
-                    Span::raw(marker.to_string()).fg(color),
+                    if matches!(
+                        s.status,
+                        shuvarie_core::ServerStatus::Starting
+                            | shuvarie_core::ServerStatus::Stopping
+                    ) {
+                        super::spinner::spinner()
+                    } else {
+                        Span::raw(marker.to_string()).fg(color)
+                    },
                     Span::raw(" ").fg(theme::TEXT_MUTED),
                     Span::raw(s.name.clone()).fg(theme::TEXT),
                 ];

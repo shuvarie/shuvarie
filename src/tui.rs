@@ -30,6 +30,7 @@ mod search;
 mod session;
 mod session_picker;
 mod sidebar;
+mod spinner;
 mod theme;
 mod utils;
 mod welcome;
@@ -89,6 +90,9 @@ where
     // A pending frame deadline armed when a core event arrived too soon after
     // the last draw. `None` means no frame is pending.
     let mut frame_deadline: Option<tokio::time::Instant> = None;
+    // Drives spinner animation when any in-progress indicator is active.
+    let mut spinner_tick = tokio::time::interval(Duration::from_millis(100));
+    spinner_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     'render_loop: loop {
         // Draw frame.
@@ -110,6 +114,12 @@ where
                     }
                 }, if frame_deadline.is_some() => {
                     // Deadline elapsed — draw the coalesced frame.
+                    frame_deadline = None;
+                    break 'event_listening;
+                }
+                // Spinner tick: redraw when an in-progress indicator is active.
+                _ = spinner_tick.tick(), if app.has_active_spinner() => {
+                    app.mark_spinners_dirty();
                     frame_deadline = None;
                     break 'event_listening;
                 }

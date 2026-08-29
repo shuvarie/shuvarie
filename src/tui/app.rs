@@ -816,6 +816,7 @@ impl App {
         self.session
             .messages
             .push((shuvarie_core::Role::User, content.clone()));
+        self.session.busy = true;
         self.session.status = Some("thinking…".to_string());
         self.ctx.send(shuvarie_core::Command::StartSession);
         self.ctx
@@ -823,7 +824,42 @@ impl App {
     }
 
     fn refresh_sessions(&mut self) {
+        self.session_picker.loading = true;
         self.ctx.send(shuvarie_core::Command::ListSessions);
+    }
+
+    /// Whether any spinner is currently animating, so the render loop can tick.
+    pub fn has_active_spinner(&self) -> bool {
+        if self.session.busy {
+            return true;
+        }
+        if self.history_search.loading {
+            return true;
+        }
+        if self.session_picker.loading {
+            return true;
+        }
+        self.session.sidebar.lsp_servers.iter().any(|s| {
+            matches!(
+                s.status,
+                shuvarie_core::ServerStatus::Starting | shuvarie_core::ServerStatus::Stopping
+            )
+        })
+    }
+
+    /// Mark the views that are animating dirty so the next frame re-renders them.
+    pub fn mark_spinners_dirty(&self) {
+        if self.session.busy {
+            self.session.mark_spinner_dirty();
+        }
+        if self.session.sidebar.lsp_servers.iter().any(|s| {
+            matches!(
+                s.status,
+                shuvarie_core::ServerStatus::Starting | shuvarie_core::ServerStatus::Stopping
+            )
+        }) {
+            self.session.sidebar.mark_dirty();
+        }
     }
 
     fn update_command_availability(&mut self) {

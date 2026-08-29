@@ -229,7 +229,10 @@ impl HistorySearch {
         let status = if let Some(err) = &self.error {
             Paragraph::new(err.as_str()).fg(theme::ERROR)
         } else if self.loading {
-            Paragraph::new("searching…").fg(theme::TEXT_MUTED)
+            Paragraph::new(Line::from(vec![
+                super::spinner::spinner(),
+                Span::raw(" searching…").fg(theme::TEXT_MUTED),
+            ]))
         } else if self.query.value.is_empty() {
             Paragraph::new("type to search all sessions").fg(theme::TEXT_MUTED)
         } else if self.hits.is_empty() {
