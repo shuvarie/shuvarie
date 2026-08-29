@@ -189,6 +189,12 @@ impl ModelPicker {
 
         self.search.view(frame, input_area, "/ to search models");
 
+        let offset = scroll_offset_for(
+            self.selected,
+            self.offset,
+            list_area.height as usize,
+            self.visible_len(),
+        );
         let mut items: Vec<ListItem> = Vec::new();
         let query_row_present = self.query_row().is_some();
         if let Some(q) = self.query_row() {
@@ -200,7 +206,7 @@ impl ModelPicker {
             line.push(Span::raw("  (no match)").fg(theme::TEXT_MUTED));
             items.push(render_list_item_line(Line::from(line), self.selected == 0));
         }
-        let skip = self.offset.saturating_sub(usize::from(query_row_present));
+        let skip = offset.saturating_sub(usize::from(query_row_present));
         let row_base = self.selected.saturating_sub(usize::from(query_row_present));
         for (idx, &orig) in self.filtered.iter().enumerate().skip(skip) {
             let m = &self.models[orig];

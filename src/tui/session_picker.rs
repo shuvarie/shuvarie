@@ -212,11 +212,17 @@ impl SessionPicker {
                 list_area,
             );
         } else {
+            let offset = scroll_offset_for(
+                self.selected,
+                self.offset,
+                list_area.height as usize,
+                self.sessions.len(),
+            );
             let visible: Vec<ListItem> = self
                 .sessions
                 .iter()
                 .enumerate()
-                .skip(self.offset)
+                .skip(offset)
                 .take(list_area.height as usize)
                 .map(|(idx, s)| {
                     let marker = theme::active_marker(Some(s.id) == self.active_id);

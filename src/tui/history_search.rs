@@ -246,11 +246,17 @@ impl HistorySearch {
         };
         frame.render_widget(status, status_area);
 
+        let offset = scroll_offset_for(
+            self.selected,
+            self.offset,
+            list_area.height as usize,
+            self.hits.len(),
+        );
         let visible: Vec<ListItem> = self
             .hits
             .iter()
             .enumerate()
-            .skip(self.offset)
+            .skip(offset)
             .take(list_area.height as usize)
             .map(|(idx, hit)| {
                 let role_tag = match hit.role {

@@ -460,11 +460,17 @@ impl AddProviderForm {
         self.search
             .view(frame, search_area, "Type to filter providers…");
 
+        let offset = scroll_offset_for(
+            self.kind_selected,
+            self.kind_offset,
+            list_area.height as usize,
+            self.filtered.len(),
+        );
         let visible: Vec<ListItem> = self
             .filtered
             .iter()
             .enumerate()
-            .skip(self.kind_offset)
+            .skip(offset)
             .take(list_area.height as usize)
             .map(|(i, &orig)| {
                 render_list_item(self.providers[orig].name.clone(), i == self.kind_selected)

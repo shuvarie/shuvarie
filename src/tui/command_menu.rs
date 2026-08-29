@@ -264,11 +264,17 @@ impl CommandMenu {
         self.search
             .view(frame, input_area, "Type to search commands…");
 
+        let offset = scroll_offset_for(
+            self.selected,
+            self.offset,
+            list_area.height as usize,
+            self.filtered.len(),
+        );
         let visible: Vec<ListItem> = self
             .filtered
             .iter()
             .enumerate()
-            .skip(self.offset)
+            .skip(offset)
             .take(list_area.height as usize)
             .map(|(idx, &i)| {
                 let cmd = &self.commands[i];
