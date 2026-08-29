@@ -7,7 +7,7 @@
 //! `lsp` tool exposes start/list/stop/restart).
 //!
 //! Server specs are sourced from a built-in per-language table (`registry::builtin`)
-//! and can be overridden or extended through `[lsp.servers.<lang>]` in `config.toml`
+//! and can be overridden or extended through `server <lang>` nodes in `config.kdl`'s `lsp` section
 //! (see `config::LspConfig`). Missing binaries are probed lazily on `start` and skipped
 //! silently so the rest of the manager keeps working on systems without a given server.
 

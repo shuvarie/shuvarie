@@ -5,30 +5,22 @@ use serde::{Deserialize, Serialize};
 use crate::registry;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case", default)]
 pub struct LspConfig {
-    #[serde(default = "default_true")]
     pub enabled: bool,
 
-    #[serde(default)]
     pub servers: BTreeMap<String, LspServerSpec>,
 }
 
-fn default_true() -> bool {
-    true
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case", default)]
 pub struct LspServerSpec {
-    #[serde(default)]
     pub command: Vec<String>,
 
-    #[serde(default)]
     pub extensions: Vec<String>,
 
-    #[serde(default = "default_true")]
     pub auto_start: bool,
 
-    #[serde(default)]
     pub root_markers: Vec<String>,
 }
 

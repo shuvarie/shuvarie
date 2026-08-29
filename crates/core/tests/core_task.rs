@@ -19,7 +19,7 @@ fn temp_connections_path(name: &str) -> PathBuf {
             .unwrap()
             .as_nanos()
     ));
-    dir.join("shuvarie").join("connections.toml")
+    dir.join("shuvarie").join("connections.kdl")
 }
 
 async fn recv_skills_loaded(event_rx: &mut tokio::sync::mpsc::Receiver<Event>) {
