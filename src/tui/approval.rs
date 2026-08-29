@@ -123,6 +123,12 @@ impl ApprovalPrompt {
         let reason_text = match self.reason {
             ApprovalReason::OutsideWorkspace => "outside the workspace",
             ApprovalReason::HiddenPath => "a hidden path",
+            ApprovalReason::Network => "a network request",
+        };
+
+        let target_label = match self.reason {
+            ApprovalReason::Network => "to ",
+            _ => " on ",
         };
 
         let lines = vec![
@@ -130,11 +136,11 @@ impl ApprovalPrompt {
             Line::from(vec![
                 Span::raw("The model wants to ").fg(theme::TEXT),
                 Span::raw(self.tool.clone()).fg(theme::ACCENT).bold(),
-                Span::raw(" on ").fg(theme::TEXT),
+                Span::raw(target_label).fg(theme::TEXT),
                 Span::raw(self.path.clone()).fg(theme::ACCENT),
             ]),
             Line::from(vec![
-                Span::raw("This path is ").fg(theme::TEXT),
+                Span::raw("This is ").fg(theme::TEXT),
                 Span::raw(reason_text).fg(theme::WARNING),
                 Span::raw(".").fg(theme::TEXT),
             ]),

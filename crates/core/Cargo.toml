@@ -10,7 +10,9 @@ repository.workspace = true
 dirs = "6"
 futures-util = { version = "0.3", default-features = false, features = ["std", "alloc"] }
 globset = "0.4"
+html-to-markdown-rs = { version = "3", default-features = false }
 ignore = "0.4"
+reqwest = { version = "0.13", features = ["brotli", "deflate", "gzip", "zstd"] }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -25,5 +27,6 @@ tokio = { version = "1", features = ["sync", "rt", "macros", "process", "time"] 
 toml = "1.1"
 
 [dev-dependencies]
+http = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

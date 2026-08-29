@@ -4,6 +4,7 @@ use tokio::sync::{mpsc, oneshot};
 pub enum ApprovalReason {
     OutsideWorkspace,
     HiddenPath,
+    Network,
 }
 
 impl ApprovalReason {
@@ -11,6 +12,7 @@ impl ApprovalReason {
         match self {
             ApprovalReason::OutsideWorkspace => "outside the workspace",
             ApprovalReason::HiddenPath => "hidden path",
+            ApprovalReason::Network => "a network request",
         }
     }
 }
