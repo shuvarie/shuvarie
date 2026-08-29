@@ -42,13 +42,9 @@ fn default_max_turns() -> usize {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct ContextConfig {
-    /// Inverted on disk as `disabled`: defaults to on.
-    #[serde(
-        rename = "disabled",
-        serialize_with = "kdlserde::ser_not",
-        deserialize_with = "kdlserde::de_not"
-    )]
-    pub enabled: bool,
+    /// Stored inverted in the file as `disabled`; defaults to enabled.
+    #[serde(deserialize_with = "kdlserde::de_default")]
+    pub disabled: bool,
 
     /// Tokens reserved for the model's reply and a safety buffer. The input
     /// budget is `context_length - reserved`.
@@ -70,7 +66,7 @@ pub struct ContextConfig {
 impl Default for ContextConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            disabled: false,
             reserved: 20_000,
             tool_output_max_chars: 16_000,
             fallback_context_length: 128_000,
@@ -97,12 +93,8 @@ impl ContextConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub struct SkillsConfig {
-    #[serde(
-        rename = "disabled",
-        serialize_with = "kdlserde::ser_not",
-        deserialize_with = "kdlserde::de_not"
-    )]
-    pub enabled: bool,
+    #[serde(deserialize_with = "kdlserde::de_default")]
+    pub disabled: bool,
     #[serde(default, deserialize_with = "kdlserde::de_default")]
     pub dirs: Vec<String>,
 }
@@ -110,7 +102,7 @@ pub struct SkillsConfig {
 impl Default for SkillsConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            disabled: false,
             dirs: Vec::new(),
         }
     }
@@ -119,12 +111,8 @@ impl Default for SkillsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub struct EmbeddingConfig {
-    #[serde(
-        rename = "disabled",
-        serialize_with = "kdlserde::ser_not",
-        deserialize_with = "kdlserde::de_not"
-    )]
-    pub enabled: bool,
+    #[serde(deserialize_with = "kdlserde::de_default")]
+    pub disabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -136,7 +124,7 @@ pub struct EmbeddingConfig {
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            disabled: false,
             provider: None,
             model: None,
             dimensions: None,
@@ -213,12 +201,8 @@ fn effective(value: usize) -> usize {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub struct LspConfigRepr {
-    #[serde(
-        rename = "disabled",
-        serialize_with = "kdlserde::ser_not",
-        deserialize_with = "kdlserde::de_not"
-    )]
-    pub enabled: bool,
+    #[serde(deserialize_with = "kdlserde::de_default")]
+    pub disabled: bool,
     #[serde(default, deserialize_with = "kdlserde::de_default")]
     pub servers: BTreeRepr,
 }
@@ -228,7 +212,7 @@ type BTreeRepr = std::collections::BTreeMap<String, LspServerSpecRepr>;
 impl Default for LspConfigRepr {
     fn default() -> Self {
         Self {
-            enabled: true,
+            disabled: false,
             servers: BTreeMap::new(),
         }
     }
@@ -237,7 +221,7 @@ impl Default for LspConfigRepr {
 impl From<&shuvarie_lsp::LspConfig> for LspConfigRepr {
     fn from(cfg: &shuvarie_lsp::LspConfig) -> Self {
         Self {
-            enabled: cfg.enabled,
+            disabled: !cfg.enabled,
             servers: cfg
                 .servers
                 .iter()
@@ -250,7 +234,7 @@ impl From<&shuvarie_lsp::LspConfig> for LspConfigRepr {
 impl From<&LspConfigRepr> for shuvarie_lsp::LspConfig {
     fn from(repr: &LspConfigRepr) -> Self {
         Self {
-            enabled: repr.enabled,
+            enabled: !repr.disabled,
             servers: repr
                 .servers
                 .iter()
@@ -267,12 +251,8 @@ pub struct LspServerSpecRepr {
     pub command: Vec<String>,
     #[serde(default, deserialize_with = "kdlserde::de_default")]
     pub extensions: Vec<String>,
-    #[serde(
-        rename = "no-auto-start",
-        serialize_with = "kdlserde::ser_not",
-        deserialize_with = "kdlserde::de_not"
-    )]
-    pub auto_start: bool,
+    #[serde(deserialize_with = "kdlserde::de_default")]
+    pub no_auto_start: bool,
     #[serde(default, deserialize_with = "kdlserde::de_default")]
     pub root_markers: Vec<String>,
 }
@@ -282,7 +262,7 @@ impl Default for LspServerSpecRepr {
         Self {
             command: Vec::new(),
             extensions: Vec::new(),
-            auto_start: true,
+            no_auto_start: false,
             root_markers: Vec::new(),
         }
     }
@@ -293,7 +273,7 @@ impl From<&shuvarie_lsp::LspServerSpec> for LspServerSpecRepr {
         Self {
             command: spec.command.clone(),
             extensions: spec.extensions.clone(),
-            auto_start: spec.auto_start,
+            no_auto_start: !spec.auto_start,
             root_markers: spec.root_markers.clone(),
         }
     }
@@ -304,7 +284,7 @@ impl From<&LspServerSpecRepr> for shuvarie_lsp::LspServerSpec {
         Self {
             command: repr.command.clone(),
             extensions: repr.extensions.clone(),
-            auto_start: repr.auto_start,
+            auto_start: !repr.no_auto_start,
             root_markers: repr.root_markers.clone(),
         }
     }
@@ -383,7 +363,7 @@ mod tests {
         "#;
         let parsed: Config = kdlserde::from_str(text).unwrap();
         assert_eq!(parsed.ui.frame_rate, 30);
-        assert!(!parsed.skills.enabled);
+        assert!(parsed.skills.disabled);
         assert_eq!(parsed.skills.dirs, vec!["a".to_string(), "b".to_string()]);
         assert_eq!(parsed.embedding, EmbeddingConfig::default());
         assert_eq!(parsed.context, ContextConfig::default());
@@ -406,10 +386,10 @@ mod tests {
             }
         "#;
         let parsed: Config = kdlserde::from_str(text).unwrap();
-        assert!(!parsed.embedding.enabled);
+        assert!(parsed.embedding.disabled);
         assert_eq!(parsed.embedding.provider.as_deref(), Some("openai"));
         assert_eq!(parsed.embedding.dimensions, Some(1536));
-        assert!(!parsed.context.enabled);
+        assert!(parsed.context.disabled);
         assert_eq!(parsed.context.reserved, 5000);
         assert_eq!(parsed.context.tool_output_max_chars, 1000);
         assert_eq!(parsed.context.fallback_context_length, 64_000);
@@ -438,15 +418,15 @@ mod tests {
             }
         "#;
         let parsed: Config = kdlserde::from_str(text).unwrap();
-        assert!(!parsed.lsp.enabled);
+        assert!(parsed.lsp.disabled);
         let rust = parsed.lsp.servers.get("rust").expect("rust server");
         assert_eq!(rust.command, vec!["rust-analyzer".to_string()]);
         assert_eq!(rust.extensions, vec![".rs".to_string()]);
-        assert!(!rust.auto_start);
+        assert!(rust.no_auto_start);
         assert_eq!(rust.root_markers, vec!["Cargo.toml".to_string()]);
         let zig = parsed.lsp.servers.get("zig").expect("zig server");
         assert_eq!(zig.command, vec!["zls".to_string()]);
-        assert!(zig.auto_start);
+        assert!(!zig.no_auto_start);
 
         let text = kdlserde::to_string(&parsed).unwrap();
         let reparsed: Config = kdlserde::from_str(&text).unwrap();
@@ -456,13 +436,13 @@ mod tests {
     #[test]
     fn lsp_mirror_converts() {
         let repr = LspConfigRepr {
-            enabled: false,
+            disabled: true,
             servers: [(
                 "go".to_string(),
                 LspServerSpecRepr {
                     command: vec!["gopls".to_string()],
                     extensions: vec![".go".to_string()],
-                    auto_start: false,
+                    no_auto_start: true,
                     root_markers: vec!["go.mod".to_string()],
                 },
             )]
@@ -510,7 +490,7 @@ mod tests {
         config.ui.frame_rate = 120;
         config.agent.max_turns = 8;
         config.skills.dirs = vec!["/tmp/skills".to_string()];
-        config.lsp.enabled = false;
+        config.lsp.disabled = true;
         config.save_to(&path).unwrap();
         let loaded = Config::load_from(&path).unwrap();
         assert_eq!(config, loaded);

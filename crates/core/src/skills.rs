@@ -179,7 +179,7 @@ mod tests {
         write_skill(&global.join("skills"), "tokio", "Async skill", &["rust"]);
 
         let config = SkillsConfig {
-            enabled: true,
+            disabled: false,
             dirs: vec![global.join("skills").to_string_lossy().into_owned()],
         };
         let skills = Skills::load(&workspace, &config);
@@ -205,7 +205,7 @@ mod tests {
         write_skill(&global.join("skills"), "ratatui", "global copy", &[]);
 
         let config = SkillsConfig {
-            enabled: true,
+            disabled: false,
             dirs: vec![global.join("skills").to_string_lossy().into_owned()],
         };
         let skills = Skills::load(&workspace, &config);

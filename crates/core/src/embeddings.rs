@@ -21,7 +21,7 @@ pub fn setup(
     connections: &Connections,
     clients: &mut HashMap<String, ProviderClient>,
 ) -> Option<EmbeddingSetup> {
-    if !config.embedding.enabled {
+    if config.embedding.disabled {
         return None;
     }
     let provider_name = config

@@ -1648,7 +1648,7 @@ fn context_budget(
     provider: Option<&selune::Provider>,
     model: &str,
 ) -> Option<shuvarie_llm::ContextBudget> {
-    if !config.context.enabled {
+    if config.context.disabled {
         return None;
     }
     let context_length = provider

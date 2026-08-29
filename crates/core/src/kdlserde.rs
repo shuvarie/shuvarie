@@ -38,24 +38,6 @@ pub(crate) fn de_frame_rate<'de, D: serde::Deserializer<'de>>(
     Ok(Option::<u32>::deserialize(deserializer)?.unwrap_or(60))
 }
 
-/// Deserializes an inverted bool: the file stores `disabled`-style keys
-/// (default true), where the node's presence/value means "off".
-pub(crate) fn de_not<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(!Option::<bool>::deserialize(deserializer)?.unwrap_or_default())
-}
-
-/// Serializes the inverse so `enabled = true` (the common case) writes no
-/// node at all: kdl-serde drops entries whose value serializes to `Bool(false)`.
-pub(crate) fn ser_not<S: serde::Serializer>(
-    value: &bool,
-    serializer: S,
-) -> std::result::Result<S::Ok, S::Error> {
-    serializer.serialize_bool(!*value)
-}
-
 pub(crate) fn from_str<T: serde::de::DeserializeOwned>(contents: &str) -> crate::Result<T> {
     kdl::de::from_str(contents).map_err(map_error)
 }
