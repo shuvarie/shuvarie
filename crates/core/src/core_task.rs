@@ -95,10 +95,11 @@ pub async fn run(
 
     let workspace_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let agents_md_context = crate::context::load_agents_md(&workspace_root);
+    let lsp_config = shuvarie_lsp::LspConfig::from(&config.lsp);
     let lsp = std::sync::Arc::new(tokio::sync::Mutex::new(shuvarie_lsp::LspManager::new(
         workspace_root.clone(),
-        config.lsp.enabled,
-        config.lsp.resolve(),
+        lsp_config.enabled,
+        lsp_config.resolve(),
     )));
     let mut lsp_pump_tick = tokio::time::interval(std::time::Duration::from_millis(500));
     lsp_pump_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

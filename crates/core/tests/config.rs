@@ -1,9 +1,11 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
-use shuvarie_core::{Config, Connections, CoreError, ProviderConfig};
+use shuvarie_core::{
+    Config, Connections, CoreError, LspConfigRepr, LspServerSpecRepr, ProviderConfig,
+};
 
 fn sample_connections() -> Connections {
-    let mut providers = HashMap::new();
+    let mut providers = BTreeMap::new();
     providers.insert(
         "my-openai".to_string(),
         ProviderConfig::new("openai", Some("sk-test".to_string()), None),
@@ -70,7 +72,10 @@ fn kdl_document_shape() {
         saved.contains("providers {"),
         "expected providers section:\n{saved}"
     );
-    assert!(saved.contains("provider my-openai {") || saved.contains("provider \"my-openai\" {"));
+    assert!(
+        saved.contains("my-openai {") || saved.contains("\"my-openai\" {"),
+        "provider keyed by node name:\n{saved}"
+    );
     assert!(saved.contains("kind openai") || saved.contains("kind \"openai\""));
     assert!(
         saved.contains("base-url \"http://localhost:11434\"")
@@ -88,11 +93,11 @@ fn kdl_document_shape() {
 fn parse_hand_written_kdl() {
     let kdl = r#"
 providers {
-    provider "my-openai" {
+    my-openai {
         kind "openai"
         api-key "sk-test"
     }
-    provider "local-ollama" {
+    local-ollama {
         kind "ollama"
         base-url "http://localhost:11434"
     }
@@ -111,7 +116,7 @@ active-model "gpt-5.5"
 fn parse_ignores_unknown_nodes() {
     let kdl = r#"
 providers {
-    provider "my-openai" {
+    my-openai {
         kind "openai"
         api-key "sk-test"
         future-field "x"
@@ -128,7 +133,7 @@ unknown-top-level #true
 
 #[test]
 fn parse_options_absent() {
-    let kdl = "providers {\n    provider \"local\" {\n        kind \"ollama\"\n    }\n}\n";
+    let kdl = "providers {\n    local {\n        kind \"ollama\"\n    }\n}\n";
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("connections.kdl");
     std::fs::write(&path, kdl).expect("write");
@@ -148,7 +153,7 @@ fn empty_connections_has_no_connected_providers() {
 #[test]
 fn missing_active_provider_has_no_connected_providers() {
     let connections = Connections {
-        providers: HashMap::from([(
+        providers: BTreeMap::from([(
             "my-openai".to_string(),
             ProviderConfig::new("openai", Some("sk-test".to_string()), None),
         )]),
@@ -161,7 +166,7 @@ fn missing_active_provider_has_no_connected_providers() {
 #[test]
 fn active_provider_missing_from_map_has_no_connected_providers() {
     let connections = Connections {
-        providers: HashMap::new(),
+        providers: BTreeMap::new(),
         active_provider: Some("nonexistent".to_string()),
         active_model: None,
     };
@@ -171,7 +176,7 @@ fn active_provider_missing_from_map_has_no_connected_providers() {
 #[test]
 fn active_provider_without_key_has_no_connected_providers() {
     let connections = Connections {
-        providers: HashMap::from([(
+        providers: BTreeMap::from([(
             "my-openai".to_string(),
             ProviderConfig::new("openai", None, None),
         )]),
@@ -190,7 +195,7 @@ fn active_provider_with_key_is_connected() {
 #[test]
 fn ollama_without_key_is_connected() {
     let connections = Connections {
-        providers: HashMap::from([(
+        providers: BTreeMap::from([(
             "local".to_string(),
             ProviderConfig::new("ollama", None, None),
         )]),
@@ -203,7 +208,7 @@ fn ollama_without_key_is_connected() {
 #[test]
 fn ollama_cloud_without_key_is_not_connected() {
     let connections = Connections {
-        providers: HashMap::from([(
+        providers: BTreeMap::from([(
             "cloud".to_string(),
             ProviderConfig::new("ollama-cloud", None, None),
         )]),
@@ -216,7 +221,7 @@ fn ollama_cloud_without_key_is_not_connected() {
 #[test]
 fn ollama_cloud_with_key_is_connected() {
     let connections = Connections {
-        providers: HashMap::from([(
+        providers: BTreeMap::from([(
             "cloud".to_string(),
             ProviderConfig::new("ollama-cloud", Some("ollama-key".to_string()), None),
         )]),
@@ -269,7 +274,7 @@ fn agent_config_round_trip_with_limits() {
 
 #[test]
 fn agent_config_defaults_when_section_absent() {
-    let kdl = "embedding {\n    enabled #false\n}\n";
+    let kdl = "embedding {\n    disabled #true\n}\n";
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("config.kdl");
     std::fs::write(&path, kdl).expect("write");
@@ -277,13 +282,13 @@ fn agent_config_defaults_when_section_absent() {
     assert_eq!(parsed.agent.max_turns, 0);
     assert_eq!(parsed.agent.worker_max_turns, 0);
     assert_eq!(parsed.agent.effective_max_turns(), usize::MAX);
-    assert_eq!(parsed.embedding.enabled, false);
-    assert_eq!(parsed.context.enabled, true);
+    assert!(!parsed.embedding.enabled);
+    assert!(parsed.context.enabled);
     assert_eq!(parsed.context.reserved, 20_000);
     assert_eq!(parsed.context.tool_output_max_chars, 16_000);
     assert_eq!(parsed.context.fallback_context_length, 128_000);
-    assert_eq!(parsed.lsp.enabled, true);
-    assert_eq!(parsed.skills.enabled, true);
+    assert!(parsed.lsp.enabled);
+    assert!(parsed.skills.enabled);
     assert_eq!(parsed.ui.frame_rate, 60);
 }
 
@@ -293,7 +298,7 @@ fn config_with_lsp_servers_round_trip() {
     config.lsp.enabled = false;
     config.lsp.servers.insert(
         "rust".to_string(),
-        shuvarie_lsp::LspServerSpec {
+        LspServerSpecRepr {
             command: vec!["rust-analyzer".to_string()],
             extensions: vec!["rs".to_string()],
             auto_start: false,
@@ -305,23 +310,47 @@ fn config_with_lsp_servers_round_trip() {
 
     config.save_to(&path).expect("save");
     let saved = std::fs::read_to_string(&path).expect("read");
-    assert!(saved.contains("server \"rust\" {") || saved.contains("server rust {"));
-    assert!(saved.contains("auto-start #false"));
-    assert!(saved.contains("lsp {\n    enabled #false"));
+    assert!(saved.contains("servers {"), "new layout:\n{saved}");
+    assert!(saved.contains("rust {") || saved.contains("\"rust\" {"));
+    assert!(saved.contains("no-auto-start #true"));
+    assert!(saved.contains("disabled #true"));
 
     // hand-written form parses too
-    let hand = "lsp {\n    enabled #false\n    server \"rust\" {\n        command \"rust-analyzer\"\n        auto-start #false\n    }\n}\n";
+    let hand = "lsp {\n    disabled #true\n    servers {\n        rust {\n            command \"rust-analyzer\"\n            no-auto-start #true\n        }\n    }\n}\n";
     let dir2 = tempfile::tempdir().expect("tempdir");
     let path2 = dir2.path().join("config.kdl");
     std::fs::write(&path2, hand).expect("write");
     let hand_parsed = Config::load_from(&path2).expect("load");
-    assert_eq!(hand_parsed.lsp.enabled, false);
+    assert!(!hand_parsed.lsp.enabled);
     let spec = hand_parsed.lsp.servers.get("rust").expect("server");
     assert_eq!(spec.command, vec!["rust-analyzer".to_string()]);
-    assert_eq!(spec.auto_start, false);
+    assert!(!spec.auto_start);
 
     let parsed = Config::load_from(&path).expect("load");
     assert_eq!(config, parsed);
+}
+
+#[test]
+fn lsp_repr_converts_to_shuvarie_lsp_config() {
+    let mut config = Config::default();
+    config.lsp.servers.insert(
+        "go".to_string(),
+        LspServerSpecRepr {
+            command: vec!["gopls".to_string()],
+            extensions: vec!["go".to_string()],
+            auto_start: false,
+            root_markers: vec!["go.mod".to_string()],
+        },
+    );
+    let lsp_config = shuvarie_lsp::LspConfig::from(&config.lsp);
+    assert!(lsp_config.enabled);
+    let resolved = lsp_config.resolve();
+    let go = resolved.get("go").expect("go resolved");
+    assert_eq!(go.command, vec!["gopls".to_string()]);
+    assert!(!go.auto_start);
+    // builtin rust override still merges
+    let rust = resolved.get("rust").expect("rust builtin");
+    assert_eq!(rust.command, vec!["rust-analyzer".to_string()]);
 }
 
 #[test]
@@ -342,7 +371,7 @@ fn config_context_fields_kebab_round_trip() {
     assert!(saved.contains("tool-output-max-chars 1000"));
     assert!(saved.contains("fallback-context-length 32000"));
     assert!(saved.contains("frame-rate 0"));
-    assert!(saved.contains("dirs /tmp/skills /opt/skills") || saved.contains("/tmp/skills"));
+    assert!(saved.contains("dirs") && saved.contains("/tmp/skills"));
 
     let parsed = Config::load_from(&path).expect("load");
     assert_eq!(config, parsed);
@@ -370,7 +399,7 @@ fn config_embedding_options_round_trip() {
 
 #[test]
 fn malformed_kdl_reports_location() {
-    let kdl = "ui {\n    frame-rate 1.\n}\n";
+    let kdl = "ui {\n    frame-rate \"sixty\"\n}\n";
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("config.kdl");
     std::fs::write(&path, kdl).expect("write");
@@ -403,4 +432,11 @@ fn malformed_kdl_detailed_display() {
     };
     let display = parse_err.to_string();
     assert!(display.contains("config parse error") || display.contains("1:"));
+}
+
+#[test]
+fn lsp_config_repr_default_matches() {
+    let repr = LspConfigRepr::default();
+    assert!(repr.enabled);
+    assert!(repr.servers.is_empty());
 }

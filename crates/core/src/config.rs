@@ -1,35 +1,34 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use serde::{Deserialize, Serialize};
 
-use crate::kdlfmt::{self, NodeNamed, finish, push_child, scalar, strings};
+use crate::kdlserde;
 use crate::{CoreError, Result};
 
 const CONFIG_DIR_NAME: &str = "shuvarie";
 const CONFIG_FILE_NAME: &str = "config.kdl";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case", default)]
+#[serde(rename_all = "kebab-case")]
 pub struct Config {
+    #[serde(default)]
     pub ui: UiPrefs,
 
+    #[serde(default)]
     pub embedding: EmbeddingConfig,
 
+    #[serde(default)]
     pub agent: AgentConfig,
 
-    pub lsp: shuvarie_lsp::LspConfig,
+    #[serde(default)]
+    pub lsp: LspConfigRepr,
 
+    #[serde(default)]
     pub skills: SkillsConfig,
 
+    #[serde(default)]
     pub context: ContextConfig,
-}
-
-fn default_agent_config() -> AgentConfig {
-    AgentConfig {
-        max_turns: default_max_turns(),
-        worker_max_turns: 0,
-    }
 }
 
 fn default_max_turns() -> usize {
@@ -43,21 +42,28 @@ fn default_max_turns() -> usize {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct ContextConfig {
-    /// Enable the history-budget hook that trims old tool results per model
-    /// call when the estimated request size exceeds the budget.
+    /// Inverted on disk as `disabled`: defaults to on.
+    #[serde(
+        rename = "disabled",
+        serialize_with = "kdlserde::ser_not",
+        deserialize_with = "kdlserde::de_not"
+    )]
     pub enabled: bool,
 
     /// Tokens reserved for the model's reply and a safety buffer. The input
     /// budget is `context_length - reserved`.
+    #[serde(deserialize_with = "kdlserde::de_reserved")]
     pub reserved: u64,
 
     /// Maximum chars of a tool result's text sent to the model. Larger outputs
     /// are truncated with a marker hinting the model to read ranges. `0`
     /// disables the cap.
+    #[serde(deserialize_with = "kdlserde::de_tool_output_max_chars")]
     pub tool_output_max_chars: usize,
 
     /// Default context length used when the catalog has no entry for the
     /// active model.
+    #[serde(deserialize_with = "kdlserde::de_fallback_context")]
     pub fallback_context_length: u64,
 }
 
@@ -65,23 +71,11 @@ impl Default for ContextConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            reserved: default_reserved(),
-            tool_output_max_chars: default_tool_output_max_chars(),
-            fallback_context_length: default_fallback_context(),
+            reserved: 20_000,
+            tool_output_max_chars: 16_000,
+            fallback_context_length: 128_000,
         }
     }
-}
-
-fn default_reserved() -> u64 {
-    20_000
-}
-
-fn default_tool_output_max_chars() -> usize {
-    16_000
-}
-
-fn default_fallback_context() -> u64 {
-    128_000
 }
 
 impl ContextConfig {
@@ -101,9 +95,15 @@ impl ContextConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case", default)]
+#[serde(rename_all = "kebab-case")]
 pub struct SkillsConfig {
+    #[serde(
+        rename = "disabled",
+        serialize_with = "kdlserde::ser_not",
+        deserialize_with = "kdlserde::de_not"
+    )]
     pub enabled: bool,
+    #[serde(default, deserialize_with = "kdlserde::de_default")]
     pub dirs: Vec<String>,
 }
 
@@ -117,8 +117,13 @@ impl Default for SkillsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case", default)]
+#[serde(rename_all = "kebab-case")]
 pub struct EmbeddingConfig {
+    #[serde(
+        rename = "disabled",
+        serialize_with = "kdlserde::ser_not",
+        deserialize_with = "kdlserde::de_not"
+    )]
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
@@ -140,36 +145,52 @@ impl Default for EmbeddingConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case", default)]
+#[serde(rename_all = "kebab-case")]
 pub struct UiPrefs {
     /// Target frames per second for the TUI render loop. `0` disables the cap
     /// (one draw per event, the original behavior). Defaults to 60.
+    #[serde(deserialize_with = "kdlserde::de_frame_rate")]
     pub frame_rate: u32,
 }
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        Self {
-            frame_rate: default_frame_rate(),
-        }
+        Self { frame_rate: 60 }
     }
 }
 
-fn default_frame_rate() -> u32 {
-    60
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case", default)]
+#[serde(rename_all = "kebab-case")]
 pub struct AgentConfig {
+    /// `0` = unlimited.
+    #[serde(
+        rename = "max-turns",
+        default,
+        deserialize_with = "kdlserde::de_default",
+        skip_serializing_if = "is_zero_usize"
+    )]
     pub max_turns: usize,
 
+    /// `0` = unlimited.
+    #[serde(
+        rename = "worker-max-turns",
+        default,
+        deserialize_with = "kdlserde::de_default",
+        skip_serializing_if = "is_zero_usize"
+    )]
     pub worker_max_turns: usize,
+}
+
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
-        default_agent_config()
+        Self {
+            max_turns: default_max_turns(),
+            worker_max_turns: 0,
+        }
     }
 }
 
@@ -185,6 +206,108 @@ impl AgentConfig {
 
 fn effective(value: usize) -> usize {
     if value == 0 { usize::MAX } else { value }
+}
+
+/// Serde mirror of [`shuvarie_lsp::LspConfig`] for the KDL file layout; the
+/// `shuvarie-lsp` crate itself stays config-format-free.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub struct LspConfigRepr {
+    #[serde(
+        rename = "disabled",
+        serialize_with = "kdlserde::ser_not",
+        deserialize_with = "kdlserde::de_not"
+    )]
+    pub enabled: bool,
+    #[serde(default, deserialize_with = "kdlserde::de_default")]
+    pub servers: BTreeRepr,
+}
+
+type BTreeRepr = std::collections::BTreeMap<String, LspServerSpecRepr>;
+
+impl Default for LspConfigRepr {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            servers: BTreeMap::new(),
+        }
+    }
+}
+
+impl From<&shuvarie_lsp::LspConfig> for LspConfigRepr {
+    fn from(cfg: &shuvarie_lsp::LspConfig) -> Self {
+        Self {
+            enabled: cfg.enabled,
+            servers: cfg
+                .servers
+                .iter()
+                .map(|(name, spec)| (name.clone(), LspServerSpecRepr::from(spec)))
+                .collect(),
+        }
+    }
+}
+
+impl From<&LspConfigRepr> for shuvarie_lsp::LspConfig {
+    fn from(repr: &LspConfigRepr) -> Self {
+        Self {
+            enabled: repr.enabled,
+            servers: repr
+                .servers
+                .iter()
+                .map(|(name, spec)| (name.clone(), shuvarie_lsp::LspServerSpec::from(spec)))
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub struct LspServerSpecRepr {
+    #[serde(default, deserialize_with = "kdlserde::de_default")]
+    pub command: Vec<String>,
+    #[serde(default, deserialize_with = "kdlserde::de_default")]
+    pub extensions: Vec<String>,
+    #[serde(
+        rename = "no-auto-start",
+        serialize_with = "kdlserde::ser_not",
+        deserialize_with = "kdlserde::de_not"
+    )]
+    pub auto_start: bool,
+    #[serde(default, deserialize_with = "kdlserde::de_default")]
+    pub root_markers: Vec<String>,
+}
+
+impl Default for LspServerSpecRepr {
+    fn default() -> Self {
+        Self {
+            command: Vec::new(),
+            extensions: Vec::new(),
+            auto_start: true,
+            root_markers: Vec::new(),
+        }
+    }
+}
+
+impl From<&shuvarie_lsp::LspServerSpec> for LspServerSpecRepr {
+    fn from(spec: &shuvarie_lsp::LspServerSpec) -> Self {
+        Self {
+            command: spec.command.clone(),
+            extensions: spec.extensions.clone(),
+            auto_start: spec.auto_start,
+            root_markers: spec.root_markers.clone(),
+        }
+    }
+}
+
+impl From<&LspServerSpecRepr> for shuvarie_lsp::LspServerSpec {
+    fn from(repr: &LspServerSpecRepr) -> Self {
+        Self {
+            command: repr.command.clone(),
+            extensions: repr.extensions.clone(),
+            auto_start: repr.auto_start,
+            root_markers: repr.root_markers.clone(),
+        }
+    }
 }
 
 pub fn config_dir() -> Result<PathBuf> {
@@ -209,7 +332,7 @@ impl Config {
 
     pub fn load_from(path: &std::path::Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
-            Ok(contents) => Ok(Self::from_kdl(&contents)?),
+            Ok(contents) => Ok(kdlserde::from_str(&contents)?),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(CoreError::ConfigIo(e)),
         }
@@ -224,176 +347,172 @@ impl Config {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, self.to_kdl())?;
+        std::fs::write(path, kdlserde::to_string(self)?)?;
         Ok(())
     }
+}
 
-    fn from_kdl(contents: &str) -> Result<Self> {
-        let doc = kdlfmt::parse(contents)?;
-        let mut config = Self::default();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        for node in doc.nodes() {
-            let view = node.view();
-            match node.name().value() {
-                "ui" => {
-                    config.ui.frame_rate =
-                        view.integer("frame-rate", config.ui.frame_rate as i128) as u32;
-                }
-                "embedding" => {
-                    config.embedding.enabled = view.boolean("enabled", config.embedding.enabled);
-                    config.embedding.provider = view.string("provider");
-                    config.embedding.model = view.string("model");
-                    config.embedding.dimensions = if view.child_is_present("dimensions") {
-                        Some(view.integer(
-                            "dimensions",
-                            i128::from(config.embedding.dimensions.unwrap_or(0)),
-                        ) as u32)
-                    } else {
-                        config.embedding.dimensions
-                    };
-                }
-                "agent" => {
-                    config.agent.max_turns =
-                        view.integer("max-turns", config.agent.max_turns as i128) as usize;
-                    config.agent.worker_max_turns = view
-                        .integer("worker-max-turns", config.agent.worker_max_turns as i128)
-                        as usize;
-                }
-                "lsp" => {
-                    config.lsp.enabled = view.boolean("enabled", config.lsp.enabled);
-                    for server in node.children().map(|c| c.nodes()).unwrap_or_default() {
-                        if server.name().value() != "server" {
-                            continue;
-                        }
-                        let Some(name) = server.entries().first().and_then(|e| match e.value() {
-                            KdlValue::String(s) => Some(s.to_string()),
-                            KdlValue::Integer(i) => Some(i.to_string()),
-                            _ => None,
-                        }) else {
-                            continue;
-                        };
-                        let server_view = server.view();
-                        let spec = shuvarie_lsp::LspServerSpec {
-                            command: server_view.strings("command").unwrap_or_default(),
-                            extensions: server_view.strings("extensions").unwrap_or_default(),
-                            auto_start: server_view.boolean("auto-start", true),
-                            root_markers: server_view.strings("root-markers").unwrap_or_default(),
-                        };
-                        config.lsp.servers.insert(name, spec);
-                    }
-                }
-                "skills" => {
-                    config.skills.enabled = view.boolean("enabled", config.skills.enabled);
-                    config.skills.dirs = view.strings("dirs").unwrap_or_default();
-                }
-                "context" => {
-                    config.context.enabled = view.boolean("enabled", config.context.enabled);
-                    config.context.reserved =
-                        view.integer("reserved", config.context.reserved as i128) as u64;
-                    config.context.tool_output_max_chars = view.integer(
-                        "tool-output-max-chars",
-                        config.context.tool_output_max_chars as i128,
-                    ) as usize;
-                    config.context.fallback_context_length = view.integer(
-                        "fallback-context-length",
-                        config.context.fallback_context_length as i128,
-                    ) as u64;
-                }
-                _ => {}
-            }
-        }
-
-        Ok(config)
+    #[test]
+    fn defaults_round_trip() {
+        let config = Config::default();
+        let text = kdlserde::to_string(&config).unwrap();
+        let parsed: Config = kdlserde::from_str(&text).unwrap();
+        assert_eq!(config, parsed);
     }
 
-    fn to_kdl(&self) -> String {
-        let mut doc = KdlDocument::new();
+    #[test]
+    fn empty_file_is_all_defaults() {
+        let parsed: Config = kdlserde::from_str("").unwrap();
+        assert_eq!(parsed, Config::default());
+    }
 
-        let mut ui = KdlNode::new("ui");
-        push_child(
-            &mut ui,
-            scalar("frame-rate", i128::from(self.ui.frame_rate)),
-        );
-        doc.nodes_mut().push(ui);
-
-        let mut embedding = KdlNode::new("embedding");
-        push_child(&mut embedding, scalar("enabled", self.embedding.enabled));
-        if let Some(provider) = &self.embedding.provider {
-            push_child(&mut embedding, scalar("provider", provider.as_str()));
-        }
-        if let Some(model) = &self.embedding.model {
-            push_child(&mut embedding, scalar("model", model.as_str()));
-        }
-        if let Some(dimensions) = self.embedding.dimensions {
-            push_child(&mut embedding, scalar("dimensions", i128::from(dimensions)));
-        }
-        doc.nodes_mut().push(embedding);
-
-        let mut agent = KdlNode::new("agent");
-        push_child(
-            &mut agent,
-            scalar("max-turns", self.agent.max_turns as i128),
-        );
-        push_child(
-            &mut agent,
-            scalar("worker-max-turns", self.agent.worker_max_turns as i128),
-        );
-        doc.nodes_mut().push(agent);
-
-        let mut lsp = KdlNode::new("lsp");
-        push_child(&mut lsp, scalar("enabled", self.lsp.enabled));
-        for (name, spec) in &self.lsp.servers {
-            let mut server = KdlNode::new("server");
-            server.entries_mut().push(KdlEntry::new(name.as_str()));
-            if !spec.command.is_empty() {
-                push_child(&mut server, strings("command", &spec.command).unwrap());
+    #[test]
+    fn partial_file_fills_defaults() {
+        let text = r#"
+            ui {
+                frame-rate 30
             }
-            if !spec.extensions.is_empty() {
-                push_child(
-                    &mut server,
-                    strings("extensions", &spec.extensions).unwrap(),
-                );
+            skills {
+                disabled #true
+                dirs "a" "b"
             }
-            push_child(&mut server, scalar("auto-start", spec.auto_start));
-            if !spec.root_markers.is_empty() {
-                push_child(
-                    &mut server,
-                    strings("root-markers", &spec.root_markers).unwrap(),
-                );
+        "#;
+        let parsed: Config = kdlserde::from_str(text).unwrap();
+        assert_eq!(parsed.ui.frame_rate, 30);
+        assert!(!parsed.skills.enabled);
+        assert_eq!(parsed.skills.dirs, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(parsed.embedding, EmbeddingConfig::default());
+        assert_eq!(parsed.context, ContextConfig::default());
+        assert_eq!(parsed.lsp, LspConfigRepr::default());
+    }
+
+    #[test]
+    fn disabled_bools_round_trip() {
+        let text = r#"
+            embedding {
+                disabled #true
+                provider "openai"
+                dimensions 1536
             }
-            push_child(&mut lsp, server);
-        }
-        doc.nodes_mut().push(lsp);
+            context {
+                disabled #true
+                reserved 5000
+                tool-output-max-chars 1000
+                fallback-context-length 64000
+            }
+        "#;
+        let parsed: Config = kdlserde::from_str(text).unwrap();
+        assert!(!parsed.embedding.enabled);
+        assert_eq!(parsed.embedding.provider.as_deref(), Some("openai"));
+        assert_eq!(parsed.embedding.dimensions, Some(1536));
+        assert!(!parsed.context.enabled);
+        assert_eq!(parsed.context.reserved, 5000);
+        assert_eq!(parsed.context.tool_output_max_chars, 1000);
+        assert_eq!(parsed.context.fallback_context_length, 64_000);
 
-        let mut skills = KdlNode::new("skills");
-        push_child(&mut skills, scalar("enabled", self.skills.enabled));
-        if let Some(dirs) = strings("dirs", &self.skills.dirs) {
-            push_child(&mut skills, dirs);
-        }
-        doc.nodes_mut().push(skills);
+        let text = kdlserde::to_string(&parsed).unwrap();
+        let reparsed: Config = kdlserde::from_str(&text).unwrap();
+        assert_eq!(parsed, reparsed);
+    }
 
-        let mut context = KdlNode::new("context");
-        push_child(&mut context, scalar("enabled", self.context.enabled));
-        push_child(
-            &mut context,
-            scalar("reserved", self.context.reserved as i128),
-        );
-        push_child(
-            &mut context,
-            scalar(
-                "tool-output-max-chars",
-                self.context.tool_output_max_chars as i128,
-            ),
-        );
-        push_child(
-            &mut context,
-            scalar(
-                "fallback-context-length",
-                self.context.fallback_context_length as i128,
-            ),
-        );
-        doc.nodes_mut().push(context);
+    #[test]
+    fn lsp_servers_layout() {
+        let text = r#"
+            lsp {
+                disabled #true
+                servers {
+                    rust {
+                        command "rust-analyzer"
+                        extensions ".rs"
+                        no-auto-start #true
+                        root-markers "Cargo.toml"
+                    }
+                    zig {
+                        command "zls"
+                    }
+                }
+            }
+        "#;
+        let parsed: Config = kdlserde::from_str(text).unwrap();
+        assert!(!parsed.lsp.enabled);
+        let rust = parsed.lsp.servers.get("rust").expect("rust server");
+        assert_eq!(rust.command, vec!["rust-analyzer".to_string()]);
+        assert_eq!(rust.extensions, vec![".rs".to_string()]);
+        assert!(!rust.auto_start);
+        assert_eq!(rust.root_markers, vec!["Cargo.toml".to_string()]);
+        let zig = parsed.lsp.servers.get("zig").expect("zig server");
+        assert_eq!(zig.command, vec!["zls".to_string()]);
+        assert!(zig.auto_start);
 
-        finish(doc)
+        let text = kdlserde::to_string(&parsed).unwrap();
+        let reparsed: Config = kdlserde::from_str(&text).unwrap();
+        assert_eq!(parsed, reparsed);
+    }
+
+    #[test]
+    fn lsp_mirror_converts() {
+        let repr = LspConfigRepr {
+            enabled: false,
+            servers: [(
+                "go".to_string(),
+                LspServerSpecRepr {
+                    command: vec!["gopls".to_string()],
+                    extensions: vec![".go".to_string()],
+                    auto_start: false,
+                    root_markers: vec!["go.mod".to_string()],
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let lsp: shuvarie_lsp::LspConfig = (&repr).into();
+        assert!(!lsp.enabled);
+        assert_eq!(lsp.resolve().get("go").expect("go").command[0], "gopls");
+        let back = LspConfigRepr::from(&lsp);
+        assert_eq!(repr, back);
+    }
+
+    #[test]
+    fn unknown_fields_ignored() {
+        let text = r#"
+            ui {
+                frame-rate 30
+                bogus 1
+            }
+            unknown-section {
+                whatever #true
+            }
+        "#;
+        let parsed: Config = kdlserde::from_str(text).unwrap();
+        assert_eq!(parsed.ui.frame_rate, 30);
+        assert_eq!(parsed.agent, AgentConfig::default());
+    }
+
+    #[test]
+    fn type_error_surfaced_with_location() {
+        let text = "ui {\n    frame-rate \"sixty\"\n}";
+        let err = kdlserde::from_str::<Config>(text).unwrap_err();
+        let CoreError::ConfigParse(parse_err) = err else {
+            panic!("expected config parse error");
+        };
+        assert_eq!(parse_err.line, 2);
+    }
+
+    #[test]
+    fn save_and_reload_via_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.kdl");
+        let mut config = Config::default();
+        config.ui.frame_rate = 120;
+        config.agent.max_turns = 8;
+        config.skills.dirs = vec!["/tmp/skills".to_string()];
+        config.lsp.enabled = false;
+        config.save_to(&path).unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(config, loaded);
     }
 }
