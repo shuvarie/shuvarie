@@ -24,7 +24,7 @@ shuvarie-lsp = { path = "../lsp" }
 similar = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["sync", "rt", "macros", "process", "time"] }
-kdl = { version = "6.7", features = ["serde"] }
+kdl = "6.7"
 miette = "7"
 
 [dev-dependencies]
