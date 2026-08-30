@@ -395,6 +395,12 @@ impl App {
                     path,
                     reason,
                 }),
+                CoreEvent::QuestionAsked { id, questions } => {
+                    Some(AppMessage::Session(SessionMessage::QuestionAsked {
+                        id,
+                        questions,
+                    }))
+                }
                 CoreEvent::LspStatus { servers } => Some(AppMessage::LspStatus { servers }),
                 CoreEvent::LspDiagnostics { path, diagnostics } => {
                     Some(AppMessage::LspDiagnostics { path, diagnostics })
@@ -446,6 +452,10 @@ impl App {
                         }
                         SessionEffect::CancelStream => {
                             self.ctx.send(shuvarie_core::Command::CancelStream);
+                        }
+                        SessionEffect::AnswerQuestion { id, answers } => {
+                            self.ctx
+                                .send(shuvarie_core::Command::AnswerQuestion { id, answers });
                         }
                     }
                 }

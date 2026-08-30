@@ -41,6 +41,11 @@ pub enum Command {
         approved: bool,
         always: bool,
     },
+    AnswerQuestion {
+        id: u64,
+        /// `None` when the user dismissed the question.
+        answers: Option<Vec<Vec<String>>>,
+    },
     UndoLastTurn,
     Redo,
     Replay,

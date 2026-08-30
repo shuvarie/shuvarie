@@ -3,6 +3,7 @@ use shuvarie_llm::FileChange;
 use shuvarie_llm::{Model, TodoUpdate, TokenUsage};
 
 use crate::approval::ApprovalReason;
+use crate::question::QuestionPrompt;
 
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -98,6 +99,10 @@ pub enum Event {
         tool: String,
         path: String,
         reason: ApprovalReason,
+    },
+    QuestionAsked {
+        id: u64,
+        questions: Vec<QuestionPrompt>,
     },
     LspStatus {
         servers: Vec<shuvarie_lsp::LspStatus>,

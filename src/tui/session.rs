@@ -12,6 +12,7 @@ use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 use crate::tui::utils::{alt, ctrl};
 
 use super::components::{TextArea, TextAreaEffect, TextAreaMessage};
+use super::question::{QuestionEffect, QuestionMessage, QuestionUI};
 use super::sidebar::{Sidebar, SidebarMessage};
 use super::theme;
 
@@ -85,6 +86,11 @@ pub enum SessionMessage {
         path: String,
         diagnostics: Vec<shuvarie_core::DiagnosticInfo>,
     },
+    QuestionAsked {
+        id: u64,
+        questions: Vec<shuvarie_core::QuestionPrompt>,
+    },
+    Question(QuestionMessage),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -121,6 +127,7 @@ pub struct ContextActivity {
 
 pub struct SessionScreen {
     pub input: TextArea,
+    pub question: QuestionUI,
     pub messages: Vec<(Role, String)>,
     pub summary_indices: std::collections::HashSet<usize>,
     pub tools: Vec<ToolActivity>,
@@ -152,6 +159,7 @@ impl SessionScreen {
     pub fn new() -> Self {
         Self {
             input: TextArea::with_max_height("Type a message…", 8),
+            question: QuestionUI::new(),
             messages: Vec::new(),
             summary_indices: std::collections::HashSet::new(),
             tools: Vec::new(),
@@ -181,6 +189,9 @@ impl SessionScreen {
     }
 
     pub fn map_event(&self, key: &KeyEvent) -> Option<SessionMessage> {
+        if self.question.open {
+            return self.question.map_event(key).map(SessionMessage::Question);
+        }
         if ctrl(key) {
             return match key.code {
                 KeyCode::Char('n') => Some(SessionMessage::ScrollDown),
@@ -388,6 +399,7 @@ impl SessionScreen {
                         self.context.retain(|c| c.message_index != idx);
                     }
                     self.streaming = false;
+                    self.question.close();
                 }
                 self.busy = false;
                 self.status = Some(format!("error: {error}"));
@@ -415,6 +427,7 @@ impl SessionScreen {
                         self.context.retain(|c| c.message_index != idx);
                     }
                     self.streaming = false;
+                    self.question.close();
                 }
                 self.busy = false;
                 self.status = None;
@@ -450,6 +463,7 @@ impl SessionScreen {
                 self.todos.clear();
                 self.reasoning.clear();
                 self.expanded_reasoning.clear();
+                self.question.close();
                 self.streaming = false;
                 self.busy = false;
                 self.pending.clear();
@@ -511,6 +525,7 @@ impl SessionScreen {
                 self.todos = todos.clone();
                 self.sidebar.update(SidebarMessage::UpdateTodos(todos));
                 self.context.clear();
+                self.question.close();
                 self.reasoning = session
                     .reasoning
                     .iter()
@@ -566,6 +581,21 @@ impl SessionScreen {
                 self.mark_scroll_dirty();
                 None
             }
+            SessionMessage::QuestionAsked { id, questions } => {
+                self.question.open(id, questions);
+                None
+            }
+            SessionMessage::Question(m) => {
+                if let Some(effect) = self.question.update(m) {
+                    match effect {
+                        QuestionEffect::Answer { id, answers } => {
+                            self.question.close();
+                            return Some(SessionEffect::AnswerQuestion { id, answers });
+                        }
+                    }
+                }
+                None
+            }
         }
     }
 
@@ -584,7 +614,11 @@ impl SessionScreen {
                 self.sidebar.model.as_deref().unwrap_or("?")
             ),
         };
-        let input_height = self.input.desired_height(content_area.width as usize);
+        let input_height = if self.question.open {
+            self.question.desired_height(content_area.width as usize)
+        } else {
+            self.input.desired_height(content_area.width as usize)
+        };
         let todo_bar_height = if self.todos.iter().any(|t| t.status == "in_progress") {
             1
         } else {
@@ -660,7 +694,11 @@ impl SessionScreen {
             self.render_scrollbar(frame, history_inner, &scroll_state, content_height);
         }
 
-        self.input.view(frame, input_area);
+        if self.question.open {
+            self.question.view(frame, input_area);
+        } else {
+            self.input.view(frame, input_area);
+        }
 
         if let Some(status) = &self.status {
             let mut spans = Vec::new();
@@ -943,6 +981,10 @@ impl SessionScreen {
     }
 
     fn push_tool_lines(&self, lines: &mut Vec<Line>, tool: &ToolActivity) {
+        if tool.name == "question" {
+            self.push_question_tool_lines(lines, tool);
+            return;
+        }
         if let Some(todos) = &tool.todo_list {
             self.push_todo_lines(lines, todos);
             return;
@@ -1021,6 +1063,78 @@ impl SessionScreen {
                     theme::TEXT_DIM
                 }),
             ]));
+        }
+    }
+
+    /// Renders the `question` tool as a Q&A block: a `? Questions` header
+    /// (spinner while pending) followed by each question and its chosen
+    /// answers, parsed from the persisted tool args + output.
+    fn push_question_tool_lines(&self, lines: &mut Vec<Line>, tool: &ToolActivity) {
+        let mut header = Vec::new();
+        if tool.status == ToolStatus::Running {
+            header.push(super::spinner::spinner());
+        } else {
+            let (marker, fg) = if tool.status == ToolStatus::Ok {
+                ("✓", theme::SUCCESS)
+            } else {
+                ("✗", theme::ERROR)
+            };
+            header.push(Span::raw(marker).fg(fg).bold());
+        }
+        header.push(Span::raw(" question").fg(theme::TEXT).bold());
+        lines.push(Line::from(header));
+
+        if tool.status == ToolStatus::Running {
+            lines.push(Line::from(
+                Span::raw("    asking…").fg(theme::TEXT_MUTED).italic(),
+            ));
+            return;
+        }
+
+        let questions = tool
+            .args
+            .is_empty()
+            .then(Vec::new)
+            .unwrap_or_else(|| parse_question_prompts(&tool.args));
+        if tool.status == ToolStatus::Failed || questions.is_empty() {
+            let first: String = tool
+                .output
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(120)
+                .collect();
+            let note = if first.is_empty() {
+                "dismissed".to_string()
+            } else {
+                first
+            };
+            lines.push(Line::from(
+                Span::raw(format!("    {note}"))
+                    .fg(theme::TEXT_DIM)
+                    .italic(),
+            ));
+            return;
+        }
+
+        for q in &questions {
+            let answer = answer_for_question(&tool.output, &q.question);
+            lines.push(Line::from(vec![
+                Span::raw("    ? ").fg(theme::ACCENT),
+                Span::raw(q.question.clone()).fg(theme::TEXT),
+            ]));
+            let (marker, fg) = if answer.is_empty() {
+                ("  ⚠ ", theme::WARNING)
+            } else {
+                ("  ⇒ ", theme::SUCCESS)
+            };
+            let shown = if answer.is_empty() {
+                "unanswered".to_string()
+            } else {
+                answer
+            };
+            lines.push(Line::from(Span::raw(format!("{marker}{shown}")).fg(fg)));
         }
     }
 
@@ -1165,8 +1279,41 @@ impl SessionScreen {
 }
 
 pub enum SessionEffect {
-    SendMessage { content: String },
+    SendMessage {
+        content: String,
+    },
     CancelStream,
+    AnswerQuestion {
+        id: u64,
+        answers: Option<Vec<Vec<String>>>,
+    },
+}
+
+/// Parse the `question` tool's args JSON into question prompts (defensive:
+/// returns empty when the args are malformed).
+fn parse_question_prompts(args_json: &str) -> Vec<shuvarie_core::QuestionPrompt> {
+    serde_json::from_str::<serde_json::Value>(args_json)
+        .ok()
+        .and_then(|v| serde_json::from_value(v.get("questions").cloned()?).ok())
+        .unwrap_or_default()
+}
+
+/// Extract the answer recorded in the tool output for a question whose text
+/// starts with `question`. Output format: `... "q"="a, b", "q2"="c"`.
+fn answer_for_question(output: &str, question: &str) -> String {
+    let pairs = match output.split_once(": ") {
+        Some((_, rest)) => rest,
+        None => return String::new(),
+    };
+    for pair in pairs.split("\", \"") {
+        let pair = pair.trim_start_matches('"');
+        if let Some((q, a)) = pair.split_once("\"=\"")
+            && q == question
+        {
+            return a.trim_end_matches('"').to_string();
+        }
+    }
+    String::new()
 }
 
 impl Default for SessionScreen {

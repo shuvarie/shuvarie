@@ -16,6 +16,7 @@ use crate::config::Config;
 use crate::connections::{Connections, ProviderConfig};
 use crate::embeddings::{self, EmbeddingSetup};
 use crate::event::Event;
+use crate::question::{AnswerResponse, QuestionGate, QuestionRequest};
 use crate::session::Session;
 
 /// How a streamed turn ended, reported back to the run loop so it can decide
@@ -45,6 +46,7 @@ struct CoreCtx {
     event_tx: Sender<Event>,
     stream_done_tx: Sender<StreamOutcome>,
     approval_tx: Sender<ApprovalRequest>,
+    question_tx: Sender<QuestionRequest>,
     config: Config,
     workspace_root: PathBuf,
     agents_md_context: crate::context::LoadedContext,
@@ -75,6 +77,10 @@ pub async fn run(
     let mut pending_approvals: HashMap<u64, oneshot::Sender<bool>> = HashMap::new();
     let mut next_approval_id: u64 = 0;
     let mut always_approve = false;
+
+    let (question_tx, mut question_rx) = tokio::sync::mpsc::channel::<QuestionRequest>(8);
+    let mut pending_questions: HashMap<u64, oneshot::Sender<AnswerResponse>> = HashMap::new();
+    let mut next_question_id: u64 = 0;
 
     let mut clients: HashMap<String, ProviderClient> = HashMap::new();
     // Refresh the provider catalog from the service (falling back to embedded)
@@ -127,6 +133,7 @@ pub async fn run(
         event_tx,
         stream_done_tx,
         approval_tx,
+        question_tx,
         config,
         workspace_root,
         agents_md_context,
@@ -267,6 +274,7 @@ pub async fn run(
                     Command::StartSession => {
                         always_approve = false;
                         overflow_retries = 0;
+                        dismiss_pending_questions(&mut pending_questions);
                         ctx.session = Some(Arc::new(Mutex::new(Session::new())));
                         let _ = ctx.event_tx.send(Event::SessionStarted).await;
                     }
@@ -276,6 +284,7 @@ pub async fn run(
                         }
                         always_approve = false;
                         overflow_retries = 0;
+                        dismiss_pending_questions(&mut pending_questions);
                         ctx.session = Some(Arc::new(Mutex::new(Session::new())));
                         let _ = ctx.event_tx.send(Event::SessionStarted).await;
                     }
@@ -368,6 +377,7 @@ pub async fn run(
                             && !handle.is_finished()
                         {
                             handle.abort();
+                            dismiss_pending_questions(&mut pending_questions);
                             persist_interrupted_turn(
                                 ctx.turn_state.take(),
                                 &mut ctx.store,
@@ -395,6 +405,7 @@ pub async fn run(
                             continue;
                         }
                         always_approve = false;
+                        dismiss_pending_questions(&mut pending_questions);
                         match ctx.store.load_session(id).await {
                             Ok(stored) => {
                                 let loaded = Session::from_stored(stored);
@@ -498,6 +509,11 @@ pub async fn run(
                         }
                         if let Some(respond) = pending_approvals.remove(&id) {
                             let _ = respond.send(approved);
+                        }
+                    }
+                    Command::AnswerQuestion { id, answers } => {
+                        if let Some(respond) = pending_questions.remove(&id) {
+                            let _ = respond.send(answers);
                         }
                     }
                     Command::UndoLastTurn => {
@@ -708,6 +724,18 @@ pub async fn run(
                         tool: req.tool,
                         path: req.path,
                         reason: req.reason,
+                    })
+                    .await;
+            }
+            question = question_rx.recv() => {
+                let Some(req) = question else { break };
+                let id = next_question_id;
+                next_question_id = next_question_id.wrapping_add(1);
+                pending_questions.insert(id, req.respond);
+                let _ = ctx.event_tx
+                    .send(Event::QuestionAsked {
+                        id,
+                        questions: req.questions,
                     })
                     .await;
             }
@@ -977,11 +1005,13 @@ impl CoreCtx {
         };
         let preamble = crate::context::build_preamble(&base, &loaded_context);
         let gate = ApprovalGate::new(self.approval_tx.clone());
+        let question_gate = QuestionGate::new(self.question_tx.clone());
         let tools = crate::tools::all_tools(
             gate.clone(),
             self.lsp.clone(),
             crate::tools::ReadCache::new(),
             self.max_output_chars,
+            question_gate,
         );
         let provider_name_for_catalog = self
             .connections
@@ -1126,6 +1156,14 @@ async fn stream_busy(active_stream: &Option<AbortHandle>, event_tx: &Sender<Even
         return true;
     }
     false
+}
+
+/// Settle all pending questions as dismissed (dropping the responder makes
+/// the awaiting tool error out with "The user dismissed this question").
+fn dismiss_pending_questions(
+    pending_questions: &mut HashMap<u64, oneshot::Sender<AnswerResponse>>,
+) {
+    pending_questions.clear();
 }
 
 fn client_for<'a>(

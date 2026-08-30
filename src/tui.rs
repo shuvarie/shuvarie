@@ -26,6 +26,7 @@ mod home;
 mod list;
 mod logo;
 mod model_picker;
+mod question;
 mod search;
 mod session;
 mod session_picker;
