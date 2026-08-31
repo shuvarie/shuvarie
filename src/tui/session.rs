@@ -5,7 +5,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph, Wrap};
 use shuvarie_core::Role;
 use shuvarie_llm::TokenUsage;
-use shuvarie_llm::{DiffLine, DiffLineKind, FileChange};
+use shuvarie_llm::{DiffLine, DiffLineKind, FileChange, PatchFileKind};
 use termina::event::{KeyCode, KeyEvent};
 use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
@@ -1037,8 +1037,15 @@ impl SessionScreen {
             let path = match change {
                 FileChange::Edit { path, .. } => path,
                 FileChange::Write { path, .. } => path,
+                FileChange::Patch { files, .. } => match files.len() {
+                    0 => "",
+                    1 => files[0].path.as_str(),
+                    _ => "",
+                },
             };
-            self.push_diagnostics_lines(lines, path, prefix);
+            if !path.is_empty() {
+                self.push_diagnostics_lines(lines, path, prefix);
+            }
         }
     }
 
@@ -1188,6 +1195,53 @@ impl SessionScreen {
                         Span::raw(format!("{prefix}    {num} ")).fg(theme::TEXT_MUTED),
                         Span::raw(text.to_string()).fg(theme::TEXT_DIM),
                     ]));
+                }
+            }
+            FileChange::Patch { files, .. } => {
+                for file in files {
+                    match (&file.kind, &file.moved_to) {
+                        (PatchFileKind::Delete, _) => {
+                            lines.push(Line::from(vec![
+                                Span::raw(format!("{prefix}  ── deleted: ")).fg(theme::TEXT_MUTED),
+                                Span::raw(file.path.clone()).fg(theme::ERROR),
+                            ]));
+                        }
+                        (PatchFileKind::Add, _) => {
+                            lines.push(Line::from(vec![
+                                Span::raw(format!("{prefix}  ── new file: ")).fg(theme::TEXT_MUTED),
+                                Span::raw(file.path.clone()).fg(theme::ACCENT),
+                            ]));
+                            for (i, text) in
+                                file.new.as_deref().unwrap_or_default().lines().enumerate()
+                            {
+                                let num = format!("{:>4}", i + 1);
+                                lines.push(Line::from(vec![
+                                    Span::raw(format!("{prefix}    {num} ")).fg(theme::TEXT_MUTED),
+                                    Span::raw(text.to_string()).fg(theme::TEXT_DIM),
+                                ]));
+                            }
+                        }
+                        (PatchFileKind::Update, Some(target)) => {
+                            lines.push(Line::from(vec![
+                                Span::raw(format!("{prefix}  ── moved: ")).fg(theme::TEXT_MUTED),
+                                Span::raw(file.path.clone()).fg(theme::ACCENT),
+                                Span::raw(" → ").fg(theme::TEXT_MUTED),
+                                Span::raw(target.clone()).fg(theme::ACCENT),
+                            ]));
+                            for line in &file.diff {
+                                self.push_diff_line(lines, line, prefix);
+                            }
+                        }
+                        (PatchFileKind::Update, None) => {
+                            lines.push(Line::from(vec![
+                                Span::raw(format!("{prefix}  ── diff: ")).fg(theme::TEXT_MUTED),
+                                Span::raw(file.path.clone()).fg(theme::ACCENT),
+                            ]));
+                            for line in &file.diff {
+                                self.push_diff_line(lines, line, prefix);
+                            }
+                        }
+                    }
                 }
             }
         }

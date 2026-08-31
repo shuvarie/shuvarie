@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod apply_patch;
 pub mod approval;
 pub mod catalog;
 pub mod command;

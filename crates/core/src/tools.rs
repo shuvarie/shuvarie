@@ -40,7 +40,7 @@ impl ReadCache {
     }
 }
 
-fn arg_value(args: &Value, key: &str) -> Result<String, String> {
+pub(crate) fn arg_value(args: &Value, key: &str) -> Result<String, String> {
     args.get(key)
         .and_then(Value::as_str)
         .map(str::to_string)
@@ -947,14 +947,14 @@ fn resolve(path: &str) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-fn hidden_reason(path: &str) -> Option<ApprovalReason> {
+pub(crate) fn hidden_reason(path: &str) -> Option<ApprovalReason> {
     let has_hidden = path
         .split(['/', '\\'])
         .any(|c| c.starts_with('.') && c != "." && c != "..");
     has_hidden.then_some(ApprovalReason::HiddenPath)
 }
 
-fn resolve_checked(path: &str) -> Result<(PathBuf, Option<ApprovalReason>), String> {
+pub(crate) fn resolve_checked(path: &str) -> Result<(PathBuf, Option<ApprovalReason>), String> {
     let root = workspace_root()?;
     let joined = root.join(path);
     let canonical = joined.canonicalize().map_err(|e| format!("{path}: {e}"))?;
@@ -966,7 +966,9 @@ fn resolve_checked(path: &str) -> Result<(PathBuf, Option<ApprovalReason>), Stri
     Ok((canonical, reason))
 }
 
-fn resolve_for_write_checked(path: &str) -> Result<(PathBuf, Option<ApprovalReason>), String> {
+pub(crate) fn resolve_for_write_checked(
+    path: &str,
+) -> Result<(PathBuf, Option<ApprovalReason>), String> {
     let root = workspace_root()?;
     let joined = root.join(path);
     let reason = hidden_reason(path);
@@ -1006,7 +1008,7 @@ fn resolve_for_write_checked(path: &str) -> Result<(PathBuf, Option<ApprovalReas
     Ok((abs, reason))
 }
 
-fn compute_diff(old: &str, new: &str) -> Vec<DiffLine> {
+pub(crate) fn compute_diff(old: &str, new: &str) -> Vec<DiffLine> {
     let diff = similar::TextDiff::from_lines(old, new);
     let mut lines: Vec<DiffLine> = Vec::new();
     for group in diff.grouped_ops(3) {
@@ -1468,6 +1470,10 @@ pub fn all_tools(
                 lsp: Some(lsp.clone()),
             },
         ),
+        shuvarie_llm::into_dynamic(
+            "apply_patch",
+            crate::apply_patch::ApplyPatch::new(gate.clone(), Some(lsp.clone())),
+        ),
         shuvarie_llm::into_dynamic("run_shell", RunShell),
         shuvarie_llm::into_dynamic("list_dir", ListDir { gate: gate.clone() }),
         shuvarie_llm::into_dynamic("grep", Grep { gate: gate.clone() }),
@@ -1548,9 +1554,13 @@ pub fn edit_tools(
         shuvarie_llm::into_dynamic(
             "edit_file",
             EditFile {
-                gate,
+                gate: gate.clone(),
                 lsp: Some(lsp.clone()),
             },
+        ),
+        shuvarie_llm::into_dynamic(
+            "apply_patch",
+            crate::apply_patch::ApplyPatch::new(gate, Some(lsp.clone())),
         ),
         shuvarie_llm::into_dynamic("lsp", Lsp { lsp }),
     ]

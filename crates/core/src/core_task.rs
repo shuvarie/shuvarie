@@ -855,14 +855,19 @@ async fn undo_last_turn(store: &mut Store, session_id: u64) -> Result<bool, Stri
         .await
         .map_err(|e| e.to_string())?;
     for tc in &tool_calls {
-        let path = path_from_file_change_json(&tc.file_change_json);
-        if path.is_empty() {
+        let change = parse_file_change(&tc.file_change_json);
+        let Some(change) = change else {
             continue;
-        }
-        if let Some(original) = &tc.original_content {
-            let _ = std::fs::write(&path, original);
-        } else if !tc.file_change_json.is_empty() {
-            let _ = std::fs::remove_file(&path);
+        };
+        for (path, original, _new) in change.patch_files() {
+            if path.is_empty() {
+                continue;
+            }
+            if let Some(original) = original {
+                let _ = std::fs::write(path, original);
+            } else {
+                let _ = std::fs::remove_file(path);
+            }
         }
     }
     store
@@ -904,12 +909,15 @@ async fn redo_turn(store: &mut Store, session_id: u64) -> Result<bool, String> {
         .await
         .map_err(|e| e.to_string())?;
     for tc in &entry.tool_calls {
-        let path = path_from_file_change_json(&tc.file_change_json);
-        if path.is_empty() {
-            continue;
-        }
-        if let Some(new) = &tc.new_content {
-            let _ = std::fs::write(&path, new);
+        if let Some(change) = parse_file_change(&tc.file_change_json) {
+            for (path, _original, new) in change.patch_files() {
+                if path.is_empty() {
+                    continue;
+                }
+                if let Some(new) = new {
+                    let _ = std::fs::write(path, new);
+                }
+            }
         }
         let (fc_json, original, new) = (
             tc.file_change_json.clone(),
@@ -1516,14 +1524,11 @@ fn serialize_file_change(fc: &Option<FileChange>) -> (String, Option<String>, Op
     }
 }
 
-fn path_from_file_change_json(json: &str) -> String {
+fn parse_file_change(json: &str) -> Option<FileChange> {
     if json.is_empty() {
-        return String::new();
+        return None;
     }
-    serde_json::from_str::<FileChange>(json)
-        .ok()
-        .map(|fc| fc.path().to_string())
-        .unwrap_or_default()
+    serde_json::from_str::<FileChange>(json).ok()
 }
 
 async fn persist_interrupted_turn(
