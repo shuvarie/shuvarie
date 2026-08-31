@@ -5,6 +5,6 @@ pub(crate) mod test_util {
     static CWD_LOCK: Mutex<()> = Mutex::new(());
 
     pub(crate) fn lock_cwd() -> MutexGuard<'static, ()> {
-        CWD_LOCK.lock().unwrap()
+        CWD_LOCK.lock().unwrap_or_else(|err| err.into_inner())
     }
 }

@@ -385,7 +385,11 @@ impl Tool for EditFile {
     type Error = ToolExecutionError;
 
     fn description(&self) -> String {
-        "Replace text in an existing file with a string replacement. When `old` appears more than once and `occurrence` is unset the edit is rejected; pass `occurrence` to pick the nth match (1-based)."
+        "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, \
+         non-overlapping region of the original file; all oldTexts are matched against the file as it \
+         was before the call, not after earlier edits. If two changes affect the same block or nearby \
+         lines, merge them into one edit instead of emitting overlapping edits. Do not include large \
+         unchanged regions just to connect distant changes."
             .to_string()
     }
 
@@ -394,11 +398,21 @@ impl Tool for EditFile {
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "Relative path of the file to edit" },
-                "old": { "type": "string", "description": "Exact text to find (must appear in the file)" },
-                "new": { "type": "string", "description": "Replacement text" },
-                "occurrence": { "type": "integer", "minimum": 1, "description": "Which match to replace (1-based). Required when `old` appears multiple times" }
+                "edits": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "oldText": { "type": "string", "description": "Exact text for one targeted replacement; must be unique in the original file" },
+                            "newText": { "type": "string", "description": "Replacement text for this targeted edit" }
+                        },
+                        "required": ["oldText", "newText"]
+                    },
+                    "description": "One or more targeted replacements, each matched against the original file. Do not include overlapping or nested edits."
+                }
             },
-            "required": ["path", "old", "new"]
+            "required": ["path", "edits"]
         })
     }
 
@@ -411,53 +425,38 @@ impl Tool for EditFile {
         let lsp = self.lsp.clone();
         let result: Result<ToolOutput, String> = async move {
             let path = arg_value(&args, "path")?;
-            let old = arg_value(&args, "old")?;
-            let new = arg_value(&args, "new")?;
-            let occurrence = args.get("occurrence").and_then(Value::as_u64);
+            let edits = parse_edits(&args)?;
             let (abs, reason) = resolve_checked(&path)?;
             if let Some(reason) = reason {
                 gate.request("edit_file", &path, reason).await?;
             }
-            let content = std::fs::read_to_string(&abs).map_err(|e| format!("read {path}: {e}"))?;
-            if old.is_empty() {
-                return Err("cannot edit with an empty 'old' text".into());
+            let raw = std::fs::read_to_string(&abs).map_err(|e| format!("read {path}: {e}"))?;
+            let (had_bom, content) = split_bom(&raw);
+            let ending = detect_line_ending(content);
+            let base = normalize_lf(content);
+            let edited = apply_edits(&base, &edits, &path)?;
+            let mut final_content = String::with_capacity(raw.len() + 16);
+            if had_bom {
+                final_content.push('\u{FEFF}');
             }
-            let matches: Vec<usize> = content.match_indices(&old).map(|(i, _)| i).collect();
-            if matches.is_empty() {
-                return Err(format!("'old' text not found in {path} (occurrences: 0)"));
-            }
-            let idx = match occurrence {
-                Some(n) if n as usize <= matches.len() => matches[n as usize - 1],
-                Some(n) => {
-                    return Err(format!(
-                        "'old' text appears {} times; occurrence {n} is out of range",
-                        matches.len()
-                    ));
-                }
-                None if matches.len() > 1 => {
-                    return Err(format!(
-                        "'old' text appears {} times; pass 'occurrence' to select one",
-                        matches.len()
-                    ));
-                }
-                None => matches[0],
-            };
-            let mut edited = content.clone();
-            edited.replace_range(idx..idx + old.len(), &new);
-            let diff = compute_diff(&content, &edited);
-            std::fs::write(&abs, &edited).map_err(|e| format!("write {path}: {e}"))?;
+            final_content.push_str(&restore_line_endings(&edited, ending));
+            let diff = compute_diff(&raw, &final_content);
+            std::fs::write(&abs, &final_content).map_err(|e| format!("write {path}: {e}"))?;
             if let Some(lsp) = &lsp {
                 lsp.lock()
                     .await
-                    .on_file_change(Path::new(&path), &edited)
+                    .on_file_change(Path::new(&path), &final_content)
                     .await;
             }
-            let summary = format!("edited {path}: replaced 1 of {} occurrences", matches.len());
+            let summary = match edits.len() {
+                1 => format!("edited {path}: 1 edit applied"),
+                n => format!("edited {path}: {n} edits applied"),
+            };
             ctx.insert_result(FileChange::Edit {
                 path,
                 diff,
-                original: content,
-                new: edited,
+                original: raw,
+                new: final_content,
             });
             Ok(ToolOutput::text(summary))
         }
@@ -1272,6 +1271,177 @@ pub(crate) fn resolve_for_write_checked(
     Ok((abs, reason))
 }
 
+struct TextEdit {
+    old_text: String,
+    new_text: String,
+}
+
+struct MatchedEdit {
+    index: usize,
+    start: usize,
+    len: usize,
+    new_text: String,
+}
+
+fn edit_from_value(value: &Value) -> Option<TextEdit> {
+    let old = value
+        .get("oldText")
+        .or_else(|| value.get("old"))
+        .and_then(Value::as_str)?;
+    let new = value
+        .get("newText")
+        .or_else(|| value.get("new"))
+        .and_then(Value::as_str)?;
+    Some(TextEdit {
+        old_text: old.to_string(),
+        new_text: new.to_string(),
+    })
+}
+
+fn parse_edits(args: &Value) -> Result<Vec<TextEdit>, String> {
+    let mut edits: Vec<TextEdit> = Vec::new();
+    match args.get("edits") {
+        Some(Value::Array(items)) => {
+            for (i, item) in items.iter().enumerate() {
+                edits.push(edit_from_value(item).ok_or_else(|| {
+                    format!("edits[{i}] must be an object with string oldText and newText")
+                })?);
+            }
+        }
+        Some(Value::String(raw)) => match serde_json::from_str::<Value>(raw) {
+            Ok(Value::Array(items)) => {
+                return parse_edits(&json!({ "edits": items }));
+            }
+            Ok(single) => {
+                return edit_from_value(&single)
+                    .map(|edit| vec![edit])
+                    .ok_or_else(|| {
+                        "'edits' string did not contain string oldText/newText".to_string()
+                    });
+            }
+            _ => return Err("'edits' string did not parse as a JSON array".into()),
+        },
+        Some(single @ Value::Object(_)) => {
+            edits
+                .push(edit_from_value(single).ok_or_else(|| {
+                    "'edits' object needs string oldText and newText".to_string()
+                })?);
+        }
+        _ => {}
+    }
+    if edits.is_empty()
+        && let Some(edit) = edit_from_value(args)
+    {
+        edits.push(edit);
+    }
+    if edits.is_empty() {
+        return Err("edit_file requires at least one targeted replacement in 'edits'".into());
+    }
+    Ok(edits)
+}
+
+fn split_bom(raw: &str) -> (bool, &str) {
+    match raw.strip_prefix('\u{FEFF}') {
+        Some(rest) => (true, rest),
+        None => (false, raw),
+    }
+}
+
+fn detect_line_ending(content: &str) -> &'static str {
+    match (content.find("\r\n"), content.find('\n')) {
+        (Some(crlf), Some(lf)) if crlf < lf => "\r\n",
+        _ => "\n",
+    }
+}
+
+fn normalize_lf(text: &str) -> String {
+    if !text.contains('\r') {
+        return text.to_string();
+    }
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn restore_line_endings(text: &str, ending: &str) -> String {
+    if ending == "\r\n" {
+        text.replace('\n', "\r\n")
+    } else {
+        text.to_string()
+    }
+}
+
+fn apply_edits(base: &str, edits: &[TextEdit], path: &str) -> Result<String, String> {
+    let single = edits.len() == 1;
+    for (i, edit) in edits.iter().enumerate() {
+        if edit.old_text.is_empty() {
+            return Err(match single {
+                true => "oldText must not be empty.".into(),
+                false => format!("edits[{i}].oldText must not be empty."),
+            });
+        }
+    }
+    let mut matched: Vec<MatchedEdit> = Vec::new();
+    for (i, edit) in edits.iter().enumerate() {
+        let occurrences: Vec<usize> = base
+            .match_indices(&edit.old_text)
+            .map(|(pos, _)| pos)
+            .collect();
+        match occurrences.len() {
+            0 => {
+                return Err(match single {
+                    true => format!(
+                        "Could not find the text in {path}. It must match the file content exactly, including all whitespace and newlines."
+                    ),
+                    false => format!(
+                        "edits[{i}]: could not find the text in {path}. It must match the file content exactly, including all whitespace and newlines."
+                    ),
+                });
+            }
+            1 => matched.push(MatchedEdit {
+                index: i,
+                start: occurrences[0],
+                len: edit.old_text.len(),
+                new_text: edit.new_text.clone(),
+            }),
+            n => {
+                return Err(match single {
+                    true => format!(
+                        "Found {n} occurrences of the text in {path}. The text must be unique; include more surrounding lines to disambiguate."
+                    ),
+                    false => format!(
+                        "Found {n} occurrences of edits[{i}].oldText in {path}. Each oldText must be unique; include more surrounding lines to disambiguate."
+                    ),
+                });
+            }
+        }
+    }
+    matched.sort_by_key(|m| m.start);
+    for pair in matched.windows(2) {
+        let previous = &pair[0];
+        let current = &pair[1];
+        if previous.start + previous.len > current.start {
+            return Err(format!(
+                "edits[{}] and edits[{}] overlap in {path}. Merge them into one edit or target disjoint regions.",
+                previous.index, current.index
+            ));
+        }
+    }
+    let mut result = base.to_string();
+    for m in matched.iter().rev() {
+        result.replace_range(m.start..m.start + m.len, &m.new_text);
+    }
+    if result == base {
+        return Err(match single {
+            true => format!(
+                "No changes made to {path}. The replacement produced identical content; check for special characters or a mistaken match."
+            ),
+            false => {
+                format!("No changes made to {path}. The replacements produced identical content.")
+            }
+        });
+    }
+    Ok(result)
+}
+
 pub(crate) fn compute_diff(old: &str, new: &str) -> Vec<DiffLine> {
     let diff = similar::TextDiff::from_lines(old, new);
     let mut lines: Vec<DiffLine> = Vec::new();
@@ -2015,7 +2185,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn edit_replaces_and_detects_ambiguity() {
+    async fn edit_applies_multiple_disjoint_edits() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("e.txt", "alpha beta\ngamma delta\n").unwrap();
+        let mut ctx = new_ctx();
+        let out = EditFile {
+            gate: gate(),
+            lsp: no_lsp(),
+        }
+        .call(
+            &mut ctx,
+            json!({
+                "path": "e.txt",
+                "edits": [
+                    { "oldText": "gamma delta", "newText": "gamma delta epsilon" },
+                    { "oldText": "alpha", "newText": "ALPHA" }
+                ]
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(out.as_text().unwrap().contains("2 edits applied"));
+        assert_eq!(
+            std::fs::read_to_string("e.txt").unwrap(),
+            "ALPHA beta\ngamma delta epsilon\n"
+        );
+        assert!(matches!(
+            ctx.result::<FileChange>(),
+            Some(FileChange::Edit { diff, .. }) if !diff.is_empty()
+        ));
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn edit_rejects_ambiguous_missing_empty_and_noop() {
         let (dir, _guard) = tempdir();
         std::fs::write("e.txt", "a b a").unwrap();
         let err = EditFile {
@@ -2024,38 +2227,147 @@ mod tests {
         }
         .call(
             &mut new_ctx(),
-            json!({ "path": "e.txt", "old": "a", "new": "x" }),
+            json!({ "path": "e.txt", "edits": [{ "oldText": "a", "newText": "x" }] }),
         )
         .await
         .unwrap_err();
-        assert!(err.to_string().contains("occurrence"));
-        let mut ctx = new_ctx();
-        let _out = EditFile {
-            gate: gate(),
-            lsp: no_lsp(),
-        }
-        .call(
-            &mut ctx,
-            json!({ "path": "e.txt", "old": "a", "new": "x", "occurrence": 2 }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(std::fs::read_to_string("e.txt").unwrap(), "a b x");
-        assert!(matches!(
-            ctx.result::<FileChange>(),
-            Some(FileChange::Edit { diff, .. }) if !diff.is_empty()
-        ));
+        assert!(
+            err.to_string().contains("must be unique"),
+            "{}",
+            err.to_string()
+        );
         let err = EditFile {
             gate: gate(),
             lsp: no_lsp(),
         }
         .call(
             &mut new_ctx(),
-            json!({ "path": "e.txt", "old": "zzz", "new": "x" }),
+            json!({ "path": "e.txt", "edits": [{ "oldText": "zzz", "newText": "x" }] }),
         )
         .await
         .unwrap_err();
-        assert!(err.to_string().contains("not found"));
+        assert!(err.to_string().contains("Could not find"));
+        let err = EditFile {
+            gate: gate(),
+            lsp: no_lsp(),
+        }
+        .call(
+            &mut new_ctx(),
+            json!({ "path": "e.txt", "edits": [{ "oldText": "", "newText": "x" }] }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "{}",
+            err.to_string()
+        );
+        let err = EditFile {
+            gate: gate(),
+            lsp: no_lsp(),
+        }
+        .call(
+            &mut new_ctx(),
+            json!({ "path": "e.txt", "edits": [{ "oldText": "a b", "newText": "a b" }] }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("No changes made"),
+            "{}",
+            err.to_string()
+        );
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn edit_rejects_overlapping_edits() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("e.txt", "abcd").unwrap();
+        let err = EditFile {
+            gate: gate(),
+            lsp: no_lsp(),
+        }
+        .call(
+            &mut new_ctx(),
+            json!({
+                "path": "e.txt",
+                "edits": [
+                    { "oldText": "abc", "newText": "x" },
+                    { "oldText": "bcd", "newText": "y" }
+                ]
+            }),
+        )
+        .await
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("edits[0] and edits[1] overlap")
+                || msg.contains("edits[1] and edits[0] overlap"),
+            "{}",
+            msg
+        );
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn edit_accepts_legacy_flat_and_string_edits() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("e.txt", "hello world").unwrap();
+        EditFile {
+            gate: gate(),
+            lsp: no_lsp(),
+        }
+        .call(
+            &mut new_ctx(),
+            json!({ "path": "e.txt", "old": "hello", "new": "hi" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_to_string("e.txt").unwrap(), "hi world");
+        EditFile {
+            gate: gate(),
+            lsp: no_lsp(),
+        }
+        .call(
+            &mut new_ctx(),
+            json!({ "path": "e.txt", "edits": { "oldText": "world", "newText": "there" } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_to_string("e.txt").unwrap(), "hi there");
+        EditFile {
+            gate: gate(),
+            lsp: no_lsp(),
+        }
+        .call(
+            &mut new_ctx(),
+            json!({ "path": "e.txt", "edits": "[{\"oldText\":\"there\",\"newText\":\"you\"}]" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_to_string("e.txt").unwrap(), "hi you");
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn edit_preserves_bom_and_crlf() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("e.txt", "\u{FEFF}one\r\ntwo\r\n").unwrap();
+        EditFile {
+            gate: gate(),
+            lsp: no_lsp(),
+        }
+        .call(
+            &mut new_ctx(),
+            json!({ "path": "e.txt", "edits": [{ "oldText": "one", "newText": "1\n2" }] }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string("e.txt").unwrap(),
+            "\u{FEFF}1\r\n2\r\ntwo\r\n"
+        );
         drop(dir);
     }
 
