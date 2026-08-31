@@ -47,6 +47,11 @@ pub enum Event {
         file_change: Option<FileChange>,
         todo_update: Option<TodoUpdate>,
     },
+    ToolOutput {
+        tool: String,
+        worker: Option<String>,
+        content: String,
+    },
     WorkerStarted {
         name: String,
         args: serde_json::Value,

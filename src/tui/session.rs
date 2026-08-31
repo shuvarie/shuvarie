@@ -42,6 +42,11 @@ pub enum SessionMessage {
         file_change: Option<FileChange>,
         todo_update: Option<shuvarie_llm::TodoUpdate>,
     },
+    ToolOutput {
+        tool: String,
+        worker: Option<String>,
+        content: String,
+    },
     WorkerStarted {
         name: String,
         args: serde_json::Value,
@@ -322,6 +327,20 @@ impl SessionScreen {
                 self.status = None;
                 self.mark_scroll_dirty();
                 self.follow_bottom();
+                None
+            }
+            SessionMessage::ToolOutput {
+                tool,
+                worker,
+                content,
+            } => {
+                if let Some(entry) = self.tools.iter_mut().find(|t| {
+                    t.name == tool && t.worker == worker && matches!(t.status, ToolStatus::Running)
+                }) {
+                    entry.output = content;
+                    self.mark_scroll_dirty();
+                    self.follow_bottom();
+                }
                 None
             }
             SessionMessage::WorkerStarted { name, args } => {
@@ -1020,17 +1039,35 @@ impl SessionScreen {
         }
         lines.push(Line::from(header));
         if !tool.output.is_empty() {
-            let first: String = tool
-                .output
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .chars()
-                .take(120)
-                .collect();
-            lines.push(Line::from(
-                Span::raw(format!("{prefix}    {first}")).fg(theme::TEXT_DIM),
-            ));
+            let take: Vec<String> = if tool.status == ToolStatus::Running {
+                let all: Vec<&str> = tool.output.lines().collect();
+                let start = all.len().saturating_sub(3);
+                all[start..].iter().map(|s| s.to_string()).collect()
+            } else {
+                vec![
+                    tool.output
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .chars()
+                        .take(120)
+                        .collect(),
+                ]
+            };
+            if tool.status == ToolStatus::Running {
+                let indent = format!("{prefix}    ");
+                for line in take {
+                    let truncated: String = line.chars().take(120).collect();
+                    lines.push(Line::from(
+                        Span::raw(format!("{indent}{truncated}")).fg(theme::TEXT_DIM),
+                    ));
+                }
+            } else {
+                let first = take.first().map(String::as_str).unwrap_or_default();
+                lines.push(Line::from(
+                    Span::raw(format!("{prefix}    {first}")).fg(theme::TEXT_DIM),
+                ));
+            }
         }
         if let Some(change) = &tool.file_change {
             self.push_file_change_lines(lines, change, prefix);

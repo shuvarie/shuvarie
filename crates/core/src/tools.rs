@@ -14,6 +14,83 @@ use crate::question::{QuestionGate, QuestionOption, QuestionPrompt};
 const MAX_READ_BYTES: usize = 64 * 1024;
 const MAX_COMMAND_OUTPUT: usize = 16 * 1024;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
+const SHELL_CAPTURE_BYTES: usize = 64 * 1024;
+const SHELL_STREAM_TAIL_CHARS: usize = 2048;
+const SHELL_STREAM_INTERVAL_MS: u64 = 100;
+
+#[derive(Debug, Clone)]
+pub struct ShellChunk {
+    pub worker: Option<String>,
+    pub content: String,
+}
+
+/// Bounded channel sender carrying live `run_shell` output to the core task.
+/// Each clone is tagged with the owning worker so the TUI can attach the
+/// streamed output to the right tool activity entry.
+#[derive(Clone)]
+pub struct ShellOutputTx {
+    tx: tokio::sync::mpsc::Sender<ShellChunk>,
+    worker: Option<String>,
+}
+
+impl ShellOutputTx {
+    pub fn new(tx: tokio::sync::mpsc::Sender<ShellChunk>) -> Self {
+        Self { tx, worker: None }
+    }
+
+    pub fn tagged(&self, worker: &str) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            worker: Some(worker.to_string()),
+        }
+    }
+
+    async fn send_tail(&self, captured: &[u8]) {
+        let content: String = String::from_utf8_lossy(captured)
+            .chars()
+            .rev()
+            .take(SHELL_STREAM_TAIL_CHARS)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let _ = self
+            .tx
+            .send(ShellChunk {
+                worker: self.worker.clone(),
+                content,
+            })
+            .await;
+    }
+}
+
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    unsafe {
+        libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(_pid: u32) {}
+
+/// Kills the shell's process group if the tool future is cancelled mid-run
+/// (turn abort / stream cancel), so the child cannot outlive the request.
+struct KillGuard(Option<u32>);
+
+impl KillGuard {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for KillGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            kill_process_group(pid);
+        }
+    }
+}
 
 type ReadKey = (String, Option<u64>, Option<u64>);
 
@@ -295,7 +372,10 @@ impl Tool for EditFile {
     }
 }
 
-struct RunShell;
+struct RunShell {
+    gate: ApprovalGate,
+    shell_tx: ShellOutputTx,
+}
 
 impl Tool for RunShell {
     const NAME: &'static str = "run_shell";
@@ -306,9 +386,9 @@ impl Tool for RunShell {
 
     fn description(&self) -> String {
         #[cfg(unix)]
-        const DESCRIPTION: &str = "Run a shell command line in the workspace, executed through the system's Bourne shell (`sh -c`). Pipes, redirects, and shell operators work naturally. Captured stdout and stderr (combined) are returned, capped at 16 KB. The command is killed when it exceeds the timeout.";
+        const DESCRIPTION: &str = "Run a shell command line in the workspace, executed through the system's Bourne shell (`sh -c`). Pipes, redirects, and shell operators work naturally. Output streams live to the user while the command runs. Captured stdout and stderr (combined) are returned, capped at 16 KB. The command and its children are killed when it exceeds the timeout; if the command is expected to take longer and is not waiting for interactive input, retry with a larger timeout_secs value. The working directory can be set with `cwd`; a directory outside the workspace requires user approval.";
         #[cfg(windows)]
-        const DESCRIPTION: &str = "Run a shell command line in the workspace, executed through the system's PowerShell (`powershell -NoProfile -Command`). Pipes, redirects, and shell operators work naturally. Captured stdout and stderr (combined) are returned, capped at 16 KB. The command is killed when it exceeds the timeout.";
+        const DESCRIPTION: &str = "Run a shell command line in the workspace, executed through the system's PowerShell (`powershell -NoProfile -Command`). Pipes, redirects, and shell operators work naturally. Output streams live to the user while the command runs. Captured stdout and stderr (combined) are returned, capped at 16 KB. The command and its children are killed when it exceeds the timeout; if the command is expected to take longer and is not waiting for interactive input, retry with a larger timeout_secs value. The working directory can be set with `cwd`; a directory outside the workspace requires user approval.";
 
         DESCRIPTION.to_string()
     }
@@ -318,8 +398,8 @@ impl Tool for RunShell {
             "type": "object",
             "properties": {
                 "command": { "type": "string", "description": "Shell command line to run" },
-                "cwd": { "type": "string", "description": "Working directory, relative to the workspace root. Defaults to the workspace root" },
-                "timeout_secs": { "type": "integer", "minimum": 1, "description": "Timeout in seconds (default 30)" }
+                "cwd": { "type": "string", "description": "Working directory, relative to the workspace root. Defaults to the workspace root. Use this instead of 'cd' commands" },
+                "timeout_secs": { "type": "integer", "minimum": 1, "description": "Timeout in seconds (default 30). The command and its children are killed when it expires" }
             },
             "required": ["command"]
         })
@@ -337,52 +417,120 @@ impl Tool for RunShell {
                 .get("timeout_secs")
                 .and_then(Value::as_u64)
                 .unwrap_or(DEFAULT_TIMEOUT_SECS);
-            let cwd_abs = match cwd {
-                Some(c) => resolve(c)?,
-                None => workspace_root()?,
+            let (cwd_abs, gate_reason) = match cwd {
+                Some(c) => {
+                    let root = workspace_root()?;
+                    let joined = root.join(c);
+                    let resolved = joined
+                        .canonicalize()
+                        .map_err(|e| format!("cwd '{c}': {e}"))?;
+                    if !resolved.is_dir() {
+                        return Err(format!("cwd '{c}' is not a directory"));
+                    }
+                    let reason = (!resolved.starts_with(&root)).then_some(ApprovalReason::OutsideWorkspace);
+                    (resolved, reason)
+                }
+                None => (workspace_root()?, None),
             };
+            if let Some(reason) = gate_reason {
+                self.gate
+                    .request(Self::NAME, &cwd_abs.to_string_lossy(), reason)
+                    .await?;
+            }
             let mut builder = tokio::process::Command::new(shell_bin());
             shell_args(&mut builder, &command);
             builder
                 .current_dir(&cwd_abs)
                 .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
+                .stderr(std::process::Stdio::piped())
+                .stdin(std::process::Stdio::null());
+            #[cfg(unix)]
+            builder.process_group(0);
             let mut child = builder.spawn().map_err(|e| format!("spawn shell: {e}"))?;
-            let status = match tokio::time::timeout(
-                std::time::Duration::from_secs(timeout_secs),
-                child.wait(),
-            )
-            .await
-            {
-                Ok(Ok(status)) => status,
-                Ok(Err(e)) => return Err(format!("wait shell: {e}")),
-                Err(_) => {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                    return Err(format!(
-                        "shell command timed out after {timeout_secs}s (killed)"
-                    ));
+            let pgid = child.id();
+            let mut guard = KillGuard(pgid);
+
+            let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+            let mut readers = Vec::new();
+            if let Some(pipe) = child.stdout.take() {
+                readers.push(spawn_pipe_reader(pipe, chunk_tx.clone()));
+            }
+            if let Some(pipe) = child.stderr.take() {
+                readers.push(spawn_pipe_reader(pipe, chunk_tx.clone()));
+            }
+            drop(chunk_tx);
+
+            let mut captured: Vec<u8> = Vec::new();
+            let mut last_emit = std::time::Instant::now() - std::time::Duration::from_millis(SHELL_STREAM_INTERVAL_MS);
+            let interval = std::time::Duration::from_millis(SHELL_STREAM_INTERVAL_MS);
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+            let status = loop {
+                tokio::select! {
+                    maybe_chunk = chunk_rx.recv() => {
+                        match maybe_chunk {
+                            Some(chunk) => {
+                                captured.extend_from_slice(&chunk);
+                                if captured.len() > SHELL_CAPTURE_BYTES {
+                                    let drop = captured.len() - SHELL_CAPTURE_BYTES;
+                                    captured.drain(..drop);
+                                }
+                                if last_emit.elapsed() >= interval {
+                                    last_emit = std::time::Instant::now();
+                                    self.shell_tx.send_tail(&captured).await;
+                                }
+                            }
+                            None => {
+                                let status = child
+                                    .wait()
+                                    .await
+                                    .map_err(|e| format!("wait shell: {e}"))?;
+                                break status;
+                            }
+                        }
+                    }
+                    status = child.wait() => {
+                        // Drain remaining output so it is not lost with the pipes.
+                        while let Some(chunk) = chunk_rx.recv().await {
+                            captured.extend_from_slice(&chunk);
+                            if captured.len() > SHELL_CAPTURE_BYTES {
+                                let drop = captured.len() - SHELL_CAPTURE_BYTES;
+                                captured.drain(..drop);
+                            }
+                        }
+                        let status = status.map_err(|e| format!("wait shell: {e}"))?;
+                        break status;
+                    }
+                    _ = tokio::time::sleep_until(deadline) => {
+                        if let Some(pgid) = pgid {
+                            kill_process_group(pgid);
+                        }
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                        self.shell_tx.send_tail(&captured).await;
+                        let partial = String::from_utf8_lossy(&captured).trim().to_string();
+                        let mut message = format!(
+                            "shell command timed out after {timeout_secs}s (killed)"
+                        );
+                        if !partial.is_empty() {
+                            message.push_str(&format!("\n{partial}"));
+                        }
+                        message.push_str(&format!(
+                            "\n\n<shell_metadata>\nshell tool terminated the command after exceeding the {timeout_secs}s timeout. If this command is expected to take longer and is not waiting for interactive input, retry with a larger timeout_secs value.\n</shell_metadata>"
+                        ));
+                        return Err(message);
+                    }
                 }
             };
-            let mut stdout = String::new();
-            let mut stderr = String::new();
-            if let Some(mut out) = child.stdout.take() {
-                use tokio::io::AsyncReadExt;
-                let mut buf = Vec::new();
-                let _ = out.read_to_end(&mut buf).await;
-                stdout = String::from_utf8_lossy(&buf).into_owned();
+
+            for reader in readers {
+                let _ = reader.await;
             }
-            if let Some(mut err) = child.stderr.take() {
-                use tokio::io::AsyncReadExt;
-                let mut buf = Vec::new();
-                let _ = err.read_to_end(&mut buf).await;
-                stderr = String::from_utf8_lossy(&buf).into_owned();
-            }
-            let mut body = stdout;
-            if !stderr.is_empty() {
-                body.push_str(&stderr);
-            }
-            let trimmed = body.trim();
+            guard.disarm();
+
+            let trimmed = String::from_utf8_lossy(&captured)
+                .trim_end()
+                .to_string();
+            let trimmed = trimmed.trim();
             let capped: String = trimmed.chars().take(MAX_COMMAND_OUTPUT).collect();
             if !status.success() {
                 return Err(format!("shell exited with {status}:\n{capped}"));
@@ -404,6 +552,29 @@ impl Tool for RunShell {
 #[inline]
 fn shell_bin() -> &'static str {
     "sh"
+}
+
+fn spawn_pipe_reader<R>(
+    mut pipe: R,
+    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+) -> tokio::task::JoinHandle<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut buf = [0u8; 8192];
+        loop {
+            match pipe.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if tx.send(buf[..n].to_vec()).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    })
 }
 
 #[cfg(unix)]
@@ -1446,6 +1617,7 @@ pub fn all_tools(
     read_cache: ReadCache,
     max_output_chars: usize,
     question_gate: QuestionGate,
+    shell_tx: ShellOutputTx,
 ) -> Vec<shuvarie_llm::DynamicTool> {
     vec![
         shuvarie_llm::into_dynamic(
@@ -1474,7 +1646,13 @@ pub fn all_tools(
             "apply_patch",
             crate::apply_patch::ApplyPatch::new(gate.clone(), Some(lsp.clone())),
         ),
-        shuvarie_llm::into_dynamic("run_shell", RunShell),
+        shuvarie_llm::into_dynamic(
+            "run_shell",
+            RunShell {
+                gate: gate.clone(),
+                shell_tx: shell_tx.clone(),
+            },
+        ),
         shuvarie_llm::into_dynamic("list_dir", ListDir { gate: gate.clone() }),
         shuvarie_llm::into_dynamic("grep", Grep { gate: gate.clone() }),
         shuvarie_llm::into_dynamic("glob", Glob { gate: gate.clone() }),
@@ -1525,8 +1703,14 @@ pub fn read_tools(
     ]
 }
 
-pub fn command_tools(_gate: ApprovalGate) -> Vec<shuvarie_llm::DynamicTool> {
-    vec![shuvarie_llm::into_dynamic("run_shell", RunShell)]
+pub fn command_tools(
+    gate: ApprovalGate,
+    shell_tx: ShellOutputTx,
+) -> Vec<shuvarie_llm::DynamicTool> {
+    vec![shuvarie_llm::into_dynamic(
+        "run_shell",
+        RunShell { gate, shell_tx },
+    )]
 }
 
 pub fn edit_tools(
@@ -1597,6 +1781,13 @@ mod tests {
             gate: gate(),
             read_cache: ReadCache::new(),
             max_output_chars: 0,
+        }
+    }
+
+    fn run_shell_tool() -> RunShell {
+        RunShell {
+            gate: gate(),
+            shell_tx: ShellOutputTx::new(tokio::sync::mpsc::channel(64).0),
         }
     }
 
@@ -1706,26 +1897,169 @@ mod tests {
     #[tokio::test]
     async fn run_shell_success_and_timeout() {
         let (dir, _guard) = tempdir();
-        let out = RunShell
+        let out = run_shell_tool()
             .call(&mut new_ctx(), json!({ "command": "echo hello" }))
             .await
             .unwrap();
         assert!(out.as_text().unwrap().contains("hello"));
-        let err = RunShell
+        let err = run_shell_tool()
             .call(
                 &mut new_ctx(),
                 json!({ "command": "sleep 5", "timeout_secs": 1 }),
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("timed out"));
+        let message = err.to_string();
+        assert!(message.contains("timed out"), "{}", message);
+        assert!(
+            message.contains("retry with a larger timeout_secs"),
+            "{}",
+            message
+        );
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn run_shell_timeout_returns_partial_output() {
+        let (dir, _guard) = tempdir();
+        let err = run_shell_tool()
+            .call(
+                &mut new_ctx(),
+                json!({ "command": "echo partial-first; sleep 5", "timeout_secs": 1 }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("partial-first"), "{}", err);
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn run_shell_timeout_kills_children() {
+        use std::process::Command as StdCommand;
+        let (dir, _guard) = tempdir();
+        let _ = run_shell_tool()
+            .call(
+                &mut new_ctx(),
+                json!({ "command": "sleep 30 & sleep 30", "timeout_secs": 1 }),
+            )
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let out = StdCommand::new("sh")
+            .arg("-c")
+            .arg("pgrep -f '[s]leep 30' | wc -l")
+            .output()
+            .unwrap();
+        let count: u32 = String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0);
+        assert_eq!(count, 0, "sleep children survived the group kill");
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn run_shell_streams_output() {
+        let (dir, _guard) = tempdir();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let tool = RunShell {
+            gate: gate(),
+            shell_tx: ShellOutputTx::new(tx),
+        };
+        let out = tool
+            .call(
+                &mut new_ctx(),
+                json!({ "command": "echo streamed-line; sleep 0.4" }),
+            )
+            .await
+            .unwrap();
+        assert!(out.as_text().unwrap().contains("streamed-line"));
+        let mut saw_stream = false;
+        while let Ok(chunk) = rx.try_recv() {
+            assert_eq!(chunk.worker, None);
+            if chunk.content.contains("streamed-line") {
+                saw_stream = true;
+            }
+        }
+        assert!(saw_stream, "no streaming chunk carried the echoed line");
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn run_shell_worker_chunks_are_tagged() {
+        let (dir, _guard) = tempdir();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let tool = RunShell {
+            gate: gate(),
+            shell_tx: ShellOutputTx::new(tx).tagged("run_tests"),
+        };
+        tool.call(&mut new_ctx(), json!({ "command": "echo tagged" }))
+            .await
+            .unwrap();
+        let mut tagged = false;
+        while let Ok(chunk) = rx.try_recv() {
+            if chunk.worker.as_deref() == Some("run_tests") && chunk.content.contains("tagged") {
+                tagged = true;
+            }
+        }
+        assert!(tagged);
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn run_shell_validates_cwd() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("not-a-dir", "").unwrap();
+        let err = run_shell_tool()
+            .call(
+                &mut new_ctx(),
+                json!({ "command": "true", "cwd": "not-a-dir" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not a directory"), "{}", err);
+        let err = run_shell_tool()
+            .call(
+                &mut new_ctx(),
+                json!({ "command": "true", "cwd": "missing-dir" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("missing-dir"), "{}", err);
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn run_shell_gates_outside_workspace_cwd() {
+        let (dir, _guard) = tempdir();
+        let outside = TempDir::new().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::approval::ApprovalRequest>(8);
+        let tool = RunShell {
+            gate: ApprovalGate::new(tx),
+            shell_tx: ShellOutputTx::new(tokio::sync::mpsc::channel(64).0),
+        };
+        let cwd = outside.path().to_string_lossy().into_owned();
+        let call = tokio::spawn({
+            let tool = tool;
+            async move {
+                tool.call(
+                    &mut new_ctx(),
+                    json!({ "command": "echo gated", "cwd": cwd }),
+                )
+                .await
+            }
+        });
+        let req = rx.recv().await.unwrap();
+        assert_eq!(req.reason, ApprovalReason::OutsideWorkspace);
+        req.respond.send(true).unwrap();
+        let out = call.await.unwrap().unwrap();
+        assert!(out.as_text().unwrap().contains("gated"));
         drop(dir);
     }
 
     #[tokio::test]
     async fn run_shell_failure_returns_error() {
         let (dir, _guard) = tempdir();
-        let err = RunShell
+        let err = run_shell_tool()
             .call(&mut new_ctx(), json!({ "command": "exit 3" }))
             .await
             .unwrap_err();
@@ -1736,7 +2070,7 @@ mod tests {
     #[tokio::test]
     async fn run_shell_supports_pipes() {
         let (dir, _guard) = tempdir();
-        let out = RunShell
+        let out = run_shell_tool()
             .call(
                 &mut new_ctx(),
                 json!({ "command": "echo hello world | grep world" }),

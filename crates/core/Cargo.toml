@@ -28,6 +28,9 @@ uuid = { version = "1", features = ["v4"] }
 kdl = "6.7"
 miette = "7"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 http = "1"
 shuvarie-lsp = { path = "../lsp" }

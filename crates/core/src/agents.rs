@@ -5,13 +5,14 @@ use shuvarie_llm::TokenUsage;
 
 use crate::approval::ApprovalGate;
 use crate::lsp_manager::SharedManager;
-use crate::tools::{self, ReadCache};
+use crate::tools::{self, ReadCache, ShellOutputTx};
 
 pub struct WorkerSet {
     pub workers: Vec<shuvarie_llm::WorkerAgent>,
     pub usage: Arc<std::sync::Mutex<TokenUsage>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_workers(
     client: ProviderClient,
     model: &str,
@@ -20,6 +21,7 @@ pub fn build_workers(
     worker_max_turns: usize,
     max_output_chars: usize,
     context_budget: Option<shuvarie_llm::ContextBudget>,
+    shell_tx: ShellOutputTx,
 ) -> WorkerSet {
     let usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
     let workers = vec![
@@ -45,7 +47,7 @@ pub fn build_workers(
             TESTER_PREAMBLE,
             client.clone(),
             model,
-            tools::command_tools(gate.clone()),
+            tools::command_tools(gate.clone(), shell_tx.tagged("run_tests")),
             Arc::clone(&usage),
             worker_max_turns,
             None,

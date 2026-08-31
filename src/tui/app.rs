@@ -331,6 +331,15 @@ impl App {
                     file_change,
                     todo_update,
                 })),
+                CoreEvent::ToolOutput {
+                    tool,
+                    worker,
+                    content,
+                } => Some(AppMessage::Session(SessionMessage::ToolOutput {
+                    tool,
+                    worker,
+                    content,
+                })),
                 CoreEvent::WorkerStarted { name, args } => {
                     Some(AppMessage::Session(SessionMessage::WorkerStarted {
                         name,

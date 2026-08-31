@@ -1025,12 +1025,14 @@ impl CoreCtx {
         let preamble = crate::context::build_preamble(&base, &loaded_context);
         let gate = ApprovalGate::new(self.approval_tx.clone());
         let question_gate = QuestionGate::new(self.question_tx.clone());
+        let (shell_tx, mut shell_rx) = tokio::sync::mpsc::channel::<crate::tools::ShellChunk>(64);
         let tools = crate::tools::all_tools(
             gate.clone(),
             self.lsp.clone(),
             crate::tools::ReadCache::new(),
             self.max_output_chars,
             question_gate,
+            crate::tools::ShellOutputTx::new(shell_tx.clone()),
         );
         let provider_name_for_catalog = self
             .connections
@@ -1042,6 +1044,18 @@ impl CoreCtx {
             .and_then(|kind| crate::catalog::find_provider(&catalog_provider, &kind))
             .cloned();
         let budget = context_budget(&self.config, catalog_provider.as_ref(), &model);
+        let output_forward_tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            while let Some(chunk) = shell_rx.recv().await {
+                let _ = output_forward_tx
+                    .send(Event::ToolOutput {
+                        tool: "run_shell".to_string(),
+                        worker: chunk.worker,
+                        content: chunk.content,
+                    })
+                    .await;
+            }
+        });
         let mut worker_set = crate::agents::build_workers(
             client.clone(),
             &model,
@@ -1050,6 +1064,7 @@ impl CoreCtx {
             self.worker_turns,
             self.max_output_chars,
             budget.clone(),
+            crate::tools::ShellOutputTx::new(shell_tx),
         );
         let stream = client
             .stream(

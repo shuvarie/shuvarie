@@ -8118,6 +8118,7 @@ dependencies = [
  "http",
  "ignore",
  "kdl",
+ "libc",
  "miette",
  "regex",
  "reqwest 0.13.4",
