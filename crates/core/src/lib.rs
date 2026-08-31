@@ -17,6 +17,7 @@ pub mod skills;
 pub mod test_util;
 pub mod tool_record;
 pub mod tools;
+pub mod truncate;
 
 pub use approval::ApprovalReason;
 pub use command::Command;

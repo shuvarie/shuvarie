@@ -12,6 +12,10 @@ use crate::lsp_manager::SharedManager;
 use crate::question::{QuestionGate, QuestionOption, QuestionPrompt};
 
 const MAX_READ_BYTES: usize = 64 * 1024;
+const DEFAULT_READ_LIMIT: usize = 2000;
+const MAX_LINE_LENGTH: usize = 2000;
+const MAX_LINE_SUFFIX: &str = "... (line truncated to 2000 chars)";
+const BINARY_SAMPLE_BYTES: usize = 4096;
 const MAX_COMMAND_OUTPUT: usize = 16 * 1024;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const SHELL_CAPTURE_BYTES: usize = 64 * 1024;
@@ -95,12 +99,15 @@ impl Drop for KillGuard {
 type ReadKey = (String, Option<u64>, Option<u64>);
 
 /// Per-turn dedupe cache for `read_file`: tracks `(path, offset, limit)` keys
-/// that have already been returned to the model this turn. Repeated identical
-/// reads get a short note instead of re-sending file content, which keeps the
-/// agent loop from blowing up the context by re-reading the same large file.
+/// that have already been returned to the model this turn, plus a set of all
+/// paths read this turn (any range) used by `write_file`'s read-first check
+/// for overwrites. Repeated identical reads get a short note instead of
+/// re-sending file content, which keeps the agent loop from blowing up the
+/// context by re-reading the same large file.
 #[derive(Clone, Default)]
 pub struct ReadCache {
     seen: Arc<Mutex<std::collections::HashSet<ReadKey>>>,
+    read_paths: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 impl ReadCache {
@@ -113,7 +120,16 @@ impl ReadCache {
     fn mark(&self, path: &str, offset: Option<u64>, limit: Option<u64>) -> bool {
         let key = (path.to_string(), offset, limit);
         let mut seen = self.seen.lock().unwrap();
-        !seen.insert(key)
+        let fresh = seen.insert(key);
+        if fresh {
+            self.read_paths.lock().unwrap().insert(path.to_string());
+        }
+        !fresh
+    }
+
+    /// Returns `true` if the path was read (any range) earlier this turn.
+    pub(crate) fn was_read(&self, path: &str) -> bool {
+        self.read_paths.lock().unwrap().contains(path)
     }
 }
 
@@ -148,7 +164,7 @@ impl Tool for ReadFile {
             "properties": {
                 "path": { "type": "string", "description": "Path of the file, relative to the workspace root" },
                 "offset": { "type": "integer", "minimum": 1, "description": "First line to read (1-based). Defaults to 1" },
-                "limit": { "type": "integer", "minimum": 1, "description": "Maximum number of lines to read. Defaults to all lines" }
+                "limit": { "type": "integer", "minimum": 1, "description": format!("Maximum number of lines to read. Defaults to {DEFAULT_READ_LIMIT}") }
             },
             "required": ["path"]
         })
@@ -179,30 +195,47 @@ impl Tool for ReadFile {
                 return Err(format!("'{path}' is a directory, not a file"));
             }
             let data = std::fs::read(&abs).map_err(|e| format!("read {path}: {e}"))?;
-            if data.contains(&0) {
+            if is_binary_file(&data) {
                 return Err(format!("'{path}' appears to be binary; refusing to read"));
             }
-            let content_owned =
-                String::from_utf8_lossy(&data[..data.len().min(MAX_READ_BYTES)]).into_owned();
+            let content_owned = String::from_utf8_lossy(&data).into_owned();
             let lines: Vec<&str> = content_owned.lines().collect();
-            let start = offset.unwrap_or(1).max(1) as usize - 1;
-            let end = match limit {
-                Some(n) => (start + n as usize).min(lines.len()),
-                None => lines.len(),
-            };
-            if start >= lines.len() {
-                return Ok(ToolOutput::text("(empty)"));
+            let offset = offset.unwrap_or(1).max(1) as usize;
+            if offset > lines.len() && !(offset == 1 && lines.is_empty()) {
+                return Err(format!(
+                    "Offset {offset} is out of range for this file ({} lines)",
+                    lines.len()
+                ));
             }
+            let limit = limit.map(|n| n as usize).unwrap_or(DEFAULT_READ_LIMIT);
+            let start = offset - 1;
+            let end = (start + limit).min(lines.len());
             let mut out = String::new();
             for (i, line) in lines[start..end].iter().enumerate() {
+                let line = if line.chars().count() > MAX_LINE_LENGTH {
+                    let head: String = line.chars().take(MAX_LINE_LENGTH).collect();
+                    format!("{head}{MAX_LINE_SUFFIX}")
+                } else {
+                    line.to_string()
+                };
                 out.push_str(&format!("{:>6} | {line}\n", start + i + 1));
             }
-            if max_output_chars > 0 && out.chars().count() > max_output_chars {
-                let omitted = out.chars().count() - max_output_chars;
-                let truncated: String = out.chars().take(max_output_chars).collect();
-                return Ok(ToolOutput::text(format!(
-                    "{truncated}… (output truncated: {omitted} chars omitted — use offset/limit to read more of {path})"
-                )));
+            let last = start + (end - start);
+            let truncated = limit < lines.len() - start;
+            if truncated {
+                out.push_str(&format!(
+                    "\n(Showing lines {}-{} of {}. Use offset={} to continue.)",
+                    offset,
+                    last,
+                    lines.len(),
+                    last + 1
+                ));
+            } else {
+                out.push_str(&format!("\n(End of file - total {} lines)", lines.len()));
+            }
+            let hint = format!("use offset/limit to read more of {path}");
+            if let Some(capped) = crate::truncate::truncate_output(&out, max_output_chars, &hint) {
+                return Ok(ToolOutput::text(capped));
             }
             Ok(ToolOutput::text(out))
         }
@@ -211,10 +244,28 @@ impl Tool for ReadFile {
     }
 }
 
+fn is_binary_file(data: &[u8]) -> bool {
+    if data.contains(&0) {
+        return true;
+    }
+    let sample = &data[..data.len().min(BINARY_SAMPLE_BYTES)];
+    if sample.is_empty() {
+        return false;
+    }
+    let non_printable = sample
+        .iter()
+        .filter(|&&b| b < 9 || (b > 13 && b < 32))
+        .count();
+    non_printable * 10 > sample.len() * 3
+}
+
 struct WriteFile {
     gate: ApprovalGate,
+    read_cache: ReadCache,
     lsp: Option<SharedManager>,
 }
+
+const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
 
 impl Tool for WriteFile {
     const NAME: &'static str = "write_file";
@@ -224,7 +275,10 @@ impl Tool for WriteFile {
     type Error = ToolExecutionError;
 
     fn description(&self) -> String {
-        "Create or overwrite a file in the working directory, creating parent directories as needed."
+        "Create or overwrite a file in the working directory, creating parent directories as needed. \
+         Passing mode=\"create\" fails when the file already exists; mode=\"overwrite\" requires reading \
+         the file with read_file first. When mode is omitted, new files are created and existing files \
+         are overwritten (also requiring a prior read)."
             .to_string()
     }
 
@@ -233,7 +287,8 @@ impl Tool for WriteFile {
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "Relative path of the file to write" },
-                "content": { "type": "string", "description": "Full new contents of the file" }
+                "content": { "type": "string", "description": "Full new contents of the file" },
+                "mode": { "type": "string", "enum": ["create", "overwrite"], "description": "Explicit write mode: 'create' fails if the file exists; 'overwrite' replaces an existing file (must be read first). Omit to auto-detect" }
             },
             "required": ["path", "content"]
         })
@@ -245,20 +300,60 @@ impl Tool for WriteFile {
         args: Value,
     ) -> Result<ToolOutput, ToolExecutionError> {
         let gate = self.gate.clone();
+        let read_cache = self.read_cache.clone();
         let lsp = self.lsp.clone();
         let result: Result<ToolOutput, String> = async move {
             let path = arg_value(&args, "path")?;
             let content = arg_value(&args, "content")?;
+            let mode = args.get("mode").and_then(Value::as_str);
+            match mode {
+                Some("create") | Some("overwrite") | None => {}
+                Some(other) => return Err(format!("invalid mode '{other}' (expected 'create' or 'overwrite')")),
+            }
             let (abs, reason) = resolve_for_write_checked(&path)?;
             if let Some(reason) = reason {
                 gate.request("write_file", &path, reason).await?;
+            }
+            let exists = abs.exists();
+            match mode {
+                Some("create") if exists => {
+                    return Err(format!(
+                        "'{path}' already exists; use mode 'overwrite' (after reading it) to replace it"
+                    ));
+                }
+                Some("overwrite") | None if exists && !read_cache.was_read(&path) => {
+                    return Err(format!(
+                        "'{path}' exists but was not read this turn; read it with read_file before overwriting, or pass mode 'create' for a new file"
+                    ));
+                }
+                _ => {}
             }
             if let Some(parent) = abs.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("create dir {}: {e}", parent.display()))?;
             }
-            let original = std::fs::read_to_string(&abs).ok();
-            std::fs::write(&abs, &content).map_err(|e| format!("write {path}: {e}"))?;
+            let original = std::fs::read(&abs).ok();
+            let original_text = original
+                .as_deref()
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned());
+            let had_bom = original.as_deref().is_some_and(|b| b.starts_with(UTF8_BOM));
+            let content_bare = content.trim_start_matches('\u{FEFF}');
+            let content = if had_bom || content_bare.len() != content.len() {
+                format!("\u{FEFF}{content_bare}")
+            } else {
+                content_bare.to_string()
+            };
+            let tmp_path = abs.with_extension(format!(
+                "{}tmp",
+                abs.extension()
+                    .map(|e| format!("{e}.", e = e.to_string_lossy()))
+                    .unwrap_or_default()
+            ));
+            std::fs::write(&tmp_path, &content).map_err(|e| format!("write {path}: {e}"))?;
+            if let Err(e) = std::fs::rename(&tmp_path, &abs) {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(format!("write {path}: {e}"));
+            }
             if let Some(lsp) = &lsp {
                 lsp.lock()
                     .await
@@ -269,7 +364,7 @@ impl Tool for WriteFile {
             ctx.insert_result(FileChange::Write {
                 path,
                 content,
-                original,
+                original: original_text,
             });
             Ok(ToolOutput::text(summary))
         }
@@ -781,14 +876,13 @@ async fn webfetch_finish(
         ));
     }
 
-    if max_output_chars > 0 && out.chars().count() > max_output_chars {
-        let omitted = out.chars().count() - max_output_chars;
-        let truncated: String = out.chars().take(max_output_chars).collect();
-        return Ok(ToolOutput::text(format!(
-            "{truncated}… (output truncated: {omitted} chars omitted — fetch a narrower URL if needed)"
-        )));
+    let body = format!("{url} ({content_type})\n\n{out}");
+    if let Some(capped) =
+        crate::truncate::truncate_output(&body, max_output_chars, "fetch a narrower URL if needed")
+    {
+        return Ok(ToolOutput::text(capped));
     }
-    Ok(ToolOutput::text(format!("{url} ({content_type})\n\n{out}")))
+    Ok(ToolOutput::text(body))
 }
 
 fn webfetch_looks_html(mime: &str, url: &str) -> bool {
@@ -1632,6 +1726,7 @@ pub fn all_tools(
             "write_file",
             WriteFile {
                 gate: gate.clone(),
+                read_cache: read_cache.clone(),
                 lsp: Some(lsp.clone()),
             },
         ),
@@ -1641,10 +1736,6 @@ pub fn all_tools(
                 gate: gate.clone(),
                 lsp: Some(lsp.clone()),
             },
-        ),
-        shuvarie_llm::into_dynamic(
-            "apply_patch",
-            crate::apply_patch::ApplyPatch::new(gate.clone(), Some(lsp.clone())),
         ),
         shuvarie_llm::into_dynamic(
             "run_shell",
@@ -1724,7 +1815,7 @@ pub fn edit_tools(
             "read_file",
             ReadFile {
                 gate: gate.clone(),
-                read_cache,
+                read_cache: read_cache.clone(),
                 max_output_chars,
             },
         ),
@@ -1732,6 +1823,7 @@ pub fn edit_tools(
             "write_file",
             WriteFile {
                 gate: gate.clone(),
+                read_cache,
                 lsp: Some(lsp.clone()),
             },
         ),
@@ -1833,6 +1925,7 @@ mod tests {
         let mut ctx = new_ctx();
         let _out = WriteFile {
             gate: gate(),
+            read_cache: ReadCache::new(),
             lsp: no_lsp(),
         }
         .call(
@@ -1846,6 +1939,156 @@ mod tests {
             ctx.result::<FileChange>(),
             Some(FileChange::Write { path, .. }) if path == "sub/deep/f.txt"
         ));
+        drop(dir);
+    }
+
+    fn write_file_tool(read_cache: ReadCache) -> WriteFile {
+        WriteFile {
+            gate: gate(),
+            read_cache,
+            lsp: no_lsp(),
+        }
+    }
+
+    #[tokio::test]
+    async fn write_create_mode_fails_on_existing() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("exists.txt", "old").unwrap();
+        let cache = ReadCache::new();
+        let err = write_file_tool(cache)
+            .call(
+                &mut new_ctx(),
+                json!({ "path": "exists.txt", "content": "new", "mode": "create" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("already exists"),
+            "{}",
+            err.to_string()
+        );
+        assert_eq!(std::fs::read_to_string("exists.txt").unwrap(), "old");
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn write_overwrite_requires_read_first() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("f.txt", "old").unwrap();
+        let cache = ReadCache::new();
+        let tool = write_file_tool(cache.clone());
+        let err = tool
+            .call(
+                &mut new_ctx(),
+                json!({ "path": "f.txt", "content": "new", "mode": "overwrite" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("was not read"),
+            "{}",
+            err.to_string()
+        );
+        assert_eq!(std::fs::read_to_string("f.txt").unwrap(), "old");
+
+        let reader = ReadFile {
+            gate: gate(),
+            read_cache: cache,
+            max_output_chars: 0,
+        };
+        reader
+            .call(&mut new_ctx(), json!({ "path": "f.txt" }))
+            .await
+            .unwrap();
+        tool.call(
+            &mut new_ctx(),
+            json!({ "path": "f.txt", "content": "new", "mode": "overwrite" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_to_string("f.txt").unwrap(), "new");
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn write_atomic_via_temp_rename() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("f.txt", "v1").unwrap();
+        let cache = ReadCache::new();
+        let reader = ReadFile {
+            gate: gate(),
+            read_cache: cache.clone(),
+            max_output_chars: 0,
+        };
+        reader
+            .call(&mut new_ctx(), json!({ "path": "f.txt" }))
+            .await
+            .unwrap();
+        write_file_tool(cache)
+            .call(&mut new_ctx(), json!({ "path": "f.txt", "content": "v2" }))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string("f.txt").unwrap(), "v2");
+        let leftovers: Vec<_> = std::fs::read_dir(".")
+            .unwrap()
+            .filter_map(|e| {
+                let name = e.unwrap().file_name().to_string_lossy().into_owned();
+                name.contains("tmp").then_some(name)
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn write_preserves_bom_and_strips_duplicate() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("bom.txt", "\u{FEFF}original").unwrap();
+        let cache = ReadCache::new();
+        let reader = ReadFile {
+            gate: gate(),
+            read_cache: cache.clone(),
+            max_output_chars: 0,
+        };
+        reader
+            .call(&mut new_ctx(), json!({ "path": "bom.txt" }))
+            .await
+            .unwrap();
+        write_file_tool(cache)
+            .call(
+                &mut new_ctx(),
+                json!({ "path": "bom.txt", "content": "\u{FEFF}replaced" }),
+            )
+            .await
+            .unwrap();
+        let bytes = std::fs::read("bom.txt").unwrap();
+        assert!(bytes.starts_with(UTF8_BOM));
+        assert_eq!(
+            String::from_utf8(bytes.clone()).unwrap(),
+            "\u{FEFF}replaced"
+        );
+        assert_eq!(&bytes[3..], "replaced".as_bytes());
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn write_rejects_invalid_mode() {
+        let (dir, _guard) = tempdir();
+        let err = write_file_tool(ReadCache::new())
+            .call(
+                &mut new_ctx(),
+                json!({ "path": "f.txt", "content": "x", "mode": "append" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("invalid mode"),
+            "{}",
+            err.to_string()
+        );
         drop(dir);
     }
 
@@ -2276,6 +2519,92 @@ mod tests {
             out.as_text().unwrap()
         );
         assert!(out.as_text().unwrap().chars().count() < big.len() + 200);
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn read_defaults_to_2000_lines_with_footers() {
+        let (dir, _guard) = tempdir();
+        let content: String = (1..=2100).map(|i| format!("line{i}\n")).collect();
+        std::fs::write("many.txt", &content).unwrap();
+        let tool = read_file_tool();
+        let out = tool
+            .call(&mut new_ctx(), json!({ "path": "many.txt" }))
+            .await
+            .unwrap();
+        let text = out.as_text().unwrap();
+        assert!(text.contains("Showing lines 1-2000 of 2100"), "{text}");
+        assert!(text.contains("Use offset=2001"), "{text}");
+        let rest = tool
+            .call(
+                &mut new_ctx(),
+                json!({ "path": "many.txt", "offset": 2001 }),
+            )
+            .await
+            .unwrap();
+        let text = rest.as_text().unwrap();
+        assert!(text.contains("End of file - total 2100 lines"), "{text}");
+        assert!(text.contains("2100 | line2100"), "{text}");
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn read_offset_out_of_range_errors() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("small.txt", "a\nb\nc\n").unwrap();
+        let err = read_file_tool()
+            .call(&mut new_ctx(), json!({ "path": "small.txt", "offset": 10 }))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("out of range"),
+            "{}",
+            err.to_string()
+        );
+        assert!(err.to_string().contains("3 lines"));
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn read_caps_long_lines() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("long.txt", "z".repeat(3000) + "\n").unwrap();
+        let out = read_file_tool()
+            .call(&mut new_ctx(), json!({ "path": "long.txt" }))
+            .await
+            .unwrap();
+        let text = out.as_text().unwrap();
+        assert!(text.contains(MAX_LINE_SUFFIX), "{text}");
+        assert!(text.chars().count() < 2200);
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn read_detects_binary_by_nonprintable_ratio() {
+        let (dir, _guard) = tempdir();
+        let mut data = vec![b'a'; 600];
+        data.extend(std::iter::repeat_n(0x07u8, 600));
+        std::fs::write("weird.bin", &data).unwrap();
+        let err = read_file_tool()
+            .call(&mut new_ctx(), json!({ "path": "weird.bin" }))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("binary"), "{}", err);
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn read_reaches_beyond_64kb() {
+        let (dir, _guard) = tempdir();
+        let line = "y".repeat(1000) + "\n";
+        std::fs::write("wide.txt", line.repeat(100)).unwrap();
+        let out = read_file_tool()
+            .call(&mut new_ctx(), json!({ "path": "wide.txt", "offset": 90 }))
+            .await
+            .unwrap();
+        let text = out.as_text().unwrap();
+        assert!(text.contains("90 |"), "{text}");
+        assert!(text.contains("End of file - total 100 lines"), "{text}");
         drop(dir);
     }
 
