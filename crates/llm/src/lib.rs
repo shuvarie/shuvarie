@@ -12,7 +12,9 @@ pub mod usage;
 
 pub use agent::WorkerAgent;
 pub use agent::WorkerRequest;
-pub use context_hook::{ContextBudget, ContextHook, OVERFLOW_REASON, UsageTracker};
+pub use context_hook::{
+    ContextBudget, ContextHook, OVERFLOW_REASON, UsageTracker, estimate_text_tokens,
+};
 pub use error::{LlmError, Result};
 pub use file_change::{DiffLine, DiffLineKind, FileChange, PatchFileChange, PatchFileKind};
 pub use message::{ChatMsg, Role};

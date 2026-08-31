@@ -1043,7 +1043,8 @@ impl CoreCtx {
         let catalog_provider = provider_name_for_catalog
             .and_then(|kind| crate::catalog::find_provider(&catalog_provider, &kind))
             .cloned();
-        let budget = context_budget(&self.config, catalog_provider.as_ref(), &model);
+        let budget = context_budget(&self.config, catalog_provider.as_ref(), &model)
+            .map(|b| b.with_preamble_tokens(shuvarie_llm::estimate_text_tokens(&preamble)));
         let output_forward_tx = self.event_tx.clone();
         tokio::spawn(async move {
             while let Some(chunk) = shell_rx.recv().await {
@@ -1724,10 +1725,11 @@ fn context_budget(
         .and_then(|p| crate::catalog::context_length(p, model))
         .map(|n| n.max(0) as u64)
         .unwrap_or(config.context.fallback_context_length);
-    Some(shuvarie_llm::ContextBudget::new(
-        context_length,
-        config.context.reserved,
-    ))
+    Some(
+        shuvarie_llm::ContextBudget::new(context_length, config.context.reserved)
+            .with_keep_recent_tokens(config.context.keep_recent_tokens)
+            .with_tool_output_max_chars(config.context.tool_output_max_chars),
+    )
 }
 
 #[cfg(test)]

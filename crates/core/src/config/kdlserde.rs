@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
-use crate::CoreError;
 use crate::error::ConfigParseError;
+use crate::CoreError;
 
 /// Deserializes a field, falling back to the type's default when the node is
 /// absent. KDL-serde's deserializer only reports a clean `None` for omitted
@@ -30,6 +30,12 @@ pub(crate) fn de_fallback_context<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<u64, D::Error> {
     Ok(Option::<u64>::deserialize(deserializer)?.unwrap_or(128_000))
+}
+
+pub(crate) fn de_keep_recent_tokens<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<u64, D::Error> {
+    Ok(Option::<u64>::deserialize(deserializer)?.unwrap_or(20_000))
 }
 
 pub(crate) fn de_frame_rate<'de, D: serde::Deserializer<'de>>(

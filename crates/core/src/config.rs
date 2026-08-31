@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -41,10 +40,11 @@ fn default_max_turns() -> usize {
     0
 }
 
-/// Context-window management: bounds the input tokens sent to the LLM per model
-/// call. Modeled on OpenCode's compaction/preserve approach but without an LLM
-/// summarizer — older tool results are dropped (replaced with a short marker)
-/// once the estimated request size exceeds the budget.
+/// Context-window management: bounds the input tokens sent to the LLM. One
+/// forecast (anchored on the last call's real request size) drives three
+/// layers — the per-call mechanical trim, the stop-before-call overflow
+/// guard, and the pre-send LLM compaction — all sharing this budget. See
+/// `docs/design/context-compaction.md` for the pipeline design.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct ContextConfig {
@@ -56,6 +56,11 @@ pub struct ContextConfig {
     /// budget is `context_length - reserved`.
     #[serde(deserialize_with = "kdlserde::de_reserved")]
     pub reserved: u64,
+
+    /// Tokens kept verbatim as the "tail" when trimming older messages (both
+    /// the in-run hook trim and compaction's cut point use this budget).
+    #[serde(deserialize_with = "kdlserde::de_keep_recent_tokens")]
+    pub keep_recent_tokens: u64,
 
     /// Maximum chars of a tool result's text sent to the model. Larger outputs
     /// are truncated with a marker hinting the model to read ranges. `0`
@@ -74,6 +79,7 @@ impl Default for ContextConfig {
         Self {
             disabled: false,
             reserved: 20_000,
+            keep_recent_tokens: 20_000,
             tool_output_max_chars: 16_000,
             fallback_context_length: 128_000,
         }
@@ -81,22 +87,13 @@ impl Default for ContextConfig {
 }
 
 impl ContextConfig {
-    /// Tokens kept verbatim as the "tail" during per-call history trimming.
-    /// 25% of the usable budget, clamped to [2_000, 15_000] tokens (estimated
-    /// at ~4 chars/token).
-    pub fn preserve_recent_tokens(&self, context_length: u64) -> u64 {
-        let usable = context_length.saturating_sub(self.reserved);
-        let pct = usable / 4;
-        pct.clamp(2_000, 15_000)
-    }
-
     /// Usable input-token budget for the given model context length.
     pub fn usable(&self, context_length: u64) -> u64 {
         context_length.saturating_sub(self.reserved)
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub struct SkillsConfig {
     #[serde(deserialize_with = "kdlserde::de_default")]
@@ -105,16 +102,7 @@ pub struct SkillsConfig {
     pub dirs: Vec<String>,
 }
 
-impl Default for SkillsConfig {
-    fn default() -> Self {
-        Self {
-            disabled: false,
-            dirs: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub struct EmbeddingConfig {
     #[serde(deserialize_with = "kdlserde::de_default")]
@@ -125,17 +113,6 @@ pub struct EmbeddingConfig {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dimensions: Option<u32>,
-}
-
-impl Default for EmbeddingConfig {
-    fn default() -> Self {
-        Self {
-            disabled: false,
-            provider: None,
-            model: None,
-            dimensions: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -199,12 +176,16 @@ impl AgentConfig {
 }
 
 fn effective(value: usize) -> usize {
-    if value == 0 { usize::MAX } else { value }
+    if value == 0 {
+        usize::MAX
+    } else {
+        value
+    }
 }
 
 /// Serde mirror of [`shuvarie_lsp::LspConfig`] for the KDL file layout; the
 /// `shuvarie-lsp` crate itself stays config-format-free.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub struct LspConfigRepr {
     #[serde(deserialize_with = "kdlserde::de_default")]
@@ -214,15 +195,6 @@ pub struct LspConfigRepr {
 }
 
 type BTreeRepr = std::collections::BTreeMap<String, LspServerSpecRepr>;
-
-impl Default for LspConfigRepr {
-    fn default() -> Self {
-        Self {
-            disabled: false,
-            servers: BTreeMap::new(),
-        }
-    }
-}
 
 impl From<&shuvarie_lsp::LspConfig> for LspConfigRepr {
     fn from(cfg: &shuvarie_lsp::LspConfig) -> Self {
@@ -250,7 +222,7 @@ impl From<&LspConfigRepr> for shuvarie_lsp::LspConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub struct LspServerSpecRepr {
     #[serde(default, deserialize_with = "kdlserde::de_default")]
@@ -261,17 +233,6 @@ pub struct LspServerSpecRepr {
     pub no_auto_start: bool,
     #[serde(default, deserialize_with = "kdlserde::de_default")]
     pub root_markers: Vec<String>,
-}
-
-impl Default for LspServerSpecRepr {
-    fn default() -> Self {
-        Self {
-            command: Vec::new(),
-            extensions: Vec::new(),
-            no_auto_start: false,
-            root_markers: Vec::new(),
-        }
-    }
 }
 
 impl From<&shuvarie_lsp::LspServerSpec> for LspServerSpecRepr {
@@ -384,19 +345,21 @@ mod tests {
                 provider "openai"
                 dimensions 1536
             }
-            context {
-                disabled #true
-                reserved 5000
-                tool-output-max-chars 1000
-                fallback-context-length 64000
-            }
-        "#;
+                        context {
+                                disabled #true
+                                reserved 5000
+                                keep-recent-tokens 10000
+                                tool-output-max-chars 1000
+                                fallback-context-length 64000
+                        }
+                "#;
         let parsed: Config = kdlserde::from_str(text).unwrap();
         assert!(parsed.embedding.disabled);
         assert_eq!(parsed.embedding.provider.as_deref(), Some("openai"));
         assert_eq!(parsed.embedding.dimensions, Some(1536));
         assert!(parsed.context.disabled);
         assert_eq!(parsed.context.reserved, 5000);
+        assert_eq!(parsed.context.keep_recent_tokens, 10_000);
         assert_eq!(parsed.context.tool_output_max_chars, 1000);
         assert_eq!(parsed.context.fallback_context_length, 64_000);
 

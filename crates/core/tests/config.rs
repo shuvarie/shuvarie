@@ -315,6 +315,7 @@ fn agent_config_defaults_when_section_absent() {
     assert!(parsed.embedding.disabled);
     assert!(!parsed.context.disabled);
     assert_eq!(parsed.context.reserved, 20_000);
+    assert_eq!(parsed.context.keep_recent_tokens, 20_000);
     assert_eq!(parsed.context.tool_output_max_chars, 16_000);
     assert_eq!(parsed.context.fallback_context_length, 128_000);
     assert!(!parsed.lsp.disabled);
@@ -388,6 +389,7 @@ fn config_context_fields_kebab_round_trip() {
     let mut config = Config::default();
     config.context.disabled = true;
     config.context.reserved = 5_000;
+    config.context.keep_recent_tokens = 8_000;
     config.context.tool_output_max_chars = 1_000;
     config.context.fallback_context_length = 32_000;
     config.skills.dirs = vec!["/tmp/skills".to_string(), "/opt/skills".to_string()];
@@ -399,6 +401,7 @@ fn config_context_fields_kebab_round_trip() {
 
     let saved = std::fs::read_to_string(&path).expect("read");
     assert!(saved.contains("tool-output-max-chars 1000"));
+    assert!(saved.contains("keep-recent-tokens 8000"));
     assert!(saved.contains("fallback-context-length 32000"));
     assert!(saved.contains("frame-rate 0"));
     assert!(saved.contains("dirs") && saved.contains("/tmp/skills"));
