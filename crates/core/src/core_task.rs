@@ -13,7 +13,7 @@ use shuvarie_llm::{FileChange, ProviderClient};
 use crate::approval::{ApprovalGate, ApprovalRequest};
 use crate::command::Command;
 use crate::config::Config;
-use crate::connections::{Connections, ProviderConfig};
+use crate::config::{Connections, ProviderConfig};
 use crate::embeddings::{self, EmbeddingSetup};
 use crate::event::Event;
 use crate::question::{AnswerResponse, QuestionGate, QuestionRequest};

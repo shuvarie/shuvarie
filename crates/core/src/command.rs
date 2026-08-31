@@ -1,4 +1,4 @@
-use crate::connections::ProviderConfig;
+use crate::config::ProviderConfig;
 
 #[derive(Debug, Clone)]
 pub enum Command {

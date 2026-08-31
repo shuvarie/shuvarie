@@ -3,8 +3,14 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::kdlserde;
 use crate::{CoreError, Result};
+
+mod connections;
+mod connections_kdl;
+mod kdlserde;
+
+pub use self::connections::{Connections, ProviderConfig};
+pub(crate) use self::kdlserde::span_to_line_column;
 
 const CONFIG_DIR_NAME: &str = "shuvarie";
 const CONFIG_FILE_NAME: &str = "config.kdl";

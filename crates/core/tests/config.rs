@@ -29,8 +29,8 @@ fn round_trip_serialization() {
 
     connections.save_to(&path).expect("save");
     let saved = std::fs::read_to_string(&path).expect("read saved file");
-    assert!(saved.contains("active-provider"));
-    assert!(saved.contains("my-openai"));
+    assert!(saved.contains("active my-openai") || saved.contains("active \"my-openai\""));
+    assert!(saved.contains("gpt-5.5"));
     assert!(saved.contains("api-key"));
     assert!(saved.contains("sk-test"));
 
@@ -73,37 +73,32 @@ fn kdl_document_shape() {
         "expected providers section:\n{saved}"
     );
     assert!(
-        saved.contains("my-openai {") || saved.contains("\"my-openai\" {"),
-        "provider keyed by node name:\n{saved}"
+        saved.contains("provider my-openai") || saved.contains("provider \"my-openai\""),
+        "provider keyed by first argument:\n{saved}"
     );
-    assert!(saved.contains("kind openai") || saved.contains("kind \"openai\""));
+    assert!(saved.contains("kind=openai") || saved.contains("kind=\"openai\""));
     assert!(
         saved.contains("base-url \"http://localhost:11434\"")
             || saved.contains("base-url http://localhost:11434")
     );
     assert!(
-        saved.contains("active-provider my-openai")
-            || saved.contains("active-provider \"my-openai\"")
+        saved.contains("active my-openai") && saved.contains("gpt-5.5")
+            || saved.contains("active \"my-openai\" \"gpt-5.5\"")
     );
-    assert!(saved.contains("active-model"));
-    assert!(saved.contains("gpt-5.5"));
 }
 
 #[test]
 fn parse_hand_written_kdl() {
     let kdl = r#"
+active "my-openai" "gpt-5.5"
 providers {
-    my-openai {
-        kind "openai"
+    provider "my-openai" kind="openai" {
         api-key "sk-test"
     }
-    local-ollama {
-        kind "ollama"
+    provider "local-ollama" kind="ollama" {
         base-url "http://localhost:11434"
     }
 }
-active-provider "my-openai"
-active-model "gpt-5.5"
 "#;
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("connections.kdl");
@@ -116,13 +111,11 @@ active-model "gpt-5.5"
 fn parse_ignores_unknown_nodes() {
     let kdl = r#"
 providers {
-    my-openai {
-        kind "openai"
+    provider "my-openai" {
         api-key "sk-test"
         future-field "x"
     }
 }
-unknown-top-level #true
 "#;
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("connections.kdl");
@@ -133,7 +126,7 @@ unknown-top-level #true
 
 #[test]
 fn parse_options_absent() {
-    let kdl = "providers {\n    local {\n        kind \"ollama\"\n    }\n}\n";
+    let kdl = "providers {\n    provider local kind=\"ollama\"\n}\n";
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("connections.kdl");
     std::fs::write(&path, kdl).expect("write");

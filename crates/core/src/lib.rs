@@ -5,13 +5,11 @@ pub mod catalog;
 pub mod command;
 pub mod compaction;
 pub mod config;
-pub mod connections;
 pub mod context;
 pub mod core_task;
 pub mod embeddings;
 mod error;
 pub mod event;
-mod kdlserde;
 pub mod lsp_manager;
 pub mod question;
 pub mod session;
@@ -23,10 +21,9 @@ pub mod tools;
 pub use approval::ApprovalReason;
 pub use command::Command;
 pub use config::{
-    AgentConfig, Config, ContextConfig, EmbeddingConfig, LspConfigRepr, LspServerSpecRepr,
-    SkillsConfig, UiPrefs,
+    AgentConfig, Config, Connections, ContextConfig, EmbeddingConfig, LspConfigRepr,
+    LspServerSpecRepr, ProviderConfig, SkillsConfig, UiPrefs,
 };
-pub use connections::{Connections, ProviderConfig};
 pub use core_task::run;
 pub use error::{ConfigParseError, CoreError, Result};
 pub use event::Event;

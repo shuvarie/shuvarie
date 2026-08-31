@@ -83,7 +83,11 @@ fn map_error(e: kdl::de::Error) -> CoreError {
     })
 }
 
-fn span_to_line_column(input: &str, offset: usize, length: usize) -> (usize, usize, usize) {
+pub(crate) fn span_to_line_column(
+    input: &str,
+    offset: usize,
+    length: usize,
+) -> (usize, usize, usize) {
     let before = input.chars().take(offset).collect::<String>();
     let line = before.matches('\n').count() + 1;
     let column = before

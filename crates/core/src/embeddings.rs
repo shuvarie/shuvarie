@@ -4,7 +4,7 @@ use shuvarie_db::Store;
 use shuvarie_llm::ProviderClient;
 
 use crate::config::Config;
-use crate::connections::Connections;
+use crate::config::Connections;
 
 const MAX_TEXT_CHARS: usize = 8000;
 const BATCH_SIZE: u64 = 64;
