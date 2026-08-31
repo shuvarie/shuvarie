@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-use frameplay_lib::{Frameplay, FrameplayOptions};
+use frameplay::{Frameplay, FrameplayOptions, FrameTimeReference};
 use ratatui::prelude::*;
 
 use super::theme;
@@ -13,7 +13,7 @@ fn frameplay() -> &'static Frameplay<&'static str> {
         Frameplay::new(
             FRAMES,
             FrameplayOptions {
-                frame_time_reference: frameplay_lib::FrameTimeReference::StartTime,
+                frame_time_reference: FrameTimeReference::StartTime,
                 frame_rate: 10,
             },
         )

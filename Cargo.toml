@@ -10,7 +10,7 @@ repository.workspace = true
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
 color-eyre = "0.6.5"
-frameplay-lib = "0.1"
+frameplay = "0.1"
 futures-util = { version = "0.3", default-features = false, features = ["std", "alloc"] }
 nucleo = "0.5"
 selune = { path = "vendor/selune" }
