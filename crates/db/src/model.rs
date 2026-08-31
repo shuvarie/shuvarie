@@ -41,8 +41,8 @@ impl MsgRole {
 #[derive(Debug, toasty::Model)]
 pub struct Session {
     #[key]
-    #[auto]
-    pub id: u64,
+    #[auto(uuid(v7))]
+    pub id: uuid::Uuid,
     pub title: String,
     pub provider: Option<String>,
     pub model: Option<String>,
@@ -60,7 +60,7 @@ pub struct Message {
     #[auto]
     pub id: u64,
     #[index]
-    pub session_id: u64,
+    pub session_id: uuid::Uuid,
     #[belongs_to(key = session_id, references = id)]
     pub session: toasty::Deferred<Session>,
     pub seq: u64,
@@ -87,7 +87,7 @@ pub struct ToolCall {
     #[auto]
     pub id: u64,
     #[index]
-    pub session_id: u64,
+    pub session_id: uuid::Uuid,
     #[index]
     pub message_id: u64,
     #[belongs_to(key = message_id, references = id)]
@@ -109,7 +109,7 @@ pub struct UndoLog {
     #[auto]
     pub id: u64,
     #[index]
-    pub session_id: u64,
+    pub session_id: uuid::Uuid,
     pub turn_seq: u64,
     pub user_content: String,
     pub assistant_content: String,
@@ -129,7 +129,7 @@ pub struct MessageEmbedding {
     #[belongs_to(key = message_id, references = id)]
     pub message: toasty::Deferred<Message>,
     #[index]
-    pub session_id: u64,
+    pub session_id: uuid::Uuid,
     pub seq: u64,
     pub content: String,
     pub vec: Vec<u8>,

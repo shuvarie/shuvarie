@@ -22,7 +22,7 @@ pub enum Event {
     },
     SessionStarted,
     SessionCreated {
-        id: u64,
+        id: uuid::Uuid,
         title: String,
     },
     TokenReceived {
@@ -76,12 +76,12 @@ pub enum Event {
         sessions: Vec<SessionSummary>,
     },
     SessionLoaded {
-        id: u64,
+        id: uuid::Uuid,
         title: String,
         session: crate::Session,
     },
     SessionDeleted {
-        id: u64,
+        id: uuid::Uuid,
     },
     SessionError {
         error: String,

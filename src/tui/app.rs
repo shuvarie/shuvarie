@@ -73,16 +73,16 @@ pub enum AppMessage {
         sessions: Vec<shuvarie_core::SessionSummary>,
     },
     SessionLoaded {
-        id: u64,
+        id: uuid::Uuid,
         title: String,
         session: shuvarie_core::Session,
     },
     SessionCreated {
-        id: u64,
+        id: uuid::Uuid,
         title: String,
     },
     SessionDeleted {
-        id: u64,
+        id: uuid::Uuid,
     },
     SessionError {
         error: String,

@@ -13,7 +13,7 @@ static MIGRATIONS: toasty::migration::MigrationSet = toasty::embed_migrations!()
 
 #[derive(Debug, Clone)]
 pub struct SessionSummary {
-    pub id: u64,
+    pub id: uuid::Uuid,
     pub title: String,
     pub message_count: u64,
     pub updated_at_epoch_ms: i64,
@@ -21,7 +21,7 @@ pub struct SessionSummary {
 
 #[derive(Debug, Clone)]
 pub struct StoredSession {
-    pub id: u64,
+    pub id: uuid::Uuid,
     pub title: String,
     pub provider: Option<String>,
     pub model: Option<String>,
@@ -50,7 +50,7 @@ pub struct StoredMessage {
 pub struct StoredToolCall {
     pub id: u64,
     pub message_id: u64,
-    pub session_id: u64,
+    pub session_id: uuid::Uuid,
     pub seq: u64,
     pub name: String,
     pub args_json: String,
@@ -82,7 +82,7 @@ pub enum SearchSource {
 #[derive(Debug, Clone)]
 pub struct SearchHit {
     pub message_id: u64,
-    pub session_id: u64,
+    pub session_id: uuid::Uuid,
     pub seq: u64,
     pub role: MsgRole,
     pub content: String,
@@ -94,7 +94,7 @@ pub struct SearchHit {
 #[derive(Debug, Clone)]
 pub struct EmbeddableMessage {
     pub id: u64,
-    pub session_id: u64,
+    pub session_id: uuid::Uuid,
     pub seq: u64,
     pub content: String,
 }
@@ -206,7 +206,7 @@ impl Store {
         Ok(out)
     }
 
-    pub async fn load_session(&mut self, id: u64) -> Result<StoredSession> {
+    pub async fn load_session(&mut self, id: uuid::Uuid) -> Result<StoredSession> {
         let session = Session::filter_by_id(id)
             .first()
             .exec(&mut self.db)
@@ -252,7 +252,7 @@ impl Store {
         title: &str,
         provider: Option<&str>,
         model: Option<&str>,
-    ) -> Result<u64> {
+    ) -> Result<uuid::Uuid> {
         let session = toasty::create!(Session {
             title: title.to_string(),
             provider: provider.map(|p| p.to_string()),
@@ -266,7 +266,7 @@ impl Store {
 
     pub async fn append_message(
         &mut self,
-        session_id: u64,
+        session_id: uuid::Uuid,
         role: Role,
         content: &str,
     ) -> Result<StoredMessage> {
@@ -295,7 +295,7 @@ impl Store {
 
     pub async fn append_assistant_message(
         &mut self,
-        session_id: u64,
+        session_id: uuid::Uuid,
         content: &str,
         reasoning: &str,
         interrupted: bool,
@@ -352,7 +352,7 @@ impl Store {
 
     pub async fn append_summary(
         &mut self,
-        session_id: u64,
+        session_id: uuid::Uuid,
         content: &str,
     ) -> Result<StoredMessage> {
         let seq = self.next_seq(session_id).await?;
@@ -390,7 +390,7 @@ impl Store {
     #[allow(clippy::too_many_arguments)]
     pub async fn append_tool_call(
         &mut self,
-        session_id: u64,
+        session_id: uuid::Uuid,
         message_id: u64,
         seq: u64,
         name: &str,
@@ -430,7 +430,10 @@ impl Store {
         Ok(rows.into_iter().map(StoredToolCall::from).collect())
     }
 
-    async fn tool_calls_for_session(&mut self, session_id: u64) -> Result<Vec<StoredToolCall>> {
+    async fn tool_calls_for_session(
+        &mut self,
+        session_id: uuid::Uuid,
+    ) -> Result<Vec<StoredToolCall>> {
         let rows = ToolCall::filter_by_session_id(session_id)
             .order_by(ToolCall::fields().seq().asc())
             .exec(&mut self.db)
@@ -439,7 +442,7 @@ impl Store {
         Ok(rows.into_iter().map(StoredToolCall::from).collect())
     }
 
-    pub async fn truncate_undo_log(&mut self, session_id: u64) -> Result<()> {
+    pub async fn truncate_undo_log(&mut self, session_id: uuid::Uuid) -> Result<()> {
         UndoLog::filter_by_session_id(session_id)
             .delete()
             .exec(&mut self.db)
@@ -448,7 +451,11 @@ impl Store {
         Ok(())
     }
 
-    pub async fn append_undo_log(&mut self, session_id: u64, entry: &UndoEntry) -> Result<()> {
+    pub async fn append_undo_log(
+        &mut self,
+        session_id: uuid::Uuid,
+        entry: &UndoEntry,
+    ) -> Result<()> {
         let usage_json = serde_json::to_string(&entry.usage).unwrap_or_default();
         let tool_calls_json = serialize_tool_calls(&entry.tool_calls);
         let file_changes_json = serialize_file_changes(&entry.tool_calls);
@@ -468,7 +475,7 @@ impl Store {
         Ok(())
     }
 
-    pub async fn last_undo_log(&mut self, session_id: u64) -> Result<Option<UndoEntry>> {
+    pub async fn last_undo_log(&mut self, session_id: uuid::Uuid) -> Result<Option<UndoEntry>> {
         let row = UndoLog::filter_by_session_id(session_id)
             .latest_by(UndoLog::fields().id())
             .first()
@@ -489,7 +496,7 @@ impl Store {
         }))
     }
 
-    pub async fn pop_undo_log(&mut self, session_id: u64) -> Result<Option<UndoEntry>> {
+    pub async fn pop_undo_log(&mut self, session_id: uuid::Uuid) -> Result<Option<UndoEntry>> {
         let entry = self.last_undo_log(session_id).await?;
         if entry.is_some() {
             let row = UndoLog::filter_by_session_id(session_id)
@@ -507,7 +514,7 @@ impl Store {
         Ok(entry)
     }
 
-    pub async fn delete_session(&mut self, id: u64) -> Result<()> {
+    pub async fn delete_session(&mut self, id: uuid::Uuid) -> Result<()> {
         Session::filter_by_id(id)
             .delete()
             .exec(&mut self.db)
@@ -528,13 +535,13 @@ impl Store {
         .bind(query)
         .bind(limit as i64)
         .column_types([
-            toasty::stmt::Type::I64,
-            toasty::stmt::Type::I64,
-            toasty::stmt::Type::I64,
-            toasty::stmt::Type::String,
-            toasty::stmt::Type::String,
-            toasty::stmt::Type::String,
-            toasty::stmt::Type::F64,
+            Type::I64,
+            Type::Bytes,
+            Type::I64,
+            Type::String,
+            Type::String,
+            Type::String,
+            Type::F64,
         ])
         .exec(&mut self.db)
         .await
@@ -545,17 +552,23 @@ impl Store {
             let toasty::stmt::Value::Record(fields) = row else {
                 continue;
             };
+            let get_u64 = |i: usize| -> u64 {
+                match &fields[i] {
+                    toasty::stmt::Value::I64(v) => *v as u64,
+                    toasty::stmt::Value::U64(v) => *v,
+                    _ => 0,
+                }
+            };
             let get_str = |i: usize| -> String {
                 match &fields[i] {
                     toasty::stmt::Value::String(s) => s.clone(),
                     _ => String::new(),
                 }
             };
-            let get_u64 = |i: usize| -> u64 {
+            let get_uuid = |i: usize| -> uuid::Uuid {
                 match &fields[i] {
-                    toasty::stmt::Value::I64(v) => *v as u64,
-                    toasty::stmt::Value::U64(v) => *v,
-                    _ => 0,
+                    toasty::stmt::Value::Bytes(b) => uuid::Uuid::from_slice(b).unwrap_or_default(),
+                    _ => uuid::Uuid::nil(),
                 }
             };
             let get_f64 = |i: usize| -> f64 {
@@ -567,7 +580,7 @@ impl Store {
             };
             hits.push(SearchHit {
                 message_id: get_u64(0),
-                session_id: get_u64(1),
+                session_id: get_uuid(1),
                 seq: get_u64(2),
                 role: MsgRole::from_str_loose(&get_str(3)),
                 content: get_str(4),
@@ -582,7 +595,7 @@ impl Store {
     pub async fn upsert_embedding(
         &mut self,
         message_id: u64,
-        session_id: u64,
+        session_id: uuid::Uuid,
         seq: u64,
         content: &str,
         vec: Vec<u8>,
@@ -627,12 +640,7 @@ impl Store {
              LIMIT ?1",
         )
         .bind(limit as i64)
-        .column_types([
-            toasty::stmt::Type::I64,
-            toasty::stmt::Type::I64,
-            toasty::stmt::Type::I64,
-            toasty::stmt::Type::String,
-        ])
+        .column_types([Type::I64, Type::Bytes, Type::I64, Type::String])
         .exec(&mut self.db)
         .await
         .map_err(|e| DbError::Search(e.to_string()))?;
@@ -649,6 +657,12 @@ impl Store {
                     _ => 0,
                 }
             };
+            let get_uuid = |i: usize| -> uuid::Uuid {
+                match &fields[i] {
+                    toasty::stmt::Value::Bytes(b) => uuid::Uuid::from_slice(b).unwrap_or_default(),
+                    _ => uuid::Uuid::nil(),
+                }
+            };
             let get_str = |i: usize| -> String {
                 match &fields[i] {
                     toasty::stmt::Value::String(s) => s.clone(),
@@ -657,7 +671,7 @@ impl Store {
             };
             out.push(EmbeddableMessage {
                 id: get_u64(0),
-                session_id: get_u64(1),
+                session_id: get_uuid(1),
                 seq: get_u64(2),
                 content: get_str(3),
             });
@@ -680,7 +694,7 @@ impl Store {
         .bind(limit as i64)
         .column_types([
             Type::I64,
-            Type::I64,
+            Type::Bytes,
             Type::I64,
             Type::String,
             Type::String,
@@ -709,6 +723,12 @@ impl Store {
                     _ => String::new(),
                 }
             };
+            let get_uuid = |i: usize| -> uuid::Uuid {
+                match &fields[i] {
+                    toasty::stmt::Value::Bytes(b) => uuid::Uuid::from_slice(b).unwrap_or_default(),
+                    _ => uuid::Uuid::nil(),
+                }
+            };
             let get_f64 = |i: usize| -> f64 {
                 match &fields[i] {
                     toasty::stmt::Value::F64(v) => *v,
@@ -718,7 +738,7 @@ impl Store {
             };
             hits.push(SearchHit {
                 message_id: get_u64(0),
-                session_id: get_u64(1),
+                session_id: get_uuid(1),
                 seq: get_u64(2),
                 role: MsgRole::from_str_loose(&get_str(3)),
                 content: get_str(4),
@@ -730,7 +750,7 @@ impl Store {
         Ok(hits)
     }
 
-    async fn messages_for_session(&mut self, id: u64) -> Result<Vec<StoredMessage>> {
+    async fn messages_for_session(&mut self, id: uuid::Uuid) -> Result<Vec<StoredMessage>> {
         let messages = Message::filter_by_session_id(id)
             .order_by(Message::fields().seq().asc())
             .exec(&mut self.db)
@@ -739,7 +759,7 @@ impl Store {
         Ok(messages.into_iter().map(StoredMessage::from).collect())
     }
 
-    async fn message_count(&mut self, session_id: u64) -> Result<u64> {
+    async fn message_count(&mut self, session_id: uuid::Uuid) -> Result<u64> {
         let count: u64 = Message::filter_by_session_id(session_id)
             .count()
             .exec(&mut self.db)
@@ -748,7 +768,7 @@ impl Store {
         Ok(count)
     }
 
-    async fn next_seq(&mut self, session_id: u64) -> Result<u64> {
+    async fn next_seq(&mut self, session_id: uuid::Uuid) -> Result<u64> {
         let last = Message::filter_by_session_id(session_id)
             .latest_by(Message::fields().seq())
             .first()
@@ -760,7 +780,7 @@ impl Store {
 
     pub async fn last_turn(
         &mut self,
-        session_id: u64,
+        session_id: uuid::Uuid,
     ) -> Result<Option<(StoredMessage, StoredMessage)>> {
         let messages = self.messages_for_session(session_id).await?;
         let mut i = messages.len();
@@ -789,7 +809,7 @@ impl Store {
         Ok(())
     }
 
-    async fn touch_session(&mut self, id: u64) -> Result<()> {
+    async fn touch_session(&mut self, id: uuid::Uuid) -> Result<()> {
         let now = jiff::Timestamp::now();
         let update = Session::update_by_id(id).updated_at(now);
         update
@@ -895,7 +915,7 @@ fn deserialize_tool_calls(json: &str) -> Vec<StoredToolCall> {
         .map(|(seq, e)| StoredToolCall {
             id: 0,
             message_id: 0,
-            session_id: 0,
+            session_id: uuid::Uuid::nil(),
             seq: seq as u64,
             name: e.name,
             args_json: e.args_json,

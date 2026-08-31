@@ -8146,6 +8146,7 @@ dependencies = [
  "toasty-cli",
  "toasty-driver-turso",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

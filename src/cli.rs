@@ -18,4 +18,8 @@ pub struct Cli {
     /// Resume the most recent session on startup, opening the session screen.
     #[arg(short, long)]
     pub current: bool,
+    /// Resume the session with the given UUID on startup, opening the session
+    /// screen. The UUID is printed when exiting a session.
+    #[arg(short = 's', long, conflicts_with = "current", value_name = "UUID")]
+    pub session: Option<uuid::Uuid>,
 }

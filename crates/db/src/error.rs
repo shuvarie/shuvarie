@@ -11,7 +11,7 @@ pub enum DbError {
     #[error("search query failed: {0}")]
     Search(String),
     #[error("session {id} not found")]
-    NotFound { id: u64 },
+    NotFound { id: uuid::Uuid },
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;

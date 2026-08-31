@@ -71,7 +71,7 @@ pub enum SessionMessage {
     },
     Reset,
     Loaded {
-        id: u64,
+        id: uuid::Uuid,
         title: String,
         session: shuvarie_core::Session,
     },
@@ -151,7 +151,7 @@ pub struct SessionScreen {
     committed_dirty: Cell<bool>,
     pub status: Option<String>,
     pub sidebar: Sidebar,
-    pub session_id: Option<u64>,
+    pub session_id: Option<uuid::Uuid>,
     pub session_title: Option<String>,
     pub error: Option<String>,
     pub lsp_diagnostics: std::collections::BTreeMap<String, Vec<shuvarie_core::DiagnosticInfo>>,

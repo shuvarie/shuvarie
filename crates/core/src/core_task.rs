@@ -31,6 +31,17 @@ enum StreamOutcome {
     Overflowed { compacted: bool },
 }
 
+/// Which session (if any) to load when the core task starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StartupSession {
+    #[default]
+    None,
+    /// Resume the most recently updated session (`-c` / `--current`).
+    MostRecent,
+    /// Resume the session with the given UUID (`-s` / `--session`).
+    Session(uuid::Uuid),
+}
+
 /// Shared state owned by the core task's run loop, threaded through the
 /// turn-streaming helpers. Bundles the long-lived run-loop state plus the
 /// per-turn parameters derived once from config, so the helpers take a single
@@ -63,7 +74,7 @@ pub async fn run(
     config: Config,
     connections: Connections,
     store: Store,
-    load_current: bool,
+    startup: StartupSession,
     config_path: Option<PathBuf>,
     connections_path: Option<PathBuf>,
     mut cmd_rx: Receiver<Command>,
@@ -146,9 +157,7 @@ pub async fn run(
         max_output_chars,
         max_output_bytes,
     };
-    if load_current {
-        load_most_recent_session(&mut ctx.store, &mut ctx.session, &ctx.event_tx).await;
-    }
+    load_startup_session(&mut ctx.store, &mut ctx.session, &ctx.event_tx, startup).await;
 
     loop {
         tokio::select! {
@@ -829,7 +838,7 @@ fn title_for(content: &str) -> String {
     }
 }
 
-async fn undo_last_turn(store: &mut Store, session_id: u64) -> Result<bool, String> {
+async fn undo_last_turn(store: &mut Store, session_id: uuid::Uuid) -> Result<bool, String> {
     let turn = store
         .last_turn(session_id)
         .await
@@ -893,7 +902,7 @@ async fn undo_last_turn(store: &mut Store, session_id: u64) -> Result<bool, Stri
     Ok(true)
 }
 
-async fn redo_turn(store: &mut Store, session_id: u64) -> Result<bool, String> {
+async fn redo_turn(store: &mut Store, session_id: uuid::Uuid) -> Result<bool, String> {
     let entry = store
         .pop_undo_log(session_id)
         .await
@@ -1156,32 +1165,48 @@ impl CoreCtx {
     }
 }
 
-async fn load_most_recent_session(
+async fn load_startup_session(
     store: &mut Store,
     session: &mut Option<Arc<Mutex<Session>>>,
     event_tx: &Sender<Event>,
+    startup: StartupSession,
 ) {
-    match store.most_recent_session().await {
-        Ok(Some(stored)) => {
-            let loaded = Session::from_stored(stored);
-            *session = Some(Arc::new(Mutex::new(loaded.clone())));
-            let _ = event_tx
-                .send(Event::SessionLoaded {
-                    id: loaded.id.unwrap_or_default(),
-                    title: loaded.title.clone().unwrap_or_default(),
-                    session: loaded,
-                })
-                .await;
-        }
-        Ok(None) => {}
-        Err(e) => {
-            let _ = event_tx
-                .send(Event::SessionError {
-                    error: e.to_string(),
-                })
-                .await;
-        }
-    }
+    let stored = match startup {
+        StartupSession::None => return,
+        StartupSession::MostRecent => match store.most_recent_session().await {
+            Ok(stored) => stored,
+            Err(e) => {
+                let _ = event_tx
+                    .send(Event::SessionError {
+                        error: e.to_string(),
+                    })
+                    .await;
+                return;
+            }
+        },
+        StartupSession::Session(id) => match store.load_session(id).await {
+            Ok(stored) => Some(stored),
+            Err(e) => {
+                let _ = event_tx
+                    .send(Event::SessionError {
+                        error: e.to_string(),
+                    })
+                    .await;
+                return;
+            }
+        },
+    };
+    let Some(stored) = stored else { return };
+    let id = stored.id;
+    let loaded = Session::from_stored(stored);
+    *session = Some(Arc::new(Mutex::new(loaded.clone())));
+    let _ = event_tx
+        .send(Event::SessionLoaded {
+            id,
+            title: loaded.title.clone().unwrap_or_default(),
+            session: loaded,
+        })
+        .await;
 }
 
 async fn stream_busy(active_stream: &Option<AbortHandle>, event_tx: &Sender<Event>) -> bool {

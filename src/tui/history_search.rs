@@ -26,7 +26,7 @@ pub enum HistorySearchMessage {
 pub enum HistorySearchEffect {
     Open,
     Search { query: String },
-    LoadSession { id: u64 },
+    LoadSession { id: uuid::Uuid },
     Close,
 }
 

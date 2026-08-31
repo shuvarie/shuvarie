@@ -8,7 +8,7 @@ use crate::tool_record::ToolRecord;
 
 #[derive(Debug, Clone, Default)]
 pub struct Session {
-    pub id: Option<u64>,
+    pub id: Option<uuid::Uuid>,
     pub title: Option<String>,
     pub messages: Vec<ChatMsg>,
     pub reasoning: HashMap<u64, String>,

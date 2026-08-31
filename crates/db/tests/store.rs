@@ -119,8 +119,9 @@ async fn delete_session_removes_messages() {
 #[tokio::test]
 async fn load_missing_session_errors() {
     let mut store = Store::open_in_memory().await.unwrap();
-    let err = store.load_session(999).await.unwrap_err();
-    assert!(matches!(err, shuvarie_db::DbError::NotFound { id: 999 }));
+    let missing = uuid::Uuid::nil();
+    let err = store.load_session(missing).await.unwrap_err();
+    assert!(matches!(err, shuvarie_db::DbError::NotFound { id } if id == missing));
 }
 
 #[tokio::test]

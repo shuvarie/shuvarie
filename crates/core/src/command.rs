@@ -28,10 +28,10 @@ pub enum Command {
     CancelStream,
     ListSessions,
     LoadSession {
-        id: u64,
+        id: uuid::Uuid,
     },
     DeleteSession {
-        id: u64,
+        id: uuid::Uuid,
     },
     SearchHistory {
         query: String,

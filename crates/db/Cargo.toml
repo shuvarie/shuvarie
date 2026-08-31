@@ -18,6 +18,8 @@ toasty = { version = "0.10", features = ["turso", "jiff", "migration"] }
 toasty-cli = "0.10"
 toasty-driver-turso = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+uuid = "1"
 
 [dev-dependencies]
 tempfile = "3"
+uuid = "1"

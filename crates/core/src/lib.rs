@@ -25,7 +25,7 @@ pub use config::{
     Active, AgentConfig, Config, Connections, ContextConfig, EmbeddingConfig, LspConfigRepr,
     LspServerSpecRepr, ProviderConfig, SkillsConfig, UiPrefs,
 };
-pub use core_task::run;
+pub use core_task::{StartupSession, run};
 pub use error::{ConfigParseError, CoreError, Result};
 pub use event::Event;
 pub use question::{QuestionPrompt, QuestionRequest};

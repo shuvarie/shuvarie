@@ -22,8 +22,8 @@ pub enum SessionPickerMessage {
 }
 
 pub enum SessionPickerEffect {
-    LoadSession { id: u64 },
-    DeleteSession { id: u64 },
+    LoadSession { id: uuid::Uuid },
+    DeleteSession { id: uuid::Uuid },
     NewSession,
     Close,
 }
@@ -35,7 +35,7 @@ pub struct SessionPicker {
     pub offset: usize,
     viewport_height: u16,
     pub confirm_delete: bool,
-    pub active_id: Option<u64>,
+    pub active_id: Option<uuid::Uuid>,
     pub loading: bool,
 }
 
@@ -53,7 +53,7 @@ impl SessionPicker {
         }
     }
 
-    pub fn open(&mut self, active_id: Option<u64>) {
+    pub fn open(&mut self, active_id: Option<uuid::Uuid>) {
         self.open = true;
         self.sessions.clear();
         self.selected = 0;
@@ -76,7 +76,7 @@ impl SessionPicker {
         self.recompute_offset();
     }
 
-    pub fn session_after(&self, id: u64) -> Option<u64> {
+    pub fn session_after(&self, id: uuid::Uuid) -> Option<uuid::Uuid> {
         let idx = self.sessions.iter().position(|s| s.id == id)?;
         let next = idx + 1;
         if next < self.sessions.len() {

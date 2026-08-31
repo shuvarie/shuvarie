@@ -38,7 +38,7 @@ pub async fn run_tui(
     config: Config,
     cmd_tx: Sender<Command>,
     event_rx: Receiver<CoreEvent>,
-) -> io::Result<()> {
+) -> io::Result<Option<uuid::Uuid>> {
     let mut term = PlatformTerminal::new()?;
     term.enter_raw_mode()?;
 
@@ -53,10 +53,12 @@ pub async fn run_tui(
 
     let frame_budget = frame_budget(config.ui.frame_rate);
 
-    let res: io::Result<()> = render_tui(app, &mut rat, event_rx, event_stream, frame_budget).await;
+    let session_id = render_tui(app, &mut rat, event_rx, event_stream, frame_budget).await;
 
     let deinit = deinit_terminal(rat.backend_mut().terminal_mut());
-    res.and(deinit)
+    let session_id = session_id?;
+    deinit?;
+    Ok(session_id)
 }
 
 /// Minimum interval between frames. `None` disables the cap (one draw per
@@ -80,7 +82,7 @@ async fn render_tui<B>(
     mut event_rx: Receiver<CoreEvent>,
     mut event_stream: EventStream,
     frame_budget: Option<Duration>,
-) -> io::Result<()>
+) -> io::Result<Option<uuid::Uuid>>
 where
     B: Backend,
     io::Error: From<<B as Backend>::Error>,
@@ -124,13 +126,13 @@ where
                 }
                 // Terminal event — always draw immediately when it changes state.
                 ev = event_stream.next() => {
-                    let Some(ev_result) = ev else { break 'render_loop Ok(()); };
+                    let Some(ev_result) = ev else { break 'render_loop Ok(app.session.session_id); };
                     let msg = app.map_event(Event::Terminal(ev_result?));
                     (true, apply_msg(&mut app, msg))
                 }
                 // Core event — coalesce.
                 ev = event_rx.recv() => {
-                    let Some(ev) = ev else { break 'render_loop Ok(()); };
+                    let Some(ev) = ev else { break 'render_loop Ok(app.session.session_id); };
                     let msg = app.map_event(Event::Core(ev));
                     let mut changed = apply_msg(&mut app, msg);
                     // Drain all already-queued core events without blocking.
@@ -143,7 +145,7 @@ where
             };
 
             if app.quit_requested() {
-                break 'render_loop Ok(());
+                break 'render_loop Ok(app.session.session_id);
             }
 
             if !changed {

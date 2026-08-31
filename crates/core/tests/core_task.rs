@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use shuvarie_core::{Active, Command, Config, Connections, Event, ProviderConfig, Session, run};
+use shuvarie_core::{
+    Active, Command, Config, Connections, Event, ProviderConfig, Session, StartupSession, run,
+};
 use shuvarie_db::Store;
 
 fn empty_config() -> Config {
@@ -39,7 +41,7 @@ async fn ping_pong() {
         empty_config(),
         empty_connections(),
         Store::open_in_memory().await.unwrap(),
-        false,
+        StartupSession::None,
         None,
         None,
         cmd_rx,
@@ -65,7 +67,7 @@ async fn add_provider_emits_saved() {
         empty_config(),
         empty_connections(),
         Store::open_in_memory().await.unwrap(),
-        false,
+        StartupSession::None,
         None,
         Some(connections_path.clone()),
         cmd_rx,
@@ -122,7 +124,7 @@ async fn remove_provider_clears_active() {
         empty_config(),
         connections,
         Store::open_in_memory().await.unwrap(),
-        false,
+        StartupSession::None,
         None,
         Some(connections_path.clone()),
         cmd_rx,
@@ -161,7 +163,7 @@ async fn send_message_without_active_provider_emits_error() {
         empty_config(),
         empty_connections(),
         Store::open_in_memory().await.unwrap(),
-        false,
+        StartupSession::None,
         None,
         None,
         cmd_rx,
@@ -202,7 +204,7 @@ async fn cancel_with_no_active_stream_keeps_task_alive() {
         empty_config(),
         empty_connections(),
         Store::open_in_memory().await.unwrap(),
-        false,
+        StartupSession::None,
         None,
         None,
         cmd_rx,
@@ -241,7 +243,7 @@ async fn double_send_while_streaming_is_rejected() {
         empty_config(),
         connections,
         Store::open_in_memory().await.unwrap(),
-        false,
+        StartupSession::None,
         None,
         None,
         cmd_rx,
@@ -299,7 +301,7 @@ async fn send_message_persists_session_and_messages() {
         empty_config(),
         connections,
         store_clone,
-        false,
+        StartupSession::None,
         None,
         None,
         cmd_rx,
@@ -358,7 +360,7 @@ async fn load_current_emits_session_loaded_on_startup() {
         empty_config(),
         empty_connections(),
         store.clone(),
-        true,
+        StartupSession::MostRecent,
         None,
         None,
         cmd_rx,
@@ -386,6 +388,93 @@ async fn load_current_emits_session_loaded_on_startup() {
 }
 
 #[tokio::test]
+async fn load_session_by_uuid_on_startup() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    store
+        .create_session("other", Some("ollama"), Some("model"))
+        .await
+        .unwrap();
+    let target = store
+        .create_session("target", Some("ollama"), Some("model"))
+        .await
+        .unwrap();
+
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+    let handle = tokio::spawn(run(
+        empty_config(),
+        empty_connections(),
+        store.clone(),
+        StartupSession::Session(target),
+        None,
+        None,
+        cmd_rx,
+        event_tx,
+    ));
+
+    cmd_tx.send(Command::Ping).await.unwrap();
+
+    let mut saw_loaded = false;
+    for _ in 0..3 {
+        match event_rx.recv().await {
+            Some(Event::SessionLoaded { id, title, .. }) => {
+                assert_eq!(id, target);
+                assert_eq!(title, "target");
+                saw_loaded = true;
+            }
+            Some(Event::Pong) => break,
+            Some(_) => {}
+            None => break,
+        }
+    }
+    assert!(saw_loaded, "expected SessionLoaded for --session startup");
+
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn load_missing_session_uuid_on_startup_errors() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    store
+        .create_session("existing", Some("ollama"), Some("model"))
+        .await
+        .unwrap();
+
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+    let handle = tokio::spawn(run(
+        empty_config(),
+        empty_connections(),
+        store.clone(),
+        StartupSession::Session(uuid::Uuid::nil()),
+        None,
+        None,
+        cmd_rx,
+        event_tx,
+    ));
+
+    cmd_tx.send(Command::Ping).await.unwrap();
+
+    let mut saw_error = false;
+    for _ in 0..3 {
+        match event_rx.recv().await {
+            Some(Event::SessionError { error }) => {
+                assert!(error.contains("not found"), "unexpected error: {error}");
+                saw_error = true;
+            }
+            Some(Event::Pong) => break,
+            Some(_) => {}
+            None => break,
+        }
+    }
+    assert!(saw_error, "expected SessionError for unknown -s UUID");
+
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+#[tokio::test]
 async fn no_load_current_skips_session_loaded_on_startup() {
     let mut store = Store::open_in_memory().await.unwrap();
     store
@@ -399,7 +488,7 @@ async fn no_load_current_skips_session_loaded_on_startup() {
         empty_config(),
         empty_connections(),
         store.clone(),
-        false,
+        StartupSession::None,
         None,
         None,
         cmd_rx,

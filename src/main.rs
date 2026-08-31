@@ -13,11 +13,18 @@ async fn main() -> color_eyre::Result<()> {
     let (cmd_tx, cmd_rx) = channel::<shuvarie_core::Command>(64);
     let (event_tx, event_rx) = channel::<shuvarie_core::Event>(64);
     let config = shuvarie_core::Config::load()?;
+    let startup = if let Some(id) = args.session {
+        shuvarie_core::StartupSession::Session(id)
+    } else if args.current {
+        shuvarie_core::StartupSession::MostRecent
+    } else {
+        shuvarie_core::StartupSession::None
+    };
     let core = tokio::spawn(shuvarie_core::run(
         config.clone(),
         shuvarie_core::Connections::load()?,
         store,
-        args.current,
+        startup,
         None,
         None,
         cmd_rx,
@@ -28,7 +35,13 @@ async fn main() -> color_eyre::Result<()> {
     drop(cmd_tx);
     let core_res = core.await;
 
-    res?;
+    let session_id = res?;
     core_res?;
+    if let Some(session_id) = session_id {
+        println!();
+        println!("This session can be reopened with:");
+        println!();
+        println!("  shuvarie -s {session_id}");
+    }
     Ok(())
 }

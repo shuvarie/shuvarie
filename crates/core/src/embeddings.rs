@@ -83,7 +83,7 @@ pub async fn index_message(
     store: &mut Store,
     setup: &EmbeddingSetup,
     message_id: u64,
-    session_id: u64,
+    session_id: uuid::Uuid,
     seq: u64,
     content: &str,
 ) -> Result<(), String> {
@@ -179,7 +179,7 @@ mod tests {
     fn rrf_merges_and_boosts_common_hits() {
         let hit = |id: u64| shuvarie_db::SearchHit {
             message_id: id,
-            session_id: 1,
+            session_id: uuid::Uuid::from_u128(1),
             seq: 0,
             role: shuvarie_db::MsgRole::User,
             content: "x".into(),
@@ -198,7 +198,7 @@ mod tests {
     fn rrf_limit_applies() {
         let hit = |id: u64| shuvarie_db::SearchHit {
             message_id: id,
-            session_id: 1,
+            session_id: uuid::Uuid::from_u128(1),
             seq: 0,
             role: shuvarie_db::MsgRole::User,
             content: "x".into(),
