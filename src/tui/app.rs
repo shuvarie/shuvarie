@@ -306,14 +306,12 @@ impl App {
                     output,
                     worker,
                     file_change,
-                    todo_update,
                 } => Some(AppMessage::Session(SessionMessage::ToolFinished {
                     name,
                     ok,
                     output,
                     worker,
                     file_change,
-                    todo_update,
                 })),
                 CoreEvent::ToolOutput {
                     tool,

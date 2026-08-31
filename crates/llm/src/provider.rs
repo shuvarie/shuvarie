@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::message::ChatMsg;
 use crate::stream::{StreamItem, StreamStream};
-use crate::tool::{DynamicTool, FileChangeHook, TodoHook};
+use crate::tool::{DynamicTool, FileChangeHook};
 use crate::{LlmError, Result};
 
 #[derive(Debug, Clone)]
@@ -211,7 +211,6 @@ impl ProviderClient {
                     budget,
                     tracker,
                     file_hook.clone(),
-                    TodoHook::new(),
                 );
                 run_worker_agent(
                     agent,
@@ -233,7 +232,6 @@ impl ProviderClient {
                     budget,
                     tracker,
                     file_hook.clone(),
-                    TodoHook::new(),
                 );
                 run_worker_agent(
                     agent,
@@ -255,7 +253,6 @@ impl ProviderClient {
                     budget,
                     tracker,
                     file_hook.clone(),
-                    TodoHook::new(),
                 );
                 run_worker_agent(
                     agent,
@@ -277,7 +274,6 @@ impl ProviderClient {
                     budget,
                     tracker,
                     file_hook.clone(),
-                    TodoHook::new(),
                 );
                 run_worker_agent(
                     agent,
@@ -299,7 +295,6 @@ impl ProviderClient {
                     budget,
                     tracker,
                     file_hook.clone(),
-                    TodoHook::new(),
                 );
                 run_worker_agent(
                     agent,
@@ -348,7 +343,6 @@ impl ProviderClient {
             .filter_map(crate::agent::WorkerAgent::take_activity_receiver)
             .collect();
         let file_hook = FileChangeHook::new();
-        let todo_hook = TodoHook::new();
 
         async fn build(
             agent: rig::agent::Agent,
@@ -357,7 +351,6 @@ impl ProviderClient {
             receivers: Vec<tokio::sync::mpsc::Receiver<StreamItem>>,
             worker_names: std::collections::HashSet<String>,
             file_hook: FileChangeHook,
-            todo_hook: TodoHook,
             max_turns: usize,
             tracker: std::sync::Arc<crate::context_hook::UsageTracker>,
         ) -> StreamStream {
@@ -460,7 +453,6 @@ impl ProviderClient {
                             ok,
                             worker: None,
                             file_change: file_hook.take(&internal_call_id),
-                            todo_update: todo_hook.take(&internal_call_id),
                         },
                         None => StreamItem::WorkerResult {
                             name: pending_workers.pop_front().unwrap_or_default(),
@@ -512,14 +504,12 @@ impl ProviderClient {
                         context_budget,
                         tracker_for_hook,
                         file_hook.clone(),
-                        todo_hook.clone(),
                     ),
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
                     file_hook,
-                    todo_hook,
                     max_turns,
                     tracker,
                 )
@@ -535,14 +525,12 @@ impl ProviderClient {
                         context_budget,
                         tracker_for_hook,
                         file_hook.clone(),
-                        todo_hook.clone(),
                     ),
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
                     file_hook,
-                    todo_hook,
                     max_turns,
                     tracker,
                 )
@@ -558,14 +546,12 @@ impl ProviderClient {
                         context_budget,
                         tracker_for_hook,
                         file_hook.clone(),
-                        todo_hook.clone(),
                     ),
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
                     file_hook,
-                    todo_hook,
                     max_turns,
                     tracker,
                 )
@@ -581,14 +567,12 @@ impl ProviderClient {
                         context_budget,
                         tracker_for_hook,
                         file_hook.clone(),
-                        todo_hook.clone(),
                     ),
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
                     file_hook,
-                    todo_hook,
                     max_turns,
                     tracker,
                 )
@@ -604,14 +588,12 @@ impl ProviderClient {
                         context_budget,
                         tracker_for_hook,
                         file_hook.clone(),
-                        todo_hook.clone(),
                     ),
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
                     file_hook,
-                    todo_hook,
                     max_turns,
                     tracker,
                 )
@@ -630,7 +612,6 @@ fn agent_with_tools<C>(
     context_budget: Option<crate::context_hook::ContextBudget>,
     tracker: std::sync::Arc<crate::context_hook::UsageTracker>,
     file_hook: FileChangeHook,
-    todo_hook: TodoHook,
 ) -> rig::agent::Agent
 where
     C: rig::client::CompletionClient + rig::prelude::AgentClientExt,
@@ -645,14 +626,9 @@ where
             .dynamic_tools(dynamic)
             .add_hook(crate::context_hook::ContextHook::new(budget, tracker))
             .add_hook(file_hook)
-            .add_hook(todo_hook)
             .build()
     } else {
-        builder
-            .dynamic_tools(dynamic)
-            .add_hook(file_hook)
-            .add_hook(todo_hook)
-            .build()
+        builder.dynamic_tools(dynamic).add_hook(file_hook).build()
     }
 }
 
@@ -733,7 +709,6 @@ async fn run_worker_agent(
                         ok,
                         worker: Some(name.to_string()),
                         file_change: file_hook.take(&internal_call_id),
-                        todo_update: None,
                     })
                     .await;
             }
@@ -817,7 +792,6 @@ mod tests {
                 ok: true,
                 worker: Some("explore_workspace".into()),
                 file_change: None,
-                todo_update: None,
             },
         ];
         let _ = worker_tx.send(worker_items[0].clone()).await;

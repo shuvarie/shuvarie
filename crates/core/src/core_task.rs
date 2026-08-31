@@ -796,11 +796,6 @@ suite after editing code) instead of guessing. When a tool reports an error, fix
 retry rather than stopping. After finishing the work, summarize what you did and any results in \
 a short reply. Keep the reply concise.
 
-For multi-step work, maintain a session-scoped task list with the `todo` tool: create the list \
-up front, then update it as you make progress (statuses: pending, in_progress, completed, \
-cancelled; keep exactly one item in_progress at a time; mark items completed only after \
-verifying the work).
-
 You can also delegate work to three specialist worker agents, exposed as tools:
 - explore_workspace: locates, reads, and summarizes existing code (list/read/grep). Use it for \
   research and understanding before changes.
@@ -1293,7 +1288,6 @@ async fn stream_stream_to_events(
                 ok,
                 worker,
                 file_change,
-                todo_update,
             } => {
                 let (fc_json, original, new) = serialize_file_change(&file_change);
                 let key = format!("{}:{:?}", name, worker);
@@ -1323,13 +1317,6 @@ async fn stream_stream_to_events(
                     }
                     tool_seq += 1;
                 }
-                if let Some(update) = &todo_update {
-                    let mut guard = session.lock().await;
-                    guard.todos = update.todos.clone();
-                    if let Some(sid) = guard.id {
-                        let _ = store.set_todos(sid, &update.todos).await;
-                    }
-                }
                 turn_tool_records.push(crate::tool_record::ToolRecord {
                     name: name.clone(),
                     args_json,
@@ -1353,7 +1340,6 @@ async fn stream_stream_to_events(
                         output,
                         worker,
                         file_change,
-                        todo_update,
                     })
                     .await;
             }
@@ -1885,7 +1871,6 @@ mod tests {
                 ok: true,
                 worker: Some("explore_workspace".into()),
                 file_change: None,
-                todo_update: None,
             },
             StreamItem::WorkerResult {
                 name: "explore_workspace".into(),
