@@ -8104,6 +8104,7 @@ dependencies = [
  "tokio",
  "tui-scrollview",
  "unicode-width 0.2.2",
+ "uuid",
 ]
 
 [[package]]
@@ -8131,6 +8132,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

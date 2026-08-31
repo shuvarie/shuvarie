@@ -6,8 +6,6 @@ use super::{Active, Connections, CoreError, ProviderConfig, span_to_line_column}
 use crate::Result as CoreResult;
 use crate::error::ConfigParseError;
 
-const OPENAI_KIND: &str = "openai";
-
 pub(crate) fn from_kdl(contents: &str) -> CoreResult<Connections> {
     from_document(&parse_document(contents)?, contents)
 }
@@ -74,7 +72,7 @@ fn from_document(doc: &KdlDocument, input: &str) -> CoreResult<Connections> {
                         node,
                         "`active` requires a block with a `provider` child",
                         Some(
-                            "expected: active { provider \"name\" (model \"id\") (variant \
+                            "expected: active { provider \"id\" (model \"id\") (variant \
                              \"id\") }"
                                 .into(),
                         ),
@@ -145,7 +143,7 @@ fn from_document(doc: &KdlDocument, input: &str) -> CoreResult<Connections> {
                         input,
                         node,
                         "`active` block requires a `provider` child",
-                        Some("expected: active { provider \"name\" }".into()),
+                        Some("expected: active { provider \"id\" }".into()),
                     ));
                 };
                 connections.active = Some(Active {
@@ -192,69 +190,83 @@ fn parse_provider(
             None,
         ));
     }
-    let name = match node.get(0) {
-        Some(KdlValue::String(name)) => name.clone(),
-        Some(_) => {
-            return Err(node_error(
-                input,
-                node,
-                "provider name must be a string",
-                None,
-            ));
-        }
-        None => {
-            return Err(node_error(
-                input,
-                node,
-                "`provider` requires a name argument",
-                Some("expected: provider \"name\" (kind=\"kind\") { ... }".into()),
-            ));
-        }
-    };
-    let mut kind = OPENAI_KIND.to_string();
-    let mut kind_omitted = true;
-    let mut api_key = None;
-    let mut base_url = None;
-    for entry in node.entries().iter().skip(1) {
+    let mut id = None;
+    let mut name = None;
+    for entry in node.entries() {
         let Some(prop) = entry.name() else {
             return Err(node_error(
                 input,
                 node,
-                "provider takes only one positional argument (the name)",
+                "`provider` does not take positional arguments",
+                Some("expected: provider id=\"id\" name=\"name\" { ... }".into()),
+            ));
+        };
+        let KdlValue::String(value) = entry.value() else {
+            return Err(node_error(
+                input,
+                node,
+                format!("provider `{}` must be a string", prop.value()),
                 None,
             ));
         };
         match prop.value() {
-            "kind" => {
-                let KdlValue::String(value) = entry.value() else {
-                    return Err(node_error(
-                        input,
-                        node,
-                        "provider `kind` must be a string",
-                        None,
-                    ));
-                };
+            "id" => {
+                if id.is_some() {
+                    return Err(node_error(input, node, "duplicate `id` property", None));
+                }
                 if value.trim().is_empty() {
                     return Err(node_error(
                         input,
                         node,
-                        "provider `kind` must not be empty",
+                        "provider `id` must not be empty",
                         None,
                     ));
                 }
-                kind = value.clone();
-                kind_omitted = false;
+                id = Some(value.clone());
+            }
+            "name" => {
+                if name.is_some() {
+                    return Err(node_error(input, node, "duplicate `name` property", None));
+                }
+                if value.trim().is_empty() {
+                    return Err(node_error(
+                        input,
+                        node,
+                        "provider `name` must not be empty",
+                        None,
+                    ));
+                }
+                name = Some(value.clone());
             }
             other => {
                 return Err(node_error(
                     input,
                     node,
                     format!("unknown provider property `{other}`"),
-                    Some("expected `kind`".into()),
+                    Some("expected `id` or `name`".into()),
                 ));
             }
         }
     }
+    let Some(id) = id else {
+        return Err(node_error(
+            input,
+            node,
+            "`provider` requires an `id` property",
+            Some("expected: provider id=\"id\" name=\"name\" { ... }".into()),
+        ));
+    };
+    let Some(name) = name else {
+        return Err(node_error(
+            input,
+            node,
+            "`provider` requires a `name` property",
+            Some("expected: provider id=\"id\" name=\"name\" { ... }".into()),
+        ));
+    };
+    let mut kind = None;
+    let mut api_key = None;
+    let mut base_url = None;
     if let Some(children) = node.children() {
         for child in children.nodes() {
             let value = child.get(0);
@@ -274,20 +286,29 @@ fn parse_provider(
                 )),
             };
             match child.name().value() {
+                "kind" => kind = as_string(value)?,
                 "api-key" => api_key = as_string(value)?,
                 "base-url" => base_url = as_string(value)?,
                 _ => {}
             }
         }
     }
+    let Some(kind) = kind else {
+        return Err(node_error(
+            input,
+            node,
+            "`provider` requires a `kind` child",
+            Some("expected: kind \"<catalog-id>\" inside the provider block".into()),
+        ));
+    };
     let config = ProviderConfig {
+        name,
         kind,
-        kind_omitted,
         api_key,
         base_url,
     };
-    if providers.insert(name, config).is_some() {
-        return Err(node_error(input, node, "duplicate provider name", None));
+    if providers.insert(id, config).is_some() {
+        return Err(node_error(input, node, "duplicate provider id", None));
     }
     Ok(())
 }
@@ -315,16 +336,17 @@ pub(crate) fn to_kdl(connections: &Connections) -> CoreResult<String> {
     }
     let mut providers = KdlNode::new("providers");
     let mut body = KdlDocument::new();
-    for (name, config) in &connections.providers {
+    for (id, config) in &connections.providers {
         let mut node = KdlNode::new("provider");
-        node.push(KdlEntry::new(name.as_str()));
-        if !config.kind_omitted {
-            node.push(KdlEntry::new_prop(
-                "kind",
-                KdlValue::String(config.kind.clone()),
-            ));
-        }
+        node.push(KdlEntry::new_prop("id", KdlValue::String(id.clone())));
+        node.push(KdlEntry::new_prop(
+            "name",
+            KdlValue::String(config.name.clone()),
+        ));
         let mut children = KdlDocument::new();
+        let mut kind = KdlNode::new("kind");
+        kind.push(KdlEntry::new(config.kind.as_str()));
+        children.nodes_mut().push(kind);
         if let Some(key) = &config.api_key {
             let mut child = KdlNode::new("api-key");
             child.push(KdlEntry::new(key.as_str()));
@@ -335,9 +357,7 @@ pub(crate) fn to_kdl(connections: &Connections) -> CoreResult<String> {
             child.push(KdlEntry::new(url.as_str()));
             children.nodes_mut().push(child);
         }
-        if !children.nodes().is_empty() {
-            node.set_children(children);
-        }
+        node.set_children(children);
         body.nodes_mut().push(node);
     }
     providers.set_children(body);

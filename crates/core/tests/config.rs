@@ -7,17 +7,22 @@ use shuvarie_core::{
 fn sample_connections() -> Connections {
     let mut providers = BTreeMap::new();
     providers.insert(
-        "my-openai".to_string(),
-        ProviderConfig::new("openai", Some("sk-test".to_string()), None),
+        "67e55044-10b1-426f-9247-bb680e5fe0c8".to_string(),
+        ProviderConfig::new("my-openai", "openai", Some("sk-test".to_string()), None),
     );
     providers.insert(
-        "local-ollama".to_string(),
-        ProviderConfig::new("ollama", None, Some("http://localhost:11434".into())),
+        "70b3d8e2-58e1-48a2-9d21-4ef0be7f95c1".to_string(),
+        ProviderConfig::new(
+            "local-ollama",
+            "ollama",
+            None,
+            Some("http://localhost:11434".into()),
+        ),
     );
     Connections {
         providers,
         active: Some(Active {
-            provider: "my-openai".to_string(),
+            provider: "67e55044-10b1-426f-9247-bb680e5fe0c8".to_string(),
             model: Some("gpt-5.5".to_string()),
             variant: None,
         }),
@@ -32,7 +37,10 @@ fn round_trip_serialization() {
 
     connections.save_to(&path).expect("save");
     let saved = std::fs::read_to_string(&path).expect("read saved file");
-    assert!(saved.contains("provider my-openai") || saved.contains("provider \"my-openai\""));
+    assert!(
+        saved.contains("provider id=67e55044") || saved.contains("provider id=\"67e55044"),
+        "provider keyed by id property:\n{saved}"
+    );
     assert!(saved.contains("gpt-5.5"));
     assert!(saved.contains("api-key"));
     assert!(saved.contains("sk-test"));
@@ -76,10 +84,11 @@ fn kdl_document_shape() {
         "expected providers section:\n{saved}"
     );
     assert!(
-        saved.contains("provider my-openai") || saved.contains("provider \"my-openai\""),
-        "provider keyed by first argument:\n{saved}"
+        saved.contains("id=67e55044") || saved.contains("id=\"67e55044"),
+        "provider keyed by id property:\n{saved}"
     );
-    assert!(saved.contains("kind=openai") || saved.contains("kind=\"openai\""));
+    assert!(saved.contains("name=\"my-openai\"") || saved.contains("name=my-openai"));
+    assert!(saved.contains("kind \"openai\"") || saved.contains("kind openai"));
     assert!(
         saved.contains("base-url \"http://localhost:11434\"")
             || saved.contains("base-url http://localhost:11434")
@@ -94,14 +103,16 @@ fn kdl_document_shape() {
 fn parse_hand_written_kdl() {
     let kdl = r#"
 active {
-    provider "my-openai"
+    provider "67e55044-10b1-426f-9247-bb680e5fe0c8"
     model "gpt-5.5"
 }
 providers {
-    provider "my-openai" kind="openai" {
+    provider id="67e55044-10b1-426f-9247-bb680e5fe0c8" name="my-openai" {
+        kind "openai"
         api-key "sk-test"
     }
-    provider "local-ollama" kind="ollama" {
+    provider id="70b3d8e2-58e1-48a2-9d21-4ef0be7f95c1" name="local-ollama" {
+        kind "ollama"
         base-url "http://localhost:11434"
     }
 }
@@ -117,7 +128,8 @@ providers {
 fn parse_ignores_unknown_nodes() {
     let kdl = r#"
 providers {
-    provider "my-openai" {
+    provider id="12f6bb9a-4db2-4d8f-bd3a-4d1d5b8f0b9b" name="my-openai" {
+        kind "openai"
         api-key "sk-test"
         future-field "x"
     }
@@ -132,7 +144,7 @@ providers {
 
 #[test]
 fn parse_options_absent() {
-    let kdl = "providers {\n    provider local kind=\"ollama\"\n}\n";
+    let kdl = "providers {\n    provider id=\"local\" name=\"local\" { kind \"ollama\" }\n}\n";
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("connections.kdl");
     std::fs::write(&path, kdl).expect("write");
@@ -154,7 +166,7 @@ fn missing_active_provider_has_no_connected_providers() {
     let connections = Connections {
         providers: BTreeMap::from([(
             "my-openai".to_string(),
-            ProviderConfig::new("openai", Some("sk-test".to_string()), None),
+            ProviderConfig::new("my-openai", "openai", Some("sk-test".to_string()), None),
         )]),
         active: None,
     };
@@ -179,7 +191,7 @@ fn active_provider_without_key_has_no_connected_providers() {
     let connections = Connections {
         providers: BTreeMap::from([(
             "my-openai".to_string(),
-            ProviderConfig::new("openai", None, None),
+            ProviderConfig::new("my-openai", "openai", None, None),
         )]),
         active: Some(Active {
             provider: "my-openai".to_string(),
@@ -201,7 +213,7 @@ fn ollama_without_key_is_connected() {
     let connections = Connections {
         providers: BTreeMap::from([(
             "local".to_string(),
-            ProviderConfig::new("ollama", None, None),
+            ProviderConfig::new("local", "ollama", None, None),
         )]),
         active: Some(Active {
             provider: "local".to_string(),
@@ -217,7 +229,7 @@ fn ollama_cloud_without_key_is_not_connected() {
     let connections = Connections {
         providers: BTreeMap::from([(
             "cloud".to_string(),
-            ProviderConfig::new("ollama-cloud", None, None),
+            ProviderConfig::new("cloud", "ollama-cloud", None, None),
         )]),
         active: Some(Active {
             provider: "cloud".to_string(),
@@ -233,7 +245,12 @@ fn ollama_cloud_with_key_is_connected() {
     let connections = Connections {
         providers: BTreeMap::from([(
             "cloud".to_string(),
-            ProviderConfig::new("ollama-cloud", Some("ollama-key".to_string()), None),
+            ProviderConfig::new(
+                "cloud",
+                "ollama-cloud",
+                Some("ollama-key".to_string()),
+                None,
+            ),
         )]),
         active: Some(Active {
             provider: "cloud".to_string(),

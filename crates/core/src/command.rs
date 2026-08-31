@@ -7,7 +7,7 @@ pub enum Command {
         provider_name: String,
     },
     AddProvider {
-        name: String,
+        id: String,
         config: ProviderConfig,
     },
     RemoveProvider {

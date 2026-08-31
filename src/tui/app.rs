@@ -143,6 +143,9 @@ impl App {
         }
         let initial_provider = connections.active.as_ref().map(|a| a.provider.clone());
         let initial_model = connections.active.as_ref().and_then(|a| a.model.clone());
+        let initial_display = initial_provider
+            .as_deref()
+            .and_then(|id| connections.providers.get(id).map(|p| p.name.clone()));
         Self {
             ctx: UpdateCtx::new(connections, cmd_tx),
             route,
@@ -155,7 +158,7 @@ impl App {
             session: {
                 let mut s = SessionScreen::new();
                 s.sidebar.update(SidebarMessage::UpdateConfig {
-                    provider: initial_provider,
+                    provider: initial_display,
                     model: initial_model,
                     context_length: None,
                 });
@@ -496,18 +499,23 @@ impl App {
                             api_key,
                             base_url,
                         } => {
-                            let pc = shuvarie_core::ProviderConfig::new(kind, api_key, base_url);
-                            self.pending_model_pick = Some(name.clone());
+                            let id = uuid::Uuid::new_v4().to_string();
+                            let pc = shuvarie_core::ProviderConfig::new(
+                                name.clone(),
+                                kind,
+                                api_key,
+                                base_url,
+                            );
+                            self.pending_model_pick = Some(id.clone());
                             self.ctx.send(shuvarie_core::Command::AddProvider {
-                                name: name.clone(),
+                                id: id.clone(),
                                 config: pc,
                             });
                             self.ctx.send(shuvarie_core::Command::SetActiveProvider {
-                                name: name.clone(),
+                                name: id.clone(),
                             });
-                            self.ctx.send(shuvarie_core::Command::ListModels {
-                                provider_name: name,
-                            });
+                            self.ctx
+                                .send(shuvarie_core::Command::ListModels { provider_name: id });
                             self.close_overlay();
                         }
                         AddProviderOutcome::None => {}
@@ -560,8 +568,13 @@ impl App {
                             return None;
                         }
                         CommandMenuEffect::AddProvider => {
-                            let names: Vec<String> =
-                                self.ctx.connections.providers.keys().cloned().collect();
+                            let names: Vec<String> = self
+                                .ctx
+                                .connections
+                                .providers
+                                .values()
+                                .map(|p| p.name.clone())
+                                .collect();
                             let providers = shuvarie_core::catalog::providers();
                             self.add_provider_form = Some(AddProviderForm::new(providers, &names));
                             self.overlay = Overlay::AddProvider;
@@ -621,8 +634,13 @@ impl App {
                 if let Some(effect) = self.welcome.update(m) {
                     match effect {
                         WelcomeEffect::AddProvider => {
-                            let names: Vec<String> =
-                                self.ctx.connections.providers.keys().cloned().collect();
+                            let names: Vec<String> = self
+                                .ctx
+                                .connections
+                                .providers
+                                .values()
+                                .map(|p| p.name.clone())
+                                .collect();
                             let providers = shuvarie_core::catalog::providers();
                             self.add_provider_form = Some(AddProviderForm::new(providers, &names));
                             self.overlay = Overlay::AddProvider;
@@ -768,7 +786,7 @@ impl App {
                             .send(shuvarie_core::Command::SetActiveModel { model });
                     } else {
                         self.session.update(SessionMessage::UpdateConfig {
-                            provider: Some(provider_name.clone()),
+                            provider: self.provider_display_name(&provider_name),
                             model: current.map(|m| m.to_string()),
                             context_length: self.active_context_length(),
                         });
@@ -935,6 +953,14 @@ impl App {
             .and_then(|m| m.context_length.map(u64::from))
     }
 
+    fn provider_display_name(&self, id: &str) -> Option<String> {
+        self.ctx
+            .connections
+            .providers
+            .get(id)
+            .map(|p| p.name.clone())
+    }
+
     fn reload_config(&mut self) {
         if let Ok(fresh) = Connections::load() {
             self.ctx.connections = fresh;
@@ -948,7 +974,7 @@ impl App {
                     .connections
                     .active
                     .as_ref()
-                    .map(|a| a.provider.clone()),
+                    .and_then(|a| self.provider_display_name(&a.provider)),
                 model: self
                     .ctx
                     .connections

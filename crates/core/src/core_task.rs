@@ -203,9 +203,9 @@ pub async fn run(
                             }
                         }
                     }
-                    Command::AddProvider { name, config: pc } => {
-                        ctx.connections.providers.insert(name.clone(), pc);
-                        ctx.clients.remove(&name);
+                    Command::AddProvider { id, config: pc } => {
+                        ctx.connections.providers.insert(id.clone(), pc);
+                        ctx.clients.remove(&id);
                         persist(
                             &ctx.config,
                             &ctx.connections,

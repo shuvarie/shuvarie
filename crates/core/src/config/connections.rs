@@ -19,12 +19,13 @@ pub struct Connections {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProviderConfig {
+    /// The display name of the provider (e.g. `Ollama Cloud`).
+    pub name: String,
     /// The provider id as referenced in the Selune catalog (e.g. `anthropic`,
     /// `openai`, `togetherai`). This is the canonical identity; behavior such
     /// as whether an API key is required comes from the matching
     /// [`selune::Provider`].
     pub kind: String,
-    pub(crate) kind_omitted: bool,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
 }
@@ -76,10 +77,15 @@ impl Connections {
 }
 
 impl ProviderConfig {
-    pub fn new(kind: impl Into<String>, api_key: Option<String>, base_url: Option<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        kind: impl Into<String>,
+        api_key: Option<String>,
+        base_url: Option<String>,
+    ) -> Self {
         Self {
+            name: name.into(),
             kind: kind.into(),
-            kind_omitted: false,
             api_key,
             base_url,
         }
@@ -131,17 +137,19 @@ mod tests {
     fn parses_planned_format() {
         let text = r#"
             active {
-                provider "Ollama Cloud"
+                provider "67e55044-10b1-426f-9247-bb680e5fe0c8"
                 model "glm-5.3-flash"
                 variant "high"
             }
 
             providers {
-                provider "Ollama Cloud" kind="ollama-cloud" {
+                provider id="67e55044-10b1-426f-9247-bb680e5fe0c8" name="Ollama Cloud" {
+                    kind "ollama-cloud"
                     api-key "<API KEY>"
                     base-url "https://ollama.com"
                 }
-                provider "Ollama Cloud compat" {
+                provider id="5c1fd0f6-2f0e-4a3a-9b1d-4f2d2f2f2f2f" name="Ollama Cloud compat" {
+                    kind "openai"
                     api-key "<API KEY>"
                     base-url "https://ollama.com/v1"
                 }
@@ -149,18 +157,24 @@ mod tests {
         "#;
         let parsed: Connections = connections_kdl::from_kdl(text).unwrap();
         let active = parsed.active.as_ref().expect("active");
-        assert_eq!(active.provider, "Ollama Cloud");
+        assert_eq!(active.provider, "67e55044-10b1-426f-9247-bb680e5fe0c8");
         assert_eq!(active.model.as_deref(), Some("glm-5.3-flash"));
         assert_eq!(active.variant.as_deref(), Some("high"));
         assert_eq!(parsed.providers.len(), 2);
-        let cloud = parsed.providers.get("Ollama Cloud").expect("cloud");
+        let cloud = parsed
+            .providers
+            .get("67e55044-10b1-426f-9247-bb680e5fe0c8")
+            .expect("cloud");
+        assert_eq!(cloud.name, "Ollama Cloud");
         assert_eq!(cloud.kind, "ollama-cloud");
-        assert!(!cloud.kind_omitted);
         assert_eq!(cloud.api_key.as_deref(), Some("<API KEY>"));
         assert_eq!(cloud.base_url.as_deref(), Some("https://ollama.com"));
-        let compat = parsed.providers.get("Ollama Cloud compat").expect("compat");
+        let compat = parsed
+            .providers
+            .get("5c1fd0f6-2f0e-4a3a-9b1d-4f2d2f2f2f2f")
+            .expect("compat");
+        assert_eq!(compat.name, "Ollama Cloud compat");
         assert_eq!(compat.kind, "openai");
-        assert!(compat.kind_omitted);
         assert_eq!(compat.base_url.as_deref(), Some("https://ollama.com/v1"));
     }
 
@@ -168,29 +182,38 @@ mod tests {
     fn providers_layout_round_trip() {
         let text = r#"
             active {
-                provider "acme"
+                provider "0d3f7f2a-6c9b-4a5b-8e0a-1b2c3d4e5f60"
                 model "gpt-4o"
             }
             providers {
-                provider "acme" kind="openai" {
+                provider id="0d3f7f2a-6c9b-4a5b-8e0a-1b2c3d4e5f60" name="acme" {
+                    kind "openai"
                     api-key "sk-secret"
                     base-url "https://example.com/v1"
                 }
-                provider "ollama-local" kind="ollama"
+                provider id="70b3d8e2-58e1-48a2-9d21-4ef0be7f95c1" name="ollama-local" {
+                    kind "ollama"
+                }
             }
         "#;
         let parsed: Connections = connections_kdl::from_kdl(text).unwrap();
         assert_eq!(parsed.providers.len(), 2);
-        let acme = parsed.providers.get("acme").expect("acme");
+        let acme = parsed
+            .providers
+            .get("0d3f7f2a-6c9b-4a5b-8e0a-1b2c3d4e5f60")
+            .expect("acme");
+        assert_eq!(acme.name, "acme");
         assert_eq!(acme.kind, "openai");
-        assert!(!acme.kind_omitted);
         assert_eq!(acme.api_key.as_deref(), Some("sk-secret"));
         assert_eq!(acme.base_url.as_deref(), Some("https://example.com/v1"));
-        let ollama = parsed.providers.get("ollama-local").expect("ollama");
+        let ollama = parsed
+            .providers
+            .get("70b3d8e2-58e1-48a2-9d21-4ef0be7f95c1")
+            .expect("ollama");
         assert_eq!(ollama.kind, "ollama");
         assert!(ollama.api_key.is_none());
         let active = parsed.active.as_ref().expect("active");
-        assert_eq!(active.provider, "acme");
+        assert_eq!(active.provider, "0d3f7f2a-6c9b-4a5b-8e0a-1b2c3d4e5f60");
         assert_eq!(active.model.as_deref(), Some("gpt-4o"));
         assert!(active.variant.is_none());
 
@@ -203,7 +226,7 @@ mod tests {
     fn full_active_round_trip() {
         let mut connections = Connections::default();
         connections.active = Some(Active {
-            provider: "cloud".into(),
+            provider: "6f9619ff-8b86-d011-b42d-00cf4fc964ff".into(),
             model: Some("glm-5.3-flash".into()),
             variant: Some("high".into()),
         });
@@ -217,38 +240,49 @@ mod tests {
     }
 
     #[test]
-    fn omitted_kind_stays_omitted_on_save() {
+    fn parses_user_format() {
         let text = r#"
+            active {
+                provider "67e55044-10b1-426f-9247-bb680e5fe0c8"
+                model "glm-5.3-flash"
+                variant "high"
+            }
+
             providers {
-                provider "compat" {
-                    base-url "https://example.com/v1"
+                provider id="67e55044-10b1-426f-9247-bb680e5fe0c8" name="Ollama Cloud" {
+                    kind "ollama-cloud"
+                    api-key "<API KEY>"
+                    base-url "https://ollama.com"
                 }
             }
         "#;
         let parsed: Connections = connections_kdl::from_kdl(text).unwrap();
-        let compat = parsed.providers.get("compat").expect("compat");
-        assert_eq!(compat.kind, "openai");
-        assert!(compat.kind_omitted);
-
-        let saved = connections_kdl::to_kdl(&parsed).unwrap();
-        assert!(!saved.contains("kind="), "unexpected kind in:\n{saved}");
-        let reparsed: Connections = connections_kdl::from_kdl(&saved).unwrap();
-        assert_eq!(parsed, reparsed);
+        let active = parsed.active.as_ref().expect("active");
+        assert_eq!(active.provider, "67e55044-10b1-426f-9247-bb680e5fe0c8");
+        assert_eq!(active.model.as_deref(), Some("glm-5.3-flash"));
+        assert_eq!(active.variant.as_deref(), Some("high"));
+        let cloud = parsed
+            .providers
+            .get("67e55044-10b1-426f-9247-bb680e5fe0c8")
+            .expect("cloud");
+        assert_eq!(cloud.name, "Ollama Cloud");
+        assert_eq!(cloud.kind, "ollama-cloud");
+        assert_eq!(cloud.api_key.as_deref(), Some("<API KEY>"));
+        assert_eq!(cloud.base_url.as_deref(), Some("https://ollama.com"));
     }
 
     #[test]
-    fn explicit_kind_is_emitted_on_save() {
+    fn requires_kind_on_save() {
         let mut connections = Connections::default();
         connections.providers.insert(
             "local".to_string(),
-            ProviderConfig::new("ollama", None, None),
+            ProviderConfig::new("local", "ollama", None, None),
         );
         let saved = connections_kdl::to_kdl(&connections).unwrap();
-        assert!(
-            saved.contains("provider local kind=ollama")
-                || saved.contains("provider \"local\" kind=\"ollama\""),
-            "expected explicit kind in:\n{saved}"
-        );
+        assert!(saved.contains("kind"), "expected kind child in:\n{saved}");
+        let missing_kind = "providers {\n    provider id=\"x\" name=\"x\" { }\n}";
+        let err = connections_kdl::from_kdl(missing_kind).unwrap_err();
+        assert!(err.to_string().contains("`kind`"));
         let reparsed: Connections = connections_kdl::from_kdl(&saved).unwrap();
         assert_eq!(connections, reparsed);
     }
@@ -317,7 +351,7 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_provider() {
-        let text = "providers {\n    provider \"a\" kind=\"openai\"\n    provider \"a\" kind=\"ollama\"\n}";
+        let text = "providers {\n    provider id=\"a\" name=\"a\" { kind \"openai\" }\n    provider id=\"a\" name=\"b\" { kind \"ollama\" }\n}";
         let err = connections_kdl::from_kdl(text).unwrap_err();
         assert!(err.to_string().contains("duplicate"));
     }
@@ -338,11 +372,11 @@ mod tests {
         let path = dir.path().join("connections.kdl");
         let mut connections = Connections::default();
         connections.providers.insert(
-            "ollama".to_string(),
-            ProviderConfig::new("ollama", None, None),
+            "70b3d8e2-58e1-48a2-9d21-4ef0be7f95c1".to_string(),
+            ProviderConfig::new("ollama-local", "ollama", None, None),
         );
         connections.active = Some(Active {
-            provider: "ollama".to_string(),
+            provider: "70b3d8e2-58e1-48a2-9d21-4ef0be7f95c1".to_string(),
             model: Some("llama3".to_string()),
             variant: None,
         });
