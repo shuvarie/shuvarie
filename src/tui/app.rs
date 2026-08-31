@@ -15,18 +15,11 @@ use super::command_menu::{CommandMenu, CommandMenuEffect, CommandMenuMessage};
 use super::confirm_quit::{ConfirmQuit, ConfirmQuitEffect, ConfirmQuitMessage};
 use super::context::UpdateCtx;
 use super::history_search::{HistorySearch, HistorySearchEffect, HistorySearchMessage};
-use super::home::{HomeEffect, HomeMessage, HomeScreen};
 use super::model_picker::{ModelPicker, ModelPickerEffect, ModelPickerMessage};
 use super::session::{SessionEffect, SessionMessage, SessionScreen};
 use super::session_picker::{SessionPicker, SessionPickerEffect, SessionPickerMessage};
 use super::sidebar::SidebarMessage;
 use super::welcome::{Welcome, WelcomeEffect, WelcomeMessage};
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Route {
-    Home,
-    Session,
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Overlay {
@@ -50,7 +43,6 @@ pub enum AppMessage {
         rows: u16,
         cols: u16,
     },
-    Home(HomeMessage),
     Session(SessionMessage),
     AddProvider(AddProviderMessage),
     ModelPicker(ModelPickerMessage),
@@ -117,9 +109,7 @@ pub enum AppEffect {
 
 pub struct App {
     pub ctx: UpdateCtx,
-    pub route: Route,
     pub overlay: Overlay,
-    pub home: HomeScreen,
     pub session: SessionScreen,
     pub command_menu: CommandMenu,
     pub welcome: Welcome,
@@ -136,7 +126,6 @@ pub struct App {
 
 impl App {
     pub fn new(connections: Connections, cmd_tx: Sender<shuvarie_core::Command>) -> Self {
-        let route = Route::Home;
         let mut welcome = Welcome::new();
         if !connections.has_connected_providers() {
             welcome.open();
@@ -148,13 +137,11 @@ impl App {
             .and_then(|id| connections.providers.get(id).map(|p| p.name.clone()));
         Self {
             ctx: UpdateCtx::new(connections, cmd_tx),
-            route,
             overlay: if welcome.open {
                 Overlay::Welcome
             } else {
                 Overlay::None
             },
-            home: HomeScreen::new(),
             session: {
                 let mut s = SessionScreen::new();
                 s.sidebar.update(SidebarMessage::UpdateConfig {
@@ -249,7 +236,7 @@ impl App {
                     match key.kind {
                         KeyEventKind::Press => match key.code {
                             KeyCode::Char('c') if ctrl(&key) => {
-                                if self.route == Route::Session && self.session.streaming {
+                                if self.session.streaming {
                                     return Some(AppMessage::Session(
                                         SessionMessage::CancelRequested,
                                     ));
@@ -259,7 +246,7 @@ impl App {
                             KeyCode::Char('m') if ctrl(&key) => {
                                 return Some(AppMessage::OpenCommandMenu);
                             }
-                            KeyCode::Char('r') if ctrl(&key) && self.route == Route::Session => {
+                            KeyCode::Char('r') if ctrl(&key) => {
                                 return Some(AppMessage::HistorySearch(HistorySearchMessage::Open));
                             }
                             _ => {}
@@ -267,10 +254,7 @@ impl App {
                         _ => {}
                     }
 
-                    match self.route {
-                        Route::Home => self.home.map_event(&key).map(AppMessage::Home),
-                        Route::Session => self.session.map_event(&key).map(AppMessage::Session),
-                    }
+                    self.session.map_event(&key).map(AppMessage::Session)
                 }
                 _ => None,
             },
@@ -446,19 +430,13 @@ impl App {
                 self.confirm_quit.update(ConfirmQuitMessage::Cancel);
                 self.overlay = Overlay::None;
             }
-            AppMessage::Home(m) => {
-                if let Some(effect) = self.home.update(m) {
-                    match effect {
-                        HomeEffect::Submit { content } => {
-                            self.start_session(content);
-                        }
-                    }
-                }
-            }
             AppMessage::Session(m) => {
                 if let Some(effect) = self.session.update(m) {
                     match effect {
                         SessionEffect::SendMessage { content } => {
+                            if !self.session.busy && self.session.session_id.is_none() {
+                                self.ctx.send(shuvarie_core::Command::StartSession);
+                            }
                             self.ctx
                                 .send(shuvarie_core::Command::SendMessage { content });
                         }
@@ -476,7 +454,6 @@ impl App {
                 if let Some(effect) = self.session_picker.update(m) {
                     match effect {
                         SessionPickerEffect::LoadSession { id } => {
-                            self.route = Route::Session;
                             self.ctx.send(shuvarie_core::Command::LoadSession { id });
                             self.close_overlay();
                         }
@@ -484,7 +461,6 @@ impl App {
                             self.ctx.send(shuvarie_core::Command::DeleteSession { id });
                         }
                         SessionPickerEffect::NewSession => {
-                            self.route = Route::Session;
                             self.session.update(SessionMessage::Reset);
                             self.ctx.send(shuvarie_core::Command::NewSession);
                             self.close_overlay();
@@ -596,7 +572,6 @@ impl App {
                             return None;
                         }
                         CommandMenuEffect::NewSession => {
-                            self.route = Route::Session;
                             self.session.update(SessionMessage::Reset);
                             self.ctx.send(shuvarie_core::Command::NewSession);
                         }
@@ -629,7 +604,6 @@ impl App {
                                 .send(shuvarie_core::Command::SearchHistory { query });
                         }
                         HistorySearchEffect::LoadSession { id } => {
-                            self.route = Route::Session;
                             self.ctx.send(shuvarie_core::Command::LoadSession { id });
                             self.close_overlay();
                         }
@@ -824,7 +798,6 @@ impl App {
                 self.session_picker.set_sessions(sessions);
             }
             AppMessage::SessionLoaded { id, title, session } => {
-                self.route = Route::Session;
                 self.session
                     .update(SessionMessage::Loaded { id, title, session });
                 self.session_picker.active_id = Some(id);
@@ -839,7 +812,6 @@ impl App {
                         self.close_overlay();
                     } else {
                         self.session.update(SessionMessage::Reset);
-                        self.route = Route::Home;
                         self.close_overlay();
                     }
                 } else {
@@ -868,20 +840,6 @@ impl App {
             }
         }
         None
-    }
-
-    fn start_session(&mut self, content: String) {
-        self.session.update(SessionMessage::ClearError);
-        self.route = Route::Session;
-        self.session.messages.clear();
-        self.session
-            .messages
-            .push((shuvarie_core::Role::User, content.clone()));
-        self.session.busy = true;
-        self.session.status = Some("thinking…".to_string());
-        self.ctx.send(shuvarie_core::Command::StartSession);
-        self.ctx
-            .send(shuvarie_core::Command::SendMessage { content });
     }
 
     fn refresh_sessions(&mut self) {
@@ -996,10 +954,7 @@ impl App {
     }
 
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
-        match self.route {
-            Route::Home => self.home.view(frame, area),
-            Route::Session => self.session.view(frame, area),
-        }
+        self.session.view(frame, area);
 
         self.welcome.view(frame, area);
         if let Some(form) = &self.add_provider_form {
