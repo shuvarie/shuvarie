@@ -126,7 +126,7 @@ fn parse_front_matter(content: &str) -> Option<FrontMatter> {
     let rest = content.strip_prefix("---")?;
     let end = rest.find("\n---")?;
     let yaml = &rest[..end];
-    serde_yaml::from_str(yaml).ok()
+    yaml_serde::from_str(yaml).ok()
 }
 
 #[cfg(test)]
