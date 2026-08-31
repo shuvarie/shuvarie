@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 
-use super::{Connections, CoreError, ProviderConfig, span_to_line_column};
+use super::{Active, Connections, CoreError, ProviderConfig, span_to_line_column};
 use crate::Result as CoreResult;
 use crate::error::ConfigParseError;
 
@@ -62,40 +62,97 @@ fn node_error(
 
 fn from_document(doc: &KdlDocument, input: &str) -> CoreResult<Connections> {
     let mut connections = Connections::default();
-    let mut had_active = false;
     for node in doc.nodes() {
         match node.name().value() {
             "active" => {
-                if had_active {
+                if connections.active.is_some() {
                     return Err(node_error(input, node, "duplicate `active` node", None));
                 }
-                had_active = true;
-                let args: Vec<&KdlValue> = node.entries().iter().map(|e| e.value()).collect();
-                match args.as_slice() {
-                    [KdlValue::String(provider)] => {
-                        connections.active_provider = Some(provider.clone());
-                    }
-                    [KdlValue::String(provider), KdlValue::String(model)] => {
-                        connections.active_provider = Some(provider.clone());
-                        connections.active_model = Some(model.clone());
-                    }
-                    [] => {
-                        return Err(node_error(
-                            input,
-                            node,
-                            "`active` requires a provider name argument",
-                            Some("expected: active \"provider\" (\"model\")".into()),
-                        ));
-                    }
-                    _ => {
-                        return Err(node_error(
-                            input,
-                            node,
-                            "`active` accepts at most two arguments (provider, model)",
-                            Some("both arguments must be strings".into()),
-                        ));
+                let children = node.children().ok_or_else(|| {
+                    node_error(
+                        input,
+                        node,
+                        "`active` requires a block with a `provider` child",
+                        Some(
+                            "expected: active { provider \"name\" (model \"id\") (variant \
+                             \"id\") }"
+                                .into(),
+                        ),
+                    )
+                })?;
+                let mut provider = None;
+                let mut model = None;
+                let mut variant = None;
+                for child in children.nodes() {
+                    let field = match child.name().value() {
+                        "provider" => {
+                            if provider.is_some() {
+                                return Err(node_error(
+                                    input,
+                                    child,
+                                    "duplicate `provider` in `active` block",
+                                    None,
+                                ));
+                            }
+                            &mut provider
+                        }
+                        "model" => {
+                            if model.is_some() {
+                                return Err(node_error(
+                                    input,
+                                    child,
+                                    "duplicate `model` in `active` block",
+                                    None,
+                                ));
+                            }
+                            &mut model
+                        }
+                        "variant" => {
+                            if variant.is_some() {
+                                return Err(node_error(
+                                    input,
+                                    child,
+                                    "duplicate `variant` in `active` block",
+                                    None,
+                                ));
+                            }
+                            &mut variant
+                        }
+                        _ => continue,
+                    };
+                    match child.get(0) {
+                        Some(KdlValue::String(value)) => *field = Some(value.clone()),
+                        Some(_) => {
+                            return Err(node_error(
+                                input,
+                                child,
+                                format!("`{}` must be a string", child.name().value()),
+                                None,
+                            ));
+                        }
+                        None => {
+                            return Err(node_error(
+                                input,
+                                child,
+                                format!("`{}` requires a string argument", child.name().value()),
+                                None,
+                            ));
+                        }
                     }
                 }
+                let Some(provider) = provider else {
+                    return Err(node_error(
+                        input,
+                        node,
+                        "`active` block requires a `provider` child",
+                        Some("expected: active { provider \"name\" }".into()),
+                    ));
+                };
+                connections.active = Some(Active {
+                    provider,
+                    model,
+                    variant,
+                });
             }
             "providers" => {
                 let children = node
@@ -237,12 +294,23 @@ fn parse_provider(
 
 pub(crate) fn to_kdl(connections: &Connections) -> CoreResult<String> {
     let mut doc = KdlDocument::new();
-    if let Some(provider) = &connections.active_provider {
+    if let Some(active) = &connections.active {
         let mut node = KdlNode::new("active");
-        node.push(KdlEntry::new(provider.as_str()));
-        if let Some(model) = &connections.active_model {
-            node.push(KdlEntry::new(model.as_str()));
+        let mut body = KdlDocument::new();
+        let mut child = KdlNode::new("provider");
+        child.push(KdlEntry::new(active.provider.as_str()));
+        body.nodes_mut().push(child);
+        if let Some(model) = &active.model {
+            let mut child = KdlNode::new("model");
+            child.push(KdlEntry::new(model.as_str()));
+            body.nodes_mut().push(child);
         }
+        if let Some(variant) = &active.variant {
+            let mut child = KdlNode::new("variant");
+            child.push(KdlEntry::new(variant.as_str()));
+            body.nodes_mut().push(child);
+        }
+        node.set_children(body);
         doc.nodes_mut().push(node);
     }
     let mut providers = KdlNode::new("providers");

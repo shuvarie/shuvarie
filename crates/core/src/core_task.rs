@@ -218,9 +218,10 @@ pub async fn run(
                     Command::RemoveProvider { name } => {
                         ctx.connections.providers.remove(&name);
                         ctx.clients.remove(&name);
-                        if ctx.connections.active_provider.as_deref() == Some(name.as_str()) {
-                            ctx.connections.active_provider = None;
-                            ctx.connections.active_model = None;
+                        if ctx.connections.active.as_ref().map(|a| a.provider.as_str())
+                            == Some(name.as_str())
+                        {
+                            ctx.connections.active = None;
                         }
                         persist(
                             &ctx.config,
@@ -233,7 +234,14 @@ pub async fn run(
                     }
                     Command::SetActiveProvider { name } => {
                         if ctx.connections.providers.contains_key(&name) {
-                            ctx.connections.active_provider = Some(name.clone());
+                            let active = ctx.connections.active.get_or_insert_with(|| {
+                                crate::config::Active {
+                                    provider: name.clone(),
+                                    model: None,
+                                    variant: None,
+                                }
+                            });
+                            active.provider = name.clone();
                             if !ctx.clients.contains_key(&name)
                                 && let Some(pc) = ctx.connections.providers.get(&name)
                                 && let Ok(client) = build_client(pc)
@@ -251,7 +259,9 @@ pub async fn run(
                         }
                     }
                     Command::SetActiveModel { model } => {
-                        ctx.connections.active_model = Some(model);
+                        if let Some(active) = ctx.connections.active.as_mut() {
+                            active.model = Some(model);
+                        }
                         persist(
                             &ctx.config,
                             &ctx.connections,
@@ -314,8 +324,8 @@ pub async fn run(
                                     .store
                                     .create_session(
                                         &title,
-                                        ctx.connections.active_provider.as_deref(),
-                                        ctx.connections.active_model.as_deref(),
+                                        ctx.connections.active.as_ref().map(|a| a.provider.as_str()),
+                                        ctx.connections.active.as_ref().and_then(|a| a.model.as_deref()),
                                     )
                                     .await
                                 {
@@ -963,7 +973,7 @@ impl CoreCtx {
                     .await;
             }
         }
-        let Some(provider_name) = self.connections.active_provider.clone() else {
+        let Some(active) = self.connections.active.clone() else {
             let _ = self
                 .event_tx
                 .send(Event::StreamError {
@@ -972,7 +982,8 @@ impl CoreCtx {
                 .await;
             return;
         };
-        let Some(model) = self.connections.active_model.clone() else {
+        let provider_name = active.provider;
+        let Some(model) = active.model else {
             let _ = self
                 .event_tx
                 .send(Event::StreamError {

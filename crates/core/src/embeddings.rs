@@ -28,7 +28,7 @@ pub fn setup(
         .embedding
         .provider
         .clone()
-        .or_else(|| connections.active_provider.clone())?;
+        .or_else(|| connections.active.as_ref().map(|a| a.provider.clone()))?;
     let pc = connections.providers.get(&provider_name)?;
     let client = match clients.get(&provider_name) {
         Some(c) => c.clone(),

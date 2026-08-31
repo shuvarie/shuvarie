@@ -9,7 +9,7 @@ mod connections;
 mod connections_kdl;
 mod kdlserde;
 
-pub use self::connections::{Connections, ProviderConfig};
+pub use self::connections::{Active, Connections, ProviderConfig};
 pub(crate) use self::kdlserde::span_to_line_column;
 
 const CONFIG_DIR_NAME: &str = "shuvarie";

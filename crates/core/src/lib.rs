@@ -21,7 +21,7 @@ pub mod tools;
 pub use approval::ApprovalReason;
 pub use command::Command;
 pub use config::{
-    AgentConfig, Config, Connections, ContextConfig, EmbeddingConfig, LspConfigRepr,
+    Active, AgentConfig, Config, Connections, ContextConfig, EmbeddingConfig, LspConfigRepr,
     LspServerSpecRepr, ProviderConfig, SkillsConfig, UiPrefs,
 };
 pub use core_task::run;

@@ -5,10 +5,16 @@ use super::{config_dir, connections_kdl};
 use crate::{CoreError, Result as CoreResult};
 
 #[derive(Debug, Clone, Default, PartialEq)]
+pub struct Active {
+    pub provider: String,
+    pub model: Option<String>,
+    pub variant: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Connections {
     pub providers: BTreeMap<String, ProviderConfig>,
-    pub active_provider: Option<String>,
-    pub active_model: Option<String>,
+    pub active: Option<Active>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -54,14 +60,14 @@ impl Connections {
         Ok(())
     }
 
-    /// Whether the active provider is configured and connectable.
+    /// Whether the active provider (if any) is configured and connectable.
     pub fn has_connected_providers(&self) -> bool {
         if self.providers.is_empty() {
             return false;
         }
-        match &self.active_provider {
+        match &self.active {
             None => false,
-            Some(name) => match self.providers.get(name) {
+            Some(active) => match self.providers.get(&active.provider) {
                 None => false,
                 Some(p) => p.is_connectable(),
             },
@@ -118,14 +124,17 @@ mod tests {
     fn empty_file_is_defaults() {
         let parsed: Connections = connections_kdl::from_kdl("").unwrap();
         assert!(parsed.providers.is_empty());
-        assert!(parsed.active_provider.is_none());
-        assert!(parsed.active_model.is_none());
+        assert!(parsed.active.is_none());
     }
 
     #[test]
     fn parses_planned_format() {
         let text = r#"
-            active "Ollama Cloud" "glm-5.3-flash"
+            active {
+                provider "Ollama Cloud"
+                model "glm-5.3-flash"
+                variant "high"
+            }
 
             providers {
                 provider "Ollama Cloud" kind="ollama-cloud" {
@@ -139,8 +148,10 @@ mod tests {
             }
         "#;
         let parsed: Connections = connections_kdl::from_kdl(text).unwrap();
-        assert_eq!(parsed.active_provider.as_deref(), Some("Ollama Cloud"));
-        assert_eq!(parsed.active_model.as_deref(), Some("glm-5.3-flash"));
+        let active = parsed.active.as_ref().expect("active");
+        assert_eq!(active.provider, "Ollama Cloud");
+        assert_eq!(active.model.as_deref(), Some("glm-5.3-flash"));
+        assert_eq!(active.variant.as_deref(), Some("high"));
         assert_eq!(parsed.providers.len(), 2);
         let cloud = parsed.providers.get("Ollama Cloud").expect("cloud");
         assert_eq!(cloud.kind, "ollama-cloud");
@@ -156,7 +167,10 @@ mod tests {
     #[test]
     fn providers_layout_round_trip() {
         let text = r#"
-            active "acme" "gpt-4o"
+            active {
+                provider "acme"
+                model "gpt-4o"
+            }
             providers {
                 provider "acme" kind="openai" {
                     api-key "sk-secret"
@@ -175,12 +189,31 @@ mod tests {
         let ollama = parsed.providers.get("ollama-local").expect("ollama");
         assert_eq!(ollama.kind, "ollama");
         assert!(ollama.api_key.is_none());
-        assert_eq!(parsed.active_provider.as_deref(), Some("acme"));
-        assert_eq!(parsed.active_model.as_deref(), Some("gpt-4o"));
+        let active = parsed.active.as_ref().expect("active");
+        assert_eq!(active.provider, "acme");
+        assert_eq!(active.model.as_deref(), Some("gpt-4o"));
+        assert!(active.variant.is_none());
 
         let text = connections_kdl::to_kdl(&parsed).unwrap();
         let reparsed: Connections = connections_kdl::from_kdl(&text).unwrap();
         assert_eq!(parsed, reparsed);
+    }
+
+    #[test]
+    fn full_active_round_trip() {
+        let mut connections = Connections::default();
+        connections.active = Some(Active {
+            provider: "cloud".into(),
+            model: Some("glm-5.3-flash".into()),
+            variant: Some("high".into()),
+        });
+        let saved = connections_kdl::to_kdl(&connections).unwrap();
+        assert!(
+            saved.contains("variant high") || saved.contains("variant \"high\""),
+            "expected variant in:\n{saved}"
+        );
+        let reparsed: Connections = connections_kdl::from_kdl(&saved).unwrap();
+        assert_eq!(connections, reparsed);
     }
 
     #[test]
@@ -221,17 +254,34 @@ mod tests {
     }
 
     #[test]
-    fn active_without_model_omits_model_slot() {
-        let mut connections = Connections::default();
-        connections.active_provider = Some("ollama".to_string());
-        let text = connections_kdl::to_kdl(&connections).unwrap();
-        assert!(
-            text.contains("active ollama") || text.contains("active \"ollama\"\n"),
-            "expected single-arg active:\n{text}"
-        );
-        let reparsed: Connections = connections_kdl::from_kdl(&text).unwrap();
-        assert_eq!(reparsed.active_provider.as_deref(), Some("ollama"));
-        assert!(reparsed.active_model.is_none());
+    fn active_without_children_is_error() {
+        let err = connections_kdl::from_kdl("active").unwrap_err();
+        assert!(err.to_string().contains("block"));
+    }
+
+    #[test]
+    fn active_without_provider_child_is_error() {
+        let text = "active {\n    model \"m\"\n}";
+        let err = connections_kdl::from_kdl(text).unwrap_err();
+        assert!(err.to_string().contains("requires a `provider` child"));
+    }
+
+    #[test]
+    fn rejects_positional_active() {
+        let err = connections_kdl::from_kdl("active \"ollama\" \"llama3\"").unwrap_err();
+        assert!(err.to_string().contains("requires a block"));
+    }
+
+    #[test]
+    fn rejects_duplicate_children_in_active() {
+        for text in [
+            "active {\n    provider \"a\"\n    provider \"b\"\n}",
+            "active {\n    provider \"a\"\n    model \"m\"\n    model \"m2\"\n}",
+            "active {\n    provider \"a\"\n    variant \"v\"\n    variant \"high\"\n}",
+        ] {
+            let err = connections_kdl::from_kdl(text).unwrap_err();
+            assert!(err.to_string().contains("duplicate"), "{text}");
+        }
     }
 
     #[test]
@@ -242,9 +292,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_wrong_active_arg_count() {
-        let err = connections_kdl::from_kdl("active \"a\" \"b\" \"c\"").unwrap_err();
-        assert!(err.to_string().contains("at most two"));
+    fn rejects_non_string_active_children() {
+        for text in [
+            "active {\n    provider 1\n}",
+            "active {\n    provider \"a\"\n    model #true\n}",
+        ] {
+            let err = connections_kdl::from_kdl(text).unwrap_err();
+            assert!(err.to_string().contains("must be a string"), "{text}");
+        }
     }
 
     #[test]
@@ -255,7 +310,7 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_active() {
-        let text = "active \"a\"\nactive \"b\"";
+        let text = "active {\n    provider \"a\"\n}\nactive {\n    provider \"b\"\n}";
         let err = connections_kdl::from_kdl(text).unwrap_err();
         assert!(err.to_string().contains("duplicate"));
     }
@@ -269,7 +324,7 @@ mod tests {
 
     #[test]
     fn malformed_kdl_has_location() {
-        let err = connections_kdl::from_kdl("active ").unwrap_err();
+        let err = connections_kdl::from_kdl("active {").unwrap_err();
         let CoreError::ConfigParse(e) = err else {
             panic!("expected parse error");
         };
@@ -286,8 +341,11 @@ mod tests {
             "ollama".to_string(),
             ProviderConfig::new("ollama", None, None),
         );
-        connections.active_provider = Some("ollama".to_string());
-        connections.active_model = Some("llama3".to_string());
+        connections.active = Some(Active {
+            provider: "ollama".to_string(),
+            model: Some("llama3".to_string()),
+            variant: None,
+        });
         connections.save_to(&path).unwrap();
         let loaded = Connections::load_from(&path).unwrap();
         assert_eq!(connections, loaded);

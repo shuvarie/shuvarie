@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use shuvarie_core::{
-    Config, Connections, CoreError, LspConfigRepr, LspServerSpecRepr, ProviderConfig,
+    Active, Config, Connections, CoreError, LspConfigRepr, LspServerSpecRepr, ProviderConfig,
 };
 
 fn sample_connections() -> Connections {
@@ -16,8 +16,11 @@ fn sample_connections() -> Connections {
     );
     Connections {
         providers,
-        active_provider: Some("my-openai".to_string()),
-        active_model: Some("gpt-5.5".to_string()),
+        active: Some(Active {
+            provider: "my-openai".to_string(),
+            model: Some("gpt-5.5".to_string()),
+            variant: None,
+        }),
     }
 }
 
@@ -29,7 +32,7 @@ fn round_trip_serialization() {
 
     connections.save_to(&path).expect("save");
     let saved = std::fs::read_to_string(&path).expect("read saved file");
-    assert!(saved.contains("active my-openai") || saved.contains("active \"my-openai\""));
+    assert!(saved.contains("provider my-openai") || saved.contains("provider \"my-openai\""));
     assert!(saved.contains("gpt-5.5"));
     assert!(saved.contains("api-key"));
     assert!(saved.contains("sk-test"));
@@ -82,15 +85,18 @@ fn kdl_document_shape() {
             || saved.contains("base-url http://localhost:11434")
     );
     assert!(
-        saved.contains("active my-openai") && saved.contains("gpt-5.5")
-            || saved.contains("active \"my-openai\" \"gpt-5.5\"")
+        saved.contains("active {") && saved.contains("gpt-5.5"),
+        "expected active block with model:\n{saved}",
     );
 }
 
 #[test]
 fn parse_hand_written_kdl() {
     let kdl = r#"
-active "my-openai" "gpt-5.5"
+active {
+    provider "my-openai"
+    model "gpt-5.5"
+}
 providers {
     provider "my-openai" kind="openai" {
         api-key "sk-test"
@@ -150,8 +156,7 @@ fn missing_active_provider_has_no_connected_providers() {
             "my-openai".to_string(),
             ProviderConfig::new("openai", Some("sk-test".to_string()), None),
         )]),
-        active_provider: None,
-        active_model: None,
+        active: None,
     };
     assert!(!connections.has_connected_providers());
 }
@@ -160,8 +165,11 @@ fn missing_active_provider_has_no_connected_providers() {
 fn active_provider_missing_from_map_has_no_connected_providers() {
     let connections = Connections {
         providers: BTreeMap::new(),
-        active_provider: Some("nonexistent".to_string()),
-        active_model: None,
+        active: Some(Active {
+            provider: "nonexistent".to_string(),
+            model: None,
+            variant: None,
+        }),
     };
     assert!(!connections.has_connected_providers());
 }
@@ -173,8 +181,11 @@ fn active_provider_without_key_has_no_connected_providers() {
             "my-openai".to_string(),
             ProviderConfig::new("openai", None, None),
         )]),
-        active_provider: Some("my-openai".to_string()),
-        active_model: None,
+        active: Some(Active {
+            provider: "my-openai".to_string(),
+            model: None,
+            variant: None,
+        }),
     };
     assert!(!connections.has_connected_providers());
 }
@@ -192,8 +203,11 @@ fn ollama_without_key_is_connected() {
             "local".to_string(),
             ProviderConfig::new("ollama", None, None),
         )]),
-        active_provider: Some("local".to_string()),
-        active_model: None,
+        active: Some(Active {
+            provider: "local".to_string(),
+            model: None,
+            variant: None,
+        }),
     };
     assert!(connections.has_connected_providers());
 }
@@ -205,8 +219,11 @@ fn ollama_cloud_without_key_is_not_connected() {
             "cloud".to_string(),
             ProviderConfig::new("ollama-cloud", None, None),
         )]),
-        active_provider: Some("cloud".to_string()),
-        active_model: None,
+        active: Some(Active {
+            provider: "cloud".to_string(),
+            model: None,
+            variant: None,
+        }),
     };
     assert!(!connections.has_connected_providers());
 }
@@ -218,8 +235,11 @@ fn ollama_cloud_with_key_is_connected() {
             "cloud".to_string(),
             ProviderConfig::new("ollama-cloud", Some("ollama-key".to_string()), None),
         )]),
-        active_provider: Some("cloud".to_string()),
-        active_model: None,
+        active: Some(Active {
+            provider: "cloud".to_string(),
+            model: None,
+            variant: None,
+        }),
     };
     assert!(connections.has_connected_providers());
 }

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use shuvarie_core::{Command, Config, Connections, Event, ProviderConfig, Session, run};
+use shuvarie_core::{Active, Command, Config, Connections, Event, ProviderConfig, Session, run};
 use shuvarie_db::Store;
 
 fn empty_config() -> Config {
@@ -112,7 +112,11 @@ async fn remove_provider_clears_active() {
     connections
         .providers
         .insert("p1".into(), ProviderConfig::new("ollama", None, None));
-    connections.active_provider = Some("p1".into());
+    connections.active = Some(Active {
+        provider: "p1".into(),
+        model: None,
+        variant: None,
+    });
 
     let handle = tokio::spawn(run(
         empty_config(),
@@ -140,7 +144,7 @@ async fn remove_provider_clears_active() {
 
     let loaded = Connections::load_from(&connections_path).expect("load persisted connections");
     assert!(
-        !loaded.providers.contains_key("p1") && loaded.active_provider.is_none(),
+        !loaded.providers.contains_key("p1") && loaded.active.is_none(),
         "removal persisted to the temp connections path"
     );
     drop(cmd_tx);
@@ -226,8 +230,11 @@ async fn double_send_while_streaming_is_rejected() {
     connections
         .providers
         .insert("ollama".into(), ProviderConfig::new("ollama", None, None));
-    connections.active_provider = Some("ollama".into());
-    connections.active_model = Some("test-model".into());
+    connections.active = Some(Active {
+        provider: "ollama".into(),
+        model: Some("test-model".into()),
+        variant: None,
+    });
 
     let handle = tokio::spawn(run(
         empty_config(),
@@ -278,8 +285,11 @@ async fn send_message_persists_session_and_messages() {
     connections
         .providers
         .insert("ollama".into(), ProviderConfig::new("ollama", None, None));
-    connections.active_provider = Some("ollama".into());
-    connections.active_model = Some("test-model".into());
+    connections.active = Some(Active {
+        provider: "ollama".into(),
+        model: Some("test-model".into()),
+        variant: None,
+    });
 
     let store = Store::open_in_memory().await.unwrap();
     let store_clone = store.clone();

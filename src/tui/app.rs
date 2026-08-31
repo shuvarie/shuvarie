@@ -141,8 +141,8 @@ impl App {
         if !connections.has_connected_providers() {
             welcome.open();
         }
-        let initial_provider = connections.active_provider.clone();
-        let initial_model = connections.active_model.clone();
+        let initial_provider = connections.active.as_ref().map(|a| a.provider.clone());
+        let initial_model = connections.active.as_ref().and_then(|a| a.model.clone());
         Self {
             ctx: UpdateCtx::new(connections, cmd_tx),
             route,
@@ -522,7 +522,12 @@ impl App {
                                 .send(shuvarie_core::Command::SetActiveModel { model });
                         }
                         ModelPickerEffect::Close => {
-                            if self.ctx.connections.active_model.is_none()
+                            if self
+                                .ctx
+                                .connections
+                                .active
+                                .as_ref()
+                                .is_none_or(|a| a.model.is_none())
                                 && let Some(first) = self.model_picker.models.first()
                             {
                                 self.ctx.send(shuvarie_core::Command::SetActiveModel {
@@ -543,8 +548,9 @@ impl App {
                                 .get(
                                     self.ctx
                                         .connections
-                                        .active_provider
-                                        .as_deref()
+                                        .active
+                                        .as_ref()
+                                        .map(|a| a.provider.as_str())
                                         .unwrap_or(""),
                                 )
                                 .cloned()
@@ -730,15 +736,33 @@ impl App {
                 if empty {
                     return None;
                 }
-                if Some(provider_name.as_str()) == self.ctx.connections.active_provider.as_deref() {
+                if Some(provider_name.as_str())
+                    == self
+                        .ctx
+                        .connections
+                        .active
+                        .as_ref()
+                        .map(|a| a.provider.as_str())
+                {
                     let models = self.models.get(&provider_name).unwrap();
-                    let current = self.ctx.connections.active_model.as_deref();
+                    let current = self
+                        .ctx
+                        .connections
+                        .active
+                        .as_ref()
+                        .and_then(|a| a.model.as_deref());
                     let chosen = current
                         .filter(|c| models.iter().any(|m| m.id == *c))
                         .map(|c| c.to_string())
                         .or_else(|| models.first().map(|m| m.id.clone()));
                     if let Some(model) = chosen
-                        && self.ctx.connections.active_model.as_deref() != Some(model.as_str())
+                        && self
+                            .ctx
+                            .connections
+                            .active
+                            .as_ref()
+                            .and_then(|a| a.model.as_deref())
+                            != Some(model.as_str())
                     {
                         self.ctx
                             .send(shuvarie_core::Command::SetActiveModel { model });
@@ -902,10 +926,10 @@ impl App {
     }
 
     fn active_context_length(&self) -> Option<u64> {
-        let provider = self.ctx.connections.active_provider.as_deref()?;
-        let model = self.ctx.connections.active_model.as_deref()?;
+        let active = self.ctx.connections.active.as_ref()?;
+        let model = active.model.as_deref()?;
         self.models
-            .get(provider)?
+            .get(&active.provider)?
             .iter()
             .find(|m| m.id == model)
             .and_then(|m| m.context_length.map(u64::from))
@@ -919,8 +943,18 @@ impl App {
                 self.overlay = Overlay::None;
             }
             self.session.update(SessionMessage::UpdateConfig {
-                provider: self.ctx.connections.active_provider.clone(),
-                model: self.ctx.connections.active_model.clone(),
+                provider: self
+                    .ctx
+                    .connections
+                    .active
+                    .as_ref()
+                    .map(|a| a.provider.clone()),
+                model: self
+                    .ctx
+                    .connections
+                    .active
+                    .as_ref()
+                    .and_then(|a| a.model.clone()),
                 context_length: self.active_context_length(),
             });
         }
