@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -132,6 +133,31 @@ impl ReadCache {
     }
 }
 
+/// Per-target-file mutation locks shared by `write_file`, `edit_file`, and
+/// `apply_patch`, so worker agents and the manager never interleave
+/// read-modify-write spans on the same file. Different files stay parallel.
+#[derive(Clone, Default)]
+pub struct FileLocks {
+    locks: Arc<tokio::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>>,
+}
+
+impl FileLocks {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) async fn lock(&self, path: &Path) -> tokio::sync::OwnedMutexGuard<()> {
+        let entry = self
+            .locks
+            .lock()
+            .await
+            .entry(path.to_owned())
+            .or_default()
+            .clone();
+        entry.lock_owned().await
+    }
+}
+
 pub(crate) fn arg_value(args: &Value, key: &str) -> Result<String, String> {
     args.get(key)
         .and_then(Value::as_str)
@@ -143,6 +169,7 @@ struct ReadFile {
     gate: ApprovalGate,
     read_cache: ReadCache,
     max_output_chars: usize,
+    max_output_bytes: usize,
 }
 
 impl Tool for ReadFile {
@@ -177,6 +204,7 @@ impl Tool for ReadFile {
         let gate = self.gate.clone();
         let read_cache = self.read_cache.clone();
         let max_output_chars = self.max_output_chars;
+        let max_output_bytes = self.max_output_bytes;
         let result: Result<ToolOutput, String> = async move {
             let path = arg_value(&args, "path")?;
             let offset = args.get("offset").and_then(Value::as_u64);
@@ -193,7 +221,7 @@ impl Tool for ReadFile {
             if abs.is_dir() {
                 return Err(format!("'{path}' is a directory, not a file"));
             }
-            let data = std::fs::read(&abs).map_err(|e| format!("read {path}: {e}"))?;
+            let data = tokio::fs::read(&abs).await.map_err(|e| format!("read {path}: {e}"))?;
             if is_binary_file(&data) {
                 return Err(format!("'{path}' appears to be binary; refusing to read"));
             }
@@ -210,8 +238,10 @@ impl Tool for ReadFile {
             let start = offset - 1;
             let end = (start + limit).min(lines.len());
             let mut out = String::new();
+            let mut long_lines = false;
             for (i, line) in lines[start..end].iter().enumerate() {
                 let line = if line.chars().count() > MAX_LINE_LENGTH {
+                    long_lines = true;
                     let head: String = line.chars().take(MAX_LINE_LENGTH).collect();
                     format!("{head}{MAX_LINE_SUFFIX}")
                 } else {
@@ -232,8 +262,16 @@ impl Tool for ReadFile {
             } else {
                 out.push_str(&format!("\n(End of file - total {} lines)", lines.len()));
             }
+            if long_lines {
+                out.push_str(
+                    "\n(long lines truncated; use run_shell, e.g. `sed -n 'Np' file | cut -c1-2000`, to read one exactly)",
+                );
+            }
             let hint = format!("use offset/limit to read more of {path}");
             if let Some(capped) = crate::truncate::truncate_output(&out, max_output_chars, &hint) {
+                return Ok(ToolOutput::text(capped));
+            }
+            if let Some(capped) = crate::truncate::truncate_bytes(&out, max_output_bytes, &hint) {
                 return Ok(ToolOutput::text(capped));
             }
             Ok(ToolOutput::text(out))
@@ -262,6 +300,7 @@ struct WriteFile {
     gate: ApprovalGate,
     read_cache: ReadCache,
     lsp: Option<SharedManager>,
+    locks: FileLocks,
 }
 
 const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
@@ -301,6 +340,7 @@ impl Tool for WriteFile {
         let gate = self.gate.clone();
         let read_cache = self.read_cache.clone();
         let lsp = self.lsp.clone();
+        let locks = self.locks.clone();
         let result: Result<ToolOutput, String> = async move {
             let path = arg_value(&args, "path")?;
             let content = arg_value(&args, "content")?;
@@ -313,6 +353,7 @@ impl Tool for WriteFile {
             if let Some(reason) = reason {
                 gate.request("write_file", &path, reason).await?;
             }
+            let _file_lock = locks.lock(&abs).await;
             let exists = abs.exists();
             match mode {
                 Some("create") if exists => {
@@ -328,10 +369,11 @@ impl Tool for WriteFile {
                 _ => {}
             }
             if let Some(parent) = abs.parent() {
-                std::fs::create_dir_all(parent)
+                tokio::fs::create_dir_all(parent)
+                    .await
                     .map_err(|e| format!("create dir {}: {e}", parent.display()))?;
             }
-            let original = std::fs::read(&abs).ok();
+            let original = tokio::fs::read(&abs).await.ok();
             let original_text = original
                 .as_deref()
                 .map(|bytes| String::from_utf8_lossy(bytes).into_owned());
@@ -348,9 +390,11 @@ impl Tool for WriteFile {
                     .map(|e| format!("{e}.", e = e.to_string_lossy()))
                     .unwrap_or_default()
             ));
-            std::fs::write(&tmp_path, &content).map_err(|e| format!("write {path}: {e}"))?;
-            if let Err(e) = std::fs::rename(&tmp_path, &abs) {
-                let _ = std::fs::remove_file(&tmp_path);
+            tokio::fs::write(&tmp_path, &content)
+                .await
+                .map_err(|e| format!("write {path}: {e}"))?;
+            if let Err(e) = tokio::fs::rename(&tmp_path, &abs).await {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
                 return Err(format!("write {path}: {e}"));
             }
             if let Some(lsp) = &lsp {
@@ -375,6 +419,7 @@ impl Tool for WriteFile {
 struct EditFile {
     gate: ApprovalGate,
     lsp: Option<SharedManager>,
+    locks: FileLocks,
 }
 
 impl Tool for EditFile {
@@ -423,6 +468,7 @@ impl Tool for EditFile {
     ) -> Result<ToolOutput, ToolExecutionError> {
         let gate = self.gate.clone();
         let lsp = self.lsp.clone();
+        let locks = self.locks.clone();
         let result: Result<ToolOutput, String> = async move {
             let path = arg_value(&args, "path")?;
             let edits = parse_edits(&args)?;
@@ -430,7 +476,10 @@ impl Tool for EditFile {
             if let Some(reason) = reason {
                 gate.request("edit_file", &path, reason).await?;
             }
-            let raw = std::fs::read_to_string(&abs).map_err(|e| format!("read {path}: {e}"))?;
+            let _file_lock = locks.lock(&abs).await;
+            let raw = tokio::fs::read_to_string(&abs)
+                .await
+                .map_err(|e| format!("read {path}: {e}"))?;
             let (had_bom, content) = split_bom(&raw);
             let ending = detect_line_ending(content);
             let base = normalize_lf(content);
@@ -441,7 +490,9 @@ impl Tool for EditFile {
             }
             final_content.push_str(&restore_line_endings(&edited, ending));
             let diff = compute_diff(&raw, &final_content);
-            std::fs::write(&abs, &final_content).map_err(|e| format!("write {path}: {e}"))?;
+            tokio::fs::write(&abs, &final_content)
+                .await
+                .map_err(|e| format!("write {path}: {e}"))?;
             if let Some(lsp) = &lsp {
                 lsp.lock()
                     .await
@@ -1217,9 +1268,22 @@ pub(crate) fn hidden_reason(path: &str) -> Option<ApprovalReason> {
     has_hidden.then_some(ApprovalReason::HiddenPath)
 }
 
+fn expand_home(path: &str) -> String {
+    if (path == "~" || path.starts_with("~/") || path.starts_with("~\\"))
+        && let Some(home) = dirs::home_dir()
+    {
+        let rest = path
+            .strip_prefix("~/")
+            .or_else(|| path.strip_prefix("~\\"))
+            .unwrap_or("");
+        return home.join(rest).to_string_lossy().into_owned();
+    }
+    path.to_string()
+}
+
 pub(crate) fn resolve_checked(path: &str) -> Result<(PathBuf, Option<ApprovalReason>), String> {
     let root = workspace_root()?;
-    let joined = root.join(path);
+    let joined = root.join(expand_home(path));
     let canonical = joined.canonicalize().map_err(|e| format!("{path}: {e}"))?;
     let reason = if !canonical.starts_with(&root) {
         Some(ApprovalReason::OutsideWorkspace)
@@ -1233,7 +1297,7 @@ pub(crate) fn resolve_for_write_checked(
     path: &str,
 ) -> Result<(PathBuf, Option<ApprovalReason>), String> {
     let root = workspace_root()?;
-    let joined = root.join(path);
+    let joined = root.join(expand_home(path));
     let reason = hidden_reason(path);
     if joined.exists() {
         let abs = joined.canonicalize().map_err(|e| format!("{path}: {e}"))?;
@@ -1379,14 +1443,24 @@ fn apply_edits(base: &str, edits: &[TextEdit], path: &str) -> Result<String, Str
             });
         }
     }
+    let mut used_fuzzy = false;
+    for edit in edits {
+        let (_, _, fuzzy) = fuzzy_find(base, &edit.old_text);
+        if fuzzy {
+            used_fuzzy = true;
+        }
+    }
+    let replacement_base = if used_fuzzy {
+        normalize_for_fuzzy_match(base)
+    } else {
+        base.to_string()
+    };
     let mut matched: Vec<MatchedEdit> = Vec::new();
     for (i, edit) in edits.iter().enumerate() {
-        let occurrences: Vec<usize> = base
-            .match_indices(&edit.old_text)
-            .map(|(pos, _)| pos)
-            .collect();
-        match occurrences.len() {
-            0 => {
+        let (index, len, _) = fuzzy_find(&replacement_base, &edit.old_text);
+        let occurrences = count_fuzzy_occurrences(&replacement_base, &edit.old_text);
+        match (index, occurrences) {
+            (None, _) => {
                 return Err(match single {
                     true => format!(
                         "Could not find the text in {path}. It must match the file content exactly, including all whitespace and newlines."
@@ -1396,13 +1470,13 @@ fn apply_edits(base: &str, edits: &[TextEdit], path: &str) -> Result<String, Str
                     ),
                 });
             }
-            1 => matched.push(MatchedEdit {
+            (Some(start), 1) => matched.push(MatchedEdit {
                 index: i,
-                start: occurrences[0],
-                len: edit.old_text.len(),
+                start,
+                len,
                 new_text: edit.new_text.clone(),
             }),
-            n => {
+            (Some(_), n) => {
                 return Err(match single {
                     true => format!(
                         "Found {n} occurrences of the text in {path}. The text must be unique; include more surrounding lines to disambiguate."
@@ -1425,10 +1499,15 @@ fn apply_edits(base: &str, edits: &[TextEdit], path: &str) -> Result<String, Str
             ));
         }
     }
-    let mut result = base.to_string();
-    for m in matched.iter().rev() {
-        result.replace_range(m.start..m.start + m.len, &m.new_text);
-    }
+    let result = if used_fuzzy {
+        apply_replacements_preserving_unchanged_lines(base, &replacement_base, &matched)?
+    } else {
+        let mut result = base.to_string();
+        for m in matched.iter().rev() {
+            result.replace_range(m.start..m.start + m.len, &m.new_text);
+        }
+        result
+    };
     if result == base {
         return Err(match single {
             true => format!(
@@ -1439,6 +1518,143 @@ fn apply_edits(base: &str, edits: &[TextEdit], path: &str) -> Result<String, Str
             }
         });
     }
+    Ok(result)
+}
+
+fn fuzzy_find(content: &str, old: &str) -> (Option<usize>, usize, bool) {
+    if let Some(index) = content.find(old) {
+        return (Some(index), old.len(), false);
+    }
+    let normalized_content = normalize_for_fuzzy_match(content);
+    let normalized_old = normalize_for_fuzzy_match(old);
+    if let Some(index) = normalized_content.find(&normalized_old) {
+        return (Some(index), normalized_old.len(), true);
+    }
+    (None, 0, false)
+}
+
+fn count_fuzzy_occurrences(content: &str, old: &str) -> usize {
+    normalize_for_fuzzy_match(content)
+        .matches(&normalize_for_fuzzy_match(old))
+        .count()
+}
+
+fn normalize_for_fuzzy_match(text: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    let nfkc: String = text.chars().nfkc().collect();
+    let mut out = String::with_capacity(nfkc.len());
+    for (i, line) in nfkc.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(line.trim_end());
+    }
+    out.replace(['\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'], "'")
+        .replace(['\u{201C}', '\u{201D}', '\u{201E}', '\u{201F}'], "\"")
+        .replace(
+            [
+                '\u{2010}', '\u{2011}', '\u{2012}', '\u{2013}', '\u{2014}', '\u{2015}', '\u{2212}',
+            ],
+            "-",
+        )
+        .replace(
+            [
+                '\u{00A0}', '\u{2002}', '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}', '\u{2007}',
+                '\u{2008}', '\u{2009}', '\u{200A}', '\u{202F}', '\u{205F}', '\u{3000}',
+            ],
+            " ",
+        )
+}
+
+fn lines_with_endings(content: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for (idx, _) in content.match_indices('\n') {
+        lines.push(&content[start..idx + 1]);
+        start = idx + 1;
+    }
+    if start < content.len() {
+        lines.push(&content[start..]);
+    }
+    lines
+}
+
+fn line_spans(content: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut offset = 0;
+    for line in lines_with_endings(content) {
+        spans.push((offset, offset + line.len()));
+        offset += line.len();
+    }
+    spans
+}
+
+fn replacement_line_range(
+    spans: &[(usize, usize)],
+    match_start: usize,
+    match_end: usize,
+) -> Result<(usize, usize), String> {
+    let mut first = None;
+    for (i, span) in spans.iter().enumerate() {
+        if match_start >= span.0 && match_start < span.1 {
+            first = Some(i);
+            break;
+        }
+    }
+    let Some(mut last) = first else {
+        return Err("replacement range is outside the base content".into());
+    };
+    while last < spans.len() && spans[last].1 < match_end {
+        last += 1;
+    }
+    if last >= spans.len() {
+        return Err("replacement range is outside the base content".into());
+    }
+    Ok((first.unwrap(), last + 1))
+}
+
+fn apply_replacements_preserving_unchanged_lines(
+    original: &str,
+    base: &str,
+    matched: &[MatchedEdit],
+) -> Result<String, String> {
+    let original_lines = lines_with_endings(original);
+    let spans = line_spans(base);
+    if original_lines.len() != spans.len() {
+        return Err(
+            "fuzzy-matched edit could not map to the original file (line count mismatch)".into(),
+        );
+    }
+    let mut groups: Vec<(usize, usize, Vec<&MatchedEdit>)> = Vec::new();
+    for m in matched {
+        let (start_line, end_line) = replacement_line_range(&spans, m.start, m.start + m.len)?;
+        let merged = match groups.last_mut() {
+            Some((_, group_end, list)) if start_line < *group_end => {
+                *group_end = (*group_end).max(end_line);
+                list.push(m);
+                true
+            }
+            _ => false,
+        };
+        if !merged {
+            groups.push((start_line, end_line, vec![m]));
+        }
+    }
+    let mut result = String::with_capacity(original.len());
+    let mut original_index = 0;
+    for (group_start, group_end, replacements) in &groups {
+        result.push_str(&original_lines[original_index..*group_start].concat());
+        let slice_start = spans[*group_start].0;
+        let slice_end = spans[*group_end - 1].1;
+        let mut group_text = base[slice_start..slice_end].to_string();
+        for m in replacements.iter().rev() {
+            let at = m.start - slice_start;
+            group_text.replace_range(at..at + m.len, &m.new_text);
+        }
+        result.push_str(&group_text);
+        original_index = *group_end;
+    }
+    result.push_str(&original_lines[original_index..].concat());
     Ok(result)
 }
 
@@ -1798,11 +2014,14 @@ impl Tool for Question {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn all_tools(
     gate: ApprovalGate,
     lsp: SharedManager,
+    locks: FileLocks,
     read_cache: ReadCache,
     max_output_chars: usize,
+    max_output_bytes: usize,
     question_gate: QuestionGate,
     shell_tx: ShellOutputTx,
 ) -> Vec<shuvarie_llm::DynamicTool> {
@@ -1813,6 +2032,7 @@ pub fn all_tools(
                 gate: gate.clone(),
                 read_cache: read_cache.clone(),
                 max_output_chars,
+                max_output_bytes,
             },
         ),
         shuvarie_llm::into_dynamic(
@@ -1821,6 +2041,7 @@ pub fn all_tools(
                 gate: gate.clone(),
                 read_cache: read_cache.clone(),
                 lsp: Some(lsp.clone()),
+                locks: locks.clone(),
             },
         ),
         shuvarie_llm::into_dynamic(
@@ -1828,6 +2049,7 @@ pub fn all_tools(
             EditFile {
                 gate: gate.clone(),
                 lsp: Some(lsp.clone()),
+                locks: locks.clone(),
             },
         ),
         shuvarie_llm::into_dynamic(
@@ -1862,6 +2084,7 @@ pub fn read_tools(
     lsp: SharedManager,
     read_cache: ReadCache,
     max_output_chars: usize,
+    max_output_bytes: usize,
 ) -> Vec<shuvarie_llm::DynamicTool> {
     vec![
         shuvarie_llm::into_dynamic(
@@ -1870,6 +2093,7 @@ pub fn read_tools(
                 gate: gate.clone(),
                 read_cache,
                 max_output_chars,
+                max_output_bytes,
             },
         ),
         shuvarie_llm::into_dynamic("list_dir", ListDir { gate: gate.clone() }),
@@ -1899,8 +2123,10 @@ pub fn command_tools(
 pub fn edit_tools(
     gate: ApprovalGate,
     lsp: SharedManager,
+    locks: FileLocks,
     read_cache: ReadCache,
     max_output_chars: usize,
+    max_output_bytes: usize,
 ) -> Vec<shuvarie_llm::DynamicTool> {
     vec![
         shuvarie_llm::into_dynamic(
@@ -1909,6 +2135,7 @@ pub fn edit_tools(
                 gate: gate.clone(),
                 read_cache: read_cache.clone(),
                 max_output_chars,
+                max_output_bytes,
             },
         ),
         shuvarie_llm::into_dynamic(
@@ -1917,6 +2144,7 @@ pub fn edit_tools(
                 gate: gate.clone(),
                 read_cache,
                 lsp: Some(lsp.clone()),
+                locks: locks.clone(),
             },
         ),
         shuvarie_llm::into_dynamic(
@@ -1924,11 +2152,12 @@ pub fn edit_tools(
             EditFile {
                 gate: gate.clone(),
                 lsp: Some(lsp.clone()),
+                locks: locks.clone(),
             },
         ),
         shuvarie_llm::into_dynamic(
             "apply_patch",
-            crate::apply_patch::ApplyPatch::new(gate, Some(lsp.clone())),
+            crate::apply_patch::ApplyPatch::new(gate, Some(lsp.clone()), locks.clone()),
         ),
         shuvarie_llm::into_dynamic("lsp", Lsp { lsp }),
     ]
@@ -1965,6 +2194,7 @@ mod tests {
             gate: gate(),
             read_cache: ReadCache::new(),
             max_output_chars: 0,
+            max_output_bytes: 0,
         }
     }
 
@@ -2019,6 +2249,7 @@ mod tests {
             gate: gate(),
             read_cache: ReadCache::new(),
             lsp: no_lsp(),
+            locks: FileLocks::new(),
         }
         .call(
             &mut ctx,
@@ -2039,6 +2270,7 @@ mod tests {
             gate: gate(),
             read_cache,
             lsp: no_lsp(),
+            locks: FileLocks::new(),
         }
     }
 
@@ -2087,6 +2319,7 @@ mod tests {
             gate: gate(),
             read_cache: cache,
             max_output_chars: 0,
+            max_output_bytes: 0,
         };
         reader
             .call(&mut new_ctx(), json!({ "path": "f.txt" }))
@@ -2111,6 +2344,7 @@ mod tests {
             gate: gate(),
             read_cache: cache.clone(),
             max_output_chars: 0,
+            max_output_bytes: 0,
         };
         reader
             .call(&mut new_ctx(), json!({ "path": "f.txt" }))
@@ -2144,6 +2378,7 @@ mod tests {
             gate: gate(),
             read_cache: cache.clone(),
             max_output_chars: 0,
+            max_output_bytes: 0,
         };
         reader
             .call(&mut new_ctx(), json!({ "path": "bom.txt" }))
@@ -2192,6 +2427,7 @@ mod tests {
         let out = EditFile {
             gate: gate(),
             lsp: no_lsp(),
+            locks: FileLocks::new(),
         }
         .call(
             &mut ctx,
@@ -2224,6 +2460,7 @@ mod tests {
         let err = EditFile {
             gate: gate(),
             lsp: no_lsp(),
+            locks: FileLocks::new(),
         }
         .call(
             &mut new_ctx(),
@@ -2239,6 +2476,7 @@ mod tests {
         let err = EditFile {
             gate: gate(),
             lsp: no_lsp(),
+            locks: FileLocks::new(),
         }
         .call(
             &mut new_ctx(),
@@ -2250,6 +2488,7 @@ mod tests {
         let err = EditFile {
             gate: gate(),
             lsp: no_lsp(),
+            locks: FileLocks::new(),
         }
         .call(
             &mut new_ctx(),
@@ -2265,6 +2504,7 @@ mod tests {
         let err = EditFile {
             gate: gate(),
             lsp: no_lsp(),
+            locks: FileLocks::new(),
         }
         .call(
             &mut new_ctx(),
@@ -2287,6 +2527,7 @@ mod tests {
         let err = EditFile {
             gate: gate(),
             lsp: no_lsp(),
+            locks: FileLocks::new(),
         }
         .call(
             &mut new_ctx(),
@@ -2317,6 +2558,7 @@ mod tests {
         EditFile {
             gate: gate(),
             lsp: no_lsp(),
+            locks: FileLocks::new(),
         }
         .call(
             &mut new_ctx(),
@@ -2328,6 +2570,7 @@ mod tests {
         EditFile {
             gate: gate(),
             lsp: no_lsp(),
+            locks: FileLocks::new(),
         }
         .call(
             &mut new_ctx(),
@@ -2339,6 +2582,7 @@ mod tests {
         EditFile {
             gate: gate(),
             lsp: no_lsp(),
+            locks: FileLocks::new(),
         }
         .call(
             &mut new_ctx(),
@@ -2357,6 +2601,7 @@ mod tests {
         EditFile {
             gate: gate(),
             lsp: no_lsp(),
+            locks: FileLocks::new(),
         }
         .call(
             &mut new_ctx(),
@@ -2368,6 +2613,155 @@ mod tests {
             std::fs::read_to_string("e.txt").unwrap(),
             "\u{FEFF}1\r\n2\r\ntwo\r\n"
         );
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn edit_fuzzy_matches_unicode_and_trailing_ws() {
+        let (dir, _guard) = tempdir();
+        std::fs::write(
+            "fuzzy.txt",
+            "say \u{201C}hello\u{201D} ok\nplain line\n\u{2014}\u{2014}\n",
+        )
+        .unwrap();
+        EditFile {
+            gate: gate(),
+            lsp: no_lsp(),
+            locks: FileLocks::new(),
+        }
+        .call(
+            &mut new_ctx(),
+            json!({
+                "path": "fuzzy.txt",
+                "edits": [{ "oldText": "\"hello\" ok", "newText": "'goodbye' ok" }]
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string("fuzzy.txt").unwrap(),
+            "say 'goodbye' ok\nplain line\n\u{2014}\u{2014}\n"
+        );
+        std::fs::write("ws.txt", "head   \nkeep  me\n").unwrap();
+        let err = EditFile {
+            gate: gate(),
+            lsp: no_lsp(),
+            locks: FileLocks::new(),
+        }
+        .call(
+            &mut new_ctx(),
+            json!({
+                "path": "ws.txt",
+                "edits": [{ "oldText": "keep me", "newText": "KEEP ME" }]
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("Could not find"),
+            "internal double spaces are not normalized: {}",
+            err
+        );
+        EditFile {
+            gate: gate(),
+            lsp: no_lsp(),
+            locks: FileLocks::new(),
+        }
+        .call(
+            &mut new_ctx(),
+            json!({
+                "path": "ws.txt",
+                "edits": [{ "oldText": "head\nkeep  me", "newText": "HEAD\nKEEP  ME" }]
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string("ws.txt").unwrap(),
+            "HEAD\nKEEP  ME\n"
+        );
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn concurrent_edits_serialize_per_path() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("f.txt", "token alpha and token beta\n").unwrap();
+        let locks = FileLocks::new();
+        let tool_a = EditFile {
+            gate: gate(),
+            lsp: no_lsp(),
+            locks: locks.clone(),
+        };
+        let tool_b = EditFile {
+            gate: gate(),
+            lsp: no_lsp(),
+            locks,
+        };
+        let (ra, rb) = tokio::join!(
+            async {
+                tool_a
+                    .call(
+                        &mut new_ctx(),
+                        json!({ "path": "f.txt", "edits": [{ "oldText": "alpha", "newText": "ALPHA" }] }),
+                    )
+                    .await
+            },
+            async {
+                tool_b
+                    .call(
+                        &mut new_ctx(),
+                        json!({ "path": "f.txt", "edits": [{ "oldText": "beta", "newText": "BETA" }] }),
+                    )
+                    .await
+            }
+        );
+        ra.unwrap();
+        rb.unwrap();
+        assert_eq!(
+            std::fs::read_to_string("f.txt").unwrap(),
+            "token ALPHA and token BETA\n"
+        );
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn read_truncates_by_bytes() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("bytes.txt", "abcdef\n").unwrap();
+        let tool = ReadFile {
+            gate: gate(),
+            read_cache: ReadCache::new(),
+            max_output_chars: 0,
+            max_output_bytes: 3,
+        };
+        let out = tool
+            .call(&mut new_ctx(), json!({ "path": "bytes.txt" }))
+            .await
+            .unwrap();
+        let text = out.as_text().unwrap();
+        assert!(
+            text.contains("bytes omitted") && text.contains("use offset/limit"),
+            "{text}"
+        );
+        drop(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tilde_paths_expand_and_gate() {
+        let (dir, _guard) = tempdir();
+        let original_home = std::env::var("HOME").ok();
+        let home = TempDir::new().unwrap();
+        unsafe { std::env::set_var("HOME", home.path()) };
+        std::fs::write(home.path().join("homefile.txt"), "x").unwrap();
+        let (abs, reason) = resolve_checked("~/homefile.txt").unwrap();
+        assert_eq!(reason, Some(ApprovalReason::OutsideWorkspace));
+        assert!(abs.ends_with("homefile.txt"));
+        match original_home {
+            Some(home_path) => unsafe { std::env::set_var("HOME", home_path) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
         drop(dir);
     }
 
@@ -2702,6 +3096,7 @@ mod tests {
             gate: gate(),
             read_cache: cache.clone(),
             max_output_chars: 0,
+            max_output_bytes: 0,
         };
         let first = tool
             .call(&mut new_ctx(), json!({ "path": "dup.txt" }))
@@ -2742,6 +3137,7 @@ mod tests {
             gate: gate(),
             read_cache: ReadCache::new(),
             max_output_chars: 100,
+            max_output_bytes: 0,
         };
         let out = tool
             .call(&mut new_ctx(), json!({ "path": "big.txt" }))

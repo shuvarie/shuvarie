@@ -68,6 +68,11 @@ pub struct ContextConfig {
     #[serde(deserialize_with = "kdlserde::de_tool_output_max_chars")]
     pub tool_output_max_chars: usize,
 
+    /// Maximum bytes of a tool result's text sent to the model. Applies on
+    /// top of `tool_output_max_chars` (whichever caps first). `0` disables.
+    #[serde(deserialize_with = "kdlserde::de_tool_output_max_bytes")]
+    pub tool_output_max_bytes: usize,
+
     /// Default context length used when the catalog has no entry for the
     /// active model.
     #[serde(deserialize_with = "kdlserde::de_fallback_context")]
@@ -81,6 +86,7 @@ impl Default for ContextConfig {
             reserved: 20_000,
             keep_recent_tokens: 20_000,
             tool_output_max_chars: 16_000,
+            tool_output_max_bytes: 50_000,
             fallback_context_length: 128_000,
         }
     }

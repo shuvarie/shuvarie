@@ -5,7 +5,9 @@ use shuvarie_llm::{
 
 use crate::approval::ApprovalGate;
 use crate::lsp_manager::SharedManager;
-use crate::tools::{arg_value, compute_diff, resolve_checked, resolve_for_write_checked};
+use crate::tools::{
+    FileLocks, arg_value, compute_diff, resolve_checked, resolve_for_write_checked,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Hunk {
@@ -374,11 +376,12 @@ fn derive_new_contents(
 pub struct ApplyPatch {
     gate: ApprovalGate,
     lsp: Option<SharedManager>,
+    locks: FileLocks,
 }
 
 impl ApplyPatch {
-    pub fn new(gate: ApprovalGate, lsp: Option<SharedManager>) -> Self {
-        Self { gate, lsp }
+    pub fn new(gate: ApprovalGate, lsp: Option<SharedManager>, locks: FileLocks) -> Self {
+        Self { gate, lsp, locks }
     }
 }
 
@@ -415,11 +418,38 @@ impl Tool for ApplyPatch {
     ) -> Result<ToolOutput, ToolExecutionError> {
         let gate = self.gate.clone();
         let lsp = self.lsp.clone();
+        let locks = self.locks.clone();
         let result: Result<ToolOutput, String> = async move {
             let patch_text = arg_value(&args, "patchText")?;
             let hunks = parse_patch(&patch_text)?;
             if hunks.is_empty() {
                 return Err("patch rejected: no hunks found".into());
+            }
+
+            let mut lock_keys: Vec<std::path::PathBuf> = Vec::new();
+            for hunk in &hunks {
+                match hunk {
+                    Hunk::Add { path, .. } => {
+                        lock_keys.push(resolve_for_write_checked(path)?.0);
+                    }
+                    Hunk::Delete { path, .. } => {
+                        lock_keys.push(resolve_checked(path)?.0);
+                    }
+                    Hunk::Update {
+                        path, move_path, ..
+                    } => {
+                        lock_keys.push(resolve_checked(path)?.0);
+                        if let Some(target) = move_path {
+                            lock_keys.push(resolve_for_write_checked(target)?.0);
+                        }
+                    }
+                }
+            }
+            lock_keys.sort();
+            lock_keys.dedup();
+            let mut patch_locks = Vec::new();
+            for key in &lock_keys {
+                patch_locks.push(locks.lock(key).await);
             }
 
             enum Planned {
@@ -478,7 +508,8 @@ impl Tool for ApplyPatch {
                         if let Some(reason) = reason {
                             gate.request("apply_patch", path, reason).await?;
                         }
-                        let original = std::fs::read_to_string(&abs)
+                        let original = tokio::fs::read_to_string(&abs)
+                            .await
                             .map_err(|e| format!("read {path}: {e}"))?;
                         let diff = compute_diff(&original, "");
                         changes.push(PatchFileChange {
@@ -511,7 +542,8 @@ impl Tool for ApplyPatch {
                                 return Err(format!("move target {target} matches source {path}"));
                             }
                         }
-                        let original = std::fs::read_to_string(&abs)
+                        let original = tokio::fs::read_to_string(&abs)
+                            .await
                             .map_err(|e| format!("read {path}: {e}"))?;
                         let new = derive_new_contents(path, chunks, &original)?;
                         let diff = compute_diff(&original, &new);
@@ -544,27 +576,39 @@ impl Tool for ApplyPatch {
                 match planned {
                     Planned::Add { path, content } => {
                         if let Some(parent) = std::path::Path::new(path).parent() {
-                            std::fs::create_dir_all(parent)
+                            tokio::fs::create_dir_all(parent)
+                                .await
                                 .map_err(|e| format!("create dir for {path}: {e}"))?;
                         }
-                        std::fs::write(path, content).map_err(|e| format!("write {path}: {e}"))?;
+                        tokio::fs::write(path, content)
+                            .await
+                            .map_err(|e| format!("write {path}: {e}"))?;
                         summary_lines.push(format!("A {path}"));
                     }
                     Planned::Update { path, content } => {
-                        std::fs::write(path, content).map_err(|e| format!("write {path}: {e}"))?;
+                        tokio::fs::write(path, content)
+                            .await
+                            .map_err(|e| format!("write {path}: {e}"))?;
                         summary_lines.push(format!("M {path}"));
                     }
                     Planned::Move { from, to, content } => {
                         if let Some(parent) = std::path::Path::new(to).parent() {
-                            std::fs::create_dir_all(parent)
+                            tokio::fs::create_dir_all(parent)
+                                .await
                                 .map_err(|e| format!("create dir for {to}: {e}"))?;
                         }
-                        std::fs::write(to, content).map_err(|e| format!("write {to}: {e}"))?;
-                        std::fs::remove_file(from).map_err(|e| format!("remove {from}: {e}"))?;
+                        tokio::fs::write(to, content)
+                            .await
+                            .map_err(|e| format!("write {to}: {e}"))?;
+                        tokio::fs::remove_file(from)
+                            .await
+                            .map_err(|e| format!("remove {from}: {e}"))?;
                         summary_lines.push(format!("M {from} -> {to}"));
                     }
                     Planned::Delete { path } => {
-                        std::fs::remove_file(path).map_err(|e| format!("remove {path}: {e}"))?;
+                        tokio::fs::remove_file(path)
+                            .await
+                            .map_err(|e| format!("remove {path}: {e}"))?;
                         summary_lines.push(format!("D {path}"));
                     }
                 }
@@ -719,7 +763,7 @@ mod tests {
 +fn new() {}
 *** Delete File: obsolete.txt
 *** End Patch"#;
-        let tool = ApplyPatch::new(gate(), None);
+        let tool = ApplyPatch::new(gate(), None, FileLocks::new());
         let mut ctx = ToolContext::default();
         let out = tool
             .call(&mut ctx, json!({ "patchText": patch }))
@@ -765,7 +809,7 @@ mod tests {
 +data
 +moved
 *** End Patch"#;
-        let tool = ApplyPatch::new(gate(), None);
+        let tool = ApplyPatch::new(gate(), None, FileLocks::new());
         let mut ctx = ToolContext::default();
         let err = tool
             .call(&mut ctx, json!({ "patchText": patch }))
@@ -811,7 +855,7 @@ mod tests {
 -three
 +3
 *** End Patch"#;
-        let tool = ApplyPatch::new(gate(), None);
+        let tool = ApplyPatch::new(gate(), None, FileLocks::new());
         let mut ctx = ToolContext::default();
         let err = tool
             .call(&mut ctx, json!({ "patchText": patch }))

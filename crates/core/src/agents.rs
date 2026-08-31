@@ -5,7 +5,7 @@ use shuvarie_llm::TokenUsage;
 
 use crate::approval::ApprovalGate;
 use crate::lsp_manager::SharedManager;
-use crate::tools::{self, ReadCache, ShellOutputTx};
+use crate::tools::{self, FileLocks, ReadCache, ShellOutputTx};
 
 pub struct WorkerSet {
     pub workers: Vec<shuvarie_llm::WorkerAgent>,
@@ -18,8 +18,10 @@ pub fn build_workers(
     model: &str,
     gate: ApprovalGate,
     lsp: SharedManager,
+    locks: FileLocks,
     worker_max_turns: usize,
     max_output_chars: usize,
+    max_output_bytes: usize,
     context_budget: Option<shuvarie_llm::ContextBudget>,
     shell_tx: ShellOutputTx,
 ) -> WorkerSet {
@@ -36,6 +38,7 @@ pub fn build_workers(
                 lsp.clone(),
                 ReadCache::new(),
                 max_output_chars,
+                max_output_bytes,
             ),
             Arc::clone(&usage),
             worker_max_turns,
@@ -58,7 +61,14 @@ pub fn build_workers(
             EDITOR_PREAMBLE,
             client,
             model,
-            tools::edit_tools(gate, lsp, ReadCache::new(), max_output_chars),
+            tools::edit_tools(
+                gate,
+                lsp,
+                locks,
+                ReadCache::new(),
+                max_output_chars,
+                max_output_bytes,
+            ),
             Arc::clone(&usage),
             worker_max_turns,
             context_budget,

@@ -55,6 +55,7 @@ struct CoreCtx {
     manager_turns: usize,
     worker_turns: usize,
     max_output_chars: usize,
+    max_output_bytes: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -122,6 +123,7 @@ pub async fn run(
     let manager_turns = config.agent.effective_max_turns();
     let worker_turns = config.agent.effective_worker_max_turns();
     let max_output_chars = config.context.tool_output_max_chars;
+    let max_output_bytes = config.context.tool_output_max_bytes;
     let mut ctx = CoreCtx {
         store,
         connections,
@@ -142,6 +144,7 @@ pub async fn run(
         manager_turns,
         worker_turns,
         max_output_chars,
+        max_output_bytes,
     };
     if load_current {
         load_most_recent_session(&mut ctx.store, &mut ctx.session, &ctx.event_tx).await;
@@ -1021,11 +1024,14 @@ impl CoreCtx {
         let gate = ApprovalGate::new(self.approval_tx.clone());
         let question_gate = QuestionGate::new(self.question_tx.clone());
         let (shell_tx, mut shell_rx) = tokio::sync::mpsc::channel::<crate::tools::ShellChunk>(64);
+        let file_locks = crate::tools::FileLocks::new();
         let tools = crate::tools::all_tools(
             gate.clone(),
             self.lsp.clone(),
+            file_locks.clone(),
             crate::tools::ReadCache::new(),
             self.max_output_chars,
+            self.max_output_bytes,
             question_gate,
             crate::tools::ShellOutputTx::new(shell_tx.clone()),
         );
@@ -1057,8 +1063,10 @@ impl CoreCtx {
             &model,
             gate,
             self.lsp.clone(),
+            file_locks,
             self.worker_turns,
             self.max_output_chars,
+            self.max_output_bytes,
             budget.clone(),
             crate::tools::ShellOutputTx::new(shell_tx),
         );

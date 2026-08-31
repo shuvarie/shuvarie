@@ -26,6 +26,12 @@ pub(crate) fn de_tool_output_max_chars<'de, D: serde::Deserializer<'de>>(
     Ok(Option::<usize>::deserialize(deserializer)?.unwrap_or(16_000))
 }
 
+pub(crate) fn de_tool_output_max_bytes<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<usize, D::Error> {
+    Ok(Option::<usize>::deserialize(deserializer)?.unwrap_or(50_000))
+}
+
 pub(crate) fn de_fallback_context<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<u64, D::Error> {
