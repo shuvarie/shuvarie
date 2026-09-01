@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-use frameplay::{Frameplay, FrameplayOptions, FrameTimeReference};
+use frameplay::{FrameTimeReference, Frameplay, FrameplayOptions};
 use ratatui::prelude::*;
 
 use super::theme;

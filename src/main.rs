@@ -12,7 +12,10 @@ async fn main() -> color_eyre::Result<()> {
 
     let (cmd_tx, cmd_rx) = channel::<shuvarie_core::Command>(64);
     let (event_tx, event_rx) = channel::<shuvarie_core::Event>(64);
-    let config = shuvarie_core::Config::load()?;
+    let config = match args.config.as_deref() {
+        Some(path) => shuvarie_core::Config::load_explicit(path)?,
+        None => shuvarie_core::Config::load()?,
+    };
     let startup = if let Some(id) = args.session {
         shuvarie_core::StartupSession::Session(id)
     } else if args.current {
@@ -25,7 +28,7 @@ async fn main() -> color_eyre::Result<()> {
         shuvarie_core::Connections::load()?,
         store,
         startup,
-        None,
+        args.config,
         None,
         cmd_rx,
         event_tx,

@@ -54,6 +54,38 @@ pub(crate) fn from_str<T: serde::de::DeserializeOwned>(contents: &str) -> crate:
     kdl::de::from_str(contents).map_err(map_error)
 }
 
+pub(crate) fn sections(contents: &str) -> crate::Result<Vec<String>> {
+    let doc: kdl::KdlDocument = contents.parse().map_err(map_document_error)?;
+    Ok(doc
+        .nodes()
+        .iter()
+        .map(|node| node.name().value().to_string())
+        .collect())
+}
+
+fn map_document_error(e: kdl::KdlError) -> CoreError {
+    match e.diagnostics.first() {
+        Some(d) => {
+            let (line, column, length) =
+                span_to_line_column(&e.input, d.span.offset(), d.span.len());
+            CoreError::ConfigParse(ConfigParseError {
+                message: d.message.clone().unwrap_or_else(|| e.to_string()),
+                line,
+                column,
+                length,
+                help: d.help.clone(),
+            })
+        }
+        None => CoreError::ConfigParse(ConfigParseError {
+            message: e.to_string(),
+            line: 1,
+            column: 1,
+            length: 0,
+            help: None,
+        }),
+    }
+}
+
 pub(crate) fn to_string<T: serde::Serialize>(value: &T) -> std::result::Result<String, CoreError> {
     let mut doc = kdl::se::to_document(value).map_err(map_se_error)?;
     doc.autoformat();
