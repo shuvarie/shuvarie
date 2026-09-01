@@ -24,6 +24,14 @@ fn temp_connections_path(name: &str) -> PathBuf {
     dir.join("shuvarie").join("connections.kdl")
 }
 
+async fn recv_skills_loaded(event_rx: &mut tokio::sync::mpsc::Receiver<Event>) {
+    let ev = event_rx.recv().await.expect("event");
+    assert!(
+        matches!(ev, Event::SkillsLoaded { .. }),
+        "expected SkillsLoaded as the first startup event, got {ev:?}"
+    );
+}
+
 #[tokio::test]
 async fn ping_pong() {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
@@ -40,47 +48,9 @@ async fn ping_pong() {
         event_tx,
     ));
     cmd_tx.send(Command::Ping).await.unwrap();
+    recv_skills_loaded(&mut event_rx).await;
     let ev = event_rx.recv().await.expect("event");
     assert!(matches!(ev, Event::Pong));
-    drop(cmd_tx);
-    let _ = handle.await;
-}
-
-#[tokio::test]
-async fn start_session_loads_skills_before_prompt() {
-    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
-
-    let handle = tokio::spawn(run(
-        empty_config(),
-        empty_connections(),
-        Store::open_in_memory().await.unwrap(),
-        StartupSession::None,
-        None,
-        None,
-        cmd_rx,
-        event_tx,
-    ));
-    cmd_tx.send(Command::StartSession).await.unwrap();
-
-    let mut saw_skills = false;
-    let mut saw_started = false;
-    for _ in 0..4 {
-        match event_rx.recv().await {
-            Some(Event::SkillsLoaded { .. }) if !saw_started => saw_skills = true,
-            Some(Event::SessionStarted) => {
-                saw_started = true;
-                break;
-            }
-            Some(_) => {}
-            None => break,
-        }
-    }
-    assert!(
-        saw_skills && saw_started,
-        "SkillsLoaded must be emitted when the session starts, before the first prompt"
-    );
-
     drop(cmd_tx);
     let _ = handle.await;
 }
@@ -243,6 +213,7 @@ async fn cancel_with_no_active_stream_keeps_task_alive() {
     cmd_tx.send(Command::CancelStream).await.unwrap();
     cmd_tx.send(Command::Ping).await.unwrap();
 
+    recv_skills_loaded(&mut event_rx).await;
     let ev = event_rx.recv().await.expect("event");
     assert!(
         matches!(ev, Event::Pong),
@@ -526,6 +497,7 @@ async fn no_load_current_skips_session_loaded_on_startup() {
 
     cmd_tx.send(Command::Ping).await.unwrap();
 
+    recv_skills_loaded(&mut event_rx).await;
     let ev = event_rx.recv().await.expect("event");
     assert!(
         matches!(ev, Event::Pong),

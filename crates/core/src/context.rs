@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 const MAX_FILE_BYTES: usize = 64 * 1024;
 const MAX_TOTAL_BYTES: usize = 256 * 1024;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct LoadedContext {
     pub files: Vec<String>,
     pub content: String,
