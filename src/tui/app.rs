@@ -422,7 +422,9 @@ impl App {
                                 .send(shuvarie_core::Command::AnswerQuestion { id, answers });
                         }
                         SessionEffect::RunCommand(action) => {
-                            self.run_command(action);
+                            if let Some(effect) = self.run_command(action) {
+                                return Some(effect);
+                            }
                         }
                     }
                 }
@@ -510,8 +512,10 @@ impl App {
                 }
             }
             AppMessage::CommandMenu(m) => {
-                if let Some(action) = self.command_menu.update(m) {
-                    self.run_command(action);
+                if let Some(action) = self.command_menu.update(m)
+                    && let Some(effect) = self.run_command(action)
+                {
+                    return Some(effect);
                 }
                 if !self.command_menu.open && self.overlay == Overlay::CommandMenu {
                     self.overlay = Overlay::None;
@@ -779,7 +783,9 @@ impl App {
     }
 
     /// Runs a command action (from the Ctrl+M menu or the inline slash menu).
-    fn run_command(&mut self, action: CommandAction) {
+    /// Run a command action. Returns `Some(AppEffect)` when the action needs
+    /// to escalate to the parent (quit).
+    fn run_command(&mut self, action: CommandAction) -> Option<AppEffect> {
         match action {
             CommandAction::OpenModelSelect => {
                 let models = self
@@ -830,7 +836,14 @@ impl App {
             CommandAction::Resume => {
                 self.ctx.send(shuvarie_core::Command::Resume);
             }
+            CommandAction::Quit => {
+                if self.session.streaming {
+                    self.ctx.send(shuvarie_core::Command::CancelStream);
+                }
+                return Some(AppEffect::Quit);
+            }
         }
+        None
     }
 
     fn close_overlay(&mut self) {

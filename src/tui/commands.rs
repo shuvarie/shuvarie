@@ -10,10 +10,11 @@ pub enum CommandAction {
     Redo,
     Replay,
     Resume,
+    Quit,
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 8] = [
+    pub const ALL: [CommandAction; 9] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::OpenSessionPicker,
@@ -22,6 +23,7 @@ impl CommandAction {
         CommandAction::Redo,
         CommandAction::Replay,
         CommandAction::Resume,
+        CommandAction::Quit,
     ];
 
     pub fn slash_name(self) -> &'static str {
@@ -34,6 +36,7 @@ impl CommandAction {
             CommandAction::Redo => "redo",
             CommandAction::Replay => "replay",
             CommandAction::Resume => "resume",
+            CommandAction::Quit => "quit",
         }
     }
 }
@@ -94,6 +97,12 @@ pub fn default_commands() -> Vec<CommandEntry> {
             name: "Resume stream",
             description: "Restart an interrupted turn",
             action: CommandAction::Resume,
+            available: true,
+        },
+        CommandEntry {
+            name: "Quit",
+            description: "Exit the program",
+            action: CommandAction::Quit,
             available: true,
         },
     ]
@@ -181,6 +190,8 @@ mod tests {
         assert_eq!(parse_command("/undo"), Some(CommandAction::UndoLastTurn));
         assert_eq!(parse_command("  /new  "), Some(CommandAction::NewSession));
         assert_eq!(parse_command("/resume"), Some(CommandAction::Resume));
+        assert_eq!(parse_command(":quit"), Some(CommandAction::Quit));
+        assert_eq!(parse_command("/QUIT"), Some(CommandAction::Quit));
     }
 
     #[test]
