@@ -5,29 +5,10 @@ use termina::event::{KeyCode, KeyEvent};
 
 use crate::tui::utils::ctrl;
 
+use super::commands::{CommandAction, CommandEntry, default_commands};
 use super::list::{render_list_item_line, scroll_offset_for};
 use super::search::{Search, SearchMessage};
 use super::theme;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum CommandAction {
-    OpenModelSelect,
-    AddProvider,
-    OpenSessionPicker,
-    NewSession,
-    UndoLastTurn,
-    Redo,
-    Replay,
-    Resume,
-}
-
-#[derive(Clone)]
-pub struct CommandEntry {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub action: CommandAction,
-    pub available: bool,
-}
 
 pub enum CommandMenuMessage {
     Search(SearchMessage),
@@ -36,70 +17,6 @@ pub enum CommandMenuMessage {
     Run,
     Close,
     Resize { viewport_height: u16 },
-}
-
-pub enum CommandMenuEffect {
-    OpenModelSelect,
-    AddProvider,
-    OpenSessionPicker,
-    NewSession,
-    UndoLastTurn,
-    Redo,
-    Replay,
-    Resume,
-}
-
-pub fn default_commands() -> Vec<CommandEntry> {
-    vec![
-        CommandEntry {
-            name: "Select model",
-            description: "Pick the active model",
-            action: CommandAction::OpenModelSelect,
-            available: true,
-        },
-        CommandEntry {
-            name: "Add provider",
-            description: "Add a new LLM provider",
-            action: CommandAction::AddProvider,
-            available: true,
-        },
-        CommandEntry {
-            name: "Switch session",
-            description: "Resume or delete past sessions",
-            action: CommandAction::OpenSessionPicker,
-            available: true,
-        },
-        CommandEntry {
-            name: "New session",
-            description: "Start a fresh conversation",
-            action: CommandAction::NewSession,
-            available: true,
-        },
-        CommandEntry {
-            name: "Undo last turn",
-            description: "Revert last chat + file changes",
-            action: CommandAction::UndoLastTurn,
-            available: true,
-        },
-        CommandEntry {
-            name: "Redo",
-            description: "Restore the last undone turn",
-            action: CommandAction::Redo,
-            available: true,
-        },
-        CommandEntry {
-            name: "Replay last turn",
-            description: "Undo + re-run the last turn",
-            action: CommandAction::Replay,
-            available: true,
-        },
-        CommandEntry {
-            name: "Resume stream",
-            description: "Restart an interrupted turn",
-            action: CommandAction::Resume,
-            available: true,
-        },
-    ]
 }
 
 pub struct CommandMenu {
@@ -207,7 +124,7 @@ impl CommandMenu {
         }
     }
 
-    pub fn update(&mut self, msg: CommandMenuMessage) -> Option<CommandMenuEffect> {
+    pub fn update(&mut self, msg: CommandMenuMessage) -> Option<CommandAction> {
         if !self.open && !matches!(msg, CommandMenuMessage::Close) {
             return None;
         }
@@ -224,18 +141,7 @@ impl CommandMenu {
             CommandMenuMessage::Run => {
                 if let Some(action) = self.selected_action() {
                     self.close();
-                    return match action {
-                        CommandAction::OpenModelSelect => Some(CommandMenuEffect::OpenModelSelect),
-                        CommandAction::AddProvider => Some(CommandMenuEffect::AddProvider),
-                        CommandAction::OpenSessionPicker => {
-                            Some(CommandMenuEffect::OpenSessionPicker)
-                        }
-                        CommandAction::NewSession => Some(CommandMenuEffect::NewSession),
-                        CommandAction::UndoLastTurn => Some(CommandMenuEffect::UndoLastTurn),
-                        CommandAction::Redo => Some(CommandMenuEffect::Redo),
-                        CommandAction::Replay => Some(CommandMenuEffect::Replay),
-                        CommandAction::Resume => Some(CommandMenuEffect::Resume),
-                    };
+                    return Some(action);
                 }
             }
             CommandMenuMessage::Resize { viewport_height } => {

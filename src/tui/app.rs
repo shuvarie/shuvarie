@@ -10,7 +10,8 @@ use crate::tui::event::Event;
 use crate::tui::utils::ctrl;
 
 use super::add_provider::{AddProviderForm, AddProviderMessage, AddProviderOutcome};
-use super::command_menu::{CommandMenu, CommandMenuEffect, CommandMenuMessage};
+use super::command_menu::{CommandMenu, CommandMenuMessage};
+use super::commands::CommandAction;
 use super::confirm_quit::{ConfirmQuit, ConfirmQuitEffect, ConfirmQuitMessage};
 use super::context::UpdateCtx;
 use super::history_search::{HistorySearch, HistorySearchEffect, HistorySearchMessage};
@@ -420,6 +421,9 @@ impl App {
                             self.ctx
                                 .send(shuvarie_core::Command::AnswerQuestion { id, answers });
                         }
+                        SessionEffect::RunCommand(action) => {
+                            self.run_command(action);
+                        }
                     }
                 }
             }
@@ -506,63 +510,10 @@ impl App {
                 }
             }
             AppMessage::CommandMenu(m) => {
-                if let Some(effect) = self.command_menu.update(m) {
-                    match effect {
-                        CommandMenuEffect::OpenModelSelect => {
-                            let models = self
-                                .models
-                                .get(
-                                    self.ctx
-                                        .connections
-                                        .active
-                                        .as_ref()
-                                        .map(|a| a.provider.as_str())
-                                        .unwrap_or(""),
-                                )
-                                .cloned()
-                                .unwrap_or_default();
-                            self.model_picker.open(&models);
-                            self.overlay = Overlay::ModelPicker;
-                            return None;
-                        }
-                        CommandMenuEffect::AddProvider => {
-                            let names: Vec<String> = self
-                                .ctx
-                                .connections
-                                .providers
-                                .values()
-                                .map(|p| p.name.clone())
-                                .collect();
-                            let providers = shuvarie_core::catalog::providers();
-                            self.add_provider_form = Some(AddProviderForm::new(providers, &names));
-                            self.overlay = Overlay::AddProvider;
-                            return None;
-                        }
-                        CommandMenuEffect::OpenSessionPicker => {
-                            self.session_picker.open(self.session.session_id);
-                            self.refresh_sessions();
-                            self.overlay = Overlay::SessionPicker;
-                            return None;
-                        }
-                        CommandMenuEffect::NewSession => {
-                            self.session.update(SessionMessage::Reset);
-                            self.ctx.send(shuvarie_core::Command::NewSession);
-                        }
-                        CommandMenuEffect::UndoLastTurn => {
-                            self.ctx.send(shuvarie_core::Command::UndoLastTurn);
-                        }
-                        CommandMenuEffect::Redo => {
-                            self.ctx.send(shuvarie_core::Command::Redo);
-                        }
-                        CommandMenuEffect::Replay => {
-                            self.ctx.send(shuvarie_core::Command::Replay);
-                        }
-                        CommandMenuEffect::Resume => {
-                            self.ctx.send(shuvarie_core::Command::Resume);
-                        }
-                    }
+                if let Some(action) = self.command_menu.update(m) {
+                    self.run_command(action);
                 }
-                if !self.command_menu.open {
+                if !self.command_menu.open && self.overlay == Overlay::CommandMenu {
                     self.overlay = Overlay::None;
                 }
             }
@@ -817,16 +768,69 @@ impl App {
     fn update_command_availability(&mut self) {
         let has_messages = !self.session.messages.is_empty();
         let interrupted = self.session.interrupted && !self.session.streaming;
-        self.command_menu.set_availability(
-            super::command_menu::CommandAction::UndoLastTurn,
-            has_messages,
-        );
         self.command_menu
-            .set_availability(super::command_menu::CommandAction::Redo, has_messages);
+            .set_availability(CommandAction::UndoLastTurn, has_messages);
         self.command_menu
-            .set_availability(super::command_menu::CommandAction::Replay, has_messages);
+            .set_availability(CommandAction::Redo, has_messages);
         self.command_menu
-            .set_availability(super::command_menu::CommandAction::Resume, interrupted);
+            .set_availability(CommandAction::Replay, has_messages);
+        self.command_menu
+            .set_availability(CommandAction::Resume, interrupted);
+    }
+
+    /// Runs a command action (from the Ctrl+M menu or the inline slash menu).
+    fn run_command(&mut self, action: CommandAction) {
+        match action {
+            CommandAction::OpenModelSelect => {
+                let models = self
+                    .models
+                    .get(
+                        self.ctx
+                            .connections
+                            .active
+                            .as_ref()
+                            .map(|a| a.provider.as_str())
+                            .unwrap_or(""),
+                    )
+                    .cloned()
+                    .unwrap_or_default();
+                self.model_picker.open(&models);
+                self.overlay = Overlay::ModelPicker;
+            }
+            CommandAction::AddProvider => {
+                let names: Vec<String> = self
+                    .ctx
+                    .connections
+                    .providers
+                    .values()
+                    .map(|p| p.name.clone())
+                    .collect();
+                let providers = shuvarie_core::catalog::providers();
+                self.add_provider_form = Some(AddProviderForm::new(providers, &names));
+                self.overlay = Overlay::AddProvider;
+            }
+            CommandAction::OpenSessionPicker => {
+                self.session_picker.open(self.session.session_id);
+                self.refresh_sessions();
+                self.overlay = Overlay::SessionPicker;
+            }
+            CommandAction::NewSession => {
+                self.session.update(SessionMessage::Reset);
+                self.ctx.send(shuvarie_core::Command::NewSession);
+            }
+            CommandAction::UndoLastTurn => {
+                self.ctx.send(shuvarie_core::Command::UndoLastTurn);
+            }
+            CommandAction::Redo => {
+                self.ctx.send(shuvarie_core::Command::Redo);
+            }
+            CommandAction::Replay => {
+                self.ctx.send(shuvarie_core::Command::Replay);
+            }
+            CommandAction::Resume => {
+                self.ctx.send(shuvarie_core::Command::Resume);
+            }
+        }
     }
 
     fn close_overlay(&mut self) {

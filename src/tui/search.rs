@@ -19,6 +19,32 @@ pub enum SearchMessage {
     Deactivate,
 }
 
+pub fn filter_indices<F>(query: &str, count: usize, key: F) -> Vec<usize>
+where
+    F: Fn(usize) -> String,
+{
+    if query.is_empty() {
+        return (0..count).collect();
+    }
+    let mut matcher = nucleo::Matcher::new(nucleo::Config::DEFAULT);
+    let pattern = nucleo::pattern::Pattern::parse(
+        query,
+        nucleo::pattern::CaseMatching::Smart,
+        nucleo::pattern::Normalization::Smart,
+    );
+    let mut buf = Vec::new();
+    let mut scored: Vec<(usize, u32)> = (0..count)
+        .filter_map(|i| {
+            let k = key(i);
+            pattern
+                .score(nucleo::Utf32Str::new(k.as_str(), &mut buf), &mut matcher)
+                .map(|s| (i, s))
+        })
+        .collect();
+    scored.sort_by_key(|b| std::cmp::Reverse(b.1));
+    scored.into_iter().map(|(i, _)| i).collect()
+}
+
 pub struct Search {
     pub query: String,
     pub active: bool,
@@ -75,26 +101,7 @@ impl Search {
     where
         F: Fn(usize) -> String,
     {
-        if self.query.is_empty() {
-            return (0..count).collect();
-        }
-        let mut matcher = nucleo::Matcher::new(nucleo::Config::DEFAULT);
-        let pattern = nucleo::pattern::Pattern::parse(
-            &self.query,
-            nucleo::pattern::CaseMatching::Smart,
-            nucleo::pattern::Normalization::Smart,
-        );
-        let mut buf = Vec::new();
-        let mut scored: Vec<(usize, u32)> = (0..count)
-            .filter_map(|i| {
-                let k = key(i);
-                pattern
-                    .score(nucleo::Utf32Str::new(k.as_str(), &mut buf), &mut matcher)
-                    .map(|s| (i, s))
-            })
-            .collect();
-        scored.sort_by_key(|b| std::cmp::Reverse(b.1));
-        scored.into_iter().map(|(i, _)| i).collect()
+        filter_indices(&self.query, count, key)
     }
 
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect, placeholder: &str) {

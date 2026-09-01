@@ -11,9 +11,11 @@ use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
 use crate::tui::utils::{alt, ctrl};
 
+use super::commands::{self, CommandAction};
 use super::components::{TextArea, TextAreaEffect, TextAreaMessage};
 use super::question::{QuestionEffect, QuestionMessage, QuestionUI};
 use super::sidebar::{Sidebar, SidebarMessage};
+use super::slash::{SlashMenu, SlashMessage};
 use super::theme;
 
 pub enum SessionMessage {
@@ -95,6 +97,7 @@ pub enum SessionMessage {
         questions: Vec<shuvarie_core::QuestionPrompt>,
     },
     Question(QuestionMessage),
+    Slash(SlashMessage),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -131,6 +134,7 @@ pub struct ContextActivity {
 pub struct SessionScreen {
     pub input: TextArea,
     pub question: QuestionUI,
+    slash: SlashMenu,
     pub messages: Vec<(Role, String)>,
     pub summary_indices: std::collections::HashSet<usize>,
     pub tools: Vec<ToolActivity>,
@@ -162,6 +166,7 @@ impl SessionScreen {
         Self {
             input: TextArea::with_max_height("Type a message…", 8),
             question: QuestionUI::new(),
+            slash: SlashMenu::new(),
             messages: Vec::new(),
             summary_indices: std::collections::HashSet::new(),
             tools: Vec::new(),
@@ -193,6 +198,11 @@ impl SessionScreen {
         if self.question.open {
             return self.question.map_event(key).map(SessionMessage::Question);
         }
+        if self.slash.active()
+            && let Some(m) = self.slash.map_event(key)
+        {
+            return Some(SessionMessage::Slash(m));
+        }
         if ctrl(key) {
             return match key.code {
                 KeyCode::Char('n') => Some(SessionMessage::ScrollDown),
@@ -219,24 +229,77 @@ impl SessionScreen {
         self.input.buffer.row_count(inner_w) > 1
     }
 
+    fn sync_slash(&mut self) {
+        let has_messages = !self.messages.is_empty();
+        let interrupted = self.interrupted && !self.streaming;
+        self.slash
+            .set_availability(CommandAction::UndoLastTurn, has_messages);
+        self.slash
+            .set_availability(CommandAction::Redo, has_messages);
+        self.slash
+            .set_availability(CommandAction::Replay, has_messages);
+        self.slash
+            .set_availability(CommandAction::Resume, interrupted);
+        let buffer = self.input.buffer.value.clone();
+        self.slash.sync(&buffer);
+    }
+
     pub fn update(&mut self, msg: SessionMessage) -> Option<SessionEffect> {
+        self.sync_slash();
         match msg {
             SessionMessage::Text(m) => {
                 if let Some(effect) = self.input.update(m) {
                     match effect {
                         TextAreaEffect::Submit { content } => {
+                            if let Some(action) = commands::parse_command(&content) {
+                                self.sync_slash();
+                                return Some(SessionEffect::RunCommand(action));
+                            }
+                            let content = commands::unescape(&content).to_string();
                             self.messages.push((Role::User, content.clone()));
                             self.busy = true;
                             self.status = Some("thinking…".to_string());
                             self.mark_committed_dirty();
                             self.mark_scroll_dirty();
                             self.follow_bottom();
+                            self.sync_slash();
                             return Some(SessionEffect::SendMessage { content });
                         }
                     }
                 }
+                self.sync_slash();
                 None
             }
+            SessionMessage::Slash(m) => match m {
+                SlashMessage::Next => {
+                    self.slash.next();
+                    None
+                }
+                SlashMessage::Prev => {
+                    self.slash.prev();
+                    None
+                }
+                SlashMessage::Complete => {
+                    if let Some(action) = self.slash.selected_action() {
+                        let text = format!("{}{} ", self.slash.trigger_char(), action.slash_name());
+                        self.input.buffer.set(&text);
+                    }
+                    self.sync_slash();
+                    None
+                }
+                SlashMessage::Run => {
+                    if let Some(action) = self.slash.selected_action() {
+                        self.input.buffer.clear();
+                        self.sync_slash();
+                        return Some(SessionEffect::RunCommand(action));
+                    }
+                    None
+                }
+                SlashMessage::Dismiss => {
+                    self.slash.dismiss();
+                    None
+                }
+            },
             SessionMessage::ScrollUp => {
                 self.scroll_state.get_mut().scroll_up();
                 None
@@ -671,6 +734,11 @@ impl SessionScreen {
             self.input.view(frame, input_area);
         }
 
+        if !self.question.open && self.slash.active() {
+            let rect = self.slash.popup_rect(history_area, input_area);
+            self.slash.view(frame, rect);
+        }
+
         if let Some(status) = &self.status {
             let mut spans = Vec::new();
             if self.busy {
@@ -684,7 +752,9 @@ impl SessionScreen {
         if let Some(error) = &self.error {
             frame.render_widget(Paragraph::new(error.as_str()).fg(theme::ERROR), footer_area);
         } else {
-            let footer = if self.streaming {
+            let footer = if !self.question.open && self.slash.active() {
+                theme::help_line(&[("Tab", "complete"), ("↑↓", "select"), ("Esc", "dismiss")])
+            } else if self.streaming {
                 theme::help_line(&[("Ctrl+C", "stop"), ("Ctrl+M", "commands")])
             } else if self.interrupted {
                 theme::help_line(&[("Enter", "send"), ("Ctrl+M", "resume"), ("Ctrl+C", "quit")])
@@ -1298,6 +1368,7 @@ pub enum SessionEffect {
         id: u64,
         answers: Option<Vec<Vec<String>>>,
     },
+    RunCommand(CommandAction),
 }
 
 /// Parse the `question` tool's args JSON into question prompts (defensive:
