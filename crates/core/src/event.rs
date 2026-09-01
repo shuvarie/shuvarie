@@ -2,7 +2,6 @@ use shuvarie_db::SessionSummary;
 use shuvarie_llm::FileChange;
 use shuvarie_llm::{Model, TokenUsage};
 
-use crate::approval::ApprovalReason;
 use crate::question::QuestionPrompt;
 
 #[derive(Debug, Clone)]
@@ -97,12 +96,6 @@ pub enum Event {
     },
     SearchError {
         error: String,
-    },
-    ApprovalRequest {
-        id: u64,
-        tool: String,
-        path: String,
-        reason: ApprovalReason,
     },
     QuestionAsked {
         id: u64,

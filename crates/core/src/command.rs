@@ -36,11 +36,6 @@ pub enum Command {
     SearchHistory {
         query: String,
     },
-    ApproveTool {
-        id: u64,
-        approved: bool,
-        always: bool,
-    },
     AnswerQuestion {
         id: u64,
         /// `None` when the user dismissed the question.

@@ -10,7 +10,6 @@ use crate::tui::event::Event;
 use crate::tui::utils::ctrl;
 
 use super::add_provider::{AddProviderForm, AddProviderMessage, AddProviderOutcome};
-use super::approval::{ApprovalEffect, ApprovalMessage, ApprovalPrompt};
 use super::command_menu::{CommandMenu, CommandMenuEffect, CommandMenuMessage};
 use super::confirm_quit::{ConfirmQuit, ConfirmQuitEffect, ConfirmQuitMessage};
 use super::context::UpdateCtx;
@@ -31,7 +30,6 @@ pub enum Overlay {
     ConfirmQuit,
     SessionPicker,
     HistorySearch,
-    Approval,
 }
 
 pub enum AppMessage {
@@ -50,13 +48,6 @@ pub enum AppMessage {
     Welcome(WelcomeMessage),
     SessionPicker(SessionPickerMessage),
     HistorySearch(HistorySearchMessage),
-    Approval(ApprovalMessage),
-    ApprovalRequest {
-        id: u64,
-        tool: String,
-        path: String,
-        reason: shuvarie_core::ApprovalReason,
-    },
     ConfigSaved,
     ConfigError {
         error: String,
@@ -118,7 +109,6 @@ pub struct App {
     pub model_picker: ModelPicker,
     pub session_picker: SessionPicker,
     pub history_search: HistorySearch,
-    pub approval: ApprovalPrompt,
     pub models: HashMap<String, Vec<Model>>,
     pending_model_pick: Option<String>,
     quit: bool,
@@ -158,7 +148,6 @@ impl App {
             model_picker: ModelPicker::new(),
             session_picker: SessionPicker::new(),
             history_search: HistorySearch::new(),
-            approval: ApprovalPrompt::new(),
             models: HashMap::new(),
             pending_model_pick: None,
             quit: false,
@@ -224,9 +213,6 @@ impl App {
                                 .history_search
                                 .map_event(&key)
                                 .map(AppMessage::HistorySearch);
-                        }
-                        Overlay::Approval => {
-                            return self.approval.map_event(&key).map(AppMessage::Approval);
                         }
                         Overlay::None => {}
                     }
@@ -378,17 +364,6 @@ impl App {
                         error,
                     }))
                 }
-                CoreEvent::ApprovalRequest {
-                    id,
-                    tool,
-                    path,
-                    reason,
-                } => Some(AppMessage::ApprovalRequest {
-                    id,
-                    tool,
-                    path,
-                    reason,
-                }),
                 CoreEvent::QuestionAsked { id, questions } => {
                     Some(AppMessage::Session(SessionMessage::QuestionAsked {
                         id,
@@ -629,45 +604,6 @@ impl App {
                     }
                 }
             }
-            AppMessage::ApprovalRequest {
-                id,
-                tool,
-                path,
-                reason,
-            } => {
-                self.approval.open(id, tool, path, reason);
-                self.overlay = Overlay::Approval;
-            }
-            AppMessage::Approval(m) => {
-                if let Some(effect) = self.approval.update(m) {
-                    match effect {
-                        ApprovalEffect::Approve { id } => {
-                            self.ctx.send(shuvarie_core::Command::ApproveTool {
-                                id,
-                                approved: true,
-                                always: false,
-                            });
-                            self.overlay = Overlay::None;
-                        }
-                        ApprovalEffect::AlwaysApprove { id } => {
-                            self.ctx.send(shuvarie_core::Command::ApproveTool {
-                                id,
-                                approved: true,
-                                always: true,
-                            });
-                            self.overlay = Overlay::None;
-                        }
-                        ApprovalEffect::Deny { id } => {
-                            self.ctx.send(shuvarie_core::Command::ApproveTool {
-                                id,
-                                approved: false,
-                                always: false,
-                            });
-                            self.overlay = Overlay::None;
-                        }
-                    }
-                }
-            }
             AppMessage::Resized { rows, cols } => {
                 let area = Rect::new(0, 0, cols, rows);
                 match self.overlay {
@@ -702,8 +638,7 @@ impl App {
                                 .update(HistorySearchMessage::Resize { viewport_height: h });
                         }
                     }
-                    Overlay::None | Overlay::Welcome | Overlay::ConfirmQuit | Overlay::Approval => {
-                    }
+                    Overlay::None | Overlay::Welcome | Overlay::ConfirmQuit => {}
                 }
             }
             AppMessage::ConfigSaved => {
@@ -902,7 +837,6 @@ impl App {
         self.session_picker.close();
         self.history_search.close();
         self.confirm_quit.close();
-        self.approval.close();
         if self.welcome.open {
             self.welcome.close();
         }
@@ -963,7 +897,6 @@ impl App {
         self.history_search.view(frame, area);
         self.command_menu.view(frame, area);
         self.confirm_quit.view(frame, area);
-        self.approval.view(frame, area);
     }
 }
 

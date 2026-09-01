@@ -3,7 +3,6 @@ use std::sync::Arc;
 use shuvarie_llm::ProviderClient;
 use shuvarie_llm::TokenUsage;
 
-use crate::approval::ApprovalGate;
 use crate::lsp_manager::SharedManager;
 use crate::tools::{self, FileLocks, ReadCache, ShellOutputTx};
 
@@ -16,7 +15,6 @@ pub struct WorkerSet {
 pub fn build_workers(
     client: ProviderClient,
     model: &str,
-    gate: ApprovalGate,
     lsp: SharedManager,
     locks: FileLocks,
     worker_max_turns: usize,
@@ -34,7 +32,6 @@ pub fn build_workers(
             client.clone(),
             model,
             tools::read_tools(
-                gate.clone(),
                 lsp.clone(),
                 ReadCache::new(),
                 max_output_chars,
@@ -50,7 +47,7 @@ pub fn build_workers(
             TESTER_PREAMBLE,
             client.clone(),
             model,
-            tools::command_tools(gate.clone(), shell_tx.tagged("run_tests")),
+            tools::command_tools(shell_tx.tagged("run_tests")),
             Arc::clone(&usage),
             worker_max_turns,
             None,
@@ -62,7 +59,6 @@ pub fn build_workers(
             client,
             model,
             tools::edit_tools(
-                gate,
                 lsp,
                 locks,
                 ReadCache::new(),

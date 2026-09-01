@@ -7,8 +7,8 @@ use shuvarie_llm::{
     DiffLine, DiffLineKind, FileChange, Tool, ToolContext, ToolExecutionError, ToolOutput,
 };
 
-use crate::approval::{ApprovalGate, ApprovalReason};
 use crate::lsp_manager::SharedManager;
+use crate::permissions::{resolve_read, resolve_write};
 use crate::question::{QuestionGate, QuestionOption, QuestionPrompt};
 
 const MAX_READ_BYTES: usize = 64 * 1024;
@@ -166,7 +166,6 @@ pub(crate) fn arg_value(args: &Value, key: &str) -> Result<String, String> {
 }
 
 struct ReadFile {
-    gate: ApprovalGate,
     read_cache: ReadCache,
     max_output_chars: usize,
     max_output_bytes: usize,
@@ -201,7 +200,6 @@ impl Tool for ReadFile {
         _ctx: &mut ToolContext,
         args: Value,
     ) -> Result<ToolOutput, ToolExecutionError> {
-        let gate = self.gate.clone();
         let read_cache = self.read_cache.clone();
         let max_output_chars = self.max_output_chars;
         let max_output_bytes = self.max_output_bytes;
@@ -214,10 +212,7 @@ impl Tool for ReadFile {
                     "(already read {path} — see the earlier result; use a different offset/limit to re-read a range)"
                 )));
             }
-            let (abs, reason) = resolve_checked(&path)?;
-            if let Some(reason) = reason {
-                gate.request("read_file", &path, reason).await?;
-            }
+            let abs = resolve_read(&path)?;
             if abs.is_dir() {
                 return Err(format!("'{path}' is a directory, not a file"));
             }
@@ -297,7 +292,6 @@ fn is_binary_file(data: &[u8]) -> bool {
 }
 
 struct WriteFile {
-    gate: ApprovalGate,
     read_cache: ReadCache,
     lsp: Option<SharedManager>,
     locks: FileLocks,
@@ -337,7 +331,6 @@ impl Tool for WriteFile {
         ctx: &mut ToolContext,
         args: Value,
     ) -> Result<ToolOutput, ToolExecutionError> {
-        let gate = self.gate.clone();
         let read_cache = self.read_cache.clone();
         let lsp = self.lsp.clone();
         let locks = self.locks.clone();
@@ -349,10 +342,7 @@ impl Tool for WriteFile {
                 Some("create") | Some("overwrite") | None => {}
                 Some(other) => return Err(format!("invalid mode '{other}' (expected 'create' or 'overwrite')")),
             }
-            let (abs, reason) = resolve_for_write_checked(&path)?;
-            if let Some(reason) = reason {
-                gate.request("write_file", &path, reason).await?;
-            }
+            let abs = resolve_write(&path)?;
             let _file_lock = locks.lock(&abs).await;
             let exists = abs.exists();
             match mode {
@@ -417,7 +407,6 @@ impl Tool for WriteFile {
 }
 
 struct EditFile {
-    gate: ApprovalGate,
     lsp: Option<SharedManager>,
     locks: FileLocks,
 }
@@ -466,16 +455,12 @@ impl Tool for EditFile {
         ctx: &mut ToolContext,
         args: Value,
     ) -> Result<ToolOutput, ToolExecutionError> {
-        let gate = self.gate.clone();
         let lsp = self.lsp.clone();
         let locks = self.locks.clone();
         let result: Result<ToolOutput, String> = async move {
             let path = arg_value(&args, "path")?;
             let edits = parse_edits(&args)?;
-            let (abs, reason) = resolve_checked(&path)?;
-            if let Some(reason) = reason {
-                gate.request("edit_file", &path, reason).await?;
-            }
+            let abs = resolve_read(&path)?;
             let _file_lock = locks.lock(&abs).await;
             let raw = tokio::fs::read_to_string(&abs)
                 .await
@@ -517,7 +502,6 @@ impl Tool for EditFile {
 }
 
 struct RunShell {
-    gate: ApprovalGate,
     shell_tx: ShellOutputTx,
 }
 
@@ -530,9 +514,9 @@ impl Tool for RunShell {
 
     fn description(&self) -> String {
         #[cfg(unix)]
-        const DESCRIPTION: &str = "Run a shell command line in the workspace, executed through the system's Bourne shell (`sh -c`). Pipes, redirects, and shell operators work naturally. Output streams live to the user while the command runs. Captured stdout and stderr (combined) are returned, capped at 16 KB. The command and its children are killed when it exceeds the timeout; if the command is expected to take longer and is not waiting for interactive input, retry with a larger timeout_secs value. The working directory can be set with `cwd`; a directory outside the workspace requires user approval.";
+        const DESCRIPTION: &str = "Run a shell command line in the workspace, executed through the system's Bourne shell (`sh -c`). Pipes, redirects, and shell operators work naturally. Output streams live to the user while the command runs. Captured stdout and stderr (combined) are returned, capped at 16 KB. The command and its children are killed when it exceeds the timeout; if the command is expected to take longer and is not waiting for interactive input, retry with a larger timeout_secs value. The working directory can be set with `cwd`.";
         #[cfg(windows)]
-        const DESCRIPTION: &str = "Run a shell command line in the workspace, executed through the system's PowerShell (`powershell -NoProfile -Command`). Pipes, redirects, and shell operators work naturally. Output streams live to the user while the command runs. Captured stdout and stderr (combined) are returned, capped at 16 KB. The command and its children are killed when it exceeds the timeout; if the command is expected to take longer and is not waiting for interactive input, retry with a larger timeout_secs value. The working directory can be set with `cwd`; a directory outside the workspace requires user approval.";
+        const DESCRIPTION: &str = "Run a shell command line in the workspace, executed through the system's PowerShell (`powershell -NoProfile -Command`). Pipes, redirects, and shell operators work naturally. Output streams live to the user while the command runs. Captured stdout and stderr (combined) are returned, capped at 16 KB. The command and its children are killed when it exceeds the timeout; if the command is expected to take longer and is not waiting for interactive input, retry with a larger timeout_secs value. The working directory can be set with `cwd`.";
 
         DESCRIPTION.to_string()
     }
@@ -561,26 +545,20 @@ impl Tool for RunShell {
                 .get("timeout_secs")
                 .and_then(Value::as_u64)
                 .unwrap_or(DEFAULT_TIMEOUT_SECS);
-            let (cwd_abs, gate_reason) = match cwd {
+            let cwd_abs = match cwd {
                 Some(c) => {
                     let root = workspace_root()?;
-                    let joined = root.join(c);
-                    let resolved = joined
+                    let resolved = root
+                        .join(c)
                         .canonicalize()
                         .map_err(|e| format!("cwd '{c}': {e}"))?;
                     if !resolved.is_dir() {
                         return Err(format!("cwd '{c}' is not a directory"));
                     }
-                    let reason = (!resolved.starts_with(&root)).then_some(ApprovalReason::OutsideWorkspace);
-                    (resolved, reason)
+                    resolved
                 }
-                None => (workspace_root()?, None),
+                None => workspace_root()?,
             };
-            if let Some(reason) = gate_reason {
-                self.gate
-                    .request(Self::NAME, &cwd_abs.to_string_lossy(), reason)
-                    .await?;
-            }
             let mut builder = tokio::process::Command::new(shell_bin());
             shell_args(&mut builder, &command);
             builder
@@ -756,7 +734,6 @@ fn webfetch_accept_header(format: &str) -> &'static str {
 }
 
 struct WebFetch {
-    gate: ApprovalGate,
     max_output_chars: usize,
 }
 
@@ -792,7 +769,6 @@ impl Tool for WebFetch {
         _ctx: &mut ToolContext,
         args: Value,
     ) -> Result<ToolOutput, ToolExecutionError> {
-        let gate = self.gate.clone();
         let max_output_chars = self.max_output_chars;
         let result: Result<ToolOutput, String> = async move {
             let url = arg_value(&args, "url")?;
@@ -815,9 +791,6 @@ impl Tool for WebFetch {
                 .unwrap_or(DEFAULT_TIMEOUT_SECS)
                 .clamp(1, WEBFETCH_MAX_TIMEOUT_SECS);
             let timeout = std::time::Duration::from_secs(timeout_secs);
-
-            gate.request("webfetch", &url, ApprovalReason::Network)
-                .await?;
 
             let client = reqwest::Client::builder()
                 .user_agent(WEBFETCH_BROWSER_UA)
@@ -966,9 +939,7 @@ fn webfetch_convert(html: &str, plain: bool) -> String {
         .unwrap_or_else(|e| format!("(html conversion failed: {e})\n\n{html}"))
 }
 
-struct ListDir {
-    gate: ApprovalGate,
-}
+struct ListDir {}
 
 impl Tool for ListDir {
     const NAME: &'static str = "list_dir";
@@ -997,13 +968,9 @@ impl Tool for ListDir {
         _ctx: &mut ToolContext,
         args: Value,
     ) -> Result<ToolOutput, ToolExecutionError> {
-        let gate = self.gate.clone();
         let result: Result<ToolOutput, String> = async move {
             let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
-            let (abs, reason) = resolve_checked(path)?;
-            if let Some(reason) = reason {
-                gate.request("list_dir", path, reason).await?;
-            }
+            let abs = resolve_read(path)?;
             let entries = std::fs::read_dir(&abs).map_err(|e| format!("read_dir {path}: {e}"))?;
             let mut names: Vec<String> = Vec::new();
             for entry in entries {
@@ -1028,9 +995,7 @@ impl Tool for ListDir {
     }
 }
 
-struct Grep {
-    gate: ApprovalGate,
-}
+struct Grep {}
 
 impl Tool for Grep {
     const NAME: &'static str = "grep";
@@ -1062,7 +1027,6 @@ impl Tool for Grep {
         _ctx: &mut ToolContext,
         args: Value,
     ) -> Result<ToolOutput, ToolExecutionError> {
-        let gate = self.gate.clone();
         let result: Result<ToolOutput, String> = async move {
             let pattern = arg_value(&args, "pattern")?;
             let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
@@ -1072,10 +1036,7 @@ impl Tool for Grep {
                 .and_then(Value::as_u64)
                 .unwrap_or(200) as usize;
             let regex = regex::Regex::new(&pattern).map_err(|e| format!("bad pattern: {e}"))?;
-            let (abs, reason) = resolve_checked(path)?;
-            if let Some(reason) = reason {
-                gate.request("grep", path, reason).await?;
-            }
+            let abs = resolve_read(path)?;
             let mut hits = 0;
             let mut out = String::new();
             let mut walk = |entry: &Path, rel: &Path| -> Result<bool, String> {
@@ -1131,9 +1092,7 @@ impl Tool for Grep {
 
 const GLOB_MAX_RESULTS: usize = 100;
 
-struct Glob {
-    gate: ApprovalGate,
-}
+struct Glob {}
 
 impl Tool for Glob {
     const NAME: &'static str = "glob";
@@ -1163,14 +1122,10 @@ impl Tool for Glob {
         _ctx: &mut ToolContext,
         args: Value,
     ) -> Result<ToolOutput, ToolExecutionError> {
-        let gate = self.gate.clone();
         let result: Result<ToolOutput, String> = async move {
             let pattern = arg_value(&args, "pattern")?;
             let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
-            let (abs, reason) = resolve_checked(path)?;
-            if let Some(reason) = reason {
-                gate.request("glob", path, reason).await?;
-            }
+            let abs = resolve_read(path)?;
             if abs.is_file() {
                 return Err(format!("glob path must be a directory: {path}"));
             }
@@ -1259,80 +1214,6 @@ fn resolve(path: &str) -> Result<PathBuf, String> {
         return Err(format!("{path} resolves outside the workspace"));
     }
     Ok(canonical)
-}
-
-pub(crate) fn hidden_reason(path: &str) -> Option<ApprovalReason> {
-    let has_hidden = path
-        .split(['/', '\\'])
-        .any(|c| c.starts_with('.') && c != "." && c != "..");
-    has_hidden.then_some(ApprovalReason::HiddenPath)
-}
-
-fn expand_home(path: &str) -> String {
-    if (path == "~" || path.starts_with("~/") || path.starts_with("~\\"))
-        && let Some(home) = dirs::home_dir()
-    {
-        let rest = path
-            .strip_prefix("~/")
-            .or_else(|| path.strip_prefix("~\\"))
-            .unwrap_or("");
-        return home.join(rest).to_string_lossy().into_owned();
-    }
-    path.to_string()
-}
-
-pub(crate) fn resolve_checked(path: &str) -> Result<(PathBuf, Option<ApprovalReason>), String> {
-    let root = workspace_root()?;
-    let joined = root.join(expand_home(path));
-    let canonical = joined.canonicalize().map_err(|e| format!("{path}: {e}"))?;
-    let reason = if !canonical.starts_with(&root) {
-        Some(ApprovalReason::OutsideWorkspace)
-    } else {
-        hidden_reason(path)
-    };
-    Ok((canonical, reason))
-}
-
-pub(crate) fn resolve_for_write_checked(
-    path: &str,
-) -> Result<(PathBuf, Option<ApprovalReason>), String> {
-    let root = workspace_root()?;
-    let joined = root.join(expand_home(path));
-    let reason = hidden_reason(path);
-    if joined.exists() {
-        let abs = joined.canonicalize().map_err(|e| format!("{path}: {e}"))?;
-        let reason = if !abs.starts_with(&root) {
-            Some(ApprovalReason::OutsideWorkspace)
-        } else {
-            reason
-        };
-        return Ok((abs, reason));
-    }
-    let mut existing = joined.clone();
-    let mut missing: Vec<std::ffi::OsString> = Vec::new();
-    while !existing.exists() {
-        let name = existing
-            .file_name()
-            .ok_or_else(|| format!("{path}: invalid path"))?
-            .to_os_string();
-        missing.push(name);
-        existing = existing
-            .parent()
-            .ok_or_else(|| format!("{path}: invalid path"))?
-            .to_path_buf();
-    }
-    let mut abs = existing
-        .canonicalize()
-        .map_err(|e| format!("{path}: {e}"))?;
-    for name in missing.iter().rev() {
-        abs.push(name);
-    }
-    let reason = if !abs.starts_with(&root) {
-        Some(ApprovalReason::OutsideWorkspace)
-    } else {
-        reason
-    };
-    Ok((abs, reason))
 }
 
 struct TextEdit {
@@ -2016,7 +1897,6 @@ impl Tool for Question {
 
 #[allow(clippy::too_many_arguments)]
 pub fn all_tools(
-    gate: ApprovalGate,
     lsp: SharedManager,
     locks: FileLocks,
     read_cache: ReadCache,
@@ -2029,7 +1909,6 @@ pub fn all_tools(
         shuvarie_llm::into_dynamic(
             "read_file",
             ReadFile {
-                gate: gate.clone(),
                 read_cache: read_cache.clone(),
                 max_output_chars,
                 max_output_bytes,
@@ -2038,7 +1917,6 @@ pub fn all_tools(
         shuvarie_llm::into_dynamic(
             "write_file",
             WriteFile {
-                gate: gate.clone(),
                 read_cache: read_cache.clone(),
                 lsp: Some(lsp.clone()),
                 locks: locks.clone(),
@@ -2047,7 +1925,6 @@ pub fn all_tools(
         shuvarie_llm::into_dynamic(
             "edit_file",
             EditFile {
-                gate: gate.clone(),
                 lsp: Some(lsp.clone()),
                 locks: locks.clone(),
             },
@@ -2055,21 +1932,14 @@ pub fn all_tools(
         shuvarie_llm::into_dynamic(
             "run_shell",
             RunShell {
-                gate: gate.clone(),
                 shell_tx: shell_tx.clone(),
             },
         ),
-        shuvarie_llm::into_dynamic("list_dir", ListDir { gate: gate.clone() }),
-        shuvarie_llm::into_dynamic("grep", Grep { gate: gate.clone() }),
-        shuvarie_llm::into_dynamic("glob", Glob { gate: gate.clone() }),
+        shuvarie_llm::into_dynamic("list_dir", ListDir {}),
+        shuvarie_llm::into_dynamic("grep", Grep {}),
+        shuvarie_llm::into_dynamic("glob", Glob {}),
         shuvarie_llm::into_dynamic("lsp", Lsp { lsp }),
-        shuvarie_llm::into_dynamic(
-            "webfetch",
-            WebFetch {
-                gate,
-                max_output_chars,
-            },
-        ),
+        shuvarie_llm::into_dynamic("webfetch", WebFetch { max_output_chars }),
         shuvarie_llm::into_dynamic(
             "question",
             Question {
@@ -2080,7 +1950,6 @@ pub fn all_tools(
 }
 
 pub fn read_tools(
-    gate: ApprovalGate,
     lsp: SharedManager,
     read_cache: ReadCache,
     max_output_chars: usize,
@@ -2090,38 +1959,27 @@ pub fn read_tools(
         shuvarie_llm::into_dynamic(
             "read_file",
             ReadFile {
-                gate: gate.clone(),
                 read_cache,
                 max_output_chars,
                 max_output_bytes,
             },
         ),
-        shuvarie_llm::into_dynamic("list_dir", ListDir { gate: gate.clone() }),
-        shuvarie_llm::into_dynamic("grep", Grep { gate: gate.clone() }),
-        shuvarie_llm::into_dynamic("glob", Glob { gate: gate.clone() }),
+        shuvarie_llm::into_dynamic("list_dir", ListDir {}),
+        shuvarie_llm::into_dynamic("grep", Grep {}),
+        shuvarie_llm::into_dynamic("glob", Glob {}),
         shuvarie_llm::into_dynamic("lsp", Lsp { lsp: lsp.clone() }),
-        shuvarie_llm::into_dynamic(
-            "webfetch",
-            WebFetch {
-                gate,
-                max_output_chars,
-            },
-        ),
+        shuvarie_llm::into_dynamic("webfetch", WebFetch { max_output_chars }),
     ]
 }
 
-pub fn command_tools(
-    gate: ApprovalGate,
-    shell_tx: ShellOutputTx,
-) -> Vec<shuvarie_llm::DynamicTool> {
+pub fn command_tools(shell_tx: ShellOutputTx) -> Vec<shuvarie_llm::DynamicTool> {
     vec![shuvarie_llm::into_dynamic(
         "run_shell",
-        RunShell { gate, shell_tx },
+        RunShell { shell_tx },
     )]
 }
 
 pub fn edit_tools(
-    gate: ApprovalGate,
     lsp: SharedManager,
     locks: FileLocks,
     read_cache: ReadCache,
@@ -2132,7 +1990,6 @@ pub fn edit_tools(
         shuvarie_llm::into_dynamic(
             "read_file",
             ReadFile {
-                gate: gate.clone(),
                 read_cache: read_cache.clone(),
                 max_output_chars,
                 max_output_bytes,
@@ -2141,7 +1998,6 @@ pub fn edit_tools(
         shuvarie_llm::into_dynamic(
             "write_file",
             WriteFile {
-                gate: gate.clone(),
                 read_cache,
                 lsp: Some(lsp.clone()),
                 locks: locks.clone(),
@@ -2150,14 +2006,13 @@ pub fn edit_tools(
         shuvarie_llm::into_dynamic(
             "edit_file",
             EditFile {
-                gate: gate.clone(),
                 lsp: Some(lsp.clone()),
                 locks: locks.clone(),
             },
         ),
         shuvarie_llm::into_dynamic(
             "apply_patch",
-            crate::apply_patch::ApplyPatch::new(gate, Some(lsp.clone()), locks.clone()),
+            crate::apply_patch::ApplyPatch::new(Some(lsp.clone()), locks.clone()),
         ),
         shuvarie_llm::into_dynamic("lsp", Lsp { lsp }),
     ]
@@ -2176,11 +2031,6 @@ mod tests {
         (dir, guard)
     }
 
-    fn gate() -> ApprovalGate {
-        let (tx, _rx) = tokio::sync::mpsc::channel(8);
-        ApprovalGate::new(tx)
-    }
-
     fn no_lsp() -> Option<SharedManager> {
         None
     }
@@ -2191,7 +2041,6 @@ mod tests {
 
     fn read_file_tool() -> ReadFile {
         ReadFile {
-            gate: gate(),
             read_cache: ReadCache::new(),
             max_output_chars: 0,
             max_output_bytes: 0,
@@ -2200,7 +2049,6 @@ mod tests {
 
     fn run_shell_tool() -> RunShell {
         RunShell {
-            gate: gate(),
             shell_tx: ShellOutputTx::new(tokio::sync::mpsc::channel(64).0),
         }
     }
@@ -2246,7 +2094,6 @@ mod tests {
         let (dir, _guard) = tempdir();
         let mut ctx = new_ctx();
         let _out = WriteFile {
-            gate: gate(),
             read_cache: ReadCache::new(),
             lsp: no_lsp(),
             locks: FileLocks::new(),
@@ -2267,7 +2114,6 @@ mod tests {
 
     fn write_file_tool(read_cache: ReadCache) -> WriteFile {
         WriteFile {
-            gate: gate(),
             read_cache,
             lsp: no_lsp(),
             locks: FileLocks::new(),
@@ -2316,7 +2162,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string("f.txt").unwrap(), "old");
 
         let reader = ReadFile {
-            gate: gate(),
             read_cache: cache,
             max_output_chars: 0,
             max_output_bytes: 0,
@@ -2341,7 +2186,6 @@ mod tests {
         std::fs::write("f.txt", "v1").unwrap();
         let cache = ReadCache::new();
         let reader = ReadFile {
-            gate: gate(),
             read_cache: cache.clone(),
             max_output_chars: 0,
             max_output_bytes: 0,
@@ -2375,7 +2219,6 @@ mod tests {
         std::fs::write("bom.txt", "\u{FEFF}original").unwrap();
         let cache = ReadCache::new();
         let reader = ReadFile {
-            gate: gate(),
             read_cache: cache.clone(),
             max_output_chars: 0,
             max_output_bytes: 0,
@@ -2425,7 +2268,6 @@ mod tests {
         std::fs::write("e.txt", "alpha beta\ngamma delta\n").unwrap();
         let mut ctx = new_ctx();
         let out = EditFile {
-            gate: gate(),
             lsp: no_lsp(),
             locks: FileLocks::new(),
         }
@@ -2458,7 +2300,6 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::write("e.txt", "a b a").unwrap();
         let err = EditFile {
-            gate: gate(),
             lsp: no_lsp(),
             locks: FileLocks::new(),
         }
@@ -2474,7 +2315,6 @@ mod tests {
             err.to_string()
         );
         let err = EditFile {
-            gate: gate(),
             lsp: no_lsp(),
             locks: FileLocks::new(),
         }
@@ -2486,7 +2326,6 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("Could not find"));
         let err = EditFile {
-            gate: gate(),
             lsp: no_lsp(),
             locks: FileLocks::new(),
         }
@@ -2502,7 +2341,6 @@ mod tests {
             err.to_string()
         );
         let err = EditFile {
-            gate: gate(),
             lsp: no_lsp(),
             locks: FileLocks::new(),
         }
@@ -2525,7 +2363,6 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::write("e.txt", "abcd").unwrap();
         let err = EditFile {
-            gate: gate(),
             lsp: no_lsp(),
             locks: FileLocks::new(),
         }
@@ -2556,7 +2393,6 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::write("e.txt", "hello world").unwrap();
         EditFile {
-            gate: gate(),
             lsp: no_lsp(),
             locks: FileLocks::new(),
         }
@@ -2568,7 +2404,6 @@ mod tests {
         .unwrap();
         assert_eq!(std::fs::read_to_string("e.txt").unwrap(), "hi world");
         EditFile {
-            gate: gate(),
             lsp: no_lsp(),
             locks: FileLocks::new(),
         }
@@ -2580,7 +2415,6 @@ mod tests {
         .unwrap();
         assert_eq!(std::fs::read_to_string("e.txt").unwrap(), "hi there");
         EditFile {
-            gate: gate(),
             lsp: no_lsp(),
             locks: FileLocks::new(),
         }
@@ -2599,7 +2433,6 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::write("e.txt", "\u{FEFF}one\r\ntwo\r\n").unwrap();
         EditFile {
-            gate: gate(),
             lsp: no_lsp(),
             locks: FileLocks::new(),
         }
@@ -2625,7 +2458,6 @@ mod tests {
         )
         .unwrap();
         EditFile {
-            gate: gate(),
             lsp: no_lsp(),
             locks: FileLocks::new(),
         }
@@ -2644,7 +2476,6 @@ mod tests {
         );
         std::fs::write("ws.txt", "head   \nkeep  me\n").unwrap();
         let err = EditFile {
-            gate: gate(),
             lsp: no_lsp(),
             locks: FileLocks::new(),
         }
@@ -2663,7 +2494,6 @@ mod tests {
             err
         );
         EditFile {
-            gate: gate(),
             lsp: no_lsp(),
             locks: FileLocks::new(),
         }
@@ -2689,12 +2519,10 @@ mod tests {
         std::fs::write("f.txt", "token alpha and token beta\n").unwrap();
         let locks = FileLocks::new();
         let tool_a = EditFile {
-            gate: gate(),
             lsp: no_lsp(),
             locks: locks.clone(),
         };
         let tool_b = EditFile {
-            gate: gate(),
             lsp: no_lsp(),
             locks,
         };
@@ -2730,7 +2558,6 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::write("bytes.txt", "abcdef\n").unwrap();
         let tool = ReadFile {
-            gate: gate(),
             read_cache: ReadCache::new(),
             max_output_chars: 0,
             max_output_bytes: 3,
@@ -2749,15 +2576,14 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn tilde_paths_expand_and_gate() {
+    fn tilde_paths_expand() {
         let (dir, _guard) = tempdir();
         let original_home = std::env::var("HOME").ok();
         let home = TempDir::new().unwrap();
         unsafe { std::env::set_var("HOME", home.path()) };
         std::fs::write(home.path().join("homefile.txt"), "x").unwrap();
-        let (abs, reason) = resolve_checked("~/homefile.txt").unwrap();
-        assert_eq!(reason, Some(ApprovalReason::OutsideWorkspace));
-        assert!(abs.ends_with("homefile.txt"));
+        let err = resolve_write("~/homefile.txt").unwrap_err();
+        assert!(err.contains("outside the working directory"), "{err}");
         match original_home {
             Some(home_path) => unsafe { std::env::set_var("HOME", home_path) },
             None => unsafe { std::env::remove_var("HOME") },
@@ -2833,7 +2659,6 @@ mod tests {
         let (dir, _guard) = tempdir();
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         let tool = RunShell {
-            gate: gate(),
             shell_tx: ShellOutputTx::new(tx),
         };
         let out = tool
@@ -2860,7 +2685,6 @@ mod tests {
         let (dir, _guard) = tempdir();
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         let tool = RunShell {
-            gate: gate(),
             shell_tx: ShellOutputTx::new(tx).tagged("run_tests"),
         };
         tool.call(&mut new_ctx(), json!({ "command": "echo tagged" }))
@@ -2900,30 +2724,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_shell_gates_outside_workspace_cwd() {
+    async fn run_shell_allows_outside_workspace_cwd() {
         let (dir, _guard) = tempdir();
         let outside = TempDir::new().unwrap();
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::approval::ApprovalRequest>(8);
-        let tool = RunShell {
-            gate: ApprovalGate::new(tx),
-            shell_tx: ShellOutputTx::new(tokio::sync::mpsc::channel(64).0),
-        };
+        let tool = run_shell_tool();
         let cwd = outside.path().to_string_lossy().into_owned();
-        let call = tokio::spawn({
-            let tool = tool;
-            async move {
-                tool.call(
-                    &mut new_ctx(),
-                    json!({ "command": "echo gated", "cwd": cwd }),
-                )
-                .await
-            }
-        });
-        let req = rx.recv().await.unwrap();
-        assert_eq!(req.reason, ApprovalReason::OutsideWorkspace);
-        req.respond.send(true).unwrap();
-        let out = call.await.unwrap().unwrap();
-        assert!(out.as_text().unwrap().contains("gated"));
+        let out = tool
+            .call(&mut new_ctx(), json!({ "command": "pwd", "cwd": cwd }))
+            .await
+            .unwrap();
+        let text = out.as_text().unwrap();
+        let tail = outside
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(text.contains(&tail), "{text}");
         drop(dir);
     }
 
@@ -2961,10 +2778,7 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::create_dir("zdir").unwrap();
         std::fs::write("afile", "").unwrap();
-        let out = ListDir { gate: gate() }
-            .call(&mut new_ctx(), json!({}))
-            .await
-            .unwrap();
+        let out = ListDir {}.call(&mut new_ctx(), json!({})).await.unwrap();
         let lines: Vec<&str> = out.as_text().unwrap().lines().collect();
         assert_eq!(lines, vec!["afile", "zdir/"]);
         drop(dir);
@@ -2975,13 +2789,13 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::write("r.rs", "fn main() {}\n").unwrap();
         std::fs::write("r.txt", "hello fn world\n").unwrap();
-        let out = Grep { gate: gate() }
+        let out = Grep {}
             .call(&mut new_ctx(), json!({ "pattern": "fn", "include": ".rs" }))
             .await
             .unwrap();
         assert!(out.as_text().unwrap().contains("r.rs:1"));
         assert!(!out.as_text().unwrap().contains("r.txt"));
-        let none = Grep { gate: gate() }
+        let none = Grep {}
             .call(&mut new_ctx(), json!({ "pattern": "zzzz" }))
             .await
             .unwrap();
@@ -2996,7 +2810,7 @@ mod tests {
         std::fs::write("src/a.rs", "").unwrap();
         std::fs::write("src/sub/b.rs", "").unwrap();
         std::fs::write("src/c.txt", "").unwrap();
-        let out = Glob { gate: gate() }
+        let out = Glob {}
             .call(&mut new_ctx(), json!({ "pattern": "**/*.rs" }))
             .await
             .unwrap();
@@ -3015,7 +2829,7 @@ mod tests {
         std::fs::write("kept.txt", "").unwrap();
         std::fs::create_dir(".hidden").unwrap();
         std::fs::write(".hidden/secret.txt", "").unwrap();
-        let out = Glob { gate: gate() }
+        let out = Glob {}
             .call(&mut new_ctx(), json!({ "pattern": "**/*.txt" }))
             .await
             .unwrap();
@@ -3032,13 +2846,13 @@ mod tests {
         for i in 0..150 {
             std::fs::write(format!("f{i}.txt"), "").unwrap();
         }
-        let out = Glob { gate: gate() }
+        let out = Glob {}
             .call(&mut new_ctx(), json!({ "pattern": "*.txt" }))
             .await
             .unwrap();
         let text = out.as_text().unwrap();
         assert!(text.contains("truncated"), "{text}");
-        let none = Glob { gate: gate() }
+        let none = Glob {}
             .call(&mut new_ctx(), json!({ "pattern": "*.zzz" }))
             .await
             .unwrap();
@@ -3050,7 +2864,7 @@ mod tests {
     async fn glob_rejects_file_path() {
         let (dir, _guard) = tempdir();
         std::fs::write("a.txt", "").unwrap();
-        let err = Glob { gate: gate() }
+        let err = Glob {}
             .call(
                 &mut new_ctx(),
                 json!({ "pattern": "*.txt", "path": "a.txt" }),
@@ -3093,7 +2907,6 @@ mod tests {
         std::fs::write("dup.txt", "line\n").unwrap();
         let cache = ReadCache::new();
         let tool = ReadFile {
-            gate: gate(),
             read_cache: cache.clone(),
             max_output_chars: 0,
             max_output_bytes: 0,
@@ -3134,7 +2947,6 @@ mod tests {
         let big = "x".repeat(10_000) + "\n";
         std::fs::write("big.txt", &big).unwrap();
         let tool = ReadFile {
-            gate: gate(),
             read_cache: ReadCache::new(),
             max_output_chars: 100,
             max_output_bytes: 0,
@@ -3239,14 +3051,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_checked_classifies_hidden_and_outside() {
+    fn resolve_read_classification() {
         let (dir, _guard) = tempdir();
         std::fs::create_dir_all(".git").unwrap();
         std::fs::write(".git/config", "x").unwrap();
-        let (_, reason) = resolve_checked(".git/config").unwrap();
-        assert_eq!(reason, Some(ApprovalReason::HiddenPath));
-        let (_, reason) = resolve_checked(".").unwrap();
-        assert_eq!(reason, None);
+        assert!(resolve_read(".git/config").unwrap_err().contains("hidden"));
+        assert!(resolve_read(".").is_ok());
 
         let outside = dir
             .path()
@@ -3255,8 +3065,8 @@ mod tests {
             .join(format!("shuvarie-outside-{}", std::process::id()));
         std::fs::write(&outside, "x").unwrap();
         let rel = format!("../{}", outside.file_name().unwrap().to_string_lossy());
-        let (_, reason) = resolve_checked(&rel).unwrap();
-        assert_eq!(reason, Some(ApprovalReason::OutsideWorkspace));
+        assert!(resolve_read(&rel).is_ok());
+        assert!(resolve_write(&rel).is_err());
         let _ = std::fs::remove_file(&outside);
         drop(dir);
     }
@@ -3265,7 +3075,6 @@ mod tests {
     async fn webfetch_rejects_non_http_urls() {
         for url in ["ftp://example.com/x", "file:///etc/passwd", "example.com"] {
             let err = WebFetch {
-                gate: gate(),
                 max_output_chars: 0,
             }
             .call(&mut new_ctx(), json!({ "url": url }))
@@ -3278,7 +3087,6 @@ mod tests {
     #[tokio::test]
     async fn webfetch_rejects_invalid_format() {
         let err = WebFetch {
-            gate: gate(),
             max_output_chars: 0,
         }
         .call(

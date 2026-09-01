@@ -10,7 +10,6 @@ use tokio::task::AbortHandle;
 use shuvarie_db::Store;
 use shuvarie_llm::{FileChange, ProviderClient};
 
-use crate::approval::{ApprovalGate, ApprovalRequest};
 use crate::command::Command;
 use crate::config::Config;
 use crate::config::{Connections, ProviderConfig};
@@ -56,7 +55,6 @@ struct CoreCtx {
     turn_state: Option<Arc<Mutex<TurnState>>>,
     event_tx: Sender<Event>,
     stream_done_tx: Sender<StreamOutcome>,
-    approval_tx: Sender<ApprovalRequest>,
     question_tx: Sender<QuestionRequest>,
     config: Config,
     workspace_root: PathBuf,
@@ -84,11 +82,6 @@ pub async fn run(
     let (stream_done_tx, mut stream_done_rx) = tokio::sync::mpsc::channel::<StreamOutcome>(1);
     let mut overflow_retries: usize = 0;
     const MAX_OVERFLOW_RETRIES: usize = 3;
-
-    let (approval_tx, mut approval_rx) = tokio::sync::mpsc::channel::<ApprovalRequest>(64);
-    let mut pending_approvals: HashMap<u64, oneshot::Sender<bool>> = HashMap::new();
-    let mut next_approval_id: u64 = 0;
-    let mut always_approve = false;
 
     let (question_tx, mut question_rx) = tokio::sync::mpsc::channel::<QuestionRequest>(8);
     let mut pending_questions: HashMap<u64, oneshot::Sender<AnswerResponse>> = HashMap::new();
@@ -145,7 +138,6 @@ pub async fn run(
         turn_state: None,
         event_tx,
         stream_done_tx,
-        approval_tx,
         question_tx,
         config,
         workspace_root,
@@ -294,7 +286,6 @@ pub async fn run(
                         .await;
                     }
                     Command::StartSession => {
-                        always_approve = false;
                         overflow_retries = 0;
                         dismiss_pending_questions(&mut pending_questions);
                         ctx.session = Some(Arc::new(Mutex::new(Session::new())));
@@ -304,7 +295,6 @@ pub async fn run(
                         if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
                         }
-                        always_approve = false;
                         overflow_retries = 0;
                         dismiss_pending_questions(&mut pending_questions);
                         ctx.session = Some(Arc::new(Mutex::new(Session::new())));
@@ -426,7 +416,6 @@ pub async fn run(
                         if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
                         }
-                        always_approve = false;
                         dismiss_pending_questions(&mut pending_questions);
                         match ctx.store.load_session(id).await {
                             Ok(stored) => {
@@ -524,14 +513,6 @@ pub async fn run(
                             );
                         }
                         let _ = ctx.event_tx.send(Event::SearchResults { hits: fts_hits }).await;
-                    }
-                    Command::ApproveTool { id, approved, always } => {
-                        if always {
-                            always_approve = true;
-                        }
-                        if let Some(respond) = pending_approvals.remove(&id) {
-                            let _ = respond.send(approved);
-                        }
                     }
                     Command::AnswerQuestion { id, answers } => {
                         if let Some(respond) = pending_questions.remove(&id) {
@@ -731,24 +712,6 @@ pub async fn run(
                     emit_lsp_status(&mgr, &ctx.event_tx).await;
                 }
             }
-            approval = approval_rx.recv() => {
-                let Some(req) = approval else { break };
-                if always_approve {
-                    let _ = req.respond.send(true);
-                    continue;
-                }
-                let id = next_approval_id;
-                next_approval_id = next_approval_id.wrapping_add(1);
-                pending_approvals.insert(id, req.respond);
-                let _ = ctx.event_tx
-                    .send(Event::ApprovalRequest {
-                        id,
-                        tool: req.tool,
-                        path: req.path,
-                        reason: req.reason,
-                    })
-                    .await;
-            }
             question = question_rx.recv() => {
                 let Some(req) = question else { break };
                 let id = next_question_id;
@@ -801,8 +764,7 @@ async fn emit_lsp_status(mgr: &shuvarie_lsp::LspManager, event_tx: &Sender<Event
 const AGENT_PREAMBLE: &str = "\
 You are Shuvarie, an agentic coding assistant running in a terminal inside the user's project. \
 You can read, write, and edit files, list directories, grep for text, run commands, and fetch \
-web pages with the `webfetch` tool (URLs must start with http:// or https://; the user is asked \
-to approve network fetches once per session). \
+web pages with the `webfetch` tool (URLs must start with http:// or https://). \
 Prefer using tools to inspect the workspace and verify your work (for example, run the test \
 suite after editing code) instead of guessing. When a tool reports an error, fix the cause and \
 retry rather than stopping. After finishing the work, summarize what you did and any results in \
@@ -1030,12 +992,10 @@ impl CoreCtx {
             None => AGENT_PREAMBLE.to_string(),
         };
         let preamble = crate::context::build_preamble(&base, &loaded_context);
-        let gate = ApprovalGate::new(self.approval_tx.clone());
         let question_gate = QuestionGate::new(self.question_tx.clone());
         let (shell_tx, mut shell_rx) = tokio::sync::mpsc::channel::<crate::tools::ShellChunk>(64);
         let file_locks = crate::tools::FileLocks::new();
         let tools = crate::tools::all_tools(
-            gate.clone(),
             self.lsp.clone(),
             file_locks.clone(),
             crate::tools::ReadCache::new(),
@@ -1070,7 +1030,6 @@ impl CoreCtx {
         let mut worker_set = crate::agents::build_workers(
             client.clone(),
             &model,
-            gate,
             self.lsp.clone(),
             file_locks,
             self.worker_turns,

@@ -14,7 +14,6 @@ use self::app::{App, AppEffect, AppMessage};
 
 pub mod add_provider;
 mod app;
-mod approval;
 mod command_menu;
 mod components;
 mod confirm_quit;

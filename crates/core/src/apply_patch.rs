@@ -3,11 +3,9 @@ use shuvarie_llm::{
     FileChange, PatchFileChange, PatchFileKind, Tool, ToolContext, ToolExecutionError, ToolOutput,
 };
 
-use crate::approval::ApprovalGate;
 use crate::lsp_manager::SharedManager;
-use crate::tools::{
-    FileLocks, arg_value, compute_diff, resolve_checked, resolve_for_write_checked,
-};
+use crate::permissions::resolve_write;
+use crate::tools::{FileLocks, arg_value, compute_diff};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Hunk {
@@ -374,14 +372,13 @@ fn derive_new_contents(
 }
 
 pub struct ApplyPatch {
-    gate: ApprovalGate,
     lsp: Option<SharedManager>,
     locks: FileLocks,
 }
 
 impl ApplyPatch {
-    pub fn new(gate: ApprovalGate, lsp: Option<SharedManager>, locks: FileLocks) -> Self {
-        Self { gate, lsp, locks }
+    pub fn new(lsp: Option<SharedManager>, locks: FileLocks) -> Self {
+        Self { lsp, locks }
     }
 }
 
@@ -416,7 +413,6 @@ impl Tool for ApplyPatch {
         ctx: &mut ToolContext,
         args: Value,
     ) -> Result<ToolOutput, ToolExecutionError> {
-        let gate = self.gate.clone();
         let lsp = self.lsp.clone();
         let locks = self.locks.clone();
         let result: Result<ToolOutput, String> = async move {
@@ -430,17 +426,17 @@ impl Tool for ApplyPatch {
             for hunk in &hunks {
                 match hunk {
                     Hunk::Add { path, .. } => {
-                        lock_keys.push(resolve_for_write_checked(path)?.0);
+                        lock_keys.push(resolve_write(path)?);
                     }
                     Hunk::Delete { path, .. } => {
-                        lock_keys.push(resolve_checked(path)?.0);
+                        lock_keys.push(resolve_write(path)?);
                     }
                     Hunk::Update {
                         path, move_path, ..
                     } => {
-                        lock_keys.push(resolve_checked(path)?.0);
+                        lock_keys.push(resolve_write(path)?);
                         if let Some(target) = move_path {
-                            lock_keys.push(resolve_for_write_checked(target)?.0);
+                            lock_keys.push(resolve_write(target)?);
                         }
                     }
                 }
@@ -482,10 +478,7 @@ impl Tool for ApplyPatch {
                         } else {
                             format!("{contents}\n")
                         };
-                        let (abs, reason) = resolve_for_write_checked(path)?;
-                        if let Some(reason) = reason {
-                            gate.request("apply_patch", path, reason).await?;
-                        }
+                        let abs = resolve_write(path)?;
                         if abs.exists() {
                             return Err(format!("cannot add {path}: file already exists"));
                         }
@@ -504,10 +497,7 @@ impl Tool for ApplyPatch {
                         });
                     }
                     Hunk::Delete { path } => {
-                        let (abs, reason) = resolve_checked(path)?;
-                        if let Some(reason) = reason {
-                            gate.request("apply_patch", path, reason).await?;
-                        }
+                        let abs = resolve_write(path)?;
                         let original = tokio::fs::read_to_string(&abs)
                             .await
                             .map_err(|e| format!("read {path}: {e}"))?;
@@ -529,15 +519,9 @@ impl Tool for ApplyPatch {
                         move_path,
                         chunks,
                     } => {
-                        let (abs, reason) = resolve_checked(path)?;
-                        if let Some(reason) = reason {
-                            gate.request("apply_patch", path, reason).await?;
-                        }
+                        let abs = resolve_write(path)?;
                         if let Some(target) = move_path {
-                            let (target_abs, reason) = resolve_for_write_checked(target)?;
-                            if let Some(reason) = reason {
-                                gate.request("apply_patch", target, reason).await?;
-                            }
+                            let target_abs = resolve_write(target)?;
                             if target_abs == abs {
                                 return Err(format!("move target {target} matches source {path}"));
                             }
@@ -648,13 +632,7 @@ impl Tool for ApplyPatch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::approval::ApprovalGate;
     use shuvarie_llm::PatchFileKind;
-
-    fn gate() -> ApprovalGate {
-        let (tx, _rx) = tokio::sync::mpsc::channel(8);
-        ApprovalGate::new(tx)
-    }
 
     #[test]
     fn parses_add_update_delete_and_move() {
@@ -763,7 +741,7 @@ mod tests {
 +fn new() {}
 *** Delete File: obsolete.txt
 *** End Patch"#;
-        let tool = ApplyPatch::new(gate(), None, FileLocks::new());
+        let tool = ApplyPatch::new(None, FileLocks::new());
         let mut ctx = ToolContext::default();
         let out = tool
             .call(&mut ctx, json!({ "patchText": patch }))
@@ -809,7 +787,7 @@ mod tests {
 +data
 +moved
 *** End Patch"#;
-        let tool = ApplyPatch::new(gate(), None, FileLocks::new());
+        let tool = ApplyPatch::new(None, FileLocks::new());
         let mut ctx = ToolContext::default();
         let err = tool
             .call(&mut ctx, json!({ "patchText": patch }))
@@ -855,7 +833,7 @@ mod tests {
 -three
 +3
 *** End Patch"#;
-        let tool = ApplyPatch::new(gate(), None, FileLocks::new());
+        let tool = ApplyPatch::new(None, FileLocks::new());
         let mut ctx = ToolContext::default();
         let err = tool
             .call(&mut ctx, json!({ "patchText": patch }))

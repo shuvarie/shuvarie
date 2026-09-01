@@ -1,6 +1,5 @@
 pub mod agents;
 pub mod apply_patch;
-pub mod approval;
 pub mod catalog;
 pub mod command;
 pub mod compaction;
@@ -11,6 +10,7 @@ pub mod embeddings;
 mod error;
 pub mod event;
 pub mod lsp_manager;
+pub mod permissions;
 pub mod question;
 pub mod session;
 pub mod skills;
@@ -19,7 +19,6 @@ pub mod tool_record;
 pub mod tools;
 pub mod truncate;
 
-pub use approval::ApprovalReason;
 pub use command::Command;
 pub use config::{
     Active, AgentConfig, Config, Connections, ContextConfig, EmbeddingConfig, LspConfigRepr,
