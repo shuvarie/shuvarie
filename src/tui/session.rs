@@ -107,6 +107,12 @@ pub enum ToolStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusyKind {
+    Generating,
+    Tool,
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolActivity {
     pub name: String,
@@ -143,6 +149,7 @@ pub struct SessionScreen {
     pub expanded_reasoning: std::collections::HashSet<usize>,
     pub streaming: bool,
     pub busy: bool,
+    busy_kind: BusyKind,
     pub pending: String,
     pub pending_reasoning: String,
     pub interrupted: bool,
@@ -175,6 +182,7 @@ impl SessionScreen {
             expanded_reasoning: std::collections::HashSet::new(),
             streaming: false,
             busy: false,
+            busy_kind: BusyKind::Generating,
             pending: String::new(),
             pending_reasoning: String::new(),
             interrupted: false,
@@ -258,6 +266,7 @@ impl SessionScreen {
                             let content = commands::unescape(&content).to_string();
                             self.messages.push((Role::User, content.clone()));
                             self.busy = true;
+                            self.busy_kind = BusyKind::Generating;
                             self.status = Some("thinking…".to_string());
                             self.mark_committed_dirty();
                             self.mark_scroll_dirty();
@@ -314,6 +323,7 @@ impl SessionScreen {
                     self.pending.clear();
                 }
                 self.busy = true;
+                self.busy_kind = BusyKind::Generating;
                 self.pending.push_str(&content);
                 self.status = Some("streaming…".to_string());
                 self.mark_scroll_dirty();
@@ -352,6 +362,7 @@ impl SessionScreen {
                 });
                 self.streaming = true;
                 self.busy = true;
+                self.busy_kind = BusyKind::Tool;
                 self.status = Some(format!("tool: {}", self.tools.last().unwrap().name));
                 self.mark_scroll_dirty();
                 self.follow_bottom();
@@ -407,6 +418,7 @@ impl SessionScreen {
                 });
                 self.streaming = true;
                 self.busy = true;
+                self.busy_kind = BusyKind::Tool;
                 self.status = Some(format!("worker: {}", self.tools.last().unwrap().name));
                 self.mark_scroll_dirty();
                 self.follow_bottom();
@@ -739,13 +751,21 @@ impl SessionScreen {
             self.slash.view(frame, rect);
         }
 
-        if let Some(status) = &self.status {
+        let status = match self.status.as_deref() {
+            Some(status) => Some((status, self.busy_kind)),
+            None if self.busy => Some(("working…", BusyKind::Tool)),
+            None => None,
+        };
+        if let Some((status, kind)) = status {
             let mut spans = Vec::new();
             if self.busy {
-                spans.push(super::spinner::spinner());
+                spans.push(match kind {
+                    BusyKind::Generating => super::spinner::generating_spinner(),
+                    BusyKind::Tool => super::spinner::tool_spinner(),
+                });
                 spans.push(Span::raw(" "));
             }
-            spans.push(Span::raw(status.as_str()).fg(theme::TEXT_MUTED));
+            spans.push(Span::raw(status).fg(theme::TEXT_MUTED));
             frame.render_widget(Paragraph::new(Line::from(spans)), status_area);
         }
 

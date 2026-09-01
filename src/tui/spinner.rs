@@ -7,6 +7,42 @@ use super::theme;
 
 const FRAMES: [&str; 6] = ["⠹", "⠼", "⠶", "⠧", "⠏", "⠛"];
 
+const GENERATING_FRAMES: [&str; 18] = [
+    "  ⢀⣾⣿⡿⠁  ",
+    "  ⠐⣻⣿⣯⠄  ",
+    "  ⠚⢛⣿⣥⡤  ",
+    " ⠐⠛⠛⣫⣤⣤⠄ ",
+    " ⠚⠛⠛⢁⣤⣤⡤ ",
+    "⠐⠛⠛⠋ ⣠⣤⣤⠄",
+    "⠚⠛⠛⠁ ⢀⣤⣤⡤",
+    "⠻⠛⠋   ⣠⣤⣦",
+    "⢿⠛⠁   ⢀⣤⣷",
+    "⣿⠏     ⣰⣿",
+    "⣿⡥     ⢚⣿",
+    "⣷⣤⠄   ⠐⠛⢿",
+    "⣦⣤⡤   ⠚⠛⠻",
+    "⣠⣤⣤⠄ ⠐⠛⠛⠋",
+    "⢀⣤⣤⡤ ⠚⠛⠛⠁",
+    " ⣠⣤⣤⠔⠛⠛⠋ ",
+    " ⢀⣤⣤⡾⠛⠛⠁ ",
+    "  ⣠⣴⣿⠟⠋  ",
+];
+
+const TOOL_FRAMES: [&str; 12] = [
+    "⣿⣿⣿⣿⣉⣉⣉⣿⣿",
+    "⣏⣿⣿⣿⣏⣉⣉⣹⣿",
+    "⣏⣹⣿⣿⣿⣉⣉⣉⣿",
+    "⣏⣉⣿⣿⣿⣏⣉⣉⣹",
+    "⣏⣉⣹⣿⣿⣿⣉⣉⣹",
+    "⣏⣉⣉⣿⣿⣿⣏⣉⣹",
+    "⣏⣉⣉⣹⣿⣿⣿⣉⣹",
+    "⣿⣉⣉⣉⣿⣿⣿⣏⣹",
+    "⣿⣏⣉⣉⣹⣿⣿⣿⣹",
+    "⣿⣿⣉⣉⣉⣿⣿⣿⣿",
+    "⣿⣿⣏⣉⣉⣹⣿⣿⣿",
+    "⣿⣿⣿⣉⣉⣉⣿⣿⣿",
+];
+
 fn frameplay() -> &'static Frameplay<&'static str> {
     static FP: OnceLock<Frameplay<&'static str>> = OnceLock::new();
     FP.get_or_init(|| {
@@ -15,6 +51,32 @@ fn frameplay() -> &'static Frameplay<&'static str> {
             FrameplayOptions {
                 frame_time_reference: FrameTimeReference::StartTime,
                 frame_rate: 10,
+            },
+        )
+    })
+}
+
+fn generating_frameplay() -> &'static Frameplay<&'static str> {
+    static FP: OnceLock<Frameplay<&'static str>> = OnceLock::new();
+    FP.get_or_init(|| {
+        Frameplay::new(
+            GENERATING_FRAMES,
+            FrameplayOptions {
+                frame_time_reference: FrameTimeReference::StartTime,
+                frame_rate: 14,
+            },
+        )
+    })
+}
+
+fn tool_frameplay() -> &'static Frameplay<&'static str> {
+    static FP: OnceLock<Frameplay<&'static str>> = OnceLock::new();
+    FP.get_or_init(|| {
+        Frameplay::new(
+            TOOL_FRAMES,
+            FrameplayOptions {
+                frame_time_reference: FrameTimeReference::StartTime,
+                frame_rate: 14,
             },
         )
     })
@@ -29,4 +91,14 @@ pub fn spinner_frame() -> &'static str {
 /// A styled spinner span in the accent color.
 pub fn spinner() -> Span<'static> {
     Span::raw(spinner_frame()).fg(theme::ACCENT)
+}
+
+/// The wide status-row spinner shown while the model is generating.
+pub fn generating_spinner() -> Span<'static> {
+    Span::raw(*generating_frameplay().get_frame()).fg(theme::ACCENT)
+}
+
+/// The wide status-row spinner shown while a tool is running.
+pub fn tool_spinner() -> Span<'static> {
+    Span::raw(*tool_frameplay().get_frame()).fg(theme::ACCENT)
 }
