@@ -105,7 +105,6 @@ pub async fn run(
     }
 
     let workspace_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let agents_md_context = crate::context::load_agents_md(&workspace_root);
     let lsp_config = shuvarie_lsp::LspConfig::from(&config.lsp);
     let lsp = std::sync::Arc::new(tokio::sync::Mutex::new(shuvarie_lsp::LspManager::new(
         workspace_root.clone(),
@@ -116,13 +115,6 @@ pub async fn run(
     lsp_pump_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Don't fire immediately on the first tick.
     lsp_pump_tick.reset();
-
-    let skills = crate::skills::Skills::load(&workspace_root, &config.skills);
-    let _ = event_tx
-        .send(Event::SkillsLoaded {
-            skills: skills.skills.clone(),
-        })
-        .await;
 
     let manager_turns = config.agent.effective_max_turns();
     let worker_turns = config.agent.effective_worker_max_turns();
@@ -141,15 +133,15 @@ pub async fn run(
         question_tx,
         config,
         workspace_root,
-        agents_md_context,
-        skills,
+        agents_md_context: crate::context::LoadedContext::default(),
+        skills: crate::skills::Skills::default(),
         session: None,
         manager_turns,
         worker_turns,
         max_output_chars,
         max_output_bytes,
     };
-    load_startup_session(&mut ctx.store, &mut ctx.session, &ctx.event_tx, startup).await;
+    load_startup_session(&mut ctx, startup).await;
 
     loop {
         tokio::select! {
@@ -288,8 +280,7 @@ pub async fn run(
                     Command::StartSession => {
                         overflow_retries = 0;
                         dismiss_pending_questions(&mut pending_questions);
-                        ctx.session = Some(Arc::new(Mutex::new(Session::new())));
-                        let _ = ctx.event_tx.send(Event::SessionStarted).await;
+                        ctx.start_fresh_session().await;
                     }
                     Command::NewSession => {
                         if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
@@ -297,8 +288,7 @@ pub async fn run(
                         }
                         overflow_retries = 0;
                         dismiss_pending_questions(&mut pending_questions);
-                        ctx.session = Some(Arc::new(Mutex::new(Session::new())));
-                        let _ = ctx.event_tx.send(Event::SessionStarted).await;
+                        ctx.start_fresh_session().await;
                     }
                     Command::SendMessage { content } => {
                         if ctx.active_stream.as_ref().is_some_and(|h| !h.is_finished()) {
@@ -312,8 +302,7 @@ pub async fn run(
                         overflow_retries = 0;
                         ctx.active_stream = None;
                         if ctx.session.is_none() {
-                            ctx.session = Some(Arc::new(Mutex::new(Session::new())));
-                            let _ = ctx.event_tx.send(Event::SessionStarted).await;
+                            ctx.start_fresh_session().await;
                         }
                         let s = ctx.session.as_ref().unwrap();
                         s.lock().await.push_user(content.clone());
@@ -421,6 +410,7 @@ pub async fn run(
                             Ok(stored) => {
                                 let loaded = Session::from_stored(stored);
                                 ctx.session = Some(Arc::new(Mutex::new(loaded.clone())));
+                                ctx.load_session_context().await;
                                 let _ = ctx.event_tx
                                     .send(Event::SessionLoaded {
                                         id,
@@ -444,10 +434,15 @@ pub async fn run(
                         }
                         match ctx.store.delete_session(id).await {
                             Ok(()) => {
+                                let mut replaced = false;
                                 if let Some(s) = &ctx.session
                                     && s.lock().await.id == Some(id)
                                 {
                                     *s.lock().await = Session::new();
+                                    replaced = true;
+                                }
+                                if replaced {
+                                    ctx.load_session_context().await;
                                 }
                                 let _ = ctx.event_tx.send(Event::SessionDeleted { id }).await;
                             }
@@ -923,6 +918,29 @@ async fn redo_turn(store: &mut Store, session_id: uuid::Uuid) -> Result<bool, St
 }
 
 impl CoreCtx {
+    /// Reload the workspace project context (AGENTS.md) and the skill roster
+    /// from disk, then announce the skills to the TUI. Runs right after a
+    /// session is created or resumed and before its first user prompt is
+    /// streamed, so every session picks up fresh context and skills.
+    async fn load_session_context(&mut self) {
+        self.agents_md_context = crate::context::load_agents_md(&self.workspace_root);
+        self.skills = crate::skills::Skills::load(&self.workspace_root, &self.config.skills);
+        let _ = self
+            .event_tx
+            .send(Event::SkillsLoaded {
+                skills: self.skills.skills.clone(),
+            })
+            .await;
+    }
+
+    /// Replace the active session with a fresh one, loading the project
+    /// context and skills for it, and announce the session to the TUI.
+    async fn start_fresh_session(&mut self) {
+        self.session = Some(Arc::new(Mutex::new(Session::new())));
+        self.load_session_context().await;
+        let _ = self.event_tx.send(Event::SessionStarted).await;
+    }
+
     /// Build a stream for the given user content and spawn the event-forwarding
     /// task. When `push_user` is set, the content is first appended as a user
     /// message (used by `SendMessage`); otherwise it is re-sent as-is (used by
@@ -1124,18 +1142,14 @@ impl CoreCtx {
     }
 }
 
-async fn load_startup_session(
-    store: &mut Store,
-    session: &mut Option<Arc<Mutex<Session>>>,
-    event_tx: &Sender<Event>,
-    startup: StartupSession,
-) {
+async fn load_startup_session(ctx: &mut CoreCtx, startup: StartupSession) {
     let stored = match startup {
         StartupSession::None => return,
-        StartupSession::MostRecent => match store.most_recent_session().await {
+        StartupSession::MostRecent => match ctx.store.most_recent_session().await {
             Ok(stored) => stored,
             Err(e) => {
-                let _ = event_tx
+                let _ = ctx
+                    .event_tx
                     .send(Event::SessionError {
                         error: e.to_string(),
                     })
@@ -1143,10 +1157,11 @@ async fn load_startup_session(
                 return;
             }
         },
-        StartupSession::Session(id) => match store.load_session(id).await {
+        StartupSession::Session(id) => match ctx.store.load_session(id).await {
             Ok(stored) => Some(stored),
             Err(e) => {
-                let _ = event_tx
+                let _ = ctx
+                    .event_tx
                     .send(Event::SessionError {
                         error: e.to_string(),
                     })
@@ -1158,8 +1173,10 @@ async fn load_startup_session(
     let Some(stored) = stored else { return };
     let id = stored.id;
     let loaded = Session::from_stored(stored);
-    *session = Some(Arc::new(Mutex::new(loaded.clone())));
-    let _ = event_tx
+    ctx.session = Some(Arc::new(Mutex::new(loaded.clone())));
+    ctx.load_session_context().await;
+    let _ = ctx
+        .event_tx
         .send(Event::SessionLoaded {
             id,
             title: loaded.title.clone().unwrap_or_default(),
