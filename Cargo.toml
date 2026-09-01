@@ -13,12 +13,12 @@ color-eyre = "0.6.5"
 frameplay = "0.1"
 futures-util = { version = "0.3", default-features = false, features = ["std", "alloc"] }
 nucleo = "0.5"
-selune = { path = "vendor/selune" }
+selune = { path = "vendor/selune", version = "0.1" }
 serde_json = "1"
-shuvarie-core = { path = "crates/core" }
-shuvarie-db = { path = "crates/db" }
-shuvarie-highlight = { path = "crates/highlight" }
-shuvarie-llm = { path = "crates/llm" }
+shuvarie-core = { path = "crates/core", version = "0.1" }
+shuvarie-db = { path = "crates/db", version = "0.1" }
+shuvarie-highlight = { path = "crates/highlight", version = "0.1" }
+shuvarie-llm = { path = "crates/llm", version = "0.1" }
 termina = { version = "0.3.3", features = ["event-stream"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 tui-scrollview = "0.6.7"
