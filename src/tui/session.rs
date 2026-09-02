@@ -16,6 +16,7 @@ use super::theme;
 pub mod blocks;
 pub mod chat;
 pub mod segment;
+pub mod virtualizer;
 
 pub use chat::ChatMessage;
 

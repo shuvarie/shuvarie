@@ -1,6 +1,7 @@
 use ratatui::prelude::*;
 
 use crate::tui::session::segment::Segment;
+use crate::tui::session::virtualizer::TurnEst;
 use crate::tui::theme;
 
 /// Project context files loaded for the in-flight turn, rendered as one
@@ -29,5 +30,9 @@ impl ContextBlock {
             })
             .collect();
         vec![Segment::plain(lines)]
+    }
+
+    pub(super) fn est(&self) -> TurnEst {
+        TurnEst::deco(self.paths.len() as u32)
     }
 }

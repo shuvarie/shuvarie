@@ -21,7 +21,6 @@ shuvarie-highlight = { path = "crates/highlight", version = "0.1" }
 shuvarie-llm = { path = "crates/llm", version = "0.1" }
 termina = { version = "0.3.3", features = ["event-stream"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
-tui-scrollview = "0.6.7"
 unicode-width = "0.2"
 uuid = { version = "1", features = ["v4"] }
 

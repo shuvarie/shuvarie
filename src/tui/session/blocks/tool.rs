@@ -9,6 +9,7 @@ use unicode_width::UnicodeWidthStr;
 use super::format_duration_ms;
 use crate::tui::session::blocks::{ChatEnv, Segment};
 use crate::tui::session::segment::BLOCK_PADDING;
+use crate::tui::session::virtualizer::{TurnEst, collapsed_rows, file_change_row_est};
 use crate::tui::{spinner, theme};
 use shuvarie_core::tool_record::ToolRecord;
 
@@ -97,6 +98,64 @@ impl ToolBlock {
     /// Flip the collapse state of the output rows.
     pub(super) fn toggle(&mut self) {
         self.expanded = !self.expanded;
+    }
+
+    pub(super) fn set_expanded(&mut self, expanded: bool) {
+        self.expanded = expanded;
+    }
+
+    pub(super) fn is_expanded(&self) -> bool {
+        self.expanded
+    }
+
+    /// Estimated row counters mirroring [`Self::view`]: header, collapse state
+    /// (which follows `expanded` — `question`/`todo` flip it on finish), file
+    /// change rows, and the elapsed meta row. LSP diagnostics rows are
+    /// environment-dependent and not estimated.
+    pub(super) fn est(&self) -> TurnEst {
+        let mut est = TurnEst {
+            tool_count: 1,
+            padding_rows: 2 * u32::from(BLOCK_PADDING.1),
+            tool_header_width: (self.name.chars().count() + 1) as u32
+                + UnicodeWidthStr::width(self.args.as_str()).min(120) as u32,
+            ..TurnEst::default()
+        };
+        let is_shell = self.name == "run_shell";
+        if self.name == "question" {
+            if self.expanded {
+                est.tool_rows += self.output.lines().count() as u32;
+            }
+        } else if self.name == "todo" {
+            let rows = parse_items(&self.output).map_or(0, |items| items.len() as u32);
+            est.tool_rows += if self.expanded {
+                rows
+            } else {
+                collapsed_rows(rows)
+            };
+        } else {
+            let (stdout_rows, stderr_rows) = if is_shell {
+                (
+                    self.output.lines().count() as u32,
+                    self.stderr.lines().count() as u32,
+                )
+            } else {
+                (self.output.lines().count() as u32, 0)
+            };
+            est.tool_rows += if self.expanded {
+                stdout_rows
+                    .saturating_add(stderr_rows)
+                    .saturating_add(u32::from(is_shell && stdout_rows > 0 && stderr_rows > 0))
+            } else if is_shell && stderr_rows > 0 {
+                collapsed_rows(stderr_rows)
+            } else {
+                collapsed_rows(stdout_rows)
+            };
+        }
+        if let Some(change) = &self.file_change {
+            est.tool_rows += file_change_row_est(change);
+        }
+        est.tool_rows += 1;
+        est
     }
 
     pub fn bg(&self) -> Color {

@@ -4,6 +4,7 @@ use ratatui::prelude::*;
 
 use super::format_duration_ms;
 use crate::tui::session::segment::Segment;
+use crate::tui::session::virtualizer::TurnEst;
 use crate::tui::{spinner, theme};
 
 /// Thinking/reasoning text streamed during a turn — it may appear at any
@@ -64,8 +65,24 @@ impl ReasoningBlock {
         self.expanded = !self.expanded;
     }
 
+    pub(super) fn set_expanded(&mut self, expanded: bool) {
+        self.expanded = expanded;
+    }
+
+    pub(super) fn is_expanded(&self) -> bool {
+        self.expanded
+    }
+
     pub fn is_thinking(&self) -> bool {
         self.thinking
+    }
+
+    /// One collapsed header row, plus the body rows when expanded.
+    pub(super) fn est(&self) -> TurnEst {
+        TurnEst {
+            reasoning_rows: 1 + u32::from(self.expanded) * self.text.lines().count() as u32,
+            ..TurnEst::default()
+        }
     }
 
     /// Two segments: the header (the click target — the engine stamps the hit

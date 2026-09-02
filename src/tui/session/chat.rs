@@ -1,19 +1,19 @@
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use ratatui::layout::{Rect, Size};
 use ratatui::prelude::*;
 use serde_json::Value;
+use shuvarie_core::tool_record::ToolRecord;
 use shuvarie_core::{DiagnosticInfo, Role};
 use shuvarie_db::ReasoningSegment;
 use shuvarie_llm::{FileChange, ShellStreams};
-use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
 use super::blocks::{
-    Block, BlockMessage, ChatEnv, ContextBlock, ReasoningBlock, ReasoningMessage, SystemText,
-    TextBlock, TextMessage, ToolBlock, ToolMessage, UserPrompt,
+    Block, BlockMessage, ChatEnv, ContextBlock, ReasoningBlock, SystemText, TextBlock, ToolBlock,
+    ToolMessage, UserPrompt,
 };
-use super::segment::{BlockAddr, HitRegion, Segment};
+use super::segment::BlockAddr;
+use super::virtualizer::{TurnData, TurnEst, TurnFlags, locate, paint_turn};
 use crate::tui::theme;
 
 pub enum ChatMessage {
@@ -92,80 +92,54 @@ pub enum ChatMessage {
     ToggleLastTool,
 }
 
-/// One conversation turn: its role and the ordered block models it is made
-/// of (context loading, reasoning, markdown chunks interleaved with tool
-/// blocks, decorations).
-struct Turn {
-    role: Role,
-    blocks: Vec<Block>,
+/// Viewport-relative scroll position. `sticky_bottom` tracks the streaming
+/// follow state: pinned to the bottom while true, released by any upward
+/// scroll and re-engaged when scrolling back down to the last row.
+#[derive(Debug, Default, Clone, Copy)]
+struct Scroll {
+    offset: u32,
+    sticky_bottom: bool,
 }
 
-impl Turn {
-    fn append_text(&mut self, content: String) {
-        self.finish_thinking();
-        let last_is_text = matches!(self.blocks.last(), Some(Block::Text(_)));
-        if last_is_text && let Some(block) = self.blocks.last_mut() {
-            block.update(BlockMessage::Text(TextMessage::Append(content)));
-            return;
-        }
-        self.blocks.push(Block::Text(TextBlock::new(content)));
-    }
-
-    fn append_reasoning(&mut self, content: String) {
-        let last_is_reasoning = matches!(self.blocks.last(), Some(Block::Reasoning(_)));
-        if last_is_reasoning && let Some(block) = self.blocks.last_mut() {
-            block.update(BlockMessage::Reasoning(ReasoningMessage::Append(content)));
-            return;
-        }
-        self.blocks
-            .push(Block::Reasoning(ReasoningBlock::new(content)));
-    }
-
-    fn finish_thinking(&mut self) {
-        for block in &mut self.blocks {
-            if matches!(block, Block::Reasoning(_)) {
-                block.update(BlockMessage::Reasoning(ReasoningMessage::Finish));
-            }
-        }
-    }
-}
-
-/// The chat history pane: committed turns, the in-flight streaming turn, the
-/// scroll view cache, and the click hit regions. Each turn owns a list of
-/// block models; this model stacks, measures, and paints their segments.
+/// The chat history pane: committed turns (lazily materialized TEA block
+/// lists backed by the stored session), the in-flight streaming turn, and the
+/// windowed scroll engine. Only turns intersecting the viewport (plus an
+/// overscan band) render their segments; far-away turns are evicted back to
+/// estimated lazy slots so long sessions scroll without full-content
+/// rebuilds. Scroll position and the scrollbar derive from mixed exact and
+/// estimated row heights.
 pub struct Chat {
-    turns: Vec<Turn>,
-    in_flight: Option<Turn>,
+    turns: RefCell<Vec<TurnData>>,
+    in_flight: RefCell<Option<TurnData>>,
     streaming: bool,
     interrupted: bool,
     lsp_diagnostics: BTreeMap<String, Vec<DiagnosticInfo>>,
-    scroll_state: RefCell<ScrollViewState>,
-    scroll_view: RefCell<ScrollView>,
-    scroll_dirty: Cell<bool>,
-    scroll_width: Cell<u16>,
-    committed_scroll: RefCell<ScrollView>,
-    committed_dirty: Cell<bool>,
-    committed_regions: RefCell<Vec<HitRegion>>,
-    hit_regions: RefCell<Vec<HitRegion>>,
+    stored: Option<shuvarie_core::Session>,
+    stored_len: usize,
+    scroll: RefCell<Scroll>,
+    width: Cell<u16>,
+    env_rev: u64,
+    toggled: BTreeSet<(usize, usize)>,
     history_rect: Cell<Rect>,
 }
 
 impl Chat {
     pub fn new() -> Self {
         Self {
-            turns: Vec::new(),
-            in_flight: None,
+            turns: RefCell::new(Vec::new()),
+            in_flight: RefCell::new(None),
             streaming: false,
             interrupted: false,
             lsp_diagnostics: BTreeMap::new(),
-            scroll_state: RefCell::new(ScrollViewState::default()),
-            scroll_view: RefCell::new(ScrollView::new(Size::new(0, 0))),
-            scroll_dirty: Cell::new(false),
-            scroll_width: Cell::new(0),
-            committed_scroll: RefCell::new(ScrollView::new(Size::new(0, 0))),
-            committed_dirty: Cell::new(true),
-            committed_regions: RefCell::new(Vec::new()),
-            hit_regions: RefCell::new(Vec::new()),
+            stored: None,
+            stored_len: 0,
+            scroll: RefCell::new(Scroll {
+                offset: 0,
+                sticky_bottom: true,
+            }),
+            width: Cell::new(0),
+            env_rev: 0,
+            toggled: BTreeSet::new(),
             history_rect: Cell::new(Rect::default()),
         }
     }
@@ -175,53 +149,50 @@ impl Chat {
     }
 
     pub fn has_messages(&self) -> bool {
-        !self.turns.is_empty()
+        !self.turns.borrow().is_empty()
     }
 
     pub fn is_interrupted(&self) -> bool {
         self.interrupted
     }
 
-    /// Mark the scroll view dirty so an animated spinner re-renders.
+    /// Mark the in-flight turn dirty so an animated spinner re-renders.
     pub fn mark_spinner_dirty(&self) {
-        self.scroll_dirty.set(true);
+        if let Some(turn) = self.in_flight.borrow_mut().as_mut() {
+            turn.rev += 1;
+        }
     }
 
     pub fn update(&mut self, msg: ChatMessage) {
         match msg {
             ChatMessage::BeginUserTurn { content } => {
-                self.turns.push(Turn {
-                    role: Role::User,
-                    blocks: vec![Block::User(UserPrompt::new(content))],
-                });
-                self.mark_committed_dirty();
-                self.mark_scroll_dirty();
-                self.follow_bottom();
+                let mut turn = TurnData::new(Role::User);
+                turn.set_blocks(vec![Block::User(UserPrompt::new(content))], false);
+                self.turns.borrow_mut().push(turn);
             }
             ChatMessage::TokenReceived { content } => {
-                self.ensure_in_flight().append_text(content);
-                self.mark_scroll_dirty();
-                self.follow_bottom();
+                self.streaming = true;
+                let mut in_flight = self.in_flight.borrow_mut();
+                let turn = in_flight.get_or_insert_with(|| TurnData::new(Role::Assistant));
+                turn.append_text(content);
             }
             ChatMessage::ReasoningReceived { content } => {
-                self.ensure_in_flight().append_reasoning(content);
-                self.mark_scroll_dirty();
-                self.follow_bottom();
+                self.streaming = true;
+                let mut in_flight = self.in_flight.borrow_mut();
+                let turn = in_flight.get_or_insert_with(|| TurnData::new(Role::Assistant));
+                turn.append_reasoning(content);
             }
             ChatMessage::ContextLoaded { paths } => {
-                let turn = self.ensure_in_flight();
-                turn.finish_thinking();
-                turn.blocks.push(Block::Context(ContextBlock::new(paths)));
-                self.mark_scroll_dirty();
-                self.follow_bottom();
+                self.streaming = true;
+                let mut in_flight = self.in_flight.borrow_mut();
+                let turn = in_flight.get_or_insert_with(|| TurnData::new(Role::Assistant));
+                turn.push_block(Block::Context(ContextBlock::new(paths)));
             }
             ChatMessage::ToolStarted { name, args, worker } => {
-                let turn = self.ensure_in_flight();
-                turn.finish_thinking();
-                turn.blocks
-                    .push(Block::Tool(ToolBlock::new(name, args.to_string(), worker)));
-                self.mark_scroll_dirty();
-                self.follow_bottom();
+                self.streaming = true;
+                let mut in_flight = self.in_flight.borrow_mut();
+                let turn = in_flight.get_or_insert_with(|| TurnData::new(Role::Assistant));
+                turn.push_block(Block::Tool(ToolBlock::new(name, args.to_string(), worker)));
             }
             ChatMessage::ToolFinished {
                 name,
@@ -236,17 +207,16 @@ impl Chat {
                     Some(streams) => (streams.stdout, streams.stderr),
                     None => (output, String::new()),
                 };
-                if let Some(block) = self.running_tool_mut(&name, &worker) {
+                self.with_running_tool(&name, &worker, |block| {
                     block.update(BlockMessage::Tool(ToolMessage::Finish {
                         ok,
                         output: display_output,
                         stderr: display_stderr,
                         file_change,
                         duration_ms,
-                    }));
-                }
-                self.mark_scroll_dirty();
-                self.follow_bottom();
+                    }))
+                });
+                self.touch_in_flight();
             }
             ChatMessage::ToolOutput {
                 tool,
@@ -254,24 +224,22 @@ impl Chat {
                 stdout,
                 stderr,
             } => {
-                let updated = self.running_tool_mut(&tool, &worker).is_some_and(|block| {
+                let updated = self.with_running_tool(&tool, &worker, |block| {
                     block.update(BlockMessage::Tool(ToolMessage::Output { stdout, stderr }))
                 });
                 if updated {
-                    self.mark_scroll_dirty();
-                    self.follow_bottom();
+                    self.touch_in_flight();
                 }
             }
             ChatMessage::WorkerStarted { name, args } => {
-                let turn = self.ensure_in_flight();
-                turn.finish_thinking();
-                turn.blocks.push(Block::Tool(ToolBlock::new(
+                self.streaming = true;
+                let mut in_flight = self.in_flight.borrow_mut();
+                let turn = in_flight.get_or_insert_with(|| TurnData::new(Role::Assistant));
+                turn.push_block(Block::Tool(ToolBlock::new(
                     name,
                     args.to_string(),
                     Some(String::new()),
                 )));
-                self.mark_scroll_dirty();
-                self.follow_bottom();
             }
             ChatMessage::WorkerFinished {
                 name,
@@ -279,44 +247,35 @@ impl Chat {
                 output,
                 duration_ms,
             } => {
-                if let Some(block) = self.running_tool_mut(&name, &Some(String::new())) {
+                self.with_running_tool(&name, &Some(String::new()), |block| {
                     block.update(BlockMessage::Tool(ToolMessage::Finish {
                         ok,
                         output,
                         stderr: String::new(),
                         file_change: None,
                         duration_ms,
-                    }));
-                }
-                self.mark_scroll_dirty();
-                self.follow_bottom();
+                    }))
+                });
+                self.touch_in_flight();
             }
-            ChatMessage::StreamDone => {
-                self.commit_done();
-                self.mark_committed_dirty();
-                self.mark_scroll_dirty();
-                self.follow_bottom();
-            }
+            ChatMessage::StreamDone => self.commit_done(),
             ChatMessage::StreamError { .. } | ChatMessage::StreamCancelled => {
-                self.commit_interrupted();
-                self.mark_committed_dirty();
-                self.mark_scroll_dirty();
-                self.follow_bottom();
+                self.commit_interrupted()
             }
             ChatMessage::Load { session } => self.apply_session(session, true),
             ChatMessage::TurnReverted { session } => self.apply_session(session, true),
             ChatMessage::TurnRestored { session } => self.apply_session(session, false),
             ChatMessage::Reset => {
-                self.turns.clear();
-                self.in_flight = None;
+                *self.turns.borrow_mut() = Vec::new();
+                *self.in_flight.borrow_mut() = None;
+                self.stored = None;
+                self.stored_len = 0;
                 self.streaming = false;
                 self.interrupted = false;
-                self.lsp_diagnostics.clear();
-                self.committed_regions.borrow_mut().clear();
-                self.hit_regions.borrow_mut().clear();
-                *self.scroll_state.borrow_mut() = ScrollViewState::default();
-                self.mark_committed_dirty();
-                self.mark_scroll_dirty();
+                self.toggled.clear();
+                let mut scroll = self.scroll.borrow_mut();
+                scroll.offset = 0;
+                scroll.sticky_bottom = true;
             }
             ChatMessage::LspDiagnostics { path, diagnostics } => {
                 if diagnostics.is_empty() {
@@ -324,26 +283,27 @@ impl Chat {
                 } else {
                     self.lsp_diagnostics.insert(path, diagnostics);
                 }
-                // Diagnostics feed the block view env, so committed tool
-                // blocks re-render too.
-                self.mark_committed_dirty();
-                self.mark_scroll_dirty();
+                self.env_rev += 1;
             }
             ChatMessage::ScrollUp => {
-                self.scroll_state.borrow_mut().scroll_up();
+                let mut scroll = self.scroll.borrow_mut();
+                scroll.offset = scroll.offset.saturating_sub(1);
+                scroll.sticky_bottom = false;
             }
             ChatMessage::ScrollDown => {
-                self.scroll_state.borrow_mut().scroll_down();
+                let mut scroll = self.scroll.borrow_mut();
+                scroll.offset = scroll.offset.saturating_add(1);
             }
             ChatMessage::Click { column, row } => self.handle_click(column, row),
             ChatMessage::Wheel { up, column, row } => {
                 if self.in_history(column, row) {
-                    let mut state = self.scroll_state.borrow_mut();
+                    let mut scroll = self.scroll.borrow_mut();
                     for _ in 0..3 {
                         if up {
-                            state.scroll_up();
+                            scroll.offset = scroll.offset.saturating_sub(1);
+                            scroll.sticky_bottom = false;
                         } else {
-                            state.scroll_down();
+                            scroll.offset = scroll.offset.saturating_add(1);
                         }
                     }
                 }
@@ -355,86 +315,281 @@ impl Chat {
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
         self.history_rect.set(area);
         let content_width = area.width.saturating_sub(1);
-        if self.scroll_width.get() != content_width {
-            self.scroll_dirty.set(true);
-            self.committed_dirty.set(true);
-            self.scroll_width.set(content_width);
+        if content_width == 0 || area.height == 0 {
+            return;
         }
-        if self.scroll_dirty.replace(false) {
-            self.rebuild_scroll_view(content_width);
+        let viewport = u32::from(area.height);
+        let mut turns = self.turns.borrow_mut();
+        let mut in_flight = self.in_flight.borrow_mut();
+
+        if self.width.get() != content_width {
+            self.width.set(content_width);
+            for slot in turns.iter_mut() {
+                slot.cache = None;
+            }
+            if let Some(turn) = in_flight.as_mut() {
+                turn.cache = None;
+            }
         }
 
-        let mut scroll_state = self.scroll_state.borrow_mut();
-        let scroll_view = self.scroll_view.borrow();
-        frame.render_stateful_widget(&*scroll_view, area, &mut scroll_state);
+        let env = ChatEnv {
+            lsp_diagnostics: &self.lsp_diagnostics,
+        };
+        let env_rev = self.env_rev;
+        let streaming = self.streaming;
+        let interrupted = self.interrupted;
+        let turns_len = turns.len();
 
-        let content_height = scroll_view.size().height;
-        if content_height > area.height {
-            self.render_scrollbar(frame, area, &scroll_state, content_height);
+        let mut heights: Vec<u32> = turns
+            .iter()
+            .map(|slot| slot.height(content_width, env_rev))
+            .collect();
+        heights.push(
+            in_flight
+                .as_ref()
+                .map_or(0, |turn| turn.height(content_width, env_rev)),
+        );
+
+        let sticky = self.scroll.borrow().sticky_bottom;
+        let anchor = (!sticky).then(|| locate(&heights, self.scroll.borrow().offset));
+
+        let offset = self.scroll.borrow().offset;
+        let overscan = viewport;
+        let lo = offset.saturating_sub(overscan);
+        let hi = offset + viewport + overscan;
+
+        {
+            let stored = self.stored.as_ref();
+            let toggled = &self.toggled;
+            let mut y = 0u32;
+            for (i, slot) in turns.iter_mut().enumerate() {
+                let h = heights[i];
+                if y + h > lo && y < hi {
+                    let marker = interrupted && !streaming && i + 1 == turns_len;
+                    if slot.blocks.is_none() {
+                        let session = stored.expect("lazy turn without stored session");
+                        slot.materialize(|| materialize_blocks(session, i), toggled, i, marker);
+                    }
+                    slot.ensure_cache(
+                        i,
+                        content_width,
+                        &env,
+                        env_rev,
+                        TurnFlags {
+                            in_flight: false,
+                            interrupted_marker: marker,
+                        },
+                    );
+                    heights[i] = slot.height(content_width, env_rev);
+                }
+                y += h;
+            }
+            if let Some(turn) = in_flight.as_mut() {
+                let h = heights[turns_len];
+                if y + h > lo && y < hi {
+                    turn.ensure_cache(
+                        turns_len,
+                        content_width,
+                        &env,
+                        env_rev,
+                        TurnFlags {
+                            in_flight: true,
+                            interrupted_marker: false,
+                        },
+                    );
+                    heights[turns_len] = turn.height(content_width, env_rev);
+                }
+            }
         }
+
+        let total: u32 = heights.iter().sum();
+        {
+            let mut scroll = self.scroll.borrow_mut();
+            if scroll.sticky_bottom {
+                scroll.offset = total.saturating_sub(viewport);
+            } else if let Some((turn_idx, intra)) = anchor {
+                let start: u32 = heights.iter().take(turn_idx).sum();
+                let h = heights.get(turn_idx).copied().unwrap_or(0);
+                scroll.offset = start
+                    .saturating_add(intra.min(h.saturating_sub(1)))
+                    .min(total.saturating_sub(viewport));
+            } else {
+                scroll.offset = scroll.offset.min(total.saturating_sub(viewport));
+            }
+            scroll.sticky_bottom = scroll.offset >= total.saturating_sub(viewport);
+        }
+        let scroll_y = self.scroll.borrow().offset;
+
+        {
+            let buf = frame.buffer_mut();
+            let stored = self.stored.as_ref();
+            let toggled = &self.toggled;
+            let mut y = 0u32;
+            for (i, slot) in turns.iter_mut().enumerate() {
+                let mut h = heights[i];
+                if y + h > scroll_y && y < scroll_y + viewport {
+                    if slot.blocks.is_none() {
+                        let session = stored.expect("lazy turn without stored session");
+                        slot.materialize(
+                            || materialize_blocks(session, i),
+                            toggled,
+                            i,
+                            interrupted && !streaming && i + 1 == turns_len,
+                        );
+                    }
+                    slot.ensure_cache(
+                        i,
+                        content_width,
+                        &env,
+                        env_rev,
+                        TurnFlags {
+                            in_flight: false,
+                            interrupted_marker: interrupted && !streaming && i + 1 == turns_len,
+                        },
+                    );
+                    h = slot.height(content_width, env_rev);
+                    heights[i] = h;
+                    if let Some(cache) = slot.cache() {
+                        paint_turn(cache, y, scroll_y, area, content_width, buf);
+                    }
+                }
+                y += h;
+            }
+            if let Some(turn) = in_flight.as_mut() {
+                let h = turn.height(content_width, env_rev);
+                if y + h > scroll_y && y < scroll_y + viewport {
+                    turn.ensure_cache(
+                        turns_len,
+                        content_width,
+                        &env,
+                        env_rev,
+                        TurnFlags {
+                            in_flight: true,
+                            interrupted_marker: false,
+                        },
+                    );
+                    if let Some(cache) = turn.cache() {
+                        paint_turn(cache, y, scroll_y, area, content_width, buf);
+                    }
+                }
+            }
+        }
+
+        self.render_scrollbar(frame, area, scroll_y, total);
+        self.evict(&mut turns, scroll_y, viewport);
     }
 
-    fn ensure_in_flight(&mut self) -> &mut Turn {
-        self.streaming = true;
-        self.in_flight.get_or_insert_with(|| Turn {
-            role: Role::Assistant,
-            blocks: Vec::new(),
-        })
+    /// Materialize + render a turn on demand from `update` paths (toggle,
+    /// click) outside the render loop.
+    fn ensure_materialized(&mut self, turn_idx: usize) {
+        let marker = {
+            let turns = self.turns.borrow();
+            match turns.get(turn_idx) {
+                Some(slot) if slot.blocks.is_some() => return,
+                _ => self.interrupted && !self.streaming && turn_idx + 1 == turns.len(),
+            }
+        };
+        let mut turns = self.turns.borrow_mut();
+        let Some(slot) = turns.get_mut(turn_idx) else {
+            return;
+        };
+        if slot.blocks.is_some() {
+            return;
+        }
+        let Some(session) = self.stored.as_ref() else {
+            return;
+        };
+        slot.materialize(
+            || materialize_blocks(session, turn_idx),
+            &self.toggled,
+            turn_idx,
+            marker,
+        );
     }
 
-    fn running_tool_mut(&mut self, name: &str, worker: &Option<String>) -> Option<&mut Block> {
-        let turn = self.in_flight.as_mut()?;
-        turn.blocks
+    fn with_running_tool(
+        &mut self,
+        name: &str,
+        worker: &Option<String>,
+        apply: impl FnOnce(&mut Block) -> bool,
+    ) -> bool {
+        let mut in_flight = self.in_flight.borrow_mut();
+        let Some(turn) = in_flight.as_mut() else {
+            return false;
+        };
+        let Some(blocks) = turn.blocks.as_mut() else {
+            return false;
+        };
+        match blocks
             .iter_mut()
             .rev()
             .find(|block| block.tool_matches(name, worker) && block.tool_is_running())
+        {
+            Some(block) => apply(block),
+            None => false,
+        }
+    }
+
+    fn touch_in_flight(&mut self) {
+        if let Some(turn) = self.in_flight.borrow_mut().as_mut() {
+            turn.rev += 1;
+            turn.refresh_est(false);
+        }
     }
 
     fn commit_done(&mut self) {
-        if let Some(mut turn) = self.in_flight.take() {
+        if let Some(mut turn) = self.in_flight.borrow_mut().take() {
             turn.finish_thinking();
-            self.turns.push(turn);
+            turn.rev += 1;
+            turn.refresh_est(false);
+            self.turns.borrow_mut().push(turn);
             self.interrupted = false;
         }
         self.streaming = false;
     }
 
     fn commit_interrupted(&mut self) {
-        if let Some(mut turn) = self.in_flight.take() {
+        if let Some(mut turn) = self.in_flight.borrow_mut().take() {
             turn.finish_thinking();
-            turn.blocks
-                .retain(|block| !(block.is_tool() && block.tool_is_running()));
-            let has_content = turn.blocks.iter().any(|block| {
-                block.is_text() || matches!(block, Block::Reasoning(_) | Block::Tool(_))
+            if let Some(blocks) = turn.blocks.as_mut() {
+                blocks.retain(|block| !(block.is_tool() && block.tool_is_running()));
+            }
+            let has_content = turn.blocks.as_ref().is_some_and(|blocks| {
+                blocks.iter().any(|block| {
+                    block.is_text() || matches!(block, Block::Reasoning(_) | Block::Tool(_))
+                })
             });
             if has_content {
-                self.turns.push(turn);
                 self.interrupted = true;
+                turn.refresh_est(true);
+                self.turns.borrow_mut().push(turn);
             }
         }
         self.streaming = false;
     }
 
     fn apply_session(&mut self, session: shuvarie_core::Session, reset_scroll: bool) {
-        self.turns = build_turns(&session);
-        self.in_flight = None;
+        let interrupted = session.last_assistant_interrupted();
+        let ests = build_turn_ests(&session, interrupted);
+        let len = ests.len();
+        *self.turns.borrow_mut() = session
+            .messages
+            .iter()
+            .map(|message| message.role)
+            .zip(ests)
+            .map(|(role, est)| TurnData::lazy(role, est))
+            .collect();
+        *self.in_flight.borrow_mut() = None;
+        self.stored = Some(session);
+        self.stored_len = len;
         self.streaming = false;
-        self.interrupted = session.last_assistant_interrupted();
-        self.committed_regions.borrow_mut().clear();
-        self.hit_regions.borrow_mut().clear();
+        self.interrupted = interrupted;
+        self.toggled.clear();
         if reset_scroll {
-            *self.scroll_state.borrow_mut() = ScrollViewState::default();
+            let mut scroll = self.scroll.borrow_mut();
+            scroll.offset = 0;
+            scroll.sticky_bottom = false;
         }
-        self.mark_committed_dirty();
-        self.mark_scroll_dirty();
-    }
-
-    fn mark_scroll_dirty(&self) {
-        self.scroll_dirty.set(true);
-    }
-
-    fn mark_committed_dirty(&self) {
-        self.committed_dirty.set(true);
     }
 
     fn in_history(&self, column: u16, row: u16) -> bool {
@@ -451,257 +606,187 @@ impl Chat {
         if !self.in_history(column, row) {
             return;
         }
-        let content_y = self
-            .scroll_state
-            .borrow()
-            .offset()
-            .y
-            .saturating_add(row - self.history_rect.get().y);
-        let addr = self
-            .hit_regions
-            .borrow()
-            .iter()
-            .find(|region| content_y >= region.start && content_y < region.end)
-            .map(|region| region.addr.clone());
-        if let Some(addr) = addr {
+        let rect = self.history_rect.get();
+        let content_y = self.scroll.borrow().offset + u32::from(row - rect.y);
+        let width = self.width.get();
+        let env_rev = self.env_rev;
+        let mut start = 0u32;
+        let mut target = None;
+        {
+            let turns = self.turns.borrow();
+            for slot in turns.iter() {
+                let h = slot.height(width, env_rev);
+                if content_y < start + h {
+                    if let Some(cache) = slot.cache() {
+                        let local = content_y - start;
+                        target = cache
+                            .hits
+                            .iter()
+                            .find(|region| local >= region.start && local < region.end)
+                            .map(|region| region.addr.clone());
+                    }
+                    break;
+                }
+                start += h;
+            }
+        }
+        if target.is_none() {
+            let in_flight = self.in_flight.borrow();
+            if let Some(turn) = in_flight.as_ref() {
+                let h = turn.height(width, env_rev);
+                if content_y < start + h
+                    && let Some(cache) = turn.cache()
+                {
+                    let local = content_y - start;
+                    target = cache
+                        .hits
+                        .iter()
+                        .find(|region| local >= region.start && local < region.end)
+                        .map(|region| region.addr.clone());
+                }
+            }
+        }
+        if let Some(addr) = target {
             self.toggle_block(addr);
         }
     }
 
     fn toggle_block(&mut self, addr: BlockAddr) {
-        let changed = if addr.turn < self.turns.len() {
-            self.turns[addr.turn]
+        let turns_len = self.turns.borrow().len();
+        if addr.turn < turns_len {
+            self.ensure_materialized(addr.turn);
+            let mut turns = self.turns.borrow_mut();
+            let Some(slot) = turns.get_mut(addr.turn) else {
+                return;
+            };
+            let changed = slot
                 .blocks
-                .get_mut(addr.block)
-                .is_some_and(|block| block.update(BlockMessage::Toggle))
-        } else {
-            self.in_flight
                 .as_mut()
-                .and_then(|turn| turn.blocks.get_mut(addr.block))
-                .is_some_and(|block| block.update(BlockMessage::Toggle))
-        };
-        if changed {
-            if addr.turn < self.turns.len() {
-                self.mark_committed_dirty();
+                .and_then(|blocks| blocks.get_mut(addr.block))
+                .is_some_and(|block| block.update(BlockMessage::Toggle));
+            if changed {
+                let expanded = slot
+                    .blocks
+                    .as_ref()
+                    .and_then(|blocks| blocks.get(addr.block))
+                    .is_some_and(Block::is_expanded);
+                if expanded {
+                    self.toggled.insert((addr.turn, addr.block));
+                } else {
+                    self.toggled.remove(&(addr.turn, addr.block));
+                }
+                slot.rev += 1;
+                slot.refresh_est(self.interrupted && !self.streaming && addr.turn + 1 == turns_len);
             }
-            self.mark_scroll_dirty();
+        } else {
+            let mut in_flight = self.in_flight.borrow_mut();
+            let Some(turn) = in_flight.as_mut() else {
+                return;
+            };
+            let changed = turn
+                .blocks
+                .as_mut()
+                .and_then(|blocks| blocks.get_mut(addr.block))
+                .is_some_and(|block| block.update(BlockMessage::Toggle));
+            if changed {
+                let expanded = turn
+                    .blocks
+                    .as_ref()
+                    .and_then(|blocks| blocks.get(addr.block))
+                    .is_some_and(Block::is_expanded);
+                if expanded {
+                    self.toggled.insert((addr.turn, addr.block));
+                } else {
+                    self.toggled.remove(&(addr.turn, addr.block));
+                }
+                turn.rev += 1;
+                turn.refresh_est(false);
+            }
         }
     }
 
     fn toggle_last_tool(&mut self) {
-        if let Some(turn) = self.in_flight.as_ref()
-            && let Some(block) = turn.blocks.iter().rposition(|block| block.is_tool())
-        {
+        let turns_len = self.turns.borrow().len();
+        let in_flight_tool = {
+            let in_flight = self.in_flight.borrow();
+            in_flight.as_ref().and_then(|turn| {
+                turn.blocks
+                    .as_ref()
+                    .and_then(|blocks| blocks.iter().rposition(Block::is_tool))
+            })
+        };
+        if let Some(block) = in_flight_tool {
             let addr = BlockAddr {
-                turn: self.turns.len(),
+                turn: turns_len,
                 block,
             };
             self.toggle_block(addr);
             return;
         }
-        for turn in (0..self.turns.len()).rev() {
-            if let Some(block) = self.turns[turn]
-                .blocks
-                .iter()
-                .rposition(|block| block.is_tool())
+        for turn_idx in (0..turns_len).rev() {
             {
-                self.toggle_block(BlockAddr { turn, block });
+                let turns = self.turns.borrow();
+                let slot = &turns[turn_idx];
+                if slot.blocks.is_none() && slot.est.tool_count == 0 {
+                    continue;
+                }
+            }
+            self.ensure_materialized(turn_idx);
+            let found = self.turns.borrow()[turn_idx]
+                .blocks
+                .as_ref()
+                .and_then(|blocks| blocks.iter().rposition(Block::is_tool));
+            if let Some(block) = found {
+                self.toggle_block(BlockAddr {
+                    turn: turn_idx,
+                    block,
+                });
                 return;
             }
         }
     }
 
-    fn turn_segments(
-        &self,
-        turn: &Turn,
-        turn_idx: usize,
-        in_flight: bool,
-        width: u16,
-    ) -> Vec<Segment> {
-        let env = ChatEnv {
-            lsp_diagnostics: &self.lsp_diagnostics,
-        };
-        let mut segments: Vec<Segment> = Vec::new();
-        for (block_idx, block) in turn.blocks.iter().enumerate() {
-            if block.is_tool() && segments.last().is_some_and(|last| last.bg.is_some()) {
-                segments.push(Segment::spacer());
-            }
-            let mut block_segments = block.view(width, &env);
-            let addr = BlockAddr {
-                turn: turn_idx,
-                block: block_idx,
-            };
-            match block {
-                Block::Tool(_) => {
-                    for segment in &mut block_segments {
-                        segment.hit = Some(addr.clone());
-                    }
+    /// Evict rendered state for turns far outside the viewport: lazy-backed
+    /// turns drop their block models too (re-materializable from the stored
+    /// session); live turns keep blocks but drop the render cache.
+    fn evict(&self, turns: &mut [TurnData], scroll_y: u32, viewport: u32) {
+        let margin = 3 * viewport.max(1);
+        let lo = scroll_y.saturating_sub(margin);
+        let hi = scroll_y + viewport + margin;
+        let width = self.width.get();
+        let env_rev = self.env_rev;
+        let mut y = 0u32;
+        for (i, slot) in turns.iter_mut().enumerate() {
+            let h = slot.height(width, env_rev);
+            if y + h <= lo || y >= hi {
+                if i < self.stored_len {
+                    slot.blocks = None;
                 }
-                Block::Reasoning(_) => {
-                    if let Some(first) = block_segments.first_mut() {
-                        first.hit = Some(addr);
-                    }
-                }
-                _ => {}
+                slot.cache = None;
             }
-            segments.extend(block_segments);
+            y += h;
         }
-        let thinking_now = in_flight && turn.blocks.last().is_some_and(Block::is_thinking);
-        if turn.role == Role::Assistant && !turn.blocks.iter().any(Block::is_text) && !thinking_now
-        {
-            let placeholder = if in_flight {
-                Block::Working
-            } else {
-                Block::ToolOnlyNote
-            };
-            segments.extend(placeholder.view(width, &env));
-        }
-        if self.interrupted
-            && !self.streaming
-            && turn_idx + 1 == self.turns.len()
-            && turn.role == Role::Assistant
-        {
-            segments.extend(Block::Interrupted.view(width, &env));
-        }
-        segments
-    }
-
-    /// Paint `segments` into `sv` from `start_y`, bounded by `total_height`,
-    /// recording hit regions as they are stamped.
-    fn paint_segments(
-        segments: &[Segment],
-        sv: &mut ScrollView,
-        start_y: u16,
-        total_height: u16,
-        content_width: u16,
-        regions: &mut Vec<HitRegion>,
-    ) {
-        let mut y = start_y;
-        for segment in segments {
-            let h = (segment.measure(content_width) as u16).min(total_height.saturating_sub(y));
-            if h == 0 {
-                continue;
-            }
-            segment.view(sv, y, h, content_width, regions);
-            y = y.saturating_add(h);
-        }
-    }
-
-    /// Rebuild the scroll view contents: the committed buffer only re-renders
-    /// when history changed; the in-flight tail re-renders on every
-    /// scroll-dirty frame — in place into the cached combined buffer when its
-    /// height is unchanged (no re-allocation, no committed cell copy), and via
-    /// a full rebuild when the tail height changed or history was rebuilt.
-    fn rebuild_scroll_view(&self, content_width: u16) {
-        let committed_was_dirty = self.committed_dirty.replace(false);
-        if committed_was_dirty {
-            let mut segments: Vec<Segment> = Vec::new();
-            for (turn_idx, turn) in self.turns.iter().enumerate() {
-                segments.extend(self.turn_segments(turn, turn_idx, false, content_width));
-                segments.push(Segment::spacer());
-            }
-            let total: usize = segments.iter().map(|s| s.measure(content_width)).sum();
-            let total = total.min(u16::MAX as usize) as u16;
-            let mut sv = ScrollView::new(Size::new(content_width, total))
-                .scrollbars_visibility(ScrollbarVisibility::Never);
-            let mut regions = Vec::new();
-            Self::paint_segments(&segments, &mut sv, 0, total, content_width, &mut regions);
-            *self.committed_scroll.borrow_mut() = sv;
-            *self.committed_regions.borrow_mut() = regions;
-        }
-
-        let committed_scroll = self.committed_scroll.borrow();
-        let committed_height = committed_scroll.size().height;
-
-        let mut tail_segments: Vec<Segment> = Vec::new();
-        if let Some(turn) = &self.in_flight {
-            let turn_idx = self.turns.len();
-            tail_segments.extend(self.turn_segments(turn, turn_idx, true, content_width));
-            tail_segments.push(Segment::spacer());
-        }
-
-        let tail_total: usize = tail_segments.iter().map(|s| s.measure(content_width)).sum();
-        let tail_total =
-            tail_total.min((u16::MAX as usize).saturating_sub(committed_height as usize)) as u16;
-        let total_height = committed_height.saturating_add(tail_total);
-        let tail_height_unchanged = self.scroll_view.borrow().size().height == total_height;
-
-        let mut tail_regions = Vec::new();
-        if !committed_was_dirty && tail_height_unchanged {
-            // Only the in-flight tail changed: clear the stale tail rows and
-            // repaint them into the cached combined buffer, skipping the
-            // buffer re-allocation and the committed cell copy.
-            let mut sv = self.scroll_view.borrow_mut();
-            {
-                let buf = sv.buf_mut();
-                for y in committed_height..total_height {
-                    for x in 0..content_width {
-                        buf[(x, y)].reset();
-                    }
-                }
-            }
-            Self::paint_segments(
-                &tail_segments,
-                &mut sv,
-                committed_height,
-                total_height,
-                content_width,
-                &mut tail_regions,
-            );
-        } else {
-            let mut scroll_view = ScrollView::new(Size::new(content_width, total_height))
-                .scrollbars_visibility(ScrollbarVisibility::Never);
-
-            {
-                let src = committed_scroll.buf();
-                let dst = scroll_view.buf_mut();
-                for y in 0..committed_height {
-                    for x in 0..content_width {
-                        dst[(x, y)] = src[(x, y)].clone();
-                    }
-                }
-            }
-
-            Self::paint_segments(
-                &tail_segments,
-                &mut scroll_view,
-                committed_height,
-                total_height,
-                content_width,
-                &mut tail_regions,
-            );
-
-            *self.scroll_view.borrow_mut() = scroll_view;
-        }
-
-        let mut regions = self.committed_regions.borrow().clone();
-        regions.append(&mut tail_regions);
-        *self.hit_regions.borrow_mut() = regions;
     }
 
     fn render_scrollbar(
         &self,
         frame: &mut Frame<'_>,
         area: Rect,
-        state: &ScrollViewState,
-        content_height: u16,
+        scroll_y: u32,
+        content_height: u32,
     ) {
         let track_len = area.height as usize;
-        if track_len < 2 {
+        if track_len < 2 || content_height <= u32::from(area.height) {
             return;
         }
         let content_len = content_height as usize;
         let viewport_len = area.height as usize;
-        let offset = state.offset().y as usize;
-        let max_offset = content_len.saturating_sub(viewport_len);
-        let max_start = track_len.saturating_sub(1);
-        let thumb_len = max_start.max(1) * viewport_len / content_len.max(1);
-        let thumb_len = thumb_len.clamp(1, max_start);
-        let thumb_start = max_start
-            .saturating_sub(thumb_len)
-            .saturating_mul(offset)
-            .div_ceil(max_offset.max(1))
-            .min(max_start.saturating_sub(thumb_len));
+        let offset = scroll_y as usize;
+        let max_offset = content_len - viewport_len;
+        let max_start = track_len - 1;
+        let thumb_len = (max_start.max(1) * viewport_len / content_len).clamp(1, max_start);
+        let thumb_start =
+            ((max_start - thumb_len) * offset / max_offset.max(1)).min(max_start - thumb_len);
         let bar_x = area.right().saturating_sub(1);
         let buf = frame.buffer_mut();
         for row in area.top()..area.bottom() {
@@ -716,76 +801,96 @@ impl Chat {
             cell.set_style(Style::new().fg(style));
         }
     }
-
-    fn follow_bottom(&self) {
-        let mut state = self.scroll_state.borrow_mut();
-        if state.is_at_bottom() {
-            state.scroll_to_bottom();
-        }
-    }
 }
 
-/// Rebuild the committed turns from a stored session: user/system messages
-/// become their single blocks, assistant messages assemble reasoning, summary
-/// marker, tool blocks (in record order, before the text — matching reload
-/// layout), and the text chunk.
-fn build_turns(session: &shuvarie_core::Session) -> Vec<Turn> {
-    let mut turns = Vec::new();
-    for (idx, message) in session.messages.iter().enumerate() {
-        let mut blocks = Vec::new();
-        match message.role {
-            Role::User => blocks.push(Block::User(UserPrompt::new(message.content.clone()))),
-            Role::System => blocks.push(Block::System(SystemText::new(message.content.clone()))),
-            Role::Assistant => {
-                let segments: &[ReasoningSegment] = session
-                    .reasoning
-                    .get(&(idx as u64))
-                    .map(Vec::as_slice)
-                    .unwrap_or_default();
-                let mut seg_i = 0usize;
-                let drain_reasoning =
-                    |blocks: &mut Vec<Block>, seg_i: &mut usize, tools_done: usize| {
-                        while let Some(seg) = segments.get(*seg_i)
-                            && (seg.after_tool as usize) <= tools_done
-                        {
-                            blocks.push(Block::Reasoning(ReasoningBlock::finished(
-                                seg.text.clone(),
-                                seg.duration_ms,
-                            )));
-                            *seg_i += 1;
-                        }
-                    };
-                drain_reasoning(&mut blocks, &mut seg_i, 0);
-                if session.summary_seq.is_some_and(|seq| seq as usize == idx) {
-                    blocks.push(Block::Summary);
-                }
-                for (count, record) in session
-                    .tool_records
-                    .iter()
-                    .filter(|record| record.message_seq as usize == idx)
-                    .enumerate()
-                {
-                    blocks.push(Block::Tool(ToolBlock::from_record(record)));
-                    drain_reasoning(&mut blocks, &mut seg_i, count + 1);
-                }
-                drain_reasoning(&mut blocks, &mut seg_i, usize::MAX);
-                if !message.content.is_empty() {
-                    blocks.push(Block::Text(TextBlock::new(message.content.clone())));
-                }
+/// Rebuild the turns of a stored session: user/system messages become their
+/// single blocks, assistant messages assemble reasoning, summary marker, tool
+/// blocks (in record order, before the text — matching reload layout), and
+/// the text chunk.
+fn materialize_blocks(session: &shuvarie_core::Session, idx: usize) -> Vec<Block> {
+    let message = &session.messages[idx];
+    let mut blocks = Vec::new();
+    match message.role {
+        Role::User => blocks.push(Block::User(UserPrompt::new(message.content.clone()))),
+        Role::System => blocks.push(Block::System(SystemText::new(message.content.clone()))),
+        Role::Assistant => {
+            let segments: &[ReasoningSegment] = session
+                .reasoning
+                .get(&(idx as u64))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let mut seg_i = 0usize;
+            let drain_reasoning =
+                |blocks: &mut Vec<Block>, seg_i: &mut usize, tools_done: usize| {
+                    while let Some(seg) = segments.get(*seg_i)
+                        && (seg.after_tool as usize) <= tools_done
+                    {
+                        blocks.push(Block::Reasoning(ReasoningBlock::finished(
+                            seg.text.clone(),
+                            seg.duration_ms,
+                        )));
+                        *seg_i += 1;
+                    }
+                };
+            drain_reasoning(&mut blocks, &mut seg_i, 0);
+            if session.summary_seq.is_some_and(|seq| seq as usize == idx) {
+                blocks.push(Block::Summary);
+            }
+            for (count, record) in session
+                .tool_records
+                .iter()
+                .filter(|record| record.message_seq as usize == idx)
+                .enumerate()
+            {
+                blocks.push(Block::Tool(ToolBlock::from_record(record)));
+                drain_reasoning(&mut blocks, &mut seg_i, count + 1);
+            }
+            drain_reasoning(&mut blocks, &mut seg_i, usize::MAX);
+            if !message.content.is_empty() {
+                blocks.push(Block::Text(TextBlock::new(message.content.clone())));
             }
         }
-        turns.push(Turn {
-            role: message.role,
-            blocks,
-        });
     }
-    turns
+    blocks
+}
+
+/// Precompute the lazy-turn height estimates of a stored session in one pass:
+/// tool records are grouped per message so the walk stays linear.
+fn build_turn_ests(session: &shuvarie_core::Session, interrupted: bool) -> Vec<TurnEst> {
+    let mut by_msg: BTreeMap<u64, Vec<&ToolRecord>> = BTreeMap::new();
+    for record in &session.tool_records {
+        by_msg.entry(record.message_seq).or_default().push(record);
+    }
+    let last = session.messages.len().saturating_sub(1);
+    session
+        .messages
+        .iter()
+        .enumerate()
+        .map(|(idx, message)| {
+            let tools: Vec<&ToolRecord> = by_msg.get(&(idx as u64)).cloned().unwrap_or_default();
+            let reasoning_count = session.reasoning.get(&(idx as u64)).map_or(0, Vec::len);
+            let summary = session.summary_seq.is_some_and(|seq| seq as usize == idx);
+            TurnEst::from_session_parts(
+                message.role,
+                &message.content,
+                &tools,
+                reasoning_count,
+                summary,
+                interrupted && idx == last && message.role == Role::Assistant,
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use shuvarie_core::tool_record::ToolRecord;
+
+    use crate::tui::session::blocks::ReasoningMessage;
+    use crate::tui::session::virtualizer::render_turn_cache;
 
     fn header_text(block: &Block) -> String {
         let Block::Reasoning(reasoning) = block else {
@@ -804,8 +909,8 @@ mod tests {
             .unwrap_or_default()
     }
 
-    fn block_tags(turn: &Turn) -> Vec<&'static str> {
-        turn.blocks
+    fn block_tags(blocks: &[Block]) -> Vec<&'static str> {
+        blocks
             .iter()
             .map(|block| match block {
                 Block::Reasoning(_) => "R",
@@ -834,18 +939,58 @@ mod tests {
         }
     }
 
-    #[test]
-    fn working_placeholder_hidden_while_thinking() {
-        let mut chat = Chat::new();
-        chat.update(ChatMessage::ReasoningReceived {
-            content: "hmm".into(),
-        });
-        let render = |chat: &Chat| {
-            let turn = chat.in_flight.as_ref().unwrap();
-            chat.turn_segments(turn, 0, true, 80)
+    fn draw(chat: &Chat, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| chat.view(frame, Rect::new(0, 0, width, height)))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn render_turn_lines(chat: &Chat, turn_idx: Option<usize>, width: u16) -> Option<String> {
+        let diags = BTreeMap::new();
+        let env = ChatEnv {
+            lsp_diagnostics: &diags,
+        };
+        let cache = match turn_idx {
+            Some(idx) => {
+                let turns = chat.turns.borrow();
+                let slot = turns.get(idx)?;
+                render_turn_cache(
+                    slot,
+                    idx,
+                    TurnFlags {
+                        in_flight: false,
+                        interrupted_marker: false,
+                    },
+                    width,
+                    &env,
+                    0,
+                )?
+            }
+            None => {
+                let turn = chat.in_flight.borrow();
+                let turn = turn.as_ref()?;
+                render_turn_cache(
+                    turn,
+                    chat.turns.borrow().len(),
+                    TurnFlags {
+                        in_flight: true,
+                        interrupted_marker: false,
+                    },
+                    width,
+                    &env,
+                    0,
+                )?
+            }
+        };
+        Some(
+            cache
+                .segs
                 .iter()
-                .flat_map(|segment| {
-                    segment
+                .flat_map(|seg| {
+                    seg.segment
                         .lines
                         .iter()
                         .map(|line| {
@@ -857,12 +1002,20 @@ mod tests {
                         .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>()
-                .join("\n")
-        };
-        let thinking = render(&chat);
+                .join("\n"),
+        )
+    }
+
+    #[test]
+    fn working_placeholder_hidden_while_thinking() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::ReasoningReceived {
+            content: "hmm".into(),
+        });
+        let thinking = render_turn_lines(&chat, None, 80).unwrap();
         assert!(thinking.contains("Thinking..."));
         assert!(
-            !thinking.contains("(Working...)",),
+            !thinking.contains("(Working...)"),
             "no placeholder while thinking"
         );
 
@@ -871,7 +1024,7 @@ mod tests {
             args: serde_json::json!({}),
             worker: None,
         });
-        let tool_only = render(&chat);
+        let tool_only = render_turn_lines(&chat, None, 80).unwrap();
         assert!(tool_only.contains("(Working...)"));
     }
 
@@ -903,9 +1056,19 @@ mod tests {
         chat.update(ChatMessage::TokenReceived {
             content: "answer".into(),
         });
-        let blocks = &chat.in_flight.as_ref().unwrap().blocks;
-        assert_eq!(block_tags(chat.in_flight.as_ref().unwrap()), vec!["R", "X"]);
-        assert!(header_text(&blocks[0]).contains("Thought"));
+        let inspect = |chat: &Chat| {
+            let in_flight = chat.in_flight.borrow();
+            let blocks = in_flight.as_ref().unwrap().blocks.as_deref().unwrap();
+            let headers: Vec<String> = blocks
+                .iter()
+                .filter(|block| matches!(block, Block::Reasoning(_)))
+                .map(header_text)
+                .collect();
+            (block_tags(blocks), headers)
+        };
+        let (tags, headers) = inspect(&chat);
+        assert_eq!(tags, vec!["R", "X"]);
+        assert!(headers[0].contains("Thought"));
 
         chat.update(ChatMessage::ReasoningReceived {
             content: "more".into(),
@@ -915,16 +1078,14 @@ mod tests {
             args: serde_json::json!({}),
             worker: None,
         });
-        let turn = chat.in_flight.as_ref().unwrap();
-        assert_eq!(block_tags(turn), vec!["R", "X", "R", "T"]);
-        assert!(header_text(&turn.blocks[0]).contains("Thought"));
-        assert!(header_text(&turn.blocks[2]).contains("Thought"));
-
         chat.update(ChatMessage::ReasoningReceived {
             content: "again".into(),
         });
-        let turn = chat.in_flight.as_ref().unwrap();
-        assert!(header_text(&turn.blocks[4]).contains("Thinking..."));
+        let (tags, headers) = inspect(&chat);
+        assert_eq!(tags, vec!["R", "X", "R", "T", "R"]);
+        assert!(headers[0].contains("Thought"));
+        assert!(headers[1].contains("Thought"));
+        assert!(headers[2].contains("Thinking..."));
     }
 
     #[test]
@@ -934,9 +1095,10 @@ mod tests {
             content: "only thoughts".into(),
         });
         chat.update(ChatMessage::StreamDone);
-        let turn = chat.turns.last().unwrap();
-        assert_eq!(block_tags(turn), vec!["R"]);
-        assert!(header_text(&turn.blocks[0]).contains("Thought"));
+        let turns = chat.turns.borrow();
+        let blocks = turns.last().unwrap().blocks.as_deref().unwrap();
+        assert_eq!(block_tags(blocks), vec!["R"]);
+        assert!(header_text(&blocks[0]).contains("Thought"));
     }
 
     #[test]
@@ -966,50 +1128,13 @@ mod tests {
         );
         session.tool_records = vec![tool_record(1), tool_record(1)];
 
-        let turns = build_turns(&session);
-        assert_eq!(block_tags(&turns[1]), vec!["R", "T", "T", "R", "R", "X"]);
-        assert!(header_text(&turns[1].blocks[0]).contains("Thought"));
+        let blocks = materialize_blocks(&session, 1);
+        assert_eq!(block_tags(&blocks), vec!["R", "T", "T", "R", "R", "X"]);
+        assert!(header_text(&blocks[0]).contains("Thought"));
     }
 
     #[test]
-    fn in_place_tail_rebuild_matches_full_rebuild() {
-        let mut chat = Chat::new();
-        chat.update(ChatMessage::BeginUserTurn {
-            content: "make it so".into(),
-        });
-        chat.rebuild_scroll_view(80);
-
-        chat.update(ChatMessage::TokenReceived {
-            content: "hello".into(),
-        });
-        chat.rebuild_scroll_view(80);
-
-        let total = chat.scroll_view.borrow().size().height;
-        chat.scroll_view.borrow_mut().buf_mut()[(0, total - 1)].set_symbol("ZZZZZ");
-
-        assert!(!chat.committed_dirty.get());
-        chat.update(ChatMessage::TokenReceived {
-            content: " world".into(),
-        });
-        chat.rebuild_scroll_view(80);
-
-        let in_place = chat.scroll_view.borrow().buf().clone();
-        let regions = chat.hit_regions.borrow().len();
-
-        chat.committed_dirty.set(true);
-        chat.rebuild_scroll_view(80);
-
-        assert_eq!(
-            chat.scroll_view.borrow().size().height,
-            total,
-            "tail height must stay unchanged for the in-place path"
-        );
-        assert_eq!(&in_place, chat.scroll_view.borrow().buf());
-        assert_eq!(regions, chat.hit_regions.borrow().len());
-    }
-
-    #[test]
-    fn diagnostics_update_rebuilds_committed_rows() {
+    fn diagnostics_only_invalidate_tool_turns() {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "check".into(),
@@ -1029,19 +1154,288 @@ mod tests {
             duration_ms: 0,
         });
         chat.update(ChatMessage::StreamDone);
-        chat.rebuild_scroll_view(80);
-
-        chat.scroll_view.borrow_mut().buf_mut()[(0, 0)].set_symbol("ZZZZZ");
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "plain".into(),
+        });
+        chat.update(ChatMessage::TokenReceived {
+            content: "reply".into(),
+        });
+        chat.update(ChatMessage::StreamDone);
+        draw(&chat, 80, 20);
 
         chat.update(ChatMessage::LspDiagnostics {
             path: "src/lib.rs".into(),
             diagnostics: vec![],
         });
-        chat.rebuild_scroll_view(80);
 
-        let after = chat.scroll_view.borrow().buf().clone();
-        chat.committed_dirty.set(true);
-        chat.rebuild_scroll_view(80);
-        assert_eq!(&after, chat.scroll_view.borrow().buf());
+        let turns = chat.turns.borrow();
+        let tool_turn = &turns[1];
+        let text_turn = &turns[3];
+        assert!(tool_turn.env_relevant);
+        assert!(!text_turn.env_relevant);
+        assert!(
+            !tool_turn.cache.as_ref().unwrap().matches(
+                79,
+                tool_turn.rev,
+                tool_turn.env_relevant,
+                chat.env_rev
+            ),
+            "tool turn cache invalidated by env bump"
+        );
+        assert!(
+            text_turn.cache.as_ref().unwrap().matches(
+                79,
+                text_turn.rev,
+                text_turn.env_relevant,
+                chat.env_rev
+            ),
+            "text turn cache survives env bump"
+        );
+    }
+
+    #[test]
+    fn in_flight_rerender_is_stable() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "make it so".into(),
+        });
+        chat.update(ChatMessage::TokenReceived {
+            content: "hello".into(),
+        });
+        let first = render_turn_lines(&chat, None, 80).unwrap();
+
+        chat.update(ChatMessage::TokenReceived {
+            content: " world".into(),
+        });
+        let second = render_turn_lines(&chat, None, 80).unwrap();
+        assert_ne!(first, second);
+
+        let again = render_turn_lines(&chat, None, 80).unwrap();
+        assert_eq!(second, again, "same state renders identically");
+    }
+
+    fn session_with_user_turns(count: usize) -> shuvarie_core::Session {
+        let mut session = shuvarie_core::Session::new();
+        for i in 0..count {
+            session.push_user(format!("prompt number {i}"));
+            session.push_assistant(format!("reply number {i}"));
+        }
+        session
+    }
+
+    fn session_with_tool_turns(count: usize) -> shuvarie_core::Session {
+        let mut session = shuvarie_core::Session::new();
+        for i in 0..count {
+            session.push_user(format!("do {i}"));
+            session.push_assistant(format!("done {i}"));
+            session.tool_records.push(ToolRecord {
+                name: "read_file".to_string(),
+                args_json: format!("{{\"path\":\"f{i}.rs\"}}"),
+                output: (0..3)
+                    .map(|l| format!("out {i}-{l}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                stderr: String::new(),
+                ok: true,
+                worker: None,
+                message_id: i as u64,
+                message_seq: (2 * i + 1) as u64,
+                file_change: None,
+                original_content: None,
+                new_content: None,
+                duration_ms: 0,
+            });
+        }
+        session
+    }
+
+    #[test]
+    fn lazy_load_materializes_window_only() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::Load {
+            session: session_with_user_turns(60),
+        });
+        draw(&chat, 80, 20);
+        {
+            let turns = chat.turns.borrow();
+            let materialized = turns.iter().filter(|t| t.blocks.is_some()).count();
+            assert!(
+                materialized > 0 && materialized < 60,
+                "materialized {materialized}"
+            );
+            assert!(turns.last().unwrap().blocks.is_none());
+            assert!(turns.first().unwrap().blocks.is_some());
+        }
+
+        for _ in 0..6000 {
+            chat.update(ChatMessage::ScrollDown);
+        }
+        draw(&chat, 80, 20);
+        let turns = chat.turns.borrow();
+        assert!(
+            turns.first().unwrap().blocks.is_none(),
+            "top turns evicted after scrolling away"
+        );
+        assert!(turns.last().unwrap().blocks.is_some());
+    }
+
+    #[test]
+    fn sticky_bottom_follows_tokens_until_scroll_up() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "hi".into(),
+        });
+        for i in 0..40 {
+            chat.update(ChatMessage::TokenReceived {
+                content: format!("line {i}\n"),
+            });
+        }
+        draw(&chat, 80, 10);
+        assert!(chat.scroll.borrow().sticky_bottom);
+        let bottom = chat.scroll.borrow().offset;
+        assert!(bottom > 0, "streaming content exceeds the viewport");
+
+        chat.update(ChatMessage::ScrollUp);
+        assert!(!chat.scroll.borrow().sticky_bottom);
+        chat.update(ChatMessage::TokenReceived {
+            content: "more text\n".into(),
+        });
+        draw(&chat, 80, 10);
+        assert_eq!(chat.scroll.borrow().offset, bottom - 1);
+    }
+
+    #[test]
+    fn paint_shows_first_prompt_at_top_after_load() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::Load {
+            session: session_with_user_turns(10),
+        });
+        let buf = draw(&chat, 80, 12);
+        assert!(
+            buf[(0, 0)].symbol() != "█",
+            "no scrollbar at the top row of the track"
+        );
+        let row_text: String = (0..60).map(|x| buf[(x, 1)].symbol().to_string()).collect();
+        assert!(
+            row_text.contains("prompt number 0"),
+            "top row shows the first prompt, got: {row_text:?}"
+        );
+    }
+
+    #[test]
+    fn width_change_re_renders_window_at_new_width() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::Load {
+            session: session_with_user_turns(60),
+        });
+        draw(&chat, 80, 20);
+        assert!(chat.turns.borrow()[0].cache.as_ref().unwrap().width == 79);
+        draw(&chat, 40, 20);
+        let turns = chat.turns.borrow();
+        assert!(
+            turns[0]
+                .cache
+                .as_ref()
+                .is_some_and(|cache| cache.width == 39),
+            "window re-rendered at the new width"
+        );
+        assert!(
+            turns.last().unwrap().cache.is_none(),
+            "far turns stay unrendered after a width change"
+        );
+    }
+
+    #[test]
+    fn toggle_expansion_survives_eviction() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::Load {
+            session: session_with_tool_turns(30),
+        });
+        for _ in 0..6000 {
+            chat.update(ChatMessage::ScrollDown);
+        }
+        draw(&chat, 80, 20);
+        chat.update(ChatMessage::ToggleLastTool);
+        let tool_idx = (0..chat.turns.borrow().len())
+            .rev()
+            .find(|i| {
+                chat.turns.borrow()[*i]
+                    .blocks
+                    .as_ref()
+                    .is_some_and(|blocks| blocks.iter().any(Block::is_tool))
+            })
+            .unwrap();
+        let expanded = {
+            let turns = chat.turns.borrow();
+            let blocks = turns[tool_idx].blocks.as_ref().unwrap();
+            let pos = blocks.iter().rposition(Block::is_tool).unwrap();
+            blocks[pos].is_expanded()
+        };
+        assert!(expanded, "toggled tool block is expanded");
+
+        for _ in 0..6000 {
+            chat.update(ChatMessage::ScrollUp);
+        }
+        draw(&chat, 80, 20);
+        assert!(
+            chat.turns.borrow()[tool_idx].blocks.is_none(),
+            "turn evicted while scrolled away"
+        );
+
+        for _ in 0..6000 {
+            chat.update(ChatMessage::ScrollDown);
+        }
+        draw(&chat, 80, 20);
+        let turns = chat.turns.borrow();
+        let blocks = turns[tool_idx].blocks.as_ref().unwrap();
+        let pos = blocks.iter().rposition(Block::is_tool).unwrap();
+        assert!(
+            blocks[pos].is_expanded(),
+            "expansion preserved across eviction"
+        );
+    }
+
+    #[test]
+    fn click_toggles_tool_block() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "check".into(),
+        });
+        chat.update(ChatMessage::ToolStarted {
+            name: "read_file".into(),
+            args: serde_json::json!({}),
+            worker: None,
+        });
+        chat.update(ChatMessage::ToolFinished {
+            name: "read_file".into(),
+            ok: true,
+            output: String::new(),
+            worker: None,
+            file_change: None,
+            streams: None,
+            duration_ms: 0,
+        });
+
+        let buf = draw(&chat, 80, 20);
+        let rect = chat.history_rect.get();
+        let click_row = (1..buf.area().height).find(|row| buf[(0, *row)].bg == theme::SUCCESS_BG);
+        let Some(row) = click_row else {
+            panic!("tool block background not found");
+        };
+        chat.update(ChatMessage::Click {
+            column: rect.x + 5,
+            row,
+        });
+        let expanded = chat
+            .in_flight
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .blocks
+            .as_ref()
+            .unwrap()
+            .last()
+            .map(Block::is_expanded);
+        assert_eq!(expanded, Some(true));
     }
 }

@@ -1,6 +1,7 @@
 use ratatui::prelude::*;
 
-use crate::tui::session::segment::{BLOCK_PADDING, Segment};
+use crate::tui::session::segment::{Segment, BLOCK_PADDING};
+use crate::tui::session::virtualizer::TurnEst;
 use crate::tui::theme;
 
 /// The user's submitted message, rendered as a full-width warm block without
@@ -26,6 +27,15 @@ impl UserPrompt {
             padding: BLOCK_PADDING,
             hit: None,
         }]
+    }
+
+    pub(super) fn est(&self) -> TurnEst {
+        let mut est = TurnEst {
+            padding_rows: 2 * u32::from(BLOCK_PADDING.1),
+            ..TurnEst::default()
+        };
+        est.add_text(&self.content);
+        est
     }
 }
 
@@ -57,6 +67,12 @@ impl TextBlock {
         }
         vec![Segment::plain(shuvarie_highlight::render(&self.content))]
     }
+
+    pub(super) fn est(&self) -> TurnEst {
+        let mut est = TurnEst::default();
+        est.add_text(&self.content);
+        est
+    }
 }
 
 pub enum TextMessage {
@@ -79,5 +95,11 @@ impl SystemText {
         let mut lines = vec![Line::from(Span::raw("System").fg(theme::TEXT_MUTED).bold())];
         lines.append(&mut shuvarie_highlight::render(&self.content));
         vec![Segment::plain(lines)]
+    }
+
+    pub(super) fn est(&self) -> TurnEst {
+        let mut est = TurnEst::deco(1);
+        est.add_text(&self.content);
+        est
     }
 }

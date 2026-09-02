@@ -14,6 +14,7 @@ use ratatui::prelude::*;
 use shuvarie_core::DiagnosticInfo;
 
 use super::segment::Segment;
+use super::virtualizer::TurnEst;
 use crate::tui::{spinner, theme};
 
 /// Format a duration in milliseconds for block display: seconds with one
@@ -86,6 +87,23 @@ impl Block {
         }
     }
 
+    /// Estimated row counters contributed by this block, mirroring what
+    /// [`Block::view`] will produce (width-independent; the virtualizer folds
+    /// them into an O(1) height estimate per width).
+    pub fn est(&self) -> TurnEst {
+        match self {
+            Block::User(block) => block.est(),
+            Block::Text(block) => block.est(),
+            Block::System(block) => block.est(),
+            Block::Tool(block) => block.est(),
+            Block::Reasoning(block) => block.est(),
+            Block::Context(block) => block.est(),
+            Block::Summary | Block::Interrupted | Block::Working | Block::ToolOnlyNote => {
+                TurnEst::deco(1)
+            }
+        }
+    }
+
     /// Project the block into renderable segments (without hit addresses —
     /// the chat engine stamps those by turn/block position).
     pub fn view(&self, width: u16, env: &ChatEnv) -> Vec<Segment> {
@@ -133,6 +151,22 @@ impl Block {
 
     pub fn is_thinking(&self) -> bool {
         matches!(self, Block::Reasoning(reasoning) if reasoning.is_thinking())
+    }
+
+    pub fn set_expanded(&mut self, expanded: bool) {
+        match self {
+            Block::Tool(tool) => tool.set_expanded(expanded),
+            Block::Reasoning(reasoning) => reasoning.set_expanded(expanded),
+            _ => {}
+        }
+    }
+
+    pub fn is_expanded(&self) -> bool {
+        match self {
+            Block::Tool(tool) => tool.is_expanded(),
+            Block::Reasoning(reasoning) => reasoning.is_expanded(),
+            _ => false,
+        }
     }
 }
 
