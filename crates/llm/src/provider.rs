@@ -446,13 +446,15 @@ impl ProviderClient {
                         }
                     }
                     let name = tool_names.remove(&internal_call_id);
+                    let captured = file_hook.take(&internal_call_id);
                     match name {
                         Some(name) => StreamItem::ToolResult {
                             name,
                             output,
                             ok,
                             worker: None,
-                            file_change: file_hook.take(&internal_call_id),
+                            file_change: captured.file_change,
+                            streams: captured.shell,
                         },
                         None => StreamItem::WorkerResult {
                             name: pending_workers.pop_front().unwrap_or_default(),
@@ -681,6 +683,7 @@ async fn run_worker_agent(
                 },
             )) => {
                 let tool_name = tool_names.remove(&internal_call_id).unwrap_or_default();
+                let captured = file_hook.take(&internal_call_id);
                 let mut output = String::new();
                 let mut ok = true;
                 for content in tool_result.content.iter() {
@@ -708,7 +711,8 @@ async fn run_worker_agent(
                         output,
                         ok,
                         worker: Some(name.to_string()),
-                        file_change: file_hook.take(&internal_call_id),
+                        file_change: captured.file_change,
+                        streams: captured.shell,
                     })
                     .await;
             }
@@ -792,6 +796,7 @@ mod tests {
                 ok: true,
                 worker: Some("explore_workspace".into()),
                 file_change: None,
+                streams: None,
             },
         ];
         let _ = worker_tx.send(worker_items[0].clone()).await;

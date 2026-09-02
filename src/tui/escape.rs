@@ -22,3 +22,23 @@ pub const ENABLE_KITTY_KEYBOARD: Csi = Csi::Keyboard(Keyboard::PushFlags(
 ));
 
 pub const DISABLE_KITTY_KEYBOARD: Csi = Csi::Keyboard(Keyboard::PopFlags(1));
+
+// Enable button-event mouse tracking (mode 1002: press/release/drag) with SGR
+// extended coordinates (mode 1006). Termina parses the reports into
+// `Event::Mouse`; terminals that don't support the modes ignore the sequence
+// and mouse input simply never arrives.
+pub const ENABLE_MOUSE: Csi = Csi::Mode(Mode::SetDecPrivateMode(DecPrivateMode::Code(
+    DecPrivateModeCode::ButtonEventMouse,
+)));
+
+pub const ENABLE_SGR_MOUSE: Csi = Csi::Mode(Mode::SetDecPrivateMode(DecPrivateMode::Code(
+    DecPrivateModeCode::SGRMouse,
+)));
+
+pub const DISABLE_MOUSE: Csi = Csi::Mode(Mode::ResetDecPrivateMode(DecPrivateMode::Code(
+    DecPrivateModeCode::ButtonEventMouse,
+)));
+
+pub const DISABLE_SGR_MOUSE: Csi = Csi::Mode(Mode::ResetDecPrivateMode(DecPrivateMode::Code(
+    DecPrivateModeCode::SGRMouse,
+)));

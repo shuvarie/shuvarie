@@ -1,6 +1,6 @@
 use shuvarie_db::SessionSummary;
 use shuvarie_llm::FileChange;
-use shuvarie_llm::{Model, TokenUsage};
+use shuvarie_llm::{Model, ShellStreams, TokenUsage};
 
 use crate::question::QuestionPrompt;
 
@@ -44,11 +44,13 @@ pub enum Event {
         output: String,
         worker: Option<String>,
         file_change: Option<FileChange>,
+        streams: Option<ShellStreams>,
     },
     ToolOutput {
         tool: String,
         worker: Option<String>,
-        content: String,
+        stdout: String,
+        stderr: String,
     },
     WorkerStarted {
         name: String,

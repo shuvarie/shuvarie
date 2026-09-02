@@ -15,6 +15,11 @@ pub const TEXT: Color = Color::Rgb(224, 216, 196);
 pub const TEXT_DIM: Color = Color::Rgb(128, 120, 104);
 pub const TEXT_MUTED: Color = Color::Rgb(92, 86, 74);
 
+pub const PROMPT_BG: Color = Color::Rgb(44, 38, 30);
+pub const RUNNING_BG: Color = Color::Rgb(38, 38, 46);
+pub const SUCCESS_BG: Color = Color::Rgb(26, 40, 30);
+pub const ERROR_BG: Color = Color::Rgb(46, 26, 24);
+
 #[allow(dead_code)]
 pub const SUCCESS: Color = Color::Rgb(138, 146, 90);
 #[allow(dead_code)]
@@ -61,7 +66,11 @@ pub fn overlay_block<'a>(title: &str) -> Block<'a> {
 
 #[allow(dead_code)]
 pub fn active_marker(is_active: bool) -> &'static str {
-    if is_active { "● " } else { "  " }
+    if is_active {
+        "● "
+    } else {
+        "  "
+    }
 }
 
 pub fn help_line(bindings: &[(&'static str, &'static str)]) -> Line<'static> {

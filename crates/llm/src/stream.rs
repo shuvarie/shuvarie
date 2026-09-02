@@ -3,7 +3,7 @@ use futures_core::Stream;
 use serde_json::Value;
 use std::pin::Pin;
 
-use crate::file_change::FileChange;
+use crate::file_change::{FileChange, ShellStreams};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamItem {
@@ -24,6 +24,7 @@ pub enum StreamItem {
         ok: bool,
         worker: Option<String>,
         file_change: Option<FileChange>,
+        streams: Option<ShellStreams>,
     },
     WorkerStart {
         name: String,

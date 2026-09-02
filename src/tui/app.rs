@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use ratatui::prelude::*;
 use shuvarie_core::{Connections, Event as CoreEvent, Model};
 use termina::Event as TermEvent;
-use termina::event::{KeyCode, KeyEventKind};
+use termina::event::{KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use tokio::sync::mpsc::Sender;
 
 use crate::tui::event::Event;
@@ -16,7 +16,7 @@ use super::confirm_quit::{ConfirmQuit, ConfirmQuitEffect, ConfirmQuitMessage};
 use super::context::UpdateCtx;
 use super::history_search::{HistorySearch, HistorySearchEffect, HistorySearchMessage};
 use super::model_picker::{ModelPicker, ModelPickerEffect, ModelPickerMessage};
-use super::session::{SessionEffect, SessionMessage, SessionScreen};
+use super::session::{ChatMessage, SessionEffect, SessionMessage, SessionScreen};
 use super::session_picker::{SessionPicker, SessionPickerEffect, SessionPickerMessage};
 use super::sidebar::SidebarMessage;
 use super::welcome::{Welcome, WelcomeEffect, WelcomeMessage};
@@ -172,6 +172,29 @@ impl App {
                     rows: size.rows,
                     cols: size.cols,
                 }),
+                TermEvent::Mouse(mouse) if self.overlay == Overlay::None => match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => Some(AppMessage::Session(
+                        SessionMessage::Chat(ChatMessage::Click {
+                            column: mouse.column,
+                            row: mouse.row,
+                        }),
+                    )),
+                    MouseEventKind::ScrollUp => Some(AppMessage::Session(SessionMessage::Chat(
+                        ChatMessage::Wheel {
+                            up: true,
+                            column: mouse.column,
+                            row: mouse.row,
+                        },
+                    ))),
+                    MouseEventKind::ScrollDown => Some(AppMessage::Session(SessionMessage::Chat(
+                        ChatMessage::Wheel {
+                            up: false,
+                            column: mouse.column,
+                            row: mouse.row,
+                        },
+                    ))),
+                    _ => None,
+                },
                 TermEvent::Key(key) => {
                     // Overlay events
                     match self.overlay {
@@ -223,7 +246,7 @@ impl App {
                     match key.kind {
                         KeyEventKind::Press => match key.code {
                             KeyCode::Char('c') if ctrl(&key) => {
-                                if self.session.streaming {
+                                if self.session.is_streaming() {
                                     return Some(AppMessage::Session(
                                         SessionMessage::CancelRequested,
                                     ));
@@ -267,70 +290,63 @@ impl App {
                 CoreEvent::SessionCreated { id, title } => {
                     Some(AppMessage::SessionCreated { id, title })
                 }
-                CoreEvent::TokenReceived { content } => {
-                    Some(AppMessage::Session(SessionMessage::TokenReceived {
-                        content,
-                    }))
-                }
-                CoreEvent::ReasoningReceived { content } => {
-                    Some(AppMessage::Session(SessionMessage::ReasoningReceived {
-                        content,
-                    }))
-                }
-                CoreEvent::ContextLoaded { paths } => {
-                    Some(AppMessage::Session(SessionMessage::ContextLoaded { paths }))
-                }
-                CoreEvent::ToolStarted { name, args, worker } => {
-                    Some(AppMessage::Session(SessionMessage::ToolStarted {
-                        name,
-                        args,
-                        worker,
-                    }))
-                }
+                CoreEvent::TokenReceived { content } => Some(AppMessage::Session(
+                    SessionMessage::Chat(ChatMessage::TokenReceived { content }),
+                )),
+                CoreEvent::ReasoningReceived { content } => Some(AppMessage::Session(
+                    SessionMessage::Chat(ChatMessage::ReasoningReceived { content }),
+                )),
+                CoreEvent::ContextLoaded { paths } => Some(AppMessage::Session(
+                    SessionMessage::Chat(ChatMessage::ContextLoaded { paths }),
+                )),
+                CoreEvent::ToolStarted { name, args, worker } => Some(AppMessage::Session(
+                    SessionMessage::Chat(ChatMessage::ToolStarted { name, args, worker }),
+                )),
                 CoreEvent::ToolFinished {
                     name,
                     ok,
                     output,
                     worker,
                     file_change,
-                } => Some(AppMessage::Session(SessionMessage::ToolFinished {
-                    name,
-                    ok,
-                    output,
-                    worker,
-                    file_change,
-                })),
-                CoreEvent::ToolOutput {
-                    tool,
-                    worker,
-                    content,
-                } => Some(AppMessage::Session(SessionMessage::ToolOutput {
-                    tool,
-                    worker,
-                    content,
-                })),
-                CoreEvent::WorkerStarted { name, args } => {
-                    Some(AppMessage::Session(SessionMessage::WorkerStarted {
-                        name,
-                        args,
-                    }))
-                }
-                CoreEvent::WorkerFinished { name, ok, output } => {
-                    Some(AppMessage::Session(SessionMessage::WorkerFinished {
+                    streams,
+                } => Some(AppMessage::Session(SessionMessage::Chat(
+                    ChatMessage::ToolFinished {
                         name,
                         ok,
                         output,
-                    }))
-                }
-                CoreEvent::StreamDone { .. } => {
-                    Some(AppMessage::Session(SessionMessage::StreamDone))
-                }
-                CoreEvent::StreamError { error } => {
-                    Some(AppMessage::Session(SessionMessage::StreamError { error }))
-                }
-                CoreEvent::StreamCancelled => {
-                    Some(AppMessage::Session(SessionMessage::StreamCancelled))
-                }
+                        worker,
+                        file_change,
+                        streams,
+                    },
+                ))),
+                CoreEvent::ToolOutput {
+                    tool,
+                    worker,
+                    stdout,
+                    stderr,
+                } => Some(AppMessage::Session(SessionMessage::Chat(
+                    ChatMessage::ToolOutput {
+                        tool,
+                        worker,
+                        stdout,
+                        stderr,
+                    },
+                ))),
+                CoreEvent::WorkerStarted { name, args } => Some(AppMessage::Session(
+                    SessionMessage::Chat(ChatMessage::WorkerStarted { name, args }),
+                )),
+                CoreEvent::WorkerFinished { name, ok, output } => Some(AppMessage::Session(
+                    SessionMessage::Chat(ChatMessage::WorkerFinished { name, ok, output }),
+                )),
+                CoreEvent::StreamDone { .. } => Some(AppMessage::Session(SessionMessage::Chat(
+                    ChatMessage::StreamDone,
+                ))),
+                CoreEvent::StreamError { error } => Some(AppMessage::Session(
+                    SessionMessage::Chat(ChatMessage::StreamError { error }),
+                )),
+                CoreEvent::StreamCancelled => Some(AppMessage::Session(SessionMessage::Chat(
+                    ChatMessage::StreamCancelled,
+                ))),
                 CoreEvent::UsageUpdate { usage, cost } => {
                     Some(AppMessage::Session(SessionMessage::UsageUpdate {
                         usage,
@@ -716,7 +732,10 @@ impl App {
             }
             AppMessage::LspDiagnostics { path, diagnostics } => {
                 self.session
-                    .update(SessionMessage::LspDiagnostics { path, diagnostics });
+                    .update(SessionMessage::Chat(ChatMessage::LspDiagnostics {
+                        path,
+                        diagnostics,
+                    }));
             }
             AppMessage::LspError { error } => {
                 self.session.update(SessionMessage::ShowError { error });
@@ -770,8 +789,8 @@ impl App {
     }
 
     fn update_command_availability(&mut self) {
-        let has_messages = !self.session.messages.is_empty();
-        let interrupted = self.session.interrupted && !self.session.streaming;
+        let has_messages = self.session.has_messages();
+        let interrupted = self.session.is_interrupted() && !self.session.is_streaming();
         self.command_menu
             .set_availability(CommandAction::UndoLastTurn, has_messages);
         self.command_menu
@@ -837,7 +856,7 @@ impl App {
                 self.ctx.send(shuvarie_core::Command::Resume);
             }
             CommandAction::Quit => {
-                if self.session.streaming {
+                if self.session.is_streaming() {
                     self.ctx.send(shuvarie_core::Command::CancelStream);
                 }
                 return Some(AppEffect::Quit);

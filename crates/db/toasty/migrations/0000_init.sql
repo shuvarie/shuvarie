@@ -33,7 +33,8 @@ CREATE TABLE "tool_calls" (
     "worker" TEXT,
     "file_change_json" TEXT NOT NULL,
     "original_content" TEXT,
-    "new_content" TEXT
+    "new_content" TEXT,
+    "stderr" TEXT NOT NULL
 );
 -- #[toasty::breakpoint]
 CREATE INDEX "index_tool_calls_by_session_id" ON "tool_calls" ("session_id");

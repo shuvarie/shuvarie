@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use shuvarie_llm::{
-    DiffLine, DiffLineKind, FileChange, Tool, ToolContext, ToolExecutionError, ToolOutput,
+    DiffLine, DiffLineKind, FileChange, ShellStreams, Tool, ToolContext, ToolExecutionError,
+    ToolOutput,
 };
 
 use crate::lsp_manager::SharedManager;
@@ -25,7 +26,8 @@ const SHELL_STREAM_INTERVAL_MS: u64 = 100;
 #[derive(Debug, Clone)]
 pub struct ShellChunk {
     pub worker: Option<String>,
-    pub content: String,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 /// Bounded channel sender carrying live `run_shell` output to the core task.
@@ -49,23 +51,35 @@ impl ShellOutputTx {
         }
     }
 
-    async fn send_tail(&self, captured: &[u8]) {
-        let content: String = String::from_utf8_lossy(captured)
-            .chars()
-            .rev()
-            .take(SHELL_STREAM_TAIL_CHARS)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
+    async fn send_streams(&self, stdout: &[u8], stderr: &[u8]) {
         let _ = self
             .tx
             .send(ShellChunk {
                 worker: self.worker.clone(),
-                content,
+                stdout: stream_tail(stdout),
+                stderr: stream_tail(stderr),
             })
             .await;
     }
+}
+
+fn stream_tail(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .rev()
+        .take(SHELL_STREAM_TAIL_CHARS)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+fn display_stream(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .trim()
+        .chars()
+        .take(MAX_COMMAND_OUTPUT)
+        .collect()
 }
 
 #[cfg(unix)]
@@ -535,7 +549,7 @@ impl Tool for RunShell {
 
     async fn call(
         &self,
-        _ctx: &mut ToolContext,
+        ctx: &mut ToolContext,
         args: Value,
     ) -> Result<ToolOutput, ToolExecutionError> {
         let result: Result<ToolOutput, String> = async move {
@@ -572,17 +586,19 @@ impl Tool for RunShell {
             let pgid = child.id();
             let mut guard = KillGuard(pgid);
 
-            let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+            let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<(bool, Vec<u8>)>(64);
             let mut readers = Vec::new();
             if let Some(pipe) = child.stdout.take() {
-                readers.push(spawn_pipe_reader(pipe, chunk_tx.clone()));
+                readers.push(spawn_pipe_reader(pipe, chunk_tx.clone(), false));
             }
             if let Some(pipe) = child.stderr.take() {
-                readers.push(spawn_pipe_reader(pipe, chunk_tx.clone()));
+                readers.push(spawn_pipe_reader(pipe, chunk_tx.clone(), true));
             }
             drop(chunk_tx);
 
             let mut captured: Vec<u8> = Vec::new();
+            let mut out: Vec<u8> = Vec::new();
+            let mut err: Vec<u8> = Vec::new();
             let mut last_emit = std::time::Instant::now() - std::time::Duration::from_millis(SHELL_STREAM_INTERVAL_MS);
             let interval = std::time::Duration::from_millis(SHELL_STREAM_INTERVAL_MS);
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
@@ -590,15 +606,19 @@ impl Tool for RunShell {
                 tokio::select! {
                     maybe_chunk = chunk_rx.recv() => {
                         match maybe_chunk {
-                            Some(chunk) => {
+                            Some((is_stderr, chunk)) => {
                                 captured.extend_from_slice(&chunk);
-                                if captured.len() > SHELL_CAPTURE_BYTES {
-                                    let drop = captured.len() - SHELL_CAPTURE_BYTES;
-                                    captured.drain(..drop);
+                                cap_buffer(&mut captured);
+                                if is_stderr {
+                                    err.extend_from_slice(&chunk);
+                                    cap_buffer(&mut err);
+                                } else {
+                                    out.extend_from_slice(&chunk);
+                                    cap_buffer(&mut out);
                                 }
                                 if last_emit.elapsed() >= interval {
                                     last_emit = std::time::Instant::now();
-                                    self.shell_tx.send_tail(&captured).await;
+                                    self.shell_tx.send_streams(&out, &err).await;
                                 }
                             }
                             None => {
@@ -612,11 +632,15 @@ impl Tool for RunShell {
                     }
                     status = child.wait() => {
                         // Drain remaining output so it is not lost with the pipes.
-                        while let Some(chunk) = chunk_rx.recv().await {
+                        while let Some((is_stderr, chunk)) = chunk_rx.recv().await {
                             captured.extend_from_slice(&chunk);
-                            if captured.len() > SHELL_CAPTURE_BYTES {
-                                let drop = captured.len() - SHELL_CAPTURE_BYTES;
-                                captured.drain(..drop);
+                            cap_buffer(&mut captured);
+                            if is_stderr {
+                                err.extend_from_slice(&chunk);
+                                cap_buffer(&mut err);
+                            } else {
+                                out.extend_from_slice(&chunk);
+                                cap_buffer(&mut out);
                             }
                         }
                         let status = status.map_err(|e| format!("wait shell: {e}"))?;
@@ -628,7 +652,7 @@ impl Tool for RunShell {
                         }
                         let _ = child.kill().await;
                         let _ = child.wait().await;
-                        self.shell_tx.send_tail(&captured).await;
+                        self.shell_tx.send_streams(&out, &err).await;
                         let partial = String::from_utf8_lossy(&captured).trim().to_string();
                         let mut message = format!(
                             "shell command timed out after {timeout_secs}s (killed)"
@@ -639,6 +663,12 @@ impl Tool for RunShell {
                         message.push_str(&format!(
                             "\n\n<shell_metadata>\nshell tool terminated the command after exceeding the {timeout_secs}s timeout. If this command is expected to take longer and is not waiting for interactive input, retry with a larger timeout_secs value.\n</shell_metadata>"
                         ));
+                        let stdout =
+                            format!("timeout {timeout_secs}s:\n{}", display_stream(&out));
+                        ctx.insert_result(ShellStreams {
+                            stdout,
+                            stderr: display_stream(&err),
+                        });
                         return Err(message);
                     }
                 }
@@ -654,6 +684,12 @@ impl Tool for RunShell {
                 .to_string();
             let trimmed = trimmed.trim();
             let capped: String = trimmed.chars().take(MAX_COMMAND_OUTPUT).collect();
+            let status_line = format!("exit {status}:");
+            let stdout = format!("{status_line}\n{}", display_stream(&out));
+            ctx.insert_result(ShellStreams {
+                stdout,
+                stderr: display_stream(&err),
+            });
             if !status.success() {
                 return Err(format!("shell exited with {status}:\n{capped}"));
             }
@@ -662,7 +698,7 @@ impl Tool for RunShell {
                     "shell exited with {status} (no output)"
                 )))
             } else {
-                Ok(ToolOutput::text(format!("exit {status}:\n{capped}")))
+                Ok(ToolOutput::text(format!("{status_line}\n{capped}")))
             }
         }
         .await;
@@ -678,7 +714,8 @@ fn shell_bin() -> &'static str {
 
 fn spawn_pipe_reader<R>(
     mut pipe: R,
-    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    tx: tokio::sync::mpsc::Sender<(bool, Vec<u8>)>,
+    is_stderr: bool,
 ) -> tokio::task::JoinHandle<()>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -690,13 +727,20 @@ where
             match pipe.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if tx.send(buf[..n].to_vec()).await.is_err() {
+                    if tx.send((is_stderr, buf[..n].to_vec())).await.is_err() {
                         break;
                     }
                 }
             }
         }
     })
+}
+
+fn cap_buffer(buf: &mut Vec<u8>) {
+    if buf.len() > SHELL_CAPTURE_BYTES {
+        let drop = buf.len() - SHELL_CAPTURE_BYTES;
+        buf.drain(..drop);
+    }
 }
 
 #[cfg(unix)]
@@ -2672,7 +2716,7 @@ mod tests {
         let mut saw_stream = false;
         while let Ok(chunk) = rx.try_recv() {
             assert_eq!(chunk.worker, None);
-            if chunk.content.contains("streamed-line") {
+            if chunk.stdout.contains("streamed-line") {
                 saw_stream = true;
             }
         }
@@ -2692,7 +2736,7 @@ mod tests {
             .unwrap();
         let mut tagged = false;
         while let Ok(chunk) = rx.try_recv() {
-            if chunk.worker.as_deref() == Some("run_tests") && chunk.content.contains("tagged") {
+            if chunk.worker.as_deref() == Some("run_tests") && chunk.stdout.contains("tagged") {
                 tagged = true;
             }
         }

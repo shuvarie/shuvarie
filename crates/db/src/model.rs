@@ -101,6 +101,7 @@ pub struct ToolCall {
     pub file_change_json: String,
     pub original_content: Option<String>,
     pub new_content: Option<String>,
+    pub stderr: String,
 }
 
 #[derive(Debug, toasty::Model)]

@@ -122,3 +122,12 @@ pub struct DiffLine {
     pub new_line: Option<u64>,
     pub text: String,
 }
+
+/// Display-only stdout/stderr split for a `run_shell` call, attached to the
+/// tool result via `ToolContext::insert_result` and captured alongside
+/// [`FileChange`] by the same hook. The model-facing output stays combined.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ShellStreams {
+    pub stdout: String,
+    pub stderr: String,
+}

@@ -159,7 +159,8 @@ impl Ctx {
                     self.lines.push(Line::from(""));
                 }
             }
-            TagEnd::Paragraph | TagEnd::Item => self.flush_line(false),
+            TagEnd::Paragraph => self.flush_line(true),
+            TagEnd::Item => self.flush_line(false),
             TagEnd::Heading(_) => {
                 self.heading = None;
                 self.flush_line(true);
@@ -259,7 +260,7 @@ impl Ctx {
         if self.skip > 0 || self.code.is_some() {
             return;
         }
-        self.spans.push(Span::raw(" ").fg(theme::TEXT));
+        self.flush_line(false);
     }
 
     fn hard_break(&mut self) {
@@ -333,6 +334,13 @@ impl Ctx {
 
     fn finish(mut self) -> Vec<Line<'static>> {
         self.flush_line(true);
+        while self.lines.last().is_some_and(is_blank_line) {
+            self.lines.pop();
+        }
         self.lines
     }
+}
+
+fn is_blank_line(line: &Line<'static>) -> bool {
+    line.spans.iter().all(|span| span.content.is_empty())
 }

@@ -300,6 +300,12 @@ ty = "String"
 storage_ty = "Text"
 nullable = true
 
+[[schema.tables.columns]]
+id = { table = 3, index = 12 }
+name = "stderr"
+ty = "String"
+storage_ty = "Text"
+
 [[schema.tables.indices]]
 id = { table = 3, index = 0 }
 name = "index_tool_calls_by_id"

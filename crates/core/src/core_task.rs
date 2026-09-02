@@ -911,6 +911,7 @@ async fn redo_turn(store: &mut Store, session_id: uuid::Uuid) -> Result<bool, St
                 &tc.name,
                 &tc.args_json,
                 &tc.output,
+                &tc.stderr,
                 tc.ok,
                 tc.worker.as_deref(),
                 &fc_json,
@@ -1022,7 +1023,8 @@ impl CoreCtx {
                     .send(Event::ToolOutput {
                         tool: "run_shell".to_string(),
                         worker: chunk.worker,
-                        content: chunk.content,
+                        stdout: chunk.stdout,
+                        stderr: chunk.stderr,
                     })
                     .await;
             }
@@ -1280,8 +1282,13 @@ async fn stream_stream_to_events(
                 ok,
                 worker,
                 file_change,
+                streams,
             } => {
                 let (fc_json, original, new) = serialize_file_change(&file_change);
+                let (display_output, display_stderr) = match &streams {
+                    Some(s) => (s.stdout.clone(), s.stderr.clone()),
+                    None => (output.clone(), String::new()),
+                };
                 let key = format!("{}:{:?}", name, worker);
                 let args_json = pending_tool_args
                     .remove(&key)
@@ -1298,7 +1305,8 @@ async fn stream_stream_to_events(
                                 tool_seq,
                                 &name,
                                 &args_json,
-                                &output,
+                                &display_output,
+                                &display_stderr,
                                 ok,
                                 worker_name,
                                 &fc_json,
@@ -1312,7 +1320,8 @@ async fn stream_stream_to_events(
                 turn_tool_records.push(crate::tool_record::ToolRecord {
                     name: name.clone(),
                     args_json,
-                    output: output.clone(),
+                    output: display_output,
+                    stderr: display_stderr,
                     ok,
                     worker: worker.clone(),
                     message_id: assistant_message_id.unwrap_or_default(),
@@ -1332,6 +1341,7 @@ async fn stream_stream_to_events(
                         output,
                         worker,
                         file_change,
+                        streams,
                     })
                     .await;
             }
@@ -1863,6 +1873,7 @@ mod tests {
                 ok: true,
                 worker: Some("explore_workspace".into()),
                 file_change: None,
+                streams: None,
             },
             StreamItem::WorkerResult {
                 name: "explore_workspace".into(),

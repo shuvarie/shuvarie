@@ -1,0 +1,33 @@
+use ratatui::prelude::*;
+
+use crate::tui::session::segment::Segment;
+use crate::tui::theme;
+
+/// Project context files loaded for the in-flight turn, rendered as one
+/// `◈ Loaded <path>` line per path (contents go to the agent preamble).
+pub struct ContextBlock {
+    paths: Vec<String>,
+}
+
+impl ContextBlock {
+    pub fn new(paths: Vec<String>) -> Self {
+        Self { paths }
+    }
+
+    pub fn view(&self) -> Vec<Segment> {
+        if self.paths.is_empty() {
+            return Vec::new();
+        }
+        let lines = self
+            .paths
+            .iter()
+            .map(|path| {
+                Line::from(vec![
+                    Span::raw("◈").fg(theme::ACCENT).bold(),
+                    Span::raw(format!(" Loaded {path}")).fg(theme::TEXT),
+                ])
+            })
+            .collect();
+        vec![Segment::plain(lines)]
+    }
+}

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use rig::agent::hook::{HookContext, ToolResultEvent};
 use rig::agent::{AgentHook, ToolResultAction};
 
-use crate::file_change::FileChange;
+use crate::file_change::{FileChange, ShellStreams};
 
 pub use rig::completion::ToolDefinition;
 pub use rig::tool::{
@@ -32,12 +32,20 @@ where
     )
 }
 
-/// Captures host-only [`FileChange`]s that tools attach to their
-/// [`ToolContext`], keyed by the tool call's `internal_call_id` so the stream
-/// can correlate them with the corresponding `ToolResult`.
+/// Captures host-only result metadata that tools attach to their
+/// [`ToolContext`] — [`FileChange`]s from the file tools and
+/// [`ShellStreams`] from `run_shell` — keyed by the tool call's
+/// `internal_call_id` so the stream can correlate them with the
+/// corresponding `ToolResult`.
 #[derive(Clone, Default)]
 pub struct FileChangeHook {
-    changes: Arc<Mutex<HashMap<String, FileChange>>>,
+    changes: Arc<Mutex<HashMap<String, CapturedResult>>>,
+}
+
+#[derive(Debug, Default)]
+pub struct CapturedResult {
+    pub file_change: Option<FileChange>,
+    pub shell: Option<ShellStreams>,
 }
 
 impl FileChangeHook {
@@ -45,9 +53,13 @@ impl FileChangeHook {
         Self::default()
     }
 
-    /// Take the `FileChange` recorded for a tool call, if any.
-    pub fn take(&self, internal_call_id: &str) -> Option<FileChange> {
-        self.changes.lock().unwrap().remove(internal_call_id)
+    /// Take the result metadata recorded for a tool call, if any.
+    pub fn take(&self, internal_call_id: &str) -> CapturedResult {
+        self.changes
+            .lock()
+            .unwrap()
+            .remove(internal_call_id)
+            .unwrap_or_default()
     }
 }
 
@@ -57,11 +69,18 @@ impl AgentHook for FileChangeHook {
         _ctx: &HookContext,
         event: ToolResultEvent<'_>,
     ) -> impl futures_util::Future<Output = ToolResultAction> + Send {
+        let mut captured = CapturedResult::default();
         if let Some(change) = event.tool_context.result::<FileChange>() {
+            captured.file_change = Some(change.clone());
+        }
+        if let Some(shell) = event.tool_context.result::<ShellStreams>() {
+            captured.shell = Some(shell.clone());
+        }
+        if captured.file_change.is_some() || captured.shell.is_some() {
             self.changes
                 .lock()
                 .unwrap()
-                .insert(event.internal_call_id.to_string(), change.clone());
+                .insert(event.internal_call_id.to_string(), captured);
         }
         async { ToolResultAction::Keep }
     }

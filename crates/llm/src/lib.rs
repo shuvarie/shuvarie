@@ -15,7 +15,9 @@ pub use context_hook::{
     ContextBudget, ContextHook, OVERFLOW_REASON, UsageTracker, estimate_text_tokens,
 };
 pub use error::{LlmError, Result};
-pub use file_change::{DiffLine, DiffLineKind, FileChange, PatchFileChange, PatchFileKind};
+pub use file_change::{
+    DiffLine, DiffLineKind, FileChange, PatchFileChange, PatchFileKind, ShellStreams,
+};
 pub use message::{ChatMsg, Role};
 pub use model::Model;
 pub use provider::ProviderClient;

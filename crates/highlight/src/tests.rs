@@ -18,6 +18,10 @@ mod tests {
         texts(line).join("")
     }
 
+    fn is_blank(line: &Line<'static>) -> bool {
+        line.spans.iter().all(|s| s.content.is_empty())
+    }
+
     #[test]
     fn plain_preserves_lines() {
         let lines = plain("hello\nworld");
@@ -31,6 +35,23 @@ mod tests {
         let lines = render("hello world");
         assert_eq!(lines.len(), 1);
         assert_eq!(texts(&lines[0]), ["hello world"]);
+    }
+
+    #[test]
+    fn soft_break_renders_line_break() {
+        let lines = render("hello\nworld");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(texts(&lines[0]), ["hello"]);
+        assert_eq!(texts(&lines[1]), ["world"]);
+    }
+
+    #[test]
+    fn paragraph_break_renders_blank_line() {
+        let lines = render("first\n\nsecond");
+        assert_eq!(lines.len(), 3);
+        assert_eq!(texts(&lines[0]), ["first"]);
+        assert!(is_blank(&lines[1]));
+        assert_eq!(texts(&lines[2]), ["second"]);
     }
 
     #[test]
@@ -60,20 +81,16 @@ mod tests {
         let lines = render("# Big\n\n### Small");
         assert_eq!(texts(&lines[0]), ["Big"]);
         assert_eq!(lines[0].spans[0].style.fg, Some(theme::ACCENT));
-        assert!(
-            lines[0].spans[0]
-                .style
-                .add_modifier
-                .contains(Modifier::BOLD)
-        );
+        assert!(lines[0].spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
         assert_eq!(texts(&lines[2]), ["Small"]);
         assert_eq!(lines[2].spans[0].style.fg, Some(theme::TEXT));
-        assert!(
-            lines[2].spans[0]
-                .style
-                .add_modifier
-                .contains(Modifier::BOLD)
-        );
+        assert!(lines[2].spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
     }
 
     #[test]
@@ -92,7 +109,7 @@ mod tests {
     #[test]
     fn code_block_plain_fallback() {
         let lines = render("```nosuchlang123\narbitrary text\n```");
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 1);
         assert_eq!(texts(&lines[0]), ["arbitrary text"]);
         assert_eq!(lines[0].spans[0].style.fg, Some(theme::TEXT));
     }
@@ -100,7 +117,7 @@ mod tests {
     #[test]
     fn diff_block_colors() {
         let lines = render("```diff\n+ added\n- removed\n@@ hunk @@\ncontext\n```");
-        assert_eq!(lines.len(), 5);
+        assert_eq!(lines.len(), 4);
         assert_eq!(lines[0].spans[0].style.fg, Some(theme::SUCCESS));
         assert_eq!(lines[1].spans[0].style.fg, Some(theme::ERROR));
         assert_eq!(lines[2].spans[0].style.fg, Some(theme::ACCENT));
@@ -110,7 +127,7 @@ mod tests {
     #[test]
     fn unterminated_fence_does_not_panic() {
         let lines = render("```rust\nfn main() {");
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 1);
         assert!(joined(&lines[0]).contains("fn main()"));
     }
 
@@ -149,14 +166,14 @@ mod tests {
     #[test]
     fn rule_renders_divider() {
         let lines = render("a\n\n---\n\nb");
-        assert_eq!(lines.len(), 4);
-        assert!(texts(&lines[1])[0].starts_with('─'));
+        assert_eq!(lines.len(), 5);
+        assert!(texts(&lines[2])[0].starts_with('─'));
     }
 
     #[test]
     fn table_renders_rows() {
         let lines = render("| a | b |\n|---|---|\n| c | d |");
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 2);
         let header = joined(&lines[0]);
         assert!(header.contains("a"));
         assert!(header.contains("b"));
@@ -171,18 +188,16 @@ mod tests {
         let lines = render("[text](https://example.com)");
         assert_eq!(lines.len(), 1);
         assert_eq!(texts(&lines[0]), ["text"]);
-        assert!(
-            lines[0].spans[0]
-                .style
-                .add_modifier
-                .contains(Modifier::UNDERLINED)
-        );
+        assert!(lines[0].spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::UNDERLINED));
     }
 
     #[test]
     fn wide_chars_do_not_panic() {
         let lines = render("```rust\n// 日本語コメント\nlet 変数 = 1;\n```");
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 2);
     }
 
     #[test]
