@@ -48,7 +48,7 @@ strip = true
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-exclude = ["vendor/selune", "vendor/frameplay"]
+exclude = ["vendor/selune"]
 
 [workspace.package]
 version = "0.1.0"
