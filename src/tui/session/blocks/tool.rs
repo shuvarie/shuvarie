@@ -118,46 +118,45 @@ impl ToolBlock {
             padding_rows: 2 * u32::from(BLOCK_PADDING.1),
             tool_header_width: (self.name.chars().count() + 1) as u32
                 + UnicodeWidthStr::width(self.args.as_str()).min(120) as u32,
+            tool_rows: 1,
             ..TurnEst::default()
         };
-        let is_shell = self.name == "run_shell";
-        if self.name == "question" {
-            if self.status == ToolStatus::Running {
-                est.tool_rows += 1;
-            } else if self.expanded {
-                est.tool_rows += self.output.lines().count() as u32;
+        let output_rows = self.output.lines().count() as u32;
+
+        match self.name.as_str() {
+            "question" => {
+                if self.expanded {
+                    est.tool_rows += output_rows;
+                }
             }
-        } else if self.name == "todo" {
-            let rows = parse_items(&self.output).map_or(0, |items| items.len() as u32);
-            est.tool_rows += if self.expanded {
-                rows
-            } else {
-                collapsed_rows(rows)
-            };
-        } else {
-            let (stdout_rows, stderr_rows) = if is_shell {
-                (
-                    self.output.lines().count() as u32,
-                    self.stderr.lines().count() as u32,
-                )
-            } else {
-                (self.output.lines().count() as u32, 0)
-            };
-            est.tool_rows += if self.expanded {
-                stdout_rows
-                    .saturating_add(stderr_rows)
-                    .saturating_add(u32::from(is_shell && stdout_rows > 0 && stderr_rows > 0))
-            } else if is_shell && stderr_rows > 0 {
-                collapsed_rows(stderr_rows)
-            } else {
-                collapsed_rows(stdout_rows)
-            };
+            "todo" => {
+                let rows = parse_items(&self.output).map_or(0, |items| items.len() as u32);
+                est.tool_rows += if self.expanded {
+                    rows
+                } else {
+                    collapsed_rows(rows)
+                };
+            }
+            "run_shell" => {
+                let stderr_rows = self.stderr.lines().count() as u32;
+
+                if self.expanded {
+                    est.tool_rows += output_rows
+                        .saturating_add(stderr_rows)
+                        .saturating_add(u32::from(output_rows > 0 && stderr_rows > 0));
+                } else {
+                    collapsed_rows(stderr_rows);
+                }
+            }
+            _ if self.expanded => {
+                est.tool_rows += output_rows;
+            }
+            _ => {
+                collapsed_rows(output_rows);
+            }
         }
         if let Some(change) = &self.file_change {
             est.tool_rows += file_change_row_est(change);
-        }
-        if self.name != "question" {
-            est.tool_rows += 1;
         }
         est
     }
