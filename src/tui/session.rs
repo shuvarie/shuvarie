@@ -62,6 +62,7 @@ pub enum SessionMessage {
 enum BusyKind {
     Generating,
     Tool,
+    Waiting,
 }
 
 /// In-progress todo rows shown in the strip under the title bar; further
@@ -266,6 +267,9 @@ impl SessionScreen {
             }
             SessionMessage::QuestionAsked { id, questions } => {
                 self.question.open(id, questions);
+                self.busy = true;
+                self.busy_kind = BusyKind::Waiting;
+                self.status = Some("Waiting for answer...".to_string());
                 None
             }
             SessionMessage::Question(m) => {
@@ -273,6 +277,8 @@ impl SessionScreen {
                     match effect {
                         QuestionEffect::Answer { id, answers } => {
                             self.question.close();
+                            self.busy_kind = BusyKind::Tool;
+                            self.status = Some("Calling tool: question".to_string());
                             return Some(SessionEffect::AnswerQuestion { id, answers });
                         }
                     }
@@ -477,6 +483,7 @@ impl SessionScreen {
                 spans.push(match kind {
                     BusyKind::Generating => super::spinner::generating_spinner(),
                     BusyKind::Tool => super::spinner::tool_spinner(),
+                    BusyKind::Waiting => super::spinner::wait_spinner(),
                 });
                 spans.push(Span::raw(" "));
             }

@@ -28,6 +28,26 @@ const GENERATING_FRAMES: [&str; 18] = [
     "  ⣠⣴⣿⠟⠋  ",
 ];
 
+const WAIT_FRAMES: [&str; 17] = [
+    "⣿⣿⣿⣿⣉⣉⣉⣉⣹",
+    "⣏⣿⣿⣿⣏⣉⣉⣉⣹",
+    "⣏⣹⣿⣿⣿⣉⣉⣉⣹",
+    "⣏⣉⣿⣿⣿⣏⣉⣉⣹",
+    "⣏⣉⣹⣿⣿⣿⣉⣉⣹",
+    "⣏⣉⣉⣿⣿⣿⣏⣉⣹",
+    "⣏⣉⣉⣹⣿⣿⣿⣉⣹",
+    "⣏⣉⣉⣉⣿⣿⣿⣏⣹",
+    "⣏⣉⣉⣉⣹⣿⣿⣿⣹",
+    "⣏⣉⣉⣉⣉⣿⣿⣿⣿",
+    "⣏⣉⣉⣉⣹⣿⣿⣿⣹",
+    "⣏⣉⣉⣉⣿⣿⣿⣏⣹",
+    "⣏⣉⣉⣹⣿⣿⣿⣉⣹",
+    "⣏⣉⣹⣿⣿⣿⣉⣉⣹",
+    "⣏⣉⣿⣿⣿⣏⣉⣉⣹",
+    "⣏⣹⣿⣿⣿⣉⣉⣉⣹",
+    "⣏⣿⣿⣿⣏⣉⣉⣉⣹",
+];
+
 const TOOL_FRAMES: [&str; 28] = [
     "         ",
     "⡀       ⢀",
@@ -85,6 +105,19 @@ fn generating_frameplay() -> &'static Frameplay<&'static str> {
     })
 }
 
+fn wait_frameplay() -> &'static Frameplay<&'static str> {
+    static FP: OnceLock<Frameplay<&'static str>> = OnceLock::new();
+    FP.get_or_init(|| {
+        Frameplay::new(
+            WAIT_FRAMES,
+            FrameplayOptions {
+                frame_time_reference: FrameTimeReference::StartTime,
+                frame_rate: 14,
+            },
+        )
+    })
+}
+
 fn tool_frameplay() -> &'static Frameplay<&'static str> {
     static FP: OnceLock<Frameplay<&'static str>> = OnceLock::new();
     FP.get_or_init(|| {
@@ -117,4 +150,10 @@ pub fn generating_spinner() -> Span<'static> {
 /// The wide status-row spinner shown while a tool is running.
 pub fn tool_spinner() -> Span<'static> {
     Span::raw(*tool_frameplay().get_frame()).fg(theme::ACCENT)
+}
+
+/// The wide status-row spinner shown while a tool is blocked waiting on the
+/// user (e.g. an open `question` prompt).
+pub fn wait_spinner() -> Span<'static> {
+    Span::raw(*wait_frameplay().get_frame()).fg(theme::ACCENT)
 }

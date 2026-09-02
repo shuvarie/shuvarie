@@ -122,7 +122,9 @@ impl ToolBlock {
         };
         let is_shell = self.name == "run_shell";
         if self.name == "question" {
-            if self.expanded {
+            if self.status == ToolStatus::Running {
+                est.tool_rows += 1;
+            } else if self.expanded {
                 est.tool_rows += self.output.lines().count() as u32;
             }
         } else if self.name == "todo" {
@@ -154,7 +156,9 @@ impl ToolBlock {
         if let Some(change) = &self.file_change {
             est.tool_rows += file_change_row_est(change);
         }
-        est.tool_rows += 1;
+        if self.name != "question" {
+            est.tool_rows += 1;
+        }
         est
     }
 
@@ -245,7 +249,9 @@ impl ToolBlock {
                 }
             }
         }
-        lines.push(elapsed_line(self));
+        if self.name != "question" {
+            lines.push(elapsed_line(self));
+        }
         lines
     }
 

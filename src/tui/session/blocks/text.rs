@@ -1,6 +1,6 @@
 use ratatui::prelude::*;
 
-use crate::tui::session::segment::{Segment, BLOCK_PADDING};
+use crate::tui::session::segment::{BLOCK_PADDING, Segment};
 use crate::tui::session::virtualizer::TurnEst;
 use crate::tui::theme;
 
