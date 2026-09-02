@@ -1,16 +1,16 @@
 use std::collections::BTreeSet;
 
 use ratatui::prelude::*;
+use shuvarie_core::Role;
 use shuvarie_core::todos::parse_items;
 use shuvarie_core::tool_record::ToolRecord;
-use shuvarie_core::Role;
 use shuvarie_llm::{FileChange, PatchFileKind};
 use unicode_width::UnicodeWidthStr;
 
 use super::blocks::{
     Block, BlockMessage, ChatEnv, ReasoningBlock, ReasoningMessage, TextBlock, TextMessage,
 };
-use super::segment::{BlockAddr, HitRegion, Segment, BLOCK_PADDING};
+use super::segment::{BLOCK_PADDING, BlockAddr, HitRegion, Segment};
 
 /// Estimated row counters of one turn. Collected once (from stored session
 /// data at load, or from block state at materialization/mutation) so heights
@@ -220,6 +220,11 @@ pub struct TurnData {
     pub blocks: Option<Vec<Block>>,
     pub est: TurnEst,
     pub cache: Option<TurnCache>,
+    /// Last exactly measured layout height at a given content width. Kept
+    /// across cache invalidation and eviction so a turn's layout height never
+    /// flips back to the rough estimate — estimate↔exact flapping made the
+    /// total (and with it the scroll position) jump around while streaming.
+    measured: Option<(u16, u32)>,
     pub rev: u64,
     pub env_relevant: bool,
 }
@@ -231,6 +236,7 @@ impl TurnData {
             blocks: Some(Vec::new()),
             est: TurnEst::default(),
             cache: None,
+            measured: None,
             rev: 0,
             env_relevant: false,
         }
@@ -245,6 +251,7 @@ impl TurnData {
             env_relevant: est.tool_count > 0,
             est,
             cache: None,
+            measured: None,
             rev: 0,
         }
     }
@@ -351,14 +358,22 @@ impl TurnData {
     }
 
     /// Current layout height: exact from a fresh render cache, otherwise the
-    /// O(1) estimate from `est`.
+    /// last measurement taken at this width, otherwise the O(1) estimate.
+    /// The measurement fallback keeps heights stable when the cache is stale
+    /// (spinner tick, diagnostics pump) or evicted — only turns never
+    /// rendered at the current width use the estimate.
     pub fn height(&self, width: u16, env_rev: u64) -> u32 {
-        match &self.cache {
-            Some(cache) if cache.matches(width, self.rev, self.env_relevant, env_rev) => {
-                cache.height
-            }
-            _ => self.est.height(width),
+        if let Some(cache) = &self.cache
+            && cache.matches(width, self.rev, self.env_relevant, env_rev)
+        {
+            return cache.height;
         }
+        if let Some((measured_width, height)) = self.measured
+            && measured_width == width
+        {
+            return height;
+        }
+        self.est.height(width)
     }
 
     pub fn cache_is_stale(&self, width: u16, env_rev: u64) -> bool {
@@ -380,7 +395,11 @@ impl TurnData {
             return;
         }
         if self.cache_is_stale(width, env_rev) {
-            self.cache = render_turn_cache(self, turn_idx, flags, width, env, env_rev);
+            let cache = render_turn_cache(self, turn_idx, flags, width, env, env_rev);
+            if let Some(cache) = &cache {
+                self.measured = Some((width, cache.height));
+            }
+            self.cache = cache;
         }
     }
 

@@ -1216,6 +1216,127 @@ mod tests {
         assert_eq!(second, again, "same state renders identically");
     }
 
+    /// A session whose turns render much taller than their O(1) estimates:
+    /// single-line tool outputs that wrap over many rows and long reasoning
+    /// paragraphs. This is the shape that made estimate↔exact height flapping
+    /// visible as scroll jitter.
+    fn est_hostile_session(turns: usize) -> shuvarie_core::Session {
+        let mut session = shuvarie_core::Session::new();
+        for i in 0..turns {
+            session.push_user(format!("do task {i}"));
+            session.push_assistant(format!("done task {i}"));
+            let idx = session.messages.len() as u64 - 1;
+            session.reasoning.insert(
+                idx,
+                vec![ReasoningSegment {
+                    after_tool: 0,
+                    text: format!("thinking about task {i} ") + &"y".repeat(600),
+                    duration_ms: 0,
+                }],
+            );
+            session.tool_records.push(ToolRecord {
+                name: "run_shell".to_string(),
+                args_json: "{\"command\":\"cargo build\"}".to_string(),
+                output: "x".repeat(1200),
+                stderr: String::new(),
+                ok: true,
+                worker: None,
+                message_id: i as u64,
+                message_seq: idx,
+                file_change: None,
+                original_content: None,
+                new_content: None,
+                duration_ms: 0,
+            });
+        }
+        session
+    }
+
+    #[test]
+    fn turn_height_stays_measured_when_cache_invalidated() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::Load {
+            session: est_hostile_session(6),
+        });
+        draw(&chat, 80, 20);
+        let measured = chat.turns.borrow()[1].height(79, chat.env_rev);
+        let est = chat.turns.borrow()[1].est.height(79);
+        assert_ne!(
+            measured, est,
+            "session must be estimate-hostile for this test"
+        );
+
+        chat.update(ChatMessage::LspDiagnostics {
+            path: "src/main.rs".into(),
+            diagnostics: vec![],
+        });
+        assert_eq!(
+            chat.turns.borrow()[1].height(79, chat.env_rev),
+            measured,
+            "env bump must not flip the layout height back to the estimate"
+        );
+
+        chat.turns.borrow_mut()[1].rev += 1;
+        assert_eq!(
+            chat.turns.borrow()[1].height(79, chat.env_rev),
+            measured,
+            "rev bump must not flip the layout height back to the estimate"
+        );
+    }
+
+    #[test]
+    fn scroll_up_sticks_and_anchor_holds_while_streaming() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::Load {
+            session: est_hostile_session(30),
+        });
+        for _ in 0..3000 {
+            chat.update(ChatMessage::ScrollDown);
+        }
+        draw(&chat, 80, 20);
+        for _ in 0..10 {
+            chat.update(ChatMessage::ScrollUp);
+        }
+        draw(&chat, 80, 20);
+        assert!(
+            !chat.scroll.borrow().sticky_bottom,
+            "scroll-up disengages sticky"
+        );
+        let held = chat.scroll.borrow().offset;
+
+        for i in 0..30 {
+            chat.update(ChatMessage::TokenReceived {
+                content: format!("word{i} "),
+            });
+            chat.mark_spinner_dirty();
+            if i % 3 == 0 {
+                chat.update(ChatMessage::LspDiagnostics {
+                    path: "src/main.rs".into(),
+                    diagnostics: vec![],
+                });
+            }
+            draw(&chat, 80, 20);
+            let scroll = chat.scroll.borrow();
+            assert_eq!(
+                scroll.offset, held,
+                "frame {i}: anchor must hold the viewport while streaming"
+            );
+            assert!(
+                !scroll.sticky_bottom,
+                "frame {i}: streaming must not re-engage sticky"
+            );
+        }
+
+        for _ in 0..3000 {
+            chat.update(ChatMessage::ScrollDown);
+        }
+        draw(&chat, 80, 20);
+        assert!(
+            chat.scroll.borrow().sticky_bottom,
+            "scrolling back to the bottom re-engages sticky"
+        );
+    }
+
     fn session_with_user_turns(count: usize) -> shuvarie_core::Session {
         let mut session = shuvarie_core::Session::new();
         for i in 0..count {

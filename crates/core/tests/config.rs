@@ -245,12 +245,7 @@ fn ollama_cloud_with_key_is_connected() {
     let connections = Connections {
         providers: BTreeMap::from([(
             "cloud".to_string(),
-            ProviderConfig::new(
-                "cloud",
-                "ollama",
-                Some("ollama-key".to_string()),
-                None,
-            ),
+            ProviderConfig::new("cloud", "ollama", Some("ollama-key".to_string()), None),
         )]),
         active: Some(Active {
             provider: "cloud".to_string(),
