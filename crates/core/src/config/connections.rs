@@ -144,7 +144,7 @@ mod tests {
 
             providers {
                 provider id="67e55044-10b1-426f-9247-bb680e5fe0c8" name="Ollama Cloud" {
-                    kind "ollama-cloud"
+                    kind "ollama"
                     api-key "<API KEY>"
                     base-url "https://ollama.com"
                 }
@@ -166,7 +166,7 @@ mod tests {
             .get("67e55044-10b1-426f-9247-bb680e5fe0c8")
             .expect("cloud");
         assert_eq!(cloud.name, "Ollama Cloud");
-        assert_eq!(cloud.kind, "ollama-cloud");
+        assert_eq!(cloud.kind, "ollama");
         assert_eq!(cloud.api_key.as_deref(), Some("<API KEY>"));
         assert_eq!(cloud.base_url.as_deref(), Some("https://ollama.com"));
         let compat = parsed
@@ -250,7 +250,7 @@ mod tests {
 
             providers {
                 provider id="67e55044-10b1-426f-9247-bb680e5fe0c8" name="Ollama Cloud" {
-                    kind "ollama-cloud"
+                    kind "ollama"
                     api-key "<API KEY>"
                     base-url "https://ollama.com"
                 }
@@ -266,7 +266,7 @@ mod tests {
             .get("67e55044-10b1-426f-9247-bb680e5fe0c8")
             .expect("cloud");
         assert_eq!(cloud.name, "Ollama Cloud");
-        assert_eq!(cloud.kind, "ollama-cloud");
+        assert_eq!(cloud.kind, "ollama");
         assert_eq!(cloud.api_key.as_deref(), Some("<API KEY>"));
         assert_eq!(cloud.base_url.as_deref(), Some("https://ollama.com"));
     }
