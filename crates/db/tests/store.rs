@@ -139,10 +139,12 @@ async fn reasoning_segments_round_trip_with_positions() {
         ReasoningSegment {
             after_tool: 0,
             text: "first thoughts".to_string(),
+            duration_ms: 0,
         },
         ReasoningSegment {
             after_tool: 2,
             text: "thoughts after two tools".to_string(),
+            duration_ms: 0,
         },
     ];
     let msg = store

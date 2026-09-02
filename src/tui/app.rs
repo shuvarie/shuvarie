@@ -309,6 +309,7 @@ impl App {
                     worker,
                     file_change,
                     streams,
+                    duration_ms,
                 } => Some(AppMessage::Session(SessionMessage::Chat(
                     ChatMessage::ToolFinished {
                         name,
@@ -317,6 +318,7 @@ impl App {
                         worker,
                         file_change,
                         streams,
+                        duration_ms,
                     },
                 ))),
                 CoreEvent::ToolOutput {
@@ -335,9 +337,19 @@ impl App {
                 CoreEvent::WorkerStarted { name, args } => Some(AppMessage::Session(
                     SessionMessage::Chat(ChatMessage::WorkerStarted { name, args }),
                 )),
-                CoreEvent::WorkerFinished { name, ok, output } => Some(AppMessage::Session(
-                    SessionMessage::Chat(ChatMessage::WorkerFinished { name, ok, output }),
-                )),
+                CoreEvent::WorkerFinished {
+                    name,
+                    ok,
+                    output,
+                    duration_ms,
+                } => Some(AppMessage::Session(SessionMessage::Chat(
+                    ChatMessage::WorkerFinished {
+                        name,
+                        ok,
+                        output,
+                        duration_ms,
+                    },
+                ))),
                 CoreEvent::StreamDone { .. } => Some(AppMessage::Session(SessionMessage::Chat(
                     ChatMessage::StreamDone,
                 ))),

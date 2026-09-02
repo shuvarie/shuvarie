@@ -16,6 +16,17 @@ use shuvarie_core::DiagnosticInfo;
 use super::segment::Segment;
 use crate::tui::{spinner, theme};
 
+/// Format a duration in milliseconds for block display: seconds with one
+/// decimal below a minute, `Xm YYs` at or above it.
+pub(super) fn format_duration_ms(ms: u64) -> String {
+    if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        let total = ms / 1000;
+        format!("{}m {:02}s", total / 60, total % 60)
+    }
+}
+
 /// One chat block: a TEA model per variant for the stateful kinds, unit
 /// variants for the stateless decorations the engine synthesizes around turns.
 pub enum Block {
@@ -122,5 +133,21 @@ impl Block {
 
     pub fn is_thinking(&self) -> bool {
         matches!(self, Block::Reasoning(reasoning) if reasoning.is_thinking())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_duration_ms;
+
+    #[test]
+    fn duration_formats_seconds_and_minutes() {
+        assert_eq!(format_duration_ms(0), "0.0s");
+        assert_eq!(format_duration_ms(4500), "4.5s");
+        assert_eq!(format_duration_ms(10_300), "10.3s");
+        assert_eq!(format_duration_ms(59_900), "59.9s");
+        assert_eq!(format_duration_ms(60_000), "1m 00s");
+        assert_eq!(format_duration_ms(65_400), "1m 05s");
+        assert_eq!(format_duration_ms(133_000), "2m 13s");
     }
 }

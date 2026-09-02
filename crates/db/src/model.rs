@@ -6,6 +6,8 @@ pub struct ReasoningSegment {
     pub after_tool: u64,
     #[serde(default)]
     pub text: String,
+    #[serde(default)]
+    pub duration_ms: u64,
 }
 
 pub(crate) fn encode_reasoning(segments: &[ReasoningSegment]) -> String {
@@ -25,6 +27,7 @@ pub(crate) fn parse_reasoning(raw: &str) -> Vec<ReasoningSegment> {
     vec![ReasoningSegment {
         after_tool: 0,
         text: raw.to_string(),
+        duration_ms: 0,
     }]
 }
 
@@ -38,10 +41,12 @@ mod tests {
             ReasoningSegment {
                 after_tool: 0,
                 text: "before".to_string(),
+                duration_ms: 0,
             },
             ReasoningSegment {
                 after_tool: 2,
                 text: "after".to_string(),
+                duration_ms: 0,
             },
         ];
         let raw = encode_reasoning(&segments);
@@ -56,6 +61,7 @@ mod tests {
             vec![ReasoningSegment {
                 after_tool: 0,
                 text: raw.to_string(),
+                duration_ms: 0,
             }]
         );
     }
@@ -170,6 +176,7 @@ pub struct ToolCall {
     pub original_content: Option<String>,
     pub new_content: Option<String>,
     pub stderr: String,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, toasty::Model)]

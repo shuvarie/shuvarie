@@ -41,6 +41,7 @@ pub enum ChatMessage {
         worker: Option<String>,
         file_change: Option<FileChange>,
         streams: Option<ShellStreams>,
+        duration_ms: u64,
     },
     ToolOutput {
         tool: String,
@@ -56,6 +57,7 @@ pub enum ChatMessage {
         name: String,
         ok: bool,
         output: String,
+        duration_ms: u64,
     },
     StreamDone,
     StreamError {
@@ -228,6 +230,7 @@ impl Chat {
                 worker,
                 file_change,
                 streams,
+                duration_ms,
             } => {
                 let (display_output, display_stderr) = match streams {
                     Some(streams) => (streams.stdout, streams.stderr),
@@ -239,6 +242,7 @@ impl Chat {
                         output: display_output,
                         stderr: display_stderr,
                         file_change,
+                        duration_ms,
                     }));
                 }
                 self.mark_scroll_dirty();
@@ -269,13 +273,19 @@ impl Chat {
                 self.mark_scroll_dirty();
                 self.follow_bottom();
             }
-            ChatMessage::WorkerFinished { name, ok, output } => {
+            ChatMessage::WorkerFinished {
+                name,
+                ok,
+                output,
+                duration_ms,
+            } => {
                 if let Some(block) = self.running_tool_mut(&name, &Some(String::new())) {
                     block.update(BlockMessage::Tool(ToolMessage::Finish {
                         ok,
                         output,
                         stderr: String::new(),
                         file_change: None,
+                        duration_ms,
                     }));
                 }
                 self.mark_scroll_dirty();
@@ -733,16 +743,18 @@ fn build_turns(session: &shuvarie_core::Session) -> Vec<Turn> {
                     .map(Vec::as_slice)
                     .unwrap_or_default();
                 let mut seg_i = 0usize;
-                let drain_reasoning = |blocks: &mut Vec<Block>,
-                                       seg_i: &mut usize,
-                                       tools_done: usize| {
-                    while let Some(seg) = segments.get(*seg_i)
-                        && (seg.after_tool as usize) <= tools_done
-                    {
-                        blocks.push(Block::Reasoning(ReasoningBlock::finished(seg.text.clone())));
-                        *seg_i += 1;
-                    }
-                };
+                let drain_reasoning =
+                    |blocks: &mut Vec<Block>, seg_i: &mut usize, tools_done: usize| {
+                        while let Some(seg) = segments.get(*seg_i)
+                            && (seg.after_tool as usize) <= tools_done
+                        {
+                            blocks.push(Block::Reasoning(ReasoningBlock::finished(
+                                seg.text.clone(),
+                                seg.duration_ms,
+                            )));
+                            *seg_i += 1;
+                        }
+                    };
                 drain_reasoning(&mut blocks, &mut seg_i, 0);
                 if session.summary_seq.is_some_and(|seq| seq as usize == idx) {
                     blocks.push(Block::Summary);
@@ -753,15 +765,7 @@ fn build_turns(session: &shuvarie_core::Session) -> Vec<Turn> {
                     .filter(|record| record.message_seq as usize == idx)
                     .enumerate()
                 {
-                    blocks.push(Block::Tool(ToolBlock::from_record(
-                        record.name.clone(),
-                        record.args_json.clone(),
-                        record.output.clone(),
-                        record.stderr.clone(),
-                        record.ok,
-                        record.worker.clone(),
-                        record.file_change.clone(),
-                    )));
+                    blocks.push(Block::Tool(ToolBlock::from_record(record)));
                     drain_reasoning(&mut blocks, &mut seg_i, count + 1);
                 }
                 drain_reasoning(&mut blocks, &mut seg_i, usize::MAX);
@@ -826,6 +830,7 @@ mod tests {
             file_change: None,
             original_content: None,
             new_content: None,
+            duration_ms: 0,
         }
     }
 
@@ -882,8 +887,11 @@ mod tests {
         let done = header_text(&Block::Reasoning(block));
         assert!(done.contains("Thought"), "header: {done}");
 
-        let done = header_text(&Block::Reasoning(ReasoningBlock::finished("hmm")));
+        let done = header_text(&Block::Reasoning(ReasoningBlock::finished("hmm", 0)));
         assert!(done.contains("Thought"), "reloaded header: {done}");
+
+        let done = header_text(&Block::Reasoning(ReasoningBlock::finished("hmm", 10_300)));
+        assert!(done.contains("Thought 10.3s"), "reloaded header: {done}");
     }
 
     #[test]
@@ -942,14 +950,17 @@ mod tests {
                 ReasoningSegment {
                     after_tool: 0,
                     text: "start".to_string(),
+                    duration_ms: 0,
                 },
                 ReasoningSegment {
                     after_tool: 2,
                     text: "after two tools".to_string(),
+                    duration_ms: 0,
                 },
                 ReasoningSegment {
                     after_tool: 9,
                     text: "beyond records".to_string(),
+                    duration_ms: 0,
                 },
             ],
         );
@@ -1015,6 +1026,7 @@ mod tests {
             worker: None,
             file_change: None,
             streams: None,
+            duration_ms: 0,
         });
         chat.update(ChatMessage::StreamDone);
         chat.rebuild_scroll_view(80);

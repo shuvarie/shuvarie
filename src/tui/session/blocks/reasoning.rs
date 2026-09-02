@@ -1,16 +1,22 @@
+use std::time::Instant;
+
 use ratatui::prelude::*;
 
+use super::format_duration_ms;
 use crate::tui::session::segment::Segment;
 use crate::tui::{spinner, theme};
 
 /// Thinking/reasoning text streamed during a turn — it may appear at any
 /// position (before the reply, between tool calls). While chunks are still
-/// arriving the header shows a spinner; once thinking ends it becomes
-/// `⌥ Thought ▸`. Collapsed by default; clicking the header toggles expansion.
+/// arriving the header shows a spinner plus a live elapsed time; once thinking
+/// ends it becomes `⌥ Thought 10.3s ▸`. Collapsed by default; clicking the
+/// header toggles expansion.
 pub struct ReasoningBlock {
     text: String,
     expanded: bool,
     thinking: bool,
+    started_at: Option<Instant>,
+    duration_ms: u64,
 }
 
 impl ReasoningBlock {
@@ -20,15 +26,19 @@ impl ReasoningBlock {
             text: text.into(),
             expanded: false,
             thinking: true,
+            started_at: Some(Instant::now()),
+            duration_ms: 0,
         }
     }
 
     /// A block whose stream already ended (session reload/undo rebuilds).
-    pub fn finished(text: impl Into<String>) -> Self {
+    pub fn finished(text: impl Into<String>, duration_ms: u64) -> Self {
         Self {
             text: text.into(),
             expanded: false,
             thinking: false,
+            started_at: None,
+            duration_ms,
         }
     }
 
@@ -40,6 +50,9 @@ impl ReasoningBlock {
             }
             ReasoningMessage::Finish => {
                 let changed = self.thinking;
+                if changed && let Some(started) = self.started_at.take() {
+                    self.duration_ms = started.elapsed().as_millis() as u64;
+                }
                 self.thinking = false;
                 changed
             }
@@ -59,16 +72,26 @@ impl ReasoningBlock {
     /// address on the first segment only) and, when expanded, the body.
     pub fn view(&self) -> Vec<Segment> {
         let header = if self.thinking {
+            let ms = self
+                .started_at
+                .map(|started| started.elapsed().as_millis() as u64)
+                .unwrap_or(self.duration_ms);
             vec![
                 spinner::spinner(),
                 Span::raw(" "),
                 self.label("Thinking..."),
+                Span::raw(format!(" {}", format_duration_ms(ms)))
+                    .fg(theme::TEXT_MUTED)
+                    .italic(),
             ]
         } else {
             let arrow = if self.expanded { "▾" } else { "▸" };
             vec![
                 Span::raw("  ").fg(theme::TEXT_MUTED),
                 self.label("Thought"),
+                Span::raw(format!(" {}", format_duration_ms(self.duration_ms)))
+                    .fg(theme::TEXT_MUTED)
+                    .italic(),
                 Span::raw(format!(" {arrow}")).fg(theme::TEXT_MUTED),
             ]
         };

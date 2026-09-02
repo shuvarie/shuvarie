@@ -1,11 +1,15 @@
+use std::time::Instant;
+
 use ratatui::prelude::*;
 use serde_json::Value;
 use shuvarie_llm::{DiffLine, DiffLineKind, FileChange, PatchFileKind};
 use unicode_width::UnicodeWidthStr;
 
+use super::format_duration_ms;
 use crate::tui::session::blocks::{ChatEnv, Segment};
 use crate::tui::session::segment::BLOCK_PADDING;
 use crate::tui::{spinner, theme};
+use shuvarie_core::tool_record::ToolRecord;
 
 const COLLAPSED_OUTPUT_LINES: usize = 5;
 
@@ -26,6 +30,7 @@ pub enum ToolMessage {
         output: String,
         stderr: String,
         file_change: Option<FileChange>,
+        duration_ms: u64,
     },
 }
 
@@ -41,6 +46,8 @@ pub struct ToolBlock {
     expanded: bool,
     worker: Option<String>,
     file_change: Option<FileChange>,
+    started_at: Option<Instant>,
+    duration_ms: u64,
 }
 
 impl ToolBlock {
@@ -54,31 +61,27 @@ impl ToolBlock {
             expanded: false,
             worker,
             file_change: None,
+            started_at: Some(Instant::now()),
+            duration_ms: 0,
         }
     }
 
-    pub fn from_record(
-        name: String,
-        args: String,
-        output: String,
-        stderr: String,
-        ok: bool,
-        worker: Option<String>,
-        file_change: Option<FileChange>,
-    ) -> Self {
+    pub fn from_record(record: &ToolRecord) -> Self {
         Self {
-            name,
-            args,
-            status: if ok {
+            name: record.name.clone(),
+            args: record.args_json.clone(),
+            status: if record.ok {
                 ToolStatus::Ok
             } else {
                 ToolStatus::Failed
             },
-            output,
-            stderr,
+            output: record.output.clone(),
+            stderr: record.stderr.clone(),
             expanded: false,
-            worker,
-            file_change,
+            worker: record.worker.clone(),
+            file_change: record.file_change.clone(),
+            started_at: None,
+            duration_ms: record.duration_ms,
         }
     }
 
@@ -118,6 +121,7 @@ impl ToolBlock {
                 output,
                 stderr,
                 file_change,
+                duration_ms,
             } => {
                 if self.status != ToolStatus::Running {
                     return false;
@@ -130,6 +134,8 @@ impl ToolBlock {
                 self.output = output;
                 self.stderr = stderr;
                 self.file_change = file_change;
+                self.started_at = None;
+                self.duration_ms = duration_ms;
                 self.expanded = self.name == "question";
                 true
             }
@@ -152,28 +158,29 @@ impl ToolBlock {
         lines.push(self.header_line(inner_w));
         if self.name == "question" {
             push_question_block_lines(&mut lines, self);
-            return lines;
-        }
-        let before = lines.len();
-        push_output_rows(&mut lines, self, is_shell);
-        let has_output = lines.len() > before;
-        if let Some(change) = &self.file_change {
-            if has_output {
-                lines.push(Line::from(""));
-            }
-            push_file_change_lines(&mut lines, change);
-            let path = match change {
-                FileChange::Edit { path, .. } | FileChange::Write { path, .. } => {
-                    Some(path.as_str())
+        } else {
+            let before = lines.len();
+            push_output_rows(&mut lines, self, is_shell);
+            let has_output = lines.len() > before;
+            if let Some(change) = &self.file_change {
+                if has_output {
+                    lines.push(Line::from(""));
                 }
-                FileChange::Patch { files, .. } => {
-                    (files.len() == 1).then(|| files[0].path.as_str())
+                push_file_change_lines(&mut lines, change);
+                let path = match change {
+                    FileChange::Edit { path, .. } | FileChange::Write { path, .. } => {
+                        Some(path.as_str())
+                    }
+                    FileChange::Patch { files, .. } => {
+                        (files.len() == 1).then(|| files[0].path.as_str())
+                    }
+                };
+                if let Some(path) = path {
+                    push_diagnostics_lines(&mut lines, env, path);
                 }
-            };
-            if let Some(path) = path {
-                push_diagnostics_lines(&mut lines, env, path);
             }
         }
+        lines.push(elapsed_line(self));
         lines
     }
 
@@ -331,6 +338,29 @@ fn push_output_rows(lines: &mut Vec<Line<'static>>, tool: &ToolBlock, is_shell: 
                 .fg(theme::TEXT_MUTED)
                 .italic(),
         ));
+    }
+}
+
+/// The bottom meta row of a tool block: `Elapsed 4.5s` while the call is
+/// running (recomputed every frame from the wall clock), `Took 10.3s` once it
+/// finishes — the finished value comes from the core-measured duration.
+fn elapsed_line(tool: &ToolBlock) -> Line<'static> {
+    if tool.status == ToolStatus::Running {
+        let ms = tool
+            .started_at
+            .map(|started| started.elapsed().as_millis() as u64)
+            .unwrap_or_default();
+        Line::from(vec![
+            Span::raw("  Elapsed ").fg(theme::TEXT_MUTED).italic(),
+            Span::raw(format_duration_ms(ms)).fg(theme::ACCENT).italic(),
+        ])
+    } else {
+        Line::from(vec![
+            Span::raw("  Took ").fg(theme::TEXT_MUTED).italic(),
+            Span::raw(format_duration_ms(tool.duration_ms))
+                .fg(theme::TEXT_MUTED)
+                .italic(),
+        ])
     }
 }
 
@@ -610,4 +640,77 @@ fn read_file_range(args: &Value, output: &str) -> Option<(u64, u64)> {
         .filter(|l| !l.starts_with('(') && !l.starts_with("use "))
         .count() as u64;
     (count > 0).then_some((start, start + count - 1))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    fn block_text(block: &ToolBlock, env: &ChatEnv) -> String {
+        block
+            .block_lines(80, env)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.clone())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn running_block_shows_live_elapsed() {
+        let env = ChatEnv {
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let block = ToolBlock::new("run_shell", r#"{"command":"ls"}"#.to_string(), None);
+        let text = block_text(&block, &env);
+        assert!(text.contains("Elapsed "), "header/body: {text}");
+        assert!(!text.contains("Took "));
+    }
+
+    #[test]
+    fn finished_block_shows_took_with_core_duration() {
+        let env = ChatEnv {
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let mut block = ToolBlock::new("run_shell", r#"{"command":"ls"}"#.to_string(), None);
+        block.update(ToolMessage::Finish {
+            ok: true,
+            output: "done".to_string(),
+            stderr: String::new(),
+            file_change: None,
+            duration_ms: 10_300,
+        });
+        let text = block_text(&block, &env);
+        assert!(text.contains("Took 10.3s"), "header/body: {text}");
+        assert!(!text.contains("Elapsed "));
+    }
+
+    #[test]
+    fn reloaded_block_shows_persisted_duration() {
+        let env = ChatEnv {
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let block = ToolBlock::from_record(&ToolRecord {
+            name: "grep".to_string(),
+            args_json: "{}".to_string(),
+            output: String::new(),
+            stderr: String::new(),
+            ok: true,
+            worker: None,
+            message_id: 1,
+            message_seq: 1,
+            file_change: None,
+            original_content: None,
+            new_content: None,
+            duration_ms: 65_400,
+        });
+        let text = block_text(&block, &env);
+        assert!(text.contains("Took 1m 05s"), "header/body: {text}");
+    }
 }

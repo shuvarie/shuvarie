@@ -791,6 +791,13 @@ struct TurnState {
     tool_records: Vec<crate::tool_record::ToolRecord>,
 }
 
+/// A tool call whose result has not arrived yet: the serialized args plus the
+/// moment the call started, so the finished call can record its duration.
+struct PendingTool {
+    args_json: String,
+    started: std::time::Instant,
+}
+
 fn title_for(content: &str) -> String {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -917,6 +924,7 @@ async fn redo_turn(store: &mut Store, session_id: uuid::Uuid) -> Result<bool, St
                 &fc_json,
                 original.as_deref(),
                 new.as_deref(),
+                tc.duration_ms,
             )
             .await;
     }
@@ -1225,10 +1233,13 @@ async fn stream_stream_to_events(
     let mut assistant_message_id: Option<u64> = None;
     let mut assistant_seq: u64 = 0;
     let mut pending_reasoning: Vec<shuvarie_db::ReasoningSegment> = Vec::new();
+    let mut reasoning_started: Option<std::time::Instant> = None;
     let mut pending_text = String::new();
     let mut tool_seq: u64 = 0;
     let mut turn_tool_records: Vec<crate::tool_record::ToolRecord> = Vec::new();
-    let mut pending_tool_args: std::collections::HashMap<String, (String, Option<String>)> =
+    let mut pending_tool_args: std::collections::HashMap<String, PendingTool> =
+        std::collections::HashMap::new();
+    let mut pending_worker_starts: std::collections::HashMap<String, std::time::Instant> =
         std::collections::HashMap::new();
     let mut outcome = StreamOutcome::Finished;
 
@@ -1245,14 +1256,24 @@ async fn stream_stream_to_events(
             shuvarie_llm::StreamItem::Delta { .. } => {}
             shuvarie_llm::StreamItem::Reasoning { text } if !text.is_empty() => {
                 let after_tool = turn_tool_records.len() as u64;
+                let now = std::time::Instant::now();
                 match pending_reasoning.last_mut() {
                     Some(segment) if segment.after_tool == after_tool => {
                         segment.text.push_str(&text);
                     }
-                    _ => pending_reasoning.push(shuvarie_db::ReasoningSegment {
-                        after_tool,
-                        text: text.clone(),
-                    }),
+                    _ => {
+                        pending_reasoning.push(shuvarie_db::ReasoningSegment {
+                            after_tool,
+                            text: text.clone(),
+                            duration_ms: 0,
+                        });
+                        reasoning_started = Some(now);
+                    }
+                }
+                if let (Some(segment), Some(started)) =
+                    (pending_reasoning.last_mut(), reasoning_started)
+                {
+                    segment.duration_ms = started.elapsed().as_millis() as u64;
                 }
                 {
                     let mut ts = turn_state.lock().await;
@@ -1266,7 +1287,13 @@ async fn stream_stream_to_events(
             shuvarie_llm::StreamItem::ToolStart { name, args, worker } => {
                 let args_json = args.to_string();
                 let key = format!("{}:{:?}", name, worker);
-                pending_tool_args.insert(key, (args_json, worker.clone()));
+                pending_tool_args.insert(
+                    key,
+                    PendingTool {
+                        args_json,
+                        started: std::time::Instant::now(),
+                    },
+                );
                 ensure_assistant_row(
                     &mut assistant_message_id,
                     &mut assistant_seq,
@@ -1299,10 +1326,13 @@ async fn stream_stream_to_events(
                     None => (output.clone(), String::new()),
                 };
                 let key = format!("{}:{:?}", name, worker);
-                let args_json = pending_tool_args
-                    .remove(&key)
-                    .map(|(a, _)| a)
-                    .unwrap_or_default();
+                let (args_json, duration_ms) = match pending_tool_args.remove(&key) {
+                    Some(pending) => (
+                        pending.args_json,
+                        pending.started.elapsed().as_millis() as u64,
+                    ),
+                    None => (String::new(), 0),
+                };
                 let worker_name = worker.as_deref();
                 if let Some(msg_id) = assistant_message_id {
                     let session_id = session.lock().await.id;
@@ -1321,6 +1351,7 @@ async fn stream_stream_to_events(
                                 &fc_json,
                                 original.as_deref(),
                                 new.as_deref(),
+                                duration_ms,
                             )
                             .await;
                     }
@@ -1338,6 +1369,7 @@ async fn stream_stream_to_events(
                     file_change: file_change.clone(),
                     original_content: original.clone(),
                     new_content: new.clone(),
+                    duration_ms,
                 });
                 {
                     let mut ts = turn_state.lock().await;
@@ -1351,15 +1383,26 @@ async fn stream_stream_to_events(
                         worker,
                         file_change,
                         streams,
+                        duration_ms,
                     })
                     .await;
             }
             shuvarie_llm::StreamItem::WorkerStart { name, args } => {
+                pending_worker_starts.insert(name.clone(), std::time::Instant::now());
                 let _ = event_tx.send(Event::WorkerStarted { name, args }).await;
             }
             shuvarie_llm::StreamItem::WorkerResult { name, output, ok } => {
+                let duration_ms = pending_worker_starts
+                    .remove(&name)
+                    .map(|started| started.elapsed().as_millis() as u64)
+                    .unwrap_or_default();
                 let _ = event_tx
-                    .send(Event::WorkerFinished { name, ok, output })
+                    .send(Event::WorkerFinished {
+                        name,
+                        ok,
+                        output,
+                        duration_ms,
+                    })
                     .await;
             }
             shuvarie_llm::StreamItem::Done { text, usage } => {

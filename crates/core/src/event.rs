@@ -45,6 +45,7 @@ pub enum Event {
         worker: Option<String>,
         file_change: Option<FileChange>,
         streams: Option<ShellStreams>,
+        duration_ms: u64,
     },
     ToolOutput {
         tool: String,
@@ -60,6 +61,7 @@ pub enum Event {
         name: String,
         ok: bool,
         output: String,
+        duration_ms: u64,
     },
     StreamDone {
         text: String,

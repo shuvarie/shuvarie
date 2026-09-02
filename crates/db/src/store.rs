@@ -64,6 +64,7 @@ pub struct StoredToolCall {
     pub file_change_json: String,
     pub original_content: Option<String>,
     pub new_content: Option<String>,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +140,7 @@ impl From<ToolCall> for StoredToolCall {
             file_change_json: t.file_change_json,
             original_content: t.original_content,
             new_content: t.new_content,
+            duration_ms: t.duration_ms,
         }
     }
 }
@@ -413,6 +415,7 @@ impl Store {
         file_change_json: &str,
         original_content: Option<&str>,
         new_content: Option<&str>,
+        duration_ms: u64,
     ) -> Result<u64> {
         let tc = toasty::create!(ToolCall {
             session_id,
@@ -427,6 +430,7 @@ impl Store {
             file_change_json: file_change_json.to_string(),
             original_content: original_content.map(|s| s.to_string()),
             new_content: new_content.map(|s| s.to_string()),
+            duration_ms,
         })
         .exec(&mut self.db)
         .await
@@ -853,6 +857,8 @@ struct SerializableToolCall {
     file_change_json: String,
     original_content: Option<String>,
     new_content: Option<String>,
+    #[serde(default)]
+    duration_ms: u64,
 }
 
 impl From<&StoredToolCall> for SerializableToolCall {
@@ -867,6 +873,7 @@ impl From<&StoredToolCall> for SerializableToolCall {
             file_change_json: t.file_change_json.clone(),
             original_content: t.original_content.clone(),
             new_content: t.new_content.clone(),
+            duration_ms: t.duration_ms,
         }
     }
 }
@@ -942,6 +949,7 @@ fn deserialize_tool_calls(json: &str) -> Vec<StoredToolCall> {
             file_change_json: e.file_change_json,
             original_content: e.original_content,
             new_content: e.new_content,
+            duration_ms: e.duration_ms,
         })
         .collect()
 }

@@ -539,6 +539,7 @@ async fn reload_reconstructs_tool_records_at_dense_message_indices() {
             "",
             None,
             None,
+            0,
         )
         .await
         .unwrap();
@@ -572,7 +573,7 @@ async fn reload_after_redo_maps_tools_to_new_dense_indices() {
         .unwrap();
     store
         .append_tool_call(
-            sid, first.id, 0, "grep", "{}", "out", "", true, None, "", None, None,
+            sid, first.id, 0, "grep", "{}", "out", "", true, None, "", None, None, 0,
         )
         .await
         .unwrap();
@@ -599,6 +600,7 @@ async fn reload_after_redo_maps_tools_to_new_dense_indices() {
             "",
             None,
             None,
+            0,
         )
         .await
         .unwrap();

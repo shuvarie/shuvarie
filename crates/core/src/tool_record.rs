@@ -14,6 +14,7 @@ pub struct ToolRecord {
     pub file_change: Option<FileChange>,
     pub original_content: Option<String>,
     pub new_content: Option<String>,
+    pub duration_ms: u64,
 }
 
 impl ToolRecord {
@@ -35,6 +36,7 @@ impl ToolRecord {
             file_change,
             original_content: tc.original_content,
             new_content: tc.new_content,
+            duration_ms: tc.duration_ms,
         }
     }
 }
