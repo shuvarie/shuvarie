@@ -231,7 +231,7 @@ impl HistorySearch {
         } else if self.loading {
             Paragraph::new(Line::from(vec![
                 super::spinner::spinner(),
-                Span::raw(" searching…").fg(theme::TEXT_MUTED),
+                Span::raw(" Searching...").fg(theme::TEXT_MUTED),
             ]))
         } else if self.query.value.is_empty() {
             Paragraph::new("type to search all sessions").fg(theme::TEXT_MUTED)

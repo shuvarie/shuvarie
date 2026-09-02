@@ -458,7 +458,7 @@ impl AddProviderForm {
         );
 
         self.search
-            .view(frame, search_area, "Type to filter providers…");
+            .view(frame, search_area, "Type to filter providers");
 
         let offset = scroll_offset_for(
             self.kind_selected,

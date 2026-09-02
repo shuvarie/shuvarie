@@ -81,7 +81,7 @@ pub struct SessionScreen {
 impl SessionScreen {
     pub fn new() -> Self {
         Self {
-            input: TextArea::with_max_height("Type a message…", 8),
+            input: TextArea::with_max_height("Type a message", 8),
             question: QuestionUI::new(),
             slash: SlashMenu::new(),
             chat: chat::Chat::new(),
@@ -180,7 +180,7 @@ impl SessionScreen {
                             });
                             self.busy = true;
                             self.busy_kind = BusyKind::Generating;
-                            self.status = Some("thinking…".to_string());
+                            self.status = Some("Thinking...".to_string());
                             self.sync_slash();
                             return Some(SessionEffect::SendMessage { content });
                         }
@@ -317,22 +317,22 @@ impl SessionScreen {
             ChatMessage::TokenReceived { .. } => {
                 self.busy = true;
                 self.busy_kind = BusyKind::Generating;
-                self.status = Some("streaming…".to_string());
+                self.status = Some("Streaming...".to_string());
             }
             ChatMessage::ReasoningReceived { .. } => {
                 self.busy = true;
                 self.busy_kind = BusyKind::Generating;
-                self.status = Some("thinking…".to_string());
+                self.status = Some("Thinking...".to_string());
             }
             ChatMessage::ToolStarted { name, .. } => {
                 self.busy = true;
                 self.busy_kind = BusyKind::Tool;
-                self.status = Some(format!("tool: {name}"));
+                self.status = Some(format!("Calling tool: {name}"));
             }
             ChatMessage::WorkerStarted { name, .. } => {
                 self.busy = true;
                 self.busy_kind = BusyKind::Tool;
-                self.status = Some(format!("worker: {name}"));
+                self.status = Some(format!("Spawned worker: {name}"));
             }
             ChatMessage::ToolFinished { .. } | ChatMessage::WorkerFinished { .. } => {
                 self.status = None;
@@ -413,7 +413,7 @@ impl SessionScreen {
 
         let status = match self.status.as_deref() {
             Some(status) => Some((status, self.busy_kind)),
-            None if self.busy => Some(("working…", BusyKind::Tool)),
+            None if self.busy => Some(("Working...", BusyKind::Tool)),
             None => None,
         };
         if let Some((status, kind)) = status {

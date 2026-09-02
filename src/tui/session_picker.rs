@@ -207,7 +207,7 @@ impl SessionPicker {
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
                     super::spinner::spinner(),
-                    Span::raw(" loading sessions…").fg(theme::TEXT_MUTED),
+                    Span::raw(" Loading sessions...").fg(theme::TEXT_MUTED),
                 ])),
                 list_area,
             );

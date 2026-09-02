@@ -168,7 +168,7 @@ impl CommandMenu {
             Layout::vertical([Length(1), Min(0), Length(1)]).areas(inner);
 
         self.search
-            .view(frame, input_area, "Type to search commands…");
+            .view(frame, input_area, "Type to search commands");
 
         let offset = scroll_offset_for(
             self.selected,

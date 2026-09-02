@@ -96,7 +96,7 @@ impl Block {
             Block::Working => vec![Segment::plain(vec![Line::from(vec![
                 spinner::spinner(),
                 Span::raw(" "),
-                Span::raw("(working…)").fg(theme::TEXT_MUTED),
+                Span::raw("(Working...)").fg(theme::TEXT_MUTED),
             ])])],
             Block::ToolOnlyNote => vec![Segment::plain(vec![Line::from(
                 Span::raw("(tool output only — no text reply)").fg(theme::TEXT_MUTED),

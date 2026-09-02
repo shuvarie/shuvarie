@@ -337,7 +337,7 @@ fn push_output_rows(lines: &mut Vec<Line<'static>>, tool: &ToolBlock, is_shell: 
 fn push_question_block_lines(lines: &mut Vec<Line<'static>>, tool: &ToolBlock) {
     if tool.status == ToolStatus::Running {
         lines.push(Line::from(
-            Span::raw("  asking…").fg(theme::TEXT_MUTED).italic(),
+            Span::raw("  Asking...").fg(theme::TEXT_MUTED).italic(),
         ));
         return;
     }

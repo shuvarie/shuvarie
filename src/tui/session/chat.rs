@@ -807,9 +807,9 @@ mod tests {
                 .join("\n")
         };
         let thinking = render(&chat);
-        assert!(thinking.contains("thinking…"));
+        assert!(thinking.contains("Thinking..."));
         assert!(
-            !thinking.contains("(working…)",),
+            !thinking.contains("(Working...)",),
             "no placeholder while thinking"
         );
 
@@ -819,14 +819,14 @@ mod tests {
             worker: None,
         });
         let tool_only = render(&chat);
-        assert!(tool_only.contains("(working…)"));
+        assert!(tool_only.contains("(Working...)"));
     }
 
     #[test]
     fn thinking_header_shows_spinner_then_thought() {
         let block = ReasoningBlock::new("hmm");
         let thinking = header_text(&Block::Reasoning(block));
-        assert!(thinking.contains("thinking…"), "header: {thinking}");
+        assert!(thinking.contains("Thinking..."), "header: {thinking}");
         assert!(!thinking.contains("Thought"));
 
         let mut block = ReasoningBlock::new("hmm");
@@ -868,7 +868,7 @@ mod tests {
             content: "again".into(),
         });
         let turn = chat.in_flight.as_ref().unwrap();
-        assert!(header_text(&turn.blocks[4]).contains("thinking…"));
+        assert!(header_text(&turn.blocks[4]).contains("Thinking..."));
     }
 
     #[test]

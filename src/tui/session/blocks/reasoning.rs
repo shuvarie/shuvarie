@@ -59,11 +59,11 @@ impl ReasoningBlock {
     /// address on the first segment only) and, when expanded, the body.
     pub fn view(&self) -> Vec<Segment> {
         let header = if self.thinking {
-            vec![spinner::spinner(), Span::raw(" "), self.label("thinking…")]
+            vec![spinner::spinner(), Span::raw(" "), self.label("Thinking...")]
         } else {
             let arrow = if self.expanded { "▾" } else { "▸" };
             vec![
-                Span::raw("⌥ ").fg(theme::TEXT_MUTED),
+                Span::raw("  ").fg(theme::TEXT_MUTED),
                 self.label("Thought"),
                 Span::raw(format!(" {arrow}")).fg(theme::TEXT_MUTED),
             ]
