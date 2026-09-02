@@ -50,7 +50,7 @@ fn frameplay() -> &'static Frameplay<&'static str> {
             FRAMES,
             FrameplayOptions {
                 frame_time_reference: FrameTimeReference::StartTime,
-                frame_rate: 10,
+                frame_rate: 8,
             },
         )
     })
