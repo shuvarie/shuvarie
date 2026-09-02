@@ -74,9 +74,11 @@ fn frame_budget(frame_rate: u32) -> Option<Duration> {
 
 /// Helper function for rendering TUI and handling errors.
 ///
-/// Core events are coalesced: after a core event, all already-queued core
-/// events are drained and applied, then a frame is drawn at most once per
-/// `frame_budget`. Terminal events draw immediately to keep input snappy.
+/// All events flow through one scheduler: each wake applies the event (core
+/// events are drained as a batch) and then either draws — when the frame
+/// budget has elapsed — or arms a deadline at `last_draw + budget` so further
+/// events coalesce into the pending frame. Terminal input outranks core
+/// events, and input latency is bounded by one frame budget.
 async fn render_tui<B>(
     mut app: App,
     rat: &mut ratatui::Terminal<B>,
@@ -89,7 +91,7 @@ where
     io::Error: From<<B as Backend>::Error>,
 {
     let mut last_draw: Instant;
-    // A pending frame deadline armed when a core event arrived too soon after
+    // A pending frame deadline armed when an event arrived too soon after
     // the last draw. `None` means no frame is pending.
     let mut frame_deadline: Option<tokio::time::Instant> = None;
     // Drives spinner animation when any in-progress indicator is active.
@@ -102,8 +104,7 @@ where
         last_draw = Instant::now();
 
         'event_listening: loop {
-            // Apply one event, or flush a pending frame deadline.
-            let (is_terminal, changed) = tokio::select! {
+            let changed = tokio::select! {
                 biased; // cheap branches first
                 // Flush the armed frame timer: a coalesced frame is due.
                 // The `if` guard only disables polling — the future
@@ -122,26 +123,26 @@ where
                 // Spinner tick: redraw when an in-progress indicator is active.
                 _ = spinner_tick.tick(), if app.has_active_spinner() => {
                     app.mark_spinners_dirty();
-                    frame_deadline = None;
-                    break 'event_listening;
+                    true
                 }
-                // Terminal event — always draw immediately when it changes state.
+                // Terminal event — draws under the same frame budget as core
+                // events; when idle the budget has already elapsed, so keys
+                // still render immediately.
                 ev = event_stream.next() => {
                     let Some(ev_result) = ev else { break 'render_loop Ok(app.session.session_id); };
                     let msg = app.map_event(Event::Terminal(ev_result?));
-                    (true, apply_msg(&mut app, msg))
+                    apply_msg(&mut app, msg)
                 }
-                // Core event — coalesce.
+                // Core event — drain all already-queued core events as one batch.
                 ev = event_rx.recv() => {
                     let Some(ev) = ev else { break 'render_loop Ok(app.session.session_id); };
                     let msg = app.map_event(Event::Core(ev));
                     let mut changed = apply_msg(&mut app, msg);
-                    // Drain all already-queued core events without blocking.
                     while let Ok(ev) = event_rx.try_recv() {
                         let msg = app.map_event(Event::Core(ev));
                         changed |= apply_msg(&mut app, msg);
                     }
-                    (false, changed)
+                    changed
                 }
             };
 
@@ -154,30 +155,24 @@ where
                 continue;
             }
 
-            if is_terminal {
-                // Terminal input: draw immediately for responsiveness.
-                frame_deadline = None;
-                break 'event_listening;
-            }
-
-            // Core event: respect the frame budget.
+            // One draw decision for every event kind.
             match frame_budget {
                 None => {
-                    // No cap — draw now.
+                    // No cap — draw every state change.
                     frame_deadline = None;
                     break 'event_listening;
                 }
                 Some(budget) => {
-                    let elapsed = last_draw.elapsed();
-                    if elapsed >= budget {
-                        // Budget already satisfied — draw now.
+                    if last_draw.elapsed() >= budget {
+                        // Budget satisfied — draw now.
                         frame_deadline = None;
                         break 'event_listening;
-                    } else {
-                        // Arm a deadline and keep coalescing until it fires.
-                        frame_deadline = Some(tokio::time::Instant::now() + (budget - elapsed));
-                        // Stay in the listening loop to collect more events.
                     }
+                    // Arm a deadline at the earliest frame the budget allows
+                    // and keep coalescing events until it fires. The deadline
+                    // anchors on the last draw, so re-arming during a burst
+                    // never pushes it later.
+                    frame_deadline = Some(tokio::time::Instant::from_std(last_draw + budget));
                 }
             }
         }

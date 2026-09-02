@@ -314,6 +314,9 @@ impl Chat {
                 } else {
                     self.lsp_diagnostics.insert(path, diagnostics);
                 }
+                // Diagnostics feed the block view env, so committed tool
+                // blocks re-render too.
+                self.mark_committed_dirty();
                 self.mark_scroll_dirty();
             }
             ChatMessage::ScrollUp => {
@@ -468,7 +471,9 @@ impl Chat {
                 .is_some_and(|block| block.update(BlockMessage::Toggle))
         };
         if changed {
-            self.mark_committed_dirty();
+            if addr.turn < self.turns.len() {
+                self.mark_committed_dirty();
+            }
             self.mark_scroll_dirty();
         }
     }
@@ -551,8 +556,35 @@ impl Chat {
         segments
     }
 
+    /// Paint `segments` into `sv` from `start_y`, bounded by `total_height`,
+    /// recording hit regions as they are stamped.
+    fn paint_segments(
+        segments: &[Segment],
+        sv: &mut ScrollView,
+        start_y: u16,
+        total_height: u16,
+        content_width: u16,
+        regions: &mut Vec<HitRegion>,
+    ) {
+        let mut y = start_y;
+        for segment in segments {
+            let h = (segment.measure(content_width) as u16).min(total_height.saturating_sub(y));
+            if h == 0 {
+                continue;
+            }
+            segment.view(sv, y, h, content_width, regions);
+            y = y.saturating_add(h);
+        }
+    }
+
+    /// Rebuild the scroll view contents: the committed buffer only re-renders
+    /// when history changed; the in-flight tail re-renders on every
+    /// scroll-dirty frame — in place into the cached combined buffer when its
+    /// height is unchanged (no re-allocation, no committed cell copy), and via
+    /// a full rebuild when the tail height changed or history was rebuilt.
     fn rebuild_scroll_view(&self, content_width: u16) {
-        if self.committed_dirty.replace(false) {
+        let committed_was_dirty = self.committed_dirty.replace(false);
+        if committed_was_dirty {
             let mut segments: Vec<Segment> = Vec::new();
             for (turn_idx, turn) in self.turns.iter().enumerate() {
                 segments.extend(self.turn_segments(turn, turn_idx, false, content_width));
@@ -563,15 +595,7 @@ impl Chat {
             let mut sv = ScrollView::new(Size::new(content_width, total))
                 .scrollbars_visibility(ScrollbarVisibility::Never);
             let mut regions = Vec::new();
-            let mut y: u16 = 0;
-            for segment in &segments {
-                let h = (segment.measure(content_width) as u16).min(total.saturating_sub(y));
-                if h == 0 {
-                    continue;
-                }
-                segment.view(&mut sv, y, h, content_width, &mut regions);
-                y = y.saturating_add(h);
-            }
+            Self::paint_segments(&segments, &mut sv, 0, total, content_width, &mut regions);
             *self.committed_scroll.borrow_mut() = sv;
             *self.committed_regions.borrow_mut() = regions;
         }
@@ -590,35 +614,59 @@ impl Chat {
         let tail_total =
             tail_total.min((u16::MAX as usize).saturating_sub(committed_height as usize)) as u16;
         let total_height = committed_height.saturating_add(tail_total);
-        let mut scroll_view = ScrollView::new(Size::new(content_width, total_height))
-            .scrollbars_visibility(ScrollbarVisibility::Never);
-
-        {
-            let src = committed_scroll.buf();
-            let dst = scroll_view.buf_mut();
-            for y in 0..committed_height {
-                for x in 0..content_width {
-                    dst[(x, y)] = src[(x, y)].clone();
-                }
-            }
-        }
+        let tail_height_unchanged = self.scroll_view.borrow().size().height == total_height;
 
         let mut tail_regions = Vec::new();
-        let mut y = committed_height;
-        for segment in &tail_segments {
-            let h = (segment.measure(content_width) as u16).min(total_height.saturating_sub(y));
-            if h == 0 {
-                continue;
+        if !committed_was_dirty && tail_height_unchanged {
+            // Only the in-flight tail changed: clear the stale tail rows and
+            // repaint them into the cached combined buffer, skipping the
+            // buffer re-allocation and the committed cell copy.
+            let mut sv = self.scroll_view.borrow_mut();
+            {
+                let buf = sv.buf_mut();
+                for y in committed_height..total_height {
+                    for x in 0..content_width {
+                        buf[(x, y)].reset();
+                    }
+                }
             }
-            segment.view(&mut scroll_view, y, h, content_width, &mut tail_regions);
-            y = y.saturating_add(h);
+            Self::paint_segments(
+                &tail_segments,
+                &mut sv,
+                committed_height,
+                total_height,
+                content_width,
+                &mut tail_regions,
+            );
+        } else {
+            let mut scroll_view = ScrollView::new(Size::new(content_width, total_height))
+                .scrollbars_visibility(ScrollbarVisibility::Never);
+
+            {
+                let src = committed_scroll.buf();
+                let dst = scroll_view.buf_mut();
+                for y in 0..committed_height {
+                    for x in 0..content_width {
+                        dst[(x, y)] = src[(x, y)].clone();
+                    }
+                }
+            }
+
+            Self::paint_segments(
+                &tail_segments,
+                &mut scroll_view,
+                committed_height,
+                total_height,
+                content_width,
+                &mut tail_regions,
+            );
+
+            *self.scroll_view.borrow_mut() = scroll_view;
         }
 
         let mut regions = self.committed_regions.borrow().clone();
         regions.append(&mut tail_regions);
         *self.hit_regions.borrow_mut() = regions;
-
-        *self.scroll_view.borrow_mut() = scroll_view;
     }
 
     fn render_scrollbar(
@@ -910,5 +958,78 @@ mod tests {
         let turns = build_turns(&session);
         assert_eq!(block_tags(&turns[1]), vec!["R", "T", "T", "R", "R", "X"]);
         assert!(header_text(&turns[1].blocks[0]).contains("Thought"));
+    }
+
+    #[test]
+    fn in_place_tail_rebuild_matches_full_rebuild() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "make it so".into(),
+        });
+        chat.rebuild_scroll_view(80);
+
+        chat.update(ChatMessage::TokenReceived {
+            content: "hello".into(),
+        });
+        chat.rebuild_scroll_view(80);
+
+        let total = chat.scroll_view.borrow().size().height;
+        chat.scroll_view.borrow_mut().buf_mut()[(0, total - 1)].set_symbol("ZZZZZ");
+
+        assert!(!chat.committed_dirty.get());
+        chat.update(ChatMessage::TokenReceived {
+            content: " world".into(),
+        });
+        chat.rebuild_scroll_view(80);
+
+        let in_place = chat.scroll_view.borrow().buf().clone();
+        let regions = chat.hit_regions.borrow().len();
+
+        chat.committed_dirty.set(true);
+        chat.rebuild_scroll_view(80);
+
+        assert_eq!(
+            chat.scroll_view.borrow().size().height,
+            total,
+            "tail height must stay unchanged for the in-place path"
+        );
+        assert_eq!(&in_place, chat.scroll_view.borrow().buf());
+        assert_eq!(regions, chat.hit_regions.borrow().len());
+    }
+
+    #[test]
+    fn diagnostics_update_rebuilds_committed_rows() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "check".into(),
+        });
+        chat.update(ChatMessage::ToolStarted {
+            name: "edit_file".into(),
+            args: serde_json::json!({}),
+            worker: None,
+        });
+        chat.update(ChatMessage::ToolFinished {
+            name: "edit_file".into(),
+            ok: true,
+            output: String::new(),
+            worker: None,
+            file_change: None,
+            streams: None,
+        });
+        chat.update(ChatMessage::StreamDone);
+        chat.rebuild_scroll_view(80);
+
+        chat.scroll_view.borrow_mut().buf_mut()[(0, 0)].set_symbol("ZZZZZ");
+
+        chat.update(ChatMessage::LspDiagnostics {
+            path: "src/lib.rs".into(),
+            diagnostics: vec![],
+        });
+        chat.rebuild_scroll_view(80);
+
+        let after = chat.scroll_view.borrow().buf().clone();
+        chat.committed_dirty.set(true);
+        chat.rebuild_scroll_view(80);
+        assert_eq!(&after, chat.scroll_view.borrow().buf());
     }
 }
