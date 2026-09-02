@@ -106,7 +106,7 @@ impl ReasoningBlock {
                     .italic(),
             ]
         } else {
-            let arrow = if self.expanded { "▾" } else { "▸" };
+            let arrow = if self.expanded { "v" } else { ">" };
             vec![
                 Span::raw("  ").fg(theme::TEXT_MUTED),
                 self.label("Thought"),
