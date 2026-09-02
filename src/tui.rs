@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use ratatui::prelude::*;
-use termina::{EventStream, PlatformTerminal, Terminal as _};
+use termina::{EventStream, PlatformTerminal, Terminal};
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use shuvarie_core::{Command, Config, Connections, Event as CoreEvent};
