@@ -3,6 +3,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph};
 use shuvarie_llm::TokenUsage;
 use termina::event::{KeyCode, KeyEvent};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::tui::utils::{alt, ctrl};
 
@@ -63,8 +64,13 @@ enum BusyKind {
     Tool,
 }
 
-/// The session screen: sidebar, chat history pane (a [`chat::Chat`] TEA
-/// model), input, question prompt, slash menu, status row, and footer.
+/// In-progress todo rows shown in the strip under the title bar; further
+/// items collapse into an overflow hint row.
+const MAX_WORKING_ROWS: usize = 3;
+
+/// The session screen: sidebar, title bar with the working-todos strip, chat
+/// history pane (a [`chat::Chat`] TEA model), input, question prompt, slash
+/// menu, status row, and footer.
 pub struct SessionScreen {
     pub input: TextArea,
     pub question: QuestionUI,
@@ -77,6 +83,7 @@ pub struct SessionScreen {
     pub session_id: Option<uuid::Uuid>,
     pub session_title: Option<String>,
     pub error: Option<String>,
+    working_todos: Vec<shuvarie_core::todos::TodoItem>,
 }
 
 impl SessionScreen {
@@ -93,6 +100,7 @@ impl SessionScreen {
             session_id: None,
             session_title: None,
             error: None,
+            working_todos: Vec::new(),
         }
     }
 
@@ -282,8 +290,7 @@ impl SessionScreen {
                     usage: TokenUsage::default(),
                     cost: 0.0,
                 });
-                self.sidebar
-                    .update(SidebarMessage::SetTodos { done: 0, total: 0 });
+                self.sync_todos(Vec::new());
                 None
             }
             SessionMessage::Loaded { id, title, session } => {
@@ -293,10 +300,7 @@ impl SessionScreen {
                 self.status = None;
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
-                self.sidebar.update(SidebarMessage::SetTodos {
-                    done: todo_counts(&session).0,
-                    total: todo_counts(&session).1,
-                });
+                self.sync_todos(shuvarie_core::todos::replay(&session.tool_records));
                 self.chat.update(ChatMessage::Load { session });
                 None
             }
@@ -304,10 +308,7 @@ impl SessionScreen {
                 let (usage, cost) = usage_of(&session);
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
-                self.sidebar.update(SidebarMessage::SetTodos {
-                    done: todo_counts(&session).0,
-                    total: todo_counts(&session).1,
-                });
+                self.sync_todos(shuvarie_core::todos::replay(&session.tool_records));
                 self.chat.update(ChatMessage::TurnReverted { session });
                 None
             }
@@ -315,10 +316,7 @@ impl SessionScreen {
                 let (usage, cost) = usage_of(&session);
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
-                self.sidebar.update(SidebarMessage::SetTodos {
-                    done: todo_counts(&session).0,
-                    total: todo_counts(&session).1,
-                });
+                self.sync_todos(shuvarie_core::todos::replay(&session.tool_records));
                 self.chat.update(ChatMessage::TurnRestored { session });
                 None
             }
@@ -354,7 +352,7 @@ impl SessionScreen {
             } => {
                 self.status = None;
                 if name == "todo" && *ok {
-                    self.sync_todo_counts(output);
+                    self.sync_todo_output(output);
                 }
             }
             ChatMessage::WorkerFinished { .. } => {
@@ -376,14 +374,23 @@ impl SessionScreen {
         }
     }
 
-    /// Parse the finished `todo` tool call's list output into sidebar counts.
-    fn sync_todo_counts(&mut self, output: &str) {
-        let Some(items) = shuvarie_core::todos::parse_items(output) else {
-            return;
-        };
+    /// Apply a full todo list: sidebar counts plus the working-items strip
+    /// (the in-progress items shown under the title bar).
+    fn sync_todos(&mut self, items: Vec<shuvarie_core::todos::TodoItem>) {
         let (done, total) = shuvarie_core::todos::done_total(&items);
         self.sidebar
             .update(SidebarMessage::SetTodos { done, total });
+        self.working_todos = items
+            .into_iter()
+            .filter(|item| item.status == shuvarie_core::todos::TodoStatus::InProgress)
+            .collect();
+    }
+
+    /// Parse the finished `todo` tool call's list output. A successful call
+    /// always carries the full list, so no item rows means the list is empty
+    /// (`Todos (none)`).
+    fn sync_todo_output(&mut self, output: &str) {
+        self.sync_todos(shuvarie_core::todos::parse_items(output).unwrap_or_default());
     }
 
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -406,14 +413,17 @@ impl SessionScreen {
         } else {
             self.input.desired_height(content_area.width as usize)
         };
+        let working_rows = working_rows(&self.working_todos);
         let [
             title_area,
+            todos_area,
             history_area,
             input_area,
             status_area,
             footer_area,
         ] = Layout::vertical([
             Length(1),
+            Length(working_rows),
             Min(0),
             Length(input_height),
             Length(1),
@@ -427,6 +437,18 @@ impl SessionScreen {
                 .alignment(Alignment::Center),
             title_area,
         );
+
+        if working_rows > 0 {
+            let todos_block = Block::new()
+                .bg(theme::SURFACE)
+                .padding(Padding::horizontal(2));
+            let todos_inner = todos_block.inner(todos_area);
+            frame.render_widget(todos_block, todos_area);
+            frame.render_widget(
+                Paragraph::new(working_todo_lines(&self.working_todos, todos_inner.width)),
+                todos_inner,
+            );
+        }
 
         let history_block = Block::new().padding(Padding::horizontal(2));
         let history_inner = history_block.inner(history_area);
@@ -495,6 +517,60 @@ pub enum SessionEffect {
     RunCommand(CommandAction),
 }
 
+/// Rows the working-todos strip occupies below the title bar: one per
+/// in-progress item up to [`MAX_WORKING_ROWS`], plus an overflow hint row.
+fn working_rows(todos: &[shuvarie_core::todos::TodoItem]) -> u16 {
+    let n = todos.len();
+    if n == 0 {
+        0
+    } else {
+        (n.min(MAX_WORKING_ROWS) + usize::from(n > MAX_WORKING_ROWS)) as u16
+    }
+}
+
+/// The strip's lines: `~ #id text` per in-progress todo, truncated to the
+/// strip width, then an overflow hint when more items are working.
+fn working_todo_lines(todos: &[shuvarie_core::todos::TodoItem], width: u16) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for item in todos.iter().take(MAX_WORKING_ROWS) {
+        let prefix = format!("~ #{} ", item.id);
+        let text_width = usize::from(width).saturating_sub(prefix.chars().count() + 1);
+        lines.push(Line::from(vec![
+            Span::raw("~").fg(theme::WARNING),
+            Span::raw(format!(" #{} ", item.id)).fg(theme::TEXT_MUTED),
+            elided_span(&item.text, text_width, theme::TEXT),
+        ]));
+    }
+    let overflow = todos.len().saturating_sub(MAX_WORKING_ROWS);
+    if overflow > 0 {
+        lines.push(Line::from(format!("… +{overflow} more in progress")).fg(theme::TEXT_MUTED));
+    }
+    lines
+}
+
+/// A span truncated to `max_width` display columns, ending with `…` when
+/// characters were dropped.
+fn elided_span(text: &str, max_width: usize, color: Color) -> Span<'static> {
+    if UnicodeWidthStr::width(text) <= max_width {
+        return Span::raw(text.to_string()).fg(color);
+    }
+    if max_width == 0 {
+        return Span::raw(String::new()).fg(color);
+    }
+    let mut out = String::new();
+    let mut w = 0usize;
+    for ch in text.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if w + cw >= max_width {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out.push('…');
+    Span::raw(out).fg(color)
+}
+
 fn usage_of(session: &shuvarie_core::Session) -> (TokenUsage, f64) {
     (
         TokenUsage {
@@ -509,12 +585,199 @@ fn usage_of(session: &shuvarie_core::Session) -> (TokenUsage, f64) {
     )
 }
 
-fn todo_counts(session: &shuvarie_core::Session) -> (usize, usize) {
-    shuvarie_core::todos::done_total(&shuvarie_core::todos::replay(&session.tool_records))
-}
-
 impl Default for SessionScreen {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+    use shuvarie_core::tool_record::ToolRecord;
+
+    fn todo_record(args_json: &str) -> ToolRecord {
+        ToolRecord {
+            name: "todo".into(),
+            args_json: args_json.into(),
+            output: String::new(),
+            stderr: String::new(),
+            ok: true,
+            worker: None,
+            message_id: 1,
+            message_seq: 0,
+            file_change: None,
+            original_content: None,
+            new_content: None,
+            duration_ms: 0,
+        }
+    }
+
+    fn todo_finish(output: &str) -> SessionMessage {
+        SessionMessage::Chat(ChatMessage::ToolFinished {
+            name: "todo".into(),
+            ok: true,
+            output: output.into(),
+            worker: None,
+            file_change: None,
+            streams: None,
+            duration_ms: 0,
+        })
+    }
+
+    fn draw(screen: &SessionScreen, w: u16, h: u16) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| screen.view(frame, frame.area()))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn row_text(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+        (0..buf.area().width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    /// Row text of the content pane only (sidebar is 30 cols + 1 gutter).
+    fn content_row_text(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+        (31..buf.area().width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn todo_tool_finish_fills_working_strip() {
+        let mut screen = SessionScreen::new();
+        screen.update(todo_finish(
+            "Todos (0/2 done)\n  #1 [ ] plan it\n  #2 [~] write tests",
+        ));
+        assert_eq!(screen.working_todos.len(), 1);
+        assert_eq!(screen.working_todos[0].id, 2);
+        assert_eq!(screen.working_todos[0].text, "write tests");
+    }
+
+    #[test]
+    fn todo_tool_finish_with_empty_list_clears_state() {
+        let mut screen = SessionScreen::new();
+        screen.update(todo_finish("Todos (0/1 done)\n  #1 [~] write tests"));
+        screen.update(todo_finish("Removed #1\n\nTodos (none)"));
+        assert!(screen.working_todos.is_empty());
+        assert_eq!(
+            (screen.sidebar.todos_done, screen.sidebar.todos_total),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn loaded_session_replays_working_todos() {
+        let mut screen = SessionScreen::new();
+        let mut session = shuvarie_core::Session::new();
+        session.push_user("go");
+        session.push_assistant("ok");
+        session.tool_records = vec![todo_record(
+            r#"{"op":"add","text":"write tests","status":"in_progress"}"#,
+        )];
+        screen.update(SessionMessage::Loaded {
+            id: uuid::Uuid::new_v4(),
+            title: "t".into(),
+            session,
+        });
+        assert_eq!(screen.working_todos.len(), 1);
+        assert_eq!(screen.working_todos[0].text, "write tests");
+    }
+
+    #[test]
+    fn reset_clears_working_todos() {
+        let mut screen = SessionScreen::new();
+        screen.update(todo_finish("Todos (0/1 done)\n  #1 [~] write tests"));
+        screen.update(SessionMessage::Reset);
+        assert!(screen.working_todos.is_empty());
+    }
+
+    #[test]
+    fn working_strip_renders_below_title_and_takes_layout_space() {
+        let mut screen = SessionScreen::new();
+        screen.session_title = Some("T".into());
+        screen.chat.update(ChatMessage::BeginUserTurn {
+            content: "first prompt".into(),
+        });
+        screen.update(todo_finish(
+            "Todos (0/1 done)\n  #1 [~] refactor the parser",
+        ));
+        let buf = draw(&screen, 80, 24);
+        assert!(row_text(&buf, 0).contains("Shuvarie · T"), "title row");
+        let strip = row_text(&buf, 1);
+        assert!(strip.contains("~ #1"), "strip row 1: {strip:?}");
+        assert!(
+            strip.contains("refactor the parser"),
+            "strip row 1: {strip:?}"
+        );
+        let chat_row = row_text(&buf, 3);
+        assert!(
+            chat_row.contains("first prompt"),
+            "history starts below the strip: {chat_row:?}"
+        );
+    }
+
+    #[test]
+    fn working_strip_hidden_when_nothing_in_progress() {
+        let mut screen = SessionScreen::new();
+        screen.chat.update(ChatMessage::BeginUserTurn {
+            content: "first prompt".into(),
+        });
+        let buf = draw(&screen, 80, 24);
+        assert!(
+            content_row_text(&buf, 1).trim().is_empty(),
+            "no strip row when no todos: {:?}",
+            content_row_text(&buf, 1)
+        );
+        let chat_row = content_row_text(&buf, 2);
+        assert!(
+            chat_row.contains("first prompt"),
+            "history starts right below the title: {chat_row:?}"
+        );
+    }
+
+    #[test]
+    fn working_strip_caps_rows_with_overflow_hint() {
+        let mut screen = SessionScreen::new();
+        let rows = (1..=4)
+            .map(|i| format!("  #{i} [~] task number {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        screen.update(todo_finish(&format!("Todos (0/4 done)\n{rows}")));
+        assert_eq!(screen.working_todos.len(), 4);
+        let buf = draw(&screen, 80, 24);
+        let strip = (1..5)
+            .map(|y| row_text(&buf, y as u16))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            strip.contains("task number 3"),
+            "capped at 3 items: {strip:?}"
+        );
+        assert!(
+            !strip.contains("task number 4"),
+            "capped at 3 items: {strip:?}"
+        );
+        assert!(strip.contains("+1 more in progress"), "overflow: {strip:?}");
+    }
+
+    #[test]
+    fn working_strip_truncates_long_text() {
+        let mut screen = SessionScreen::new();
+        screen.update(todo_finish(
+            "Todos (0/1 done)\n  #1 [~] a very long todo text that should be cut off before the end",
+        ));
+        let buf = draw(&screen, 60, 24);
+        let strip = content_row_text(&buf, 1);
+        assert!(strip.contains('…'), "elided: {strip:?}");
+        assert!(
+            !strip.contains("before the end"),
+            "truncated to strip width: {strip:?}"
+        );
     }
 }

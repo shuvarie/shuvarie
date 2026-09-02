@@ -783,10 +783,12 @@ impl Chat {
         let viewport_len = area.height as usize;
         let offset = scroll_y as usize;
         let max_offset = content_len - viewport_len;
-        let max_start = track_len - 1;
-        let thumb_len = (max_start.max(1) * viewport_len / content_len).clamp(1, max_start);
-        let thumb_start =
-            ((max_start - thumb_len) * offset / max_offset.max(1)).min(max_start - thumb_len);
+        let thumb_len = (track_len * viewport_len / content_len).clamp(1, track_len);
+        let max_start = track_len - thumb_len;
+        let thumb_start = (max_start * offset)
+            .checked_div(max_offset)
+            .unwrap_or(0)
+            .min(max_start);
         let bar_x = area.right().saturating_sub(1);
         let buf = frame.buffer_mut();
         for row in area.top()..area.bottom() {
@@ -1302,6 +1304,31 @@ mod tests {
         });
         draw(&chat, 80, 10);
         assert_eq!(chat.scroll.borrow().offset, bottom - 1);
+    }
+
+    #[test]
+    fn scrollbar_thumb_reaches_track_bottom_when_scrolled_to_bottom() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "hi".into(),
+        });
+        for i in 0..40 {
+            chat.update(ChatMessage::TokenReceived {
+                content: format!("line {i}\n"),
+            });
+        }
+        let buf = draw(&chat, 80, 10);
+        let bar_x = buf.area().width - 1;
+        assert!(
+            chat.scroll.borrow().sticky_bottom,
+            "streaming keeps the view pinned to the bottom"
+        );
+        assert_eq!(
+            buf[(bar_x, 9)].symbol(),
+            "█",
+            "thumb covers the last track row"
+        );
+        assert_eq!(buf[(bar_x, 0)].symbol(), " ", "top of the track is empty");
     }
 
     #[test]
