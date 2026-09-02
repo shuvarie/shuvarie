@@ -7,7 +7,10 @@ use toasty::schema::db;
 use toasty::stmt::{List, Query, Type};
 
 use crate::error::{DbError, Result};
-use crate::model::{Message, MessageEmbedding, MsgRole, Session, ToolCall, UndoLog};
+use crate::model::{
+    Message, MessageEmbedding, MsgRole, ReasoningSegment, Session, ToolCall, UndoLog,
+    encode_reasoning, parse_reasoning,
+};
 
 static MIGRATIONS: toasty::migration::MigrationSet = toasty::embed_migrations!();
 
@@ -34,7 +37,7 @@ pub struct StoredMessage {
     pub id: u64,
     pub role: MsgRole,
     pub content: String,
-    pub reasoning: String,
+    pub reasoning: Vec<ReasoningSegment>,
     pub interrupted: bool,
     pub seq: u64,
     pub input_tokens: u64,
@@ -68,7 +71,7 @@ pub struct UndoEntry {
     pub turn_seq: u64,
     pub user_content: String,
     pub assistant_content: String,
-    pub reasoning: String,
+    pub reasoning: Vec<ReasoningSegment>,
     pub usage: TokenUsage,
     pub cost: f64,
     pub tool_calls: Vec<StoredToolCall>,
@@ -106,7 +109,7 @@ impl From<Message> for StoredMessage {
             id: m.id,
             role: m.role,
             content: m.content,
-            reasoning: m.reasoning,
+            reasoning: parse_reasoning(&m.reasoning),
             interrupted: m.interrupted,
             seq: m.seq,
             input_tokens: m.input_tokens,
@@ -305,7 +308,7 @@ impl Store {
         &mut self,
         session_id: uuid::Uuid,
         content: &str,
-        reasoning: &str,
+        reasoning: &[ReasoningSegment],
         interrupted: bool,
         usage: TokenUsage,
         cost: f64,
@@ -316,7 +319,7 @@ impl Store {
             seq,
             role: MsgRole::Assistant,
             content: content.to_string(),
-            reasoning: reasoning.to_string(),
+            reasoning: encode_reasoning(reasoning),
             interrupted,
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
@@ -337,14 +340,14 @@ impl Store {
         &mut self,
         message_id: u64,
         content: &str,
-        reasoning: &str,
+        reasoning: &[ReasoningSegment],
         interrupted: bool,
         usage: TokenUsage,
         cost: f64,
     ) -> Result<()> {
         Message::update_by_id(message_id)
             .content(content.to_string())
-            .reasoning(reasoning.to_string())
+            .reasoning(encode_reasoning(reasoning))
             .interrupted(interrupted)
             .input_tokens(usage.input_tokens)
             .output_tokens(usage.output_tokens)
@@ -474,7 +477,7 @@ impl Store {
             turn_seq: entry.turn_seq,
             user_content: entry.user_content.clone(),
             assistant_content: entry.assistant_content.clone(),
-            reasoning: entry.reasoning.clone(),
+            reasoning: encode_reasoning(&entry.reasoning),
             usage_json,
             tool_calls_json,
             file_changes_json,
@@ -499,7 +502,7 @@ impl Store {
             turn_seq: row.turn_seq,
             user_content: row.user_content,
             assistant_content: row.assistant_content,
-            reasoning: row.reasoning,
+            reasoning: parse_reasoning(&row.reasoning),
             usage: serde_json::from_str(&row.usage_json).unwrap_or_default(),
             cost: 0.0,
             tool_calls: deserialize_tool_calls(&row.tool_calls_json),

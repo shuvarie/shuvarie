@@ -129,7 +129,7 @@ mod tests {
             id: 0,
             role,
             content: content.to_string(),
-            reasoning: String::new(),
+            reasoning: Vec::new(),
             interrupted: false,
             seq: 0,
             input_tokens: 0,

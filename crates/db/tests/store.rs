@@ -1,4 +1,4 @@
-use shuvarie_db::{Store, StoredSession};
+use shuvarie_db::{ReasoningSegment, Store, StoredSession};
 use shuvarie_llm::Role;
 use shuvarie_llm::TokenUsage;
 
@@ -53,7 +53,7 @@ async fn append_and_load_messages_in_order() {
         .append_assistant_message(
             id,
             "hi there",
-            "",
+            &[],
             false,
             TokenUsage {
                 input_tokens: 10,
@@ -130,6 +130,46 @@ async fn most_recent_session_is_last_updated() {
 }
 
 #[tokio::test]
+async fn reasoning_segments_round_trip_with_positions() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store.create_session("think", None, None).await.unwrap();
+    store.append_message(id, Role::User, "do it").await.unwrap();
+
+    let segments = vec![
+        ReasoningSegment {
+            after_tool: 0,
+            text: "first thoughts".to_string(),
+        },
+        ReasoningSegment {
+            after_tool: 2,
+            text: "thoughts after two tools".to_string(),
+        },
+    ];
+    let msg = store
+        .append_assistant_message(id, "done", &segments, false, TokenUsage::default(), 0.0)
+        .await
+        .unwrap();
+    assert_eq!(msg.reasoning, segments);
+
+    let loaded: StoredSession = store.load_session(id).await.unwrap();
+    assert_eq!(loaded.messages[1].reasoning, segments);
+
+    store
+        .update_message(
+            msg.id,
+            "done edited",
+            &segments,
+            false,
+            TokenUsage::default(),
+            0.0,
+        )
+        .await
+        .unwrap();
+    let loaded: StoredSession = store.load_session(id).await.unwrap();
+    assert_eq!(loaded.messages[1].reasoning, segments);
+}
+
+#[tokio::test]
 async fn delete_session_removes_messages() {
     let mut store = Store::open_in_memory().await.unwrap();
     let id = store.create_session("gone", None, None).await.unwrap();
@@ -186,7 +226,7 @@ async fn search_finds_messages_across_sessions_ranked() {
         .append_assistant_message(
             s1,
             "tokio::spawn runs a task on the runtime",
-            "",
+            &[],
             false,
             TokenUsage::default(),
             0.0,

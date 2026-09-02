@@ -321,6 +321,8 @@ impl SessionScreen {
             }
             ChatMessage::ReasoningReceived { .. } => {
                 self.busy = true;
+                self.busy_kind = BusyKind::Generating;
+                self.status = Some("thinking…".to_string());
             }
             ChatMessage::ToolStarted { name, .. } => {
                 self.busy = true;

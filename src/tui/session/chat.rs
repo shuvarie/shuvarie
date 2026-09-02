@@ -5,6 +5,7 @@ use ratatui::layout::{Rect, Size};
 use ratatui::prelude::*;
 use serde_json::Value;
 use shuvarie_core::{DiagnosticInfo, Role};
+use shuvarie_db::ReasoningSegment;
 use shuvarie_llm::{FileChange, ShellStreams};
 use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
@@ -99,6 +100,7 @@ struct Turn {
 
 impl Turn {
     fn append_text(&mut self, content: String) {
+        self.finish_thinking();
         let last_is_text = matches!(self.blocks.last(), Some(Block::Text(_)));
         if last_is_text && let Some(block) = self.blocks.last_mut() {
             block.update(BlockMessage::Text(TextMessage::Append(content)));
@@ -115,6 +117,14 @@ impl Turn {
         }
         self.blocks
             .push(Block::Reasoning(ReasoningBlock::new(content)));
+    }
+
+    fn finish_thinking(&mut self) {
+        for block in &mut self.blocks {
+            if matches!(block, Block::Reasoning(_)) {
+                block.update(BlockMessage::Reasoning(ReasoningMessage::Finish));
+            }
+        }
     }
 }
 
@@ -198,12 +208,14 @@ impl Chat {
             }
             ChatMessage::ContextLoaded { paths } => {
                 let turn = self.ensure_in_flight();
+                turn.finish_thinking();
                 turn.blocks.push(Block::Context(ContextBlock::new(paths)));
                 self.mark_scroll_dirty();
                 self.follow_bottom();
             }
             ChatMessage::ToolStarted { name, args, worker } => {
                 let turn = self.ensure_in_flight();
+                turn.finish_thinking();
                 turn.blocks
                     .push(Block::Tool(ToolBlock::new(name, args.to_string(), worker)));
                 self.mark_scroll_dirty();
@@ -248,6 +260,7 @@ impl Chat {
             }
             ChatMessage::WorkerStarted { name, args } => {
                 let turn = self.ensure_in_flight();
+                turn.finish_thinking();
                 turn.blocks.push(Block::Tool(ToolBlock::new(
                     name,
                     args.to_string(),
@@ -365,7 +378,8 @@ impl Chat {
     }
 
     fn commit_done(&mut self) {
-        if let Some(turn) = self.in_flight.take() {
+        if let Some(mut turn) = self.in_flight.take() {
+            turn.finish_thinking();
             self.turns.push(turn);
             self.interrupted = false;
         }
@@ -374,6 +388,7 @@ impl Chat {
 
     fn commit_interrupted(&mut self) {
         if let Some(mut turn) = self.in_flight.take() {
+            turn.finish_thinking();
             turn.blocks
                 .retain(|block| !(block.is_tool() && block.tool_is_running()));
             let has_content = turn.blocks.iter().any(|block| {
@@ -516,7 +531,9 @@ impl Chat {
             }
             segments.extend(block_segments);
         }
-        if turn.role == Role::Assistant && !turn.blocks.iter().any(Block::is_text) {
+        let thinking_now = in_flight && turn.blocks.last().is_some_and(Block::is_thinking);
+        if turn.role == Role::Assistant && !turn.blocks.iter().any(Block::is_text) && !thinking_now
+        {
             let placeholder = if in_flight {
                 Block::Working
             } else {
@@ -662,20 +679,31 @@ fn build_turns(session: &shuvarie_core::Session) -> Vec<Turn> {
             Role::User => blocks.push(Block::User(UserPrompt::new(message.content.clone()))),
             Role::System => blocks.push(Block::System(SystemText::new(message.content.clone()))),
             Role::Assistant => {
-                if let Some((_, text)) = session
+                let segments: &[ReasoningSegment] = session
                     .reasoning
-                    .iter()
-                    .find(|(seq, _)| **seq == idx as u64)
-                {
-                    blocks.push(Block::Reasoning(ReasoningBlock::new(text.clone())));
-                }
+                    .get(&(idx as u64))
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                let mut seg_i = 0usize;
+                let drain_reasoning = |blocks: &mut Vec<Block>,
+                                       seg_i: &mut usize,
+                                       tools_done: usize| {
+                    while let Some(seg) = segments.get(*seg_i)
+                        && (seg.after_tool as usize) <= tools_done
+                    {
+                        blocks.push(Block::Reasoning(ReasoningBlock::finished(seg.text.clone())));
+                        *seg_i += 1;
+                    }
+                };
+                drain_reasoning(&mut blocks, &mut seg_i, 0);
                 if session.summary_seq.is_some_and(|seq| seq as usize == idx) {
                     blocks.push(Block::Summary);
                 }
-                for record in session
+                for (count, record) in session
                     .tool_records
                     .iter()
                     .filter(|record| record.message_seq as usize == idx)
+                    .enumerate()
                 {
                     blocks.push(Block::Tool(ToolBlock::from_record(
                         record.name.clone(),
@@ -686,7 +714,9 @@ fn build_turns(session: &shuvarie_core::Session) -> Vec<Turn> {
                         record.worker.clone(),
                         record.file_change.clone(),
                     )));
+                    drain_reasoning(&mut blocks, &mut seg_i, count + 1);
                 }
+                drain_reasoning(&mut blocks, &mut seg_i, usize::MAX);
                 if !message.content.is_empty() {
                     blocks.push(Block::Text(TextBlock::new(message.content.clone())));
                 }
@@ -698,4 +728,187 @@ fn build_turns(session: &shuvarie_core::Session) -> Vec<Turn> {
         });
     }
     turns
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shuvarie_core::tool_record::ToolRecord;
+
+    fn header_text(block: &Block) -> String {
+        let Block::Reasoning(reasoning) = block else {
+            panic!("not a reasoning block");
+        };
+        reasoning
+            .view()
+            .first()
+            .and_then(|segment| segment.lines.first())
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.clone())
+                    .collect::<String>()
+            })
+            .unwrap_or_default()
+    }
+
+    fn block_tags(turn: &Turn) -> Vec<&'static str> {
+        turn.blocks
+            .iter()
+            .map(|block| match block {
+                Block::Reasoning(_) => "R",
+                Block::Tool(_) => "T",
+                Block::Text(_) => "X",
+                Block::User(_) => "U",
+                _ => "?",
+            })
+            .collect()
+    }
+
+    fn tool_record(seq: u64) -> ToolRecord {
+        ToolRecord {
+            name: "read_file".to_string(),
+            args_json: "{}".to_string(),
+            output: String::new(),
+            stderr: String::new(),
+            ok: true,
+            worker: None,
+            message_id: 1,
+            message_seq: seq,
+            file_change: None,
+            original_content: None,
+            new_content: None,
+        }
+    }
+
+    #[test]
+    fn working_placeholder_hidden_while_thinking() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::ReasoningReceived {
+            content: "hmm".into(),
+        });
+        let render = |chat: &Chat| {
+            let turn = chat.in_flight.as_ref().unwrap();
+            chat.turn_segments(turn, 0, true, 80)
+                .iter()
+                .flat_map(|segment| {
+                    segment
+                        .lines
+                        .iter()
+                        .map(|line| {
+                            line.spans
+                                .iter()
+                                .map(|span| span.content.clone())
+                                .collect::<String>()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let thinking = render(&chat);
+        assert!(thinking.contains("thinking…"));
+        assert!(
+            !thinking.contains("(working…)",),
+            "no placeholder while thinking"
+        );
+
+        chat.update(ChatMessage::ToolStarted {
+            name: "read_file".into(),
+            args: serde_json::json!({}),
+            worker: None,
+        });
+        let tool_only = render(&chat);
+        assert!(tool_only.contains("(working…)"));
+    }
+
+    #[test]
+    fn thinking_header_shows_spinner_then_thought() {
+        let block = ReasoningBlock::new("hmm");
+        let thinking = header_text(&Block::Reasoning(block));
+        assert!(thinking.contains("thinking…"), "header: {thinking}");
+        assert!(!thinking.contains("Thought"));
+
+        let mut block = ReasoningBlock::new("hmm");
+        assert!(block.update(ReasoningMessage::Finish));
+        let done = header_text(&Block::Reasoning(block));
+        assert!(done.contains("Thought"), "header: {done}");
+
+        let done = header_text(&Block::Reasoning(ReasoningBlock::finished("hmm")));
+        assert!(done.contains("Thought"), "reloaded header: {done}");
+    }
+
+    #[test]
+    fn text_and_tools_finish_thinking() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::ReasoningReceived {
+            content: "first".into(),
+        });
+        chat.update(ChatMessage::TokenReceived {
+            content: "answer".into(),
+        });
+        let blocks = &chat.in_flight.as_ref().unwrap().blocks;
+        assert_eq!(block_tags(chat.in_flight.as_ref().unwrap()), vec!["R", "X"]);
+        assert!(header_text(&blocks[0]).contains("Thought"));
+
+        chat.update(ChatMessage::ReasoningReceived {
+            content: "more".into(),
+        });
+        chat.update(ChatMessage::ToolStarted {
+            name: "read_file".into(),
+            args: serde_json::json!({}),
+            worker: None,
+        });
+        let turn = chat.in_flight.as_ref().unwrap();
+        assert_eq!(block_tags(turn), vec!["R", "X", "R", "T"]);
+        assert!(header_text(&turn.blocks[0]).contains("Thought"));
+        assert!(header_text(&turn.blocks[2]).contains("Thought"));
+
+        chat.update(ChatMessage::ReasoningReceived {
+            content: "again".into(),
+        });
+        let turn = chat.in_flight.as_ref().unwrap();
+        assert!(header_text(&turn.blocks[4]).contains("thinking…"));
+    }
+
+    #[test]
+    fn commit_finishes_thinking() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::ReasoningReceived {
+            content: "only thoughts".into(),
+        });
+        chat.update(ChatMessage::StreamDone);
+        let turn = chat.turns.last().unwrap();
+        assert_eq!(block_tags(turn), vec!["R"]);
+        assert!(header_text(&turn.blocks[0]).contains("Thought"));
+    }
+
+    #[test]
+    fn reload_interleaves_reasoning_between_tool_records() {
+        let mut session = shuvarie_core::Session::new();
+        session.push_user("do it");
+        session.push_assistant("done");
+        session.reasoning.insert(
+            1,
+            vec![
+                ReasoningSegment {
+                    after_tool: 0,
+                    text: "start".to_string(),
+                },
+                ReasoningSegment {
+                    after_tool: 2,
+                    text: "after two tools".to_string(),
+                },
+                ReasoningSegment {
+                    after_tool: 9,
+                    text: "beyond records".to_string(),
+                },
+            ],
+        );
+        session.tool_records = vec![tool_record(1), tool_record(1)];
+
+        let turns = build_turns(&session);
+        assert_eq!(block_tags(&turns[1]), vec!["R", "T", "T", "R", "R", "X"]);
+        assert!(header_text(&turns[1].blocks[0]).contains("Thought"));
+    }
 }

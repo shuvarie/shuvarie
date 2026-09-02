@@ -66,11 +66,7 @@ pub fn overlay_block<'a>(title: &str) -> Block<'a> {
 
 #[allow(dead_code)]
 pub fn active_marker(is_active: bool) -> &'static str {
-    if is_active {
-        "● "
-    } else {
-        "  "
-    }
+    if is_active { "● " } else { "  " }
 }
 
 pub fn help_line(bindings: &[(&'static str, &'static str)]) -> Line<'static> {

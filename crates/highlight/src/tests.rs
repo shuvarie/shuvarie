@@ -81,16 +81,20 @@ mod tests {
         let lines = render("# Big\n\n### Small");
         assert_eq!(texts(&lines[0]), ["Big"]);
         assert_eq!(lines[0].spans[0].style.fg, Some(theme::ACCENT));
-        assert!(lines[0].spans[0]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD));
+        assert!(
+            lines[0].spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
         assert_eq!(texts(&lines[2]), ["Small"]);
         assert_eq!(lines[2].spans[0].style.fg, Some(theme::TEXT));
-        assert!(lines[2].spans[0]
-            .style
-            .add_modifier
-            .contains(Modifier::BOLD));
+        assert!(
+            lines[2].spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
     }
 
     #[test]
@@ -188,10 +192,12 @@ mod tests {
         let lines = render("[text](https://example.com)");
         assert_eq!(lines.len(), 1);
         assert_eq!(texts(&lines[0]), ["text"]);
-        assert!(lines[0].spans[0]
-            .style
-            .add_modifier
-            .contains(Modifier::UNDERLINED));
+        assert!(
+            lines[0].spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::UNDERLINED)
+        );
     }
 
     #[test]

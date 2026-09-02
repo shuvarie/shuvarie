@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use shuvarie_db::StoredSession;
+use shuvarie_db::{ReasoningSegment, StoredSession};
 use shuvarie_llm::ChatMsg;
 use shuvarie_llm::TokenUsage;
 
@@ -11,7 +11,7 @@ pub struct Session {
     pub id: Option<uuid::Uuid>,
     pub title: Option<String>,
     pub messages: Vec<ChatMsg>,
-    pub reasoning: HashMap<u64, String>,
+    pub reasoning: HashMap<u64, Vec<ReasoningSegment>>,
     pub interrupted: HashMap<u64, bool>,
     pub tool_records: Vec<ToolRecord>,
     pub tokens: u64,

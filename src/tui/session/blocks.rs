@@ -119,4 +119,8 @@ impl Block {
     pub fn tool_is_running(&self) -> bool {
         matches!(self, Block::Tool(tool) if tool.is_running())
     }
+
+    pub fn is_thinking(&self) -> bool {
+        matches!(self, Block::Reasoning(reasoning) if reasoning.is_thinking())
+    }
 }

@@ -1,6 +1,6 @@
 use ratatui::prelude::*;
 
-use crate::tui::session::segment::{Segment, BLOCK_PADDING};
+use crate::tui::session::segment::{BLOCK_PADDING, Segment};
 use crate::tui::theme;
 
 /// The user's submitted message, rendered as a full-width warm block without

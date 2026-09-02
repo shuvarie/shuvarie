@@ -787,7 +787,7 @@ struct TurnState {
     assistant_message_id: Option<u64>,
     assistant_seq: u64,
     pending_text: String,
-    pending_reasoning: String,
+    pending_reasoning: Vec<shuvarie_db::ReasoningSegment>,
     tool_records: Vec<crate::tool_record::ToolRecord>,
 }
 
@@ -1224,7 +1224,7 @@ async fn stream_stream_to_events(
 
     let mut assistant_message_id: Option<u64> = None;
     let mut assistant_seq: u64 = 0;
-    let mut pending_reasoning = String::new();
+    let mut pending_reasoning: Vec<shuvarie_db::ReasoningSegment> = Vec::new();
     let mut pending_text = String::new();
     let mut tool_seq: u64 = 0;
     let mut turn_tool_records: Vec<crate::tool_record::ToolRecord> = Vec::new();
@@ -1244,7 +1244,16 @@ async fn stream_stream_to_events(
             }
             shuvarie_llm::StreamItem::Delta { .. } => {}
             shuvarie_llm::StreamItem::Reasoning { text } if !text.is_empty() => {
-                pending_reasoning.push_str(&text);
+                let after_tool = turn_tool_records.len() as u64;
+                match pending_reasoning.last_mut() {
+                    Some(segment) if segment.after_tool == after_tool => {
+                        segment.text.push_str(&text);
+                    }
+                    _ => pending_reasoning.push(shuvarie_db::ReasoningSegment {
+                        after_tool,
+                        text: text.clone(),
+                    }),
+                }
                 {
                     let mut ts = turn_state.lock().await;
                     ts.pending_reasoning = pending_reasoning.clone();
@@ -1502,7 +1511,7 @@ async fn ensure_assistant_row(
     assistant_seq: &mut u64,
     session: &Arc<Mutex<Session>>,
     store: &mut Store,
-    reasoning: &str,
+    reasoning: &[shuvarie_db::ReasoningSegment],
     _event_tx: &Sender<Event>,
 ) {
     if assistant_message_id.is_some() {
@@ -1623,7 +1632,7 @@ fn build_client(pc: &ProviderConfig) -> Result<ProviderClient, String> {
 async fn persist_stream_error(
     assistant_message_id: Option<u64>,
     pending_text: &str,
-    pending_reasoning: &str,
+    pending_reasoning: &[shuvarie_db::ReasoningSegment],
     session: &Arc<Mutex<Session>>,
     store: &mut Store,
 ) {
@@ -1663,8 +1672,7 @@ async fn persist_stream_error(
     g.push_assistant(pending_text.to_string());
     let seq = g.messages.len() - 1;
     if !pending_reasoning.is_empty() {
-        g.reasoning
-            .insert(seq as u64, pending_reasoning.to_string());
+        g.reasoning.insert(seq as u64, pending_reasoning.to_vec());
     }
     g.interrupted.insert(seq as u64, true);
 }

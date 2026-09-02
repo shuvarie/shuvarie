@@ -1,5 +1,73 @@
 use shuvarie_llm::Role;
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReasoningSegment {
+    #[serde(default)]
+    pub after_tool: u64,
+    #[serde(default)]
+    pub text: String,
+}
+
+pub(crate) fn encode_reasoning(segments: &[ReasoningSegment]) -> String {
+    if segments.is_empty() {
+        return String::new();
+    }
+    serde_json::to_string(segments).unwrap_or_default()
+}
+
+pub(crate) fn parse_reasoning(raw: &str) -> Vec<ReasoningSegment> {
+    if raw.trim().is_empty() {
+        return Vec::new();
+    }
+    if let Ok(segments) = serde_json::from_str::<Vec<ReasoningSegment>>(raw) {
+        return segments;
+    }
+    vec![ReasoningSegment {
+        after_tool: 0,
+        text: raw.to_string(),
+    }]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_reasoning_round_trips_segments() {
+        let segments = vec![
+            ReasoningSegment {
+                after_tool: 0,
+                text: "before".to_string(),
+            },
+            ReasoningSegment {
+                after_tool: 2,
+                text: "after".to_string(),
+            },
+        ];
+        let raw = encode_reasoning(&segments);
+        assert_eq!(parse_reasoning(&raw), segments);
+    }
+
+    #[test]
+    fn parse_reasoning_falls_back_to_single_start_segment() {
+        let raw = "plain streamed thinking";
+        assert_eq!(
+            parse_reasoning(raw),
+            vec![ReasoningSegment {
+                after_tool: 0,
+                text: raw.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_reasoning_empty_is_empty() {
+        assert!(parse_reasoning("").is_empty());
+        assert!(parse_reasoning("   ").is_empty());
+        assert_eq!(encode_reasoning(&[]), "");
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, toasty::Embed)]
 #[column(rename_all = "snake_case")]
 pub enum MsgRole {

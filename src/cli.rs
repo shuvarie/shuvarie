@@ -1,9 +1,9 @@
 use clap::{
-    builder::{
-        styling::{AnsiColor, Style},
-        Styles,
-    },
     Parser,
+    builder::{
+        Styles,
+        styling::{AnsiColor, Style},
+    },
 };
 use std::path::PathBuf;
 

@@ -233,11 +233,7 @@ impl AgentConfig {
 }
 
 fn effective(value: usize) -> usize {
-    if value == 0 {
-        usize::MAX
-    } else {
-        value
-    }
+    if value == 0 { usize::MAX } else { value }
 }
 
 /// Serde mirror of [`shuvarie_lsp::LspConfig`] for the KDL file layout; the
