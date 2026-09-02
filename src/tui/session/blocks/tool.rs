@@ -238,13 +238,7 @@ impl ToolBlock {
                 }
                 let right_text = right.join(" · ");
                 let right_w = UnicodeWidthStr::width(right_text.as_str());
-                let avail = inner_w.saturating_sub(right_w + 2);
-                let cmd_display: String = cmd
-                    .chars()
-                    .take(avail)
-                    .map(|c| if c == '\n' { ' ' } else { c })
-                    .collect();
-                header.push(Span::raw(cmd_display).fg(theme::TEXT).bold());
+                header.push(Span::raw("$ ".to_string() + cmd).fg(theme::TEXT).bold());
                 if !right_text.is_empty() {
                     let pad = inner_w
                         .saturating_sub(spans_width(&header) + right_w)
@@ -258,8 +252,16 @@ impl ToolBlock {
                 let range = (self.status == ToolStatus::Ok)
                     .then(|| read_file_range(&args, &self.output))
                     .flatten();
-                let path_display: String = path.chars().take(inner_w.saturating_sub(20)).collect();
-                header.push(Span::raw(path_display).fg(theme::ACCENT).bold());
+                let avail = inner_w
+                    .saturating_sub(self.name.chars().count() + 1)
+                    .saturating_sub(20);
+                let path_display: String = path.chars().take(avail).collect();
+                header.push(Span::raw(self.name.clone()).fg(theme::TEXT).bold());
+                header.push(
+                    Span::raw(format!(" {path_display}"))
+                        .fg(theme::ACCENT)
+                        .bold(),
+                );
                 if let Some((start, end)) = range {
                     header.push(Span::raw(format!(" · lines {start}–{end}")).fg(theme::TEXT_MUTED));
                 }
