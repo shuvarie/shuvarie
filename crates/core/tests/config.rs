@@ -229,7 +229,7 @@ fn ollama_cloud_without_key_is_not_connected() {
     let connections = Connections {
         providers: BTreeMap::from([(
             "cloud".to_string(),
-            ProviderConfig::new("cloud", "ollama", None, None),
+            ProviderConfig::new("cloud", "ollama-cloud", None, None),
         )]),
         active: Some(Active {
             provider: "cloud".to_string(),
