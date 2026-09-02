@@ -336,6 +336,12 @@ impl Drop for LspManager {
         if let Some(handle) = self.supervisor.take() {
             handle.abort();
         }
+        for (_, server) in std::mem::take(&mut self.servers) {
+            server.main_loop.abort();
+            if let Ok(mut child) = server.child.try_lock() {
+                let _ = child.start_kill();
+            }
+        }
     }
 }
 

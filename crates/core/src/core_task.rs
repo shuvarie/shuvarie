@@ -749,6 +749,8 @@ pub async fn run(
             }
         }
     }
+
+    ctx.lsp.lock().await.shutdown_all().await;
 }
 
 const SEARCH_LIMIT: u64 = 50;

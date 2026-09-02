@@ -137,8 +137,9 @@ impl Server {
 
     pub async fn shutdown(&self) -> Result<(), String> {
         let mut socket = self.socket.clone();
-        let _ = socket.shutdown(()).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), socket.shutdown(())).await;
         let _ = socket.exit(());
+        let _ = socket.emit(Stop);
         Ok(())
     }
 
