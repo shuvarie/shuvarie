@@ -301,7 +301,7 @@ impl ToolBlock {
                 let (status_label, _) = split_status_line(&self.output);
                 let mut right: Vec<String> = Vec::new();
                 if let Some(t) = timeout {
-                    right.push(format!("{t}s"));
+                    right.push(format!("timeout={t}s"));
                 }
                 if let Some(label) = status_label
                     && label != "exit 0"
