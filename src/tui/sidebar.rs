@@ -158,13 +158,14 @@ impl Sidebar {
         }
 
         lines.push(Line::from("Context").fg(theme::ACCENT).bold());
+        lines.push(Line::from("  Tokens:").fg(theme::TEXT_DIM));
         lines.push(
-            Line::from(format!(
-                "  Tokens: ↑{} ↓{}",
-                self.input_tokens.to_dec_sep_num(','),
-                self.output_tokens.to_dec_sep_num(',')
-            ))
-            .fg(theme::TEXT_DIM),
+            Line::from(format!("    ↑{}", self.input_tokens.to_dec_sep_num(','),))
+                .fg(theme::TEXT_DIM),
+        );
+        lines.push(
+            Line::from(format!("    ↓{}", self.output_tokens.to_dec_sep_num(',')))
+                .fg(theme::TEXT_DIM),
         );
         if self.reasoning_tokens > 0 {
             lines.push(
