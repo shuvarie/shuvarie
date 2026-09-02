@@ -6,6 +6,7 @@ use shuvarie_core::Model;
 use termina::event::{KeyCode, KeyEvent};
 
 use crate::tui::utils::ctrl;
+use crate::tui::utils::num::fmt_tokens;
 
 use super::add_provider::centered_rect;
 use super::list::{render_list_item_line, scroll_offset_for};
@@ -198,11 +199,9 @@ impl ModelPicker {
         let mut items: Vec<ListItem> = Vec::new();
         let query_row_present = self.query_row().is_some();
         if let Some(q) = self.query_row() {
-            let mut line = vec![
-                Span::raw(format!("Use \"{q}\""))
-                    .fg(theme::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ];
+            let mut line = vec![Span::raw(format!("Use \"{q}\""))
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD)];
             line.push(Span::raw("  (no match)").fg(theme::TEXT_MUTED));
             items.push(render_list_item_line(Line::from(line), self.selected == 0));
         }
@@ -212,7 +211,10 @@ impl ModelPicker {
             let m = &self.models[orig];
             let mut line = vec![Span::raw(m.display_name().to_string()).fg(theme::TEXT)];
             if let Some(ctx) = m.context_length {
-                line.push(Span::raw(format!(" · {}k ctx", ctx / 1024)).fg(theme::TEXT_MUTED));
+                line.push(
+                    Span::raw(format!(" · {} ctx", fmt_tokens(u64::from(ctx))))
+                        .fg(theme::TEXT_MUTED),
+                );
             }
             items.push(render_list_item_line(Line::from(line), idx == row_base));
         }

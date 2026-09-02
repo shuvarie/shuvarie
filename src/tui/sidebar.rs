@@ -7,21 +7,18 @@ use shuvarie_core::{LspStatus, Skill};
 use shuvarie_llm::TokenUsage;
 use termina::event::KeyEvent;
 
-use crate::tui::{components::VersionBar, utils::locale::ToDecSepNum};
+use crate::tui::components::VersionBar;
+use crate::tui::sidebar::context::ContextDisplay;
 
 use super::theme;
 
+mod context;
+
 pub struct Sidebar {
     pub version_bar: VersionBar,
-    pub tokens: u64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub reasoning_tokens: u64,
-    pub cached_tokens: u64,
-    pub cost: f64,
     pub provider: Option<String>,
     pub model: Option<String>,
-    pub context_length: Option<u64>,
+    context: ContextDisplay,
     pub lsp_servers: Vec<LspStatus>,
     pub lsp_enabled: bool,
     pub skills: Vec<Skill>,
@@ -61,15 +58,9 @@ impl Sidebar {
     pub fn new() -> Self {
         Self {
             version_bar: VersionBar::new(HorizontalAlignment::Left),
-            tokens: 0,
-            input_tokens: 0,
-            output_tokens: 0,
-            reasoning_tokens: 0,
-            cached_tokens: 0,
-            cost: 0.0,
             provider: None,
             model: None,
-            context_length: None,
+            context: ContextDisplay::new(),
             lsp_servers: Vec::new(),
             lsp_enabled: true,
             skills: Vec::new(),
@@ -90,24 +81,13 @@ impl Sidebar {
             } => {
                 self.provider = provider;
                 self.model = model;
-                self.context_length = context_length;
+                self.context.set_context_length(context_length);
             }
             SidebarMessage::UpdateUsage { usage, cost } => {
-                self.tokens = self.tokens.saturating_add(usage.total_tokens);
-                self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens);
-                self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
-                self.reasoning_tokens =
-                    self.reasoning_tokens.saturating_add(usage.reasoning_tokens);
-                self.cached_tokens = self.cached_tokens.saturating_add(usage.cached_input_tokens);
-                self.cost += cost;
+                self.context.add_usage(&usage, cost);
             }
             SidebarMessage::SetUsage { usage, cost } => {
-                self.tokens = usage.total_tokens;
-                self.input_tokens = usage.input_tokens;
-                self.output_tokens = usage.output_tokens;
-                self.reasoning_tokens = usage.reasoning_tokens;
-                self.cached_tokens = usage.cached_input_tokens;
-                self.cost = cost;
+                self.context.set_usage(&usage, cost);
             }
             SidebarMessage::UpdateLsp { servers } => {
                 self.lsp_servers = servers;
@@ -178,36 +158,7 @@ impl Sidebar {
             lines.push(Line::from(""));
         }
 
-        lines.push(Line::from("Context").fg(theme::ACCENT).bold());
-        lines.push(Line::from("  Tokens:").fg(theme::TEXT_DIM));
-        lines.push(
-            Line::from(format!("    ↑{}", self.input_tokens.to_dec_sep_num(','),))
-                .fg(theme::TEXT_DIM),
-        );
-        lines.push(
-            Line::from(format!("    ↓{}", self.output_tokens.to_dec_sep_num(',')))
-                .fg(theme::TEXT_DIM),
-        );
-        if self.reasoning_tokens > 0 {
-            lines.push(
-                Line::from(format!(
-                    "  Think:  {}",
-                    self.reasoning_tokens.to_dec_sep_num(',')
-                ))
-                .fg(theme::TEXT_DIM),
-            );
-        }
-        if self.cached_tokens > 0 {
-            lines.push(
-                Line::from(format!(
-                    "  Cache:  {}",
-                    self.cached_tokens.to_dec_sep_num(',')
-                ))
-                .fg(theme::TEXT_DIM),
-            );
-        }
-        lines.push(Line::from(format!("  Cost: ${:.2}", self.cost)).fg(theme::TEXT_DIM));
-        lines.push(Line::from(""));
+        self.context.view(&mut lines);
 
         if self.todos_total > 0 {
             lines.push(Line::from("Todos").fg(theme::ACCENT).bold());
@@ -333,5 +284,89 @@ mod tests {
         sidebar.update(SidebarMessage::SetTodos { done: 3, total: 3 });
         sidebar.update(SidebarMessage::SetTodos { done: 0, total: 0 });
         assert!(!text(&sidebar.rendered_lines()).contains("Todos"));
+    }
+
+    #[test]
+    fn context_section_shows_tokens_and_cost() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage {
+                total_tokens: 22_400,
+                input_tokens: 10_100,
+                output_tokens: 12_300,
+                ..Default::default()
+            },
+            cost: 0.125,
+        });
+        let rendered = text(&sidebar.rendered_lines());
+        assert!(rendered.contains("↑10.1k"), "body: {rendered}");
+        assert!(rendered.contains("↓12.3k"), "body: {rendered}");
+        assert!(rendered.contains("Cost $0.12"), "body: {rendered}");
+        assert!(!rendered.contains("Think"), "body: {rendered}");
+        assert!(!rendered.contains("Cache"), "body: {rendered}");
+        assert!(!rendered.contains('%'), "body: {rendered}");
+    }
+
+    #[test]
+    fn context_section_shows_think_and_cache_when_present() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage {
+                total_tokens: 11_756,
+                input_tokens: 10_100,
+                output_tokens: 1_656,
+                reasoning_tokens: 12_000,
+                cached_input_tokens: 456,
+                ..Default::default()
+            },
+            cost: 0.0,
+        });
+        let rendered = text(&sidebar.rendered_lines());
+        assert!(rendered.contains("Think 12k"), "body: {rendered}");
+        assert!(rendered.contains("Cache 456"), "body: {rendered}");
+    }
+
+    #[test]
+    fn context_section_shows_window_fraction() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateConfig {
+            provider: None,
+            model: None,
+            context_length: Some(200_000),
+        });
+        sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage {
+                total_tokens: 12_300,
+                ..Default::default()
+            },
+            cost: 0.0,
+        });
+        let rendered = text(&sidebar.rendered_lines());
+        assert!(rendered.contains("12.3k / 200k (6%)"), "body: {rendered}");
+    }
+
+    #[test]
+    fn context_section_set_usage_replaces_totals() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage {
+                total_tokens: 50_000,
+                input_tokens: 50_000,
+                ..Default::default()
+            },
+            cost: 1.0,
+        });
+        sidebar.update(SidebarMessage::SetUsage {
+            usage: TokenUsage {
+                total_tokens: 10_000,
+                input_tokens: 10_000,
+                ..Default::default()
+            },
+            cost: 0.2,
+        });
+        let rendered = text(&sidebar.rendered_lines());
+        assert!(rendered.contains("10k"), "body: {rendered}");
+        assert!(rendered.contains("$0.20"), "body: {rendered}");
+        assert!(!rendered.contains("50k"), "body: {rendered}");
     }
 }

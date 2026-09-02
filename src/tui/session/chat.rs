@@ -1236,7 +1236,7 @@ mod tests {
             );
             session.tool_records.push(ToolRecord {
                 name: "run_shell".to_string(),
-                args_json: "{\"command\":\"cargo build\"}".to_string(),
+                args_json: format!("{{\"command\":\"{}\"}}", "c".repeat(290)),
                 output: "x".repeat(1200),
                 stderr: String::new(),
                 ok: true,
