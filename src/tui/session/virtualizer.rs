@@ -89,7 +89,7 @@ impl TurnEst {
                 est.add_text(content);
             }
             Role::Assistant => {
-                est.reasoning_rows = reasoning_count as u32;
+                est.reasoning_rows = reasoning_count as u32 * (1 + 2 * u32::from(BLOCK_PADDING.1));
                 if summary_marker {
                     est.deco_rows += 1;
                 }

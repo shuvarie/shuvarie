@@ -3,7 +3,7 @@ use std::time::Instant;
 use ratatui::prelude::*;
 
 use super::format_duration_ms;
-use crate::tui::session::segment::Segment;
+use crate::tui::session::segment::{BLOCK_PADDING, Segment};
 use crate::tui::session::virtualizer::TurnEst;
 use crate::tui::{spinner, theme};
 
@@ -77,16 +77,20 @@ impl ReasoningBlock {
         self.thinking
     }
 
-    /// One collapsed header row, plus the body rows when expanded.
+    /// Vertical padding, one collapsed header row, plus the body rows when
+    /// expanded.
     pub(super) fn est(&self) -> TurnEst {
         TurnEst {
-            reasoning_rows: 1 + u32::from(self.expanded) * self.text.lines().count() as u32,
+            reasoning_rows: 2 * u32::from(BLOCK_PADDING.1)
+                + 1
+                + u32::from(self.expanded) * self.text.lines().count() as u32,
             ..TurnEst::default()
         }
     }
 
-    /// Two segments: the header (the click target — the engine stamps the hit
-    /// address on the first segment only) and, when expanded, the body.
+    /// One padded segment: the header line, plus the body lines when
+    /// expanded (the engine stamps the hit address on the first segment, so
+    /// the whole block toggles on click).
     pub fn view(&self) -> Vec<Segment> {
         let header = if self.thinking {
             let ms = self
@@ -112,16 +116,20 @@ impl ReasoningBlock {
                 Span::raw(format!(" {arrow}")).fg(theme::TEXT_MUTED),
             ]
         };
-        let mut segments = vec![Segment::plain(vec![Line::from(header)])];
+        let mut lines = vec![Line::from(header)];
         if self.expanded {
-            segments.push(Segment::plain(
+            lines.extend(
                 self.text
                     .lines()
-                    .map(|l| Line::from(Span::raw(format!("  {l}")).fg(theme::TEXT_DIM).italic()))
-                    .collect(),
-            ));
+                    .map(|l| Line::from(Span::raw(format!("  {l}")).fg(theme::TEXT_DIM).italic())),
+            );
         }
-        segments
+        vec![Segment {
+            lines,
+            bg: None,
+            padding: (0, BLOCK_PADDING.1),
+            hit: None,
+        }]
     }
 
     fn label(&self, text: &str) -> Span<'static> {
