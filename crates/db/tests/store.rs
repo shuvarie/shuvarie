@@ -3,6 +3,30 @@ use shuvarie_llm::Role;
 use shuvarie_llm::TokenUsage;
 
 #[tokio::test]
+async fn open_seeds_gitignore_when_creating_shuvarie_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".shuvarie/data.db");
+
+    Store::open(&path).await.unwrap();
+    let gitignore = dir.path().join(".shuvarie/.gitignore");
+    assert!(gitignore.exists());
+    assert_eq!(std::fs::read_to_string(&gitignore).unwrap(), "*\n");
+
+    std::fs::write(&gitignore, "!data.db\n").unwrap();
+    Store::open(&path).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&gitignore).unwrap(),
+        "!data.db\n",
+        "reopen must not overwrite an existing .gitignore"
+    );
+
+    let plain = dir.path().join("other");
+    std::fs::create_dir_all(&plain).unwrap();
+    Store::open(&plain.join("data.db")).await.unwrap();
+    assert!(!plain.join(".gitignore").exists());
+}
+
+#[tokio::test]
 async fn create_and_list_sessions_most_recent_first() {
     let mut store = Store::open_in_memory().await.unwrap();
     let s1 = store.create_session("first", None, None).await.unwrap();

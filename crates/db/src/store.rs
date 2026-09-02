@@ -150,8 +150,14 @@ impl Store {
 
     pub async fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
+            let created = !parent.exists();
             std::fs::create_dir_all(parent)
                 .map_err(|e| DbError::Open(format!("create dir {}: {e}", parent.display())))?;
+            if created && parent.file_name() == Some(std::ffi::OsStr::new(".shuvarie")) {
+                let gitignore = parent.join(".gitignore");
+                std::fs::write(&gitignore, "*\n")
+                    .map_err(|e| DbError::Open(format!("write {}: {e}", gitignore.display())))?;
+            }
         }
         let driver = toasty_driver_turso::Turso::file(path).experimental_index_method(true);
         Self::open_with_driver(driver).await
