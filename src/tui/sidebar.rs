@@ -25,6 +25,8 @@ pub struct Sidebar {
     pub lsp_servers: Vec<LspStatus>,
     pub lsp_enabled: bool,
     pub skills: Vec<Skill>,
+    pub todos_done: usize,
+    pub todos_total: usize,
     dirty: Cell<bool>,
     lines_cache: RefCell<Vec<Line<'static>>>,
 }
@@ -49,6 +51,10 @@ pub enum SidebarMessage {
     UpdateSkills {
         skills: Vec<Skill>,
     },
+    SetTodos {
+        done: usize,
+        total: usize,
+    },
 }
 
 impl Sidebar {
@@ -67,6 +73,8 @@ impl Sidebar {
             lsp_servers: Vec::new(),
             lsp_enabled: true,
             skills: Vec::new(),
+            todos_done: 0,
+            todos_total: 0,
             dirty: Cell::new(true),
             lines_cache: RefCell::new(Vec::new()),
         }
@@ -107,6 +115,10 @@ impl Sidebar {
             SidebarMessage::UpdateSkills { skills } => {
                 self.skills = skills;
             }
+            SidebarMessage::SetTodos { done, total } => {
+                self.todos_done = done;
+                self.todos_total = total;
+            }
         }
     }
 
@@ -142,6 +154,15 @@ impl Sidebar {
         let lines = self.lines_cache.borrow().clone();
         let para = Paragraph::new(lines).alignment(Alignment::Left);
         frame.render_widget(para, lines_area);
+    }
+
+    #[cfg(test)]
+    fn rendered_lines(&self) -> Vec<Line<'static>> {
+        if self.dirty.get() {
+            *self.lines_cache.borrow_mut() = self.build_lines();
+            self.dirty.set(false);
+        }
+        self.lines_cache.borrow().clone()
     }
 
     fn build_lines(&self) -> Vec<Line<'static>> {
@@ -187,6 +208,23 @@ impl Sidebar {
         }
         lines.push(Line::from(format!("  Cost: ${:.2}", self.cost)).fg(theme::TEXT_DIM));
         lines.push(Line::from(""));
+
+        if self.todos_total > 0 {
+            lines.push(Line::from("Todos").fg(theme::ACCENT).bold());
+            let done_color = if self.todos_done == self.todos_total {
+                theme::SUCCESS
+            } else {
+                theme::TEXT
+            };
+            lines.push(Line::from(vec![
+                Span::raw("  ").fg(theme::TEXT_MUTED),
+                Span::raw(format!("{}", self.todos_done))
+                    .fg(done_color)
+                    .bold(),
+                Span::raw(format!("/{} done", self.todos_total)).fg(theme::TEXT_DIM),
+            ]));
+            lines.push(Line::from(""));
+        }
 
         lines.push(Line::from("LSP").fg(theme::ACCENT).bold());
         if !self.lsp_enabled {
@@ -254,5 +292,46 @@ impl Sidebar {
 impl Default for Sidebar {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.clone())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn todos_section_hidden_when_empty() {
+        let sidebar = Sidebar::new();
+        assert!(!text(&sidebar.rendered_lines()).contains("Todos"));
+    }
+
+    #[test]
+    fn todos_section_shows_done_and_total() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::SetTodos { done: 2, total: 5 });
+        let rendered = text(&sidebar.rendered_lines());
+        assert!(rendered.contains("Todos"), "body: {rendered}");
+        assert!(rendered.contains("2/5 done"), "body: {rendered}");
+    }
+
+    #[test]
+    fn todos_section_reset_hides_again() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::SetTodos { done: 3, total: 3 });
+        sidebar.update(SidebarMessage::SetTodos { done: 0, total: 0 });
+        assert!(!text(&sidebar.rendered_lines()).contains("Todos"));
     }
 }

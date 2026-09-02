@@ -2,6 +2,7 @@ use std::time::Instant;
 
 use ratatui::prelude::*;
 use serde_json::Value;
+use shuvarie_core::todos::{TodoStatus, done_total, parse_items};
 use shuvarie_llm::{DiffLine, DiffLineKind, FileChange, PatchFileKind};
 use unicode_width::UnicodeWidthStr;
 
@@ -136,7 +137,7 @@ impl ToolBlock {
                 self.file_change = file_change;
                 self.started_at = None;
                 self.duration_ms = duration_ms;
-                self.expanded = self.name == "question";
+                self.expanded = self.name == "question" || self.name == "todo";
                 true
             }
         }
@@ -158,6 +159,11 @@ impl ToolBlock {
         lines.push(self.header_line(inner_w));
         if self.name == "question" {
             push_question_block_lines(&mut lines, self);
+        } else if self.name == "todo" {
+            match parse_items(&self.output) {
+                Some(items) => push_todo_rows(&mut lines, &items, self.expanded),
+                None => push_output_rows(&mut lines, self, false),
+            }
         } else {
             let before = lines.len();
             push_output_rows(&mut lines, self, is_shell);
@@ -276,6 +282,22 @@ impl ToolBlock {
             "question" => {
                 header.push(Span::raw("question").fg(theme::TEXT).bold());
             }
+            "todo" => {
+                header.push(Span::raw("todo").fg(theme::TEXT).bold());
+                if let Some(summary) = todo_op_summary(&args) {
+                    header.push(Span::raw(format!(" {summary}")).fg(theme::TEXT_MUTED));
+                }
+                if let Some(items) = parse_items(&self.output) {
+                    let (done, total) = done_total(&items);
+                    let right_text = format!("{done}/{total} done");
+                    let right_w = UnicodeWidthStr::width(right_text.as_str());
+                    let pad = inner_w
+                        .saturating_sub(spans_width(&header) + right_w)
+                        .max(1);
+                    header.push(Span::raw(" ".repeat(pad)));
+                    header.push(Span::raw(right_text).fg(theme::TEXT_MUTED));
+                }
+            }
             _ => {
                 header.push(Span::raw(self.name.clone()).fg(theme::TEXT).bold());
                 if !self.args.is_empty() {
@@ -335,6 +357,75 @@ fn push_output_rows(lines: &mut Vec<Line<'static>>, tool: &ToolBlock, is_shell: 
     if hidden > 0 {
         lines.push(Line::from(
             Span::raw(format!("… +{hidden} more lines"))
+                .fg(theme::TEXT_MUTED)
+                .italic(),
+        ));
+    }
+}
+
+/// A short human summary of the todo operation for the block header, parsed
+/// from the call args: `+ "text"`, `#2 → done`, `− #1`.
+fn todo_op_summary(args: &Value) -> Option<String> {
+    let truncate = |raw: &str| -> String { raw.chars().take(40).collect() };
+    match args.get("op").and_then(Value::as_str)? {
+        "add" => {
+            let text = args.get("text").and_then(Value::as_str)?;
+            Some(format!("+ \"{}\"", truncate(text)))
+        }
+        "update" => {
+            let id = args.get("id").and_then(Value::as_u64)?;
+            let text = args.get("text").and_then(Value::as_str);
+            let status = args.get("status").and_then(Value::as_str);
+            match (text, status) {
+                (Some(t), Some(s)) => Some(format!("#{id} → \"{}\" → {s}", truncate(t))),
+                (Some(t), None) => Some(format!("#{id} → \"{}\"", truncate(t))),
+                (None, Some(s)) => Some(format!("#{id} → {s}")),
+                (None, None) => Some(format!("#{id}")),
+            }
+        }
+        "remove" => {
+            let id = args.get("id").and_then(Value::as_u64)?;
+            Some(format!("− #{id}"))
+        }
+        _ => None,
+    }
+}
+
+/// The styled todo list rows: done items dimmed + struck through, the single
+/// in-progress item highlighted, pending items dim. Collapsed like tool
+/// output (last few rows + a hint), expanded shows everything.
+fn push_todo_rows(
+    lines: &mut Vec<Line<'static>>,
+    items: &[shuvarie_core::todos::TodoItem],
+    expanded: bool,
+) {
+    let hidden = if expanded {
+        0
+    } else {
+        items.len().saturating_sub(COLLAPSED_OUTPUT_LINES)
+    };
+    for item in &items[hidden..] {
+        let (marker, marker_fg, text_style) = match item.status {
+            TodoStatus::Done => (
+                "✓",
+                theme::SUCCESS,
+                Style::new()
+                    .fg(theme::TEXT_DIM)
+                    .add_modifier(Modifier::CROSSED_OUT),
+            ),
+            TodoStatus::InProgress => ("◐", theme::ACCENT, Style::new().fg(theme::TEXT).bold()),
+            TodoStatus::Pending => ("○", theme::TEXT_MUTED, Style::new().fg(theme::TEXT_DIM)),
+        };
+        lines.push(Line::from(vec![
+            Span::raw("  ").fg(theme::TEXT_MUTED),
+            Span::raw(marker).fg(marker_fg).bold(),
+            Span::raw(" ").fg(theme::TEXT_MUTED),
+            Span::raw(item.text.clone()).style(text_style),
+        ]));
+    }
+    if hidden > 0 {
+        lines.push(Line::from(
+            Span::raw(format!("… +{hidden} more items"))
                 .fg(theme::TEXT_MUTED)
                 .italic(),
         ));
@@ -712,5 +803,86 @@ mod tests {
         });
         let text = block_text(&block, &env);
         assert!(text.contains("Took 1m 05s"), "header/body: {text}");
+    }
+
+    fn todo_output() -> String {
+        "Added #3 \"update UI\"\n\nTodos (1/3 done)\n  #1 [x] set up schema\n  #2 [~] write migration\n  #3 [ ] update UI".to_string()
+    }
+
+    #[test]
+    fn finished_todo_block_renders_status_list() {
+        let env = ChatEnv {
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let mut block = ToolBlock::new(
+            "todo",
+            r#"{"op":"add","text":"update UI"}"#.to_string(),
+            None,
+        );
+        block.update(ToolMessage::Finish {
+            ok: true,
+            output: todo_output(),
+            stderr: String::new(),
+            file_change: None,
+            duration_ms: 120,
+        });
+        let text = block_text(&block, &env);
+        assert!(text.contains("todo + \"update UI\""), "header/body: {text}");
+        assert!(text.contains("1/3 done"), "header/body: {text}");
+        assert!(text.contains("✓ set up schema"), "header/body: {text}");
+        assert!(text.contains("◐ write migration"), "header/body: {text}");
+        assert!(text.contains("○ update UI"), "header/body: {text}");
+        assert!(
+            !text.contains("Todos (1/3 done)"),
+            "raw output rows leaked: {text}"
+        );
+        assert!(!text.contains("Added #3"), "model summary leaked: {text}");
+    }
+
+    #[test]
+    fn reloaded_todo_block_renders_from_persisted_output() {
+        let env = ChatEnv {
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let block = ToolBlock::from_record(&ToolRecord {
+            name: "todo".to_string(),
+            args_json: r#"{"op":"list"}"#.to_string(),
+            output: "Todos (1/3 done)\n  #1 [x] set up schema\n  #2 [~] write migration\n  #3 [ ] update UI".to_string(),
+            stderr: String::new(),
+            ok: true,
+            worker: None,
+            message_id: 1,
+            message_seq: 1,
+            file_change: None,
+            original_content: None,
+            new_content: None,
+            duration_ms: 90,
+        });
+        let text = block_text(&block, &env);
+        assert!(text.contains("✓ set up schema"), "header/body: {text}");
+        assert!(text.contains("◐ write migration"), "header/body: {text}");
+        assert!(text.contains("○ update UI"), "header/body: {text}");
+        assert!(text.contains("1/3 done"), "header/body: {text}");
+    }
+
+    #[test]
+    fn failed_todo_call_falls_back_to_output_rows() {
+        let env = ChatEnv {
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let mut block = ToolBlock::new(
+            "todo",
+            r#"{"op":"update","id":9,"status":"done"}"#.to_string(),
+            None,
+        );
+        block.update(ToolMessage::Finish {
+            ok: false,
+            output: "unknown todo id 9".to_string(),
+            stderr: String::new(),
+            file_change: None,
+            duration_ms: 5,
+        });
+        let text = block_text(&block, &env);
+        assert!(text.contains("unknown todo id 9"), "header/body: {text}");
     }
 }

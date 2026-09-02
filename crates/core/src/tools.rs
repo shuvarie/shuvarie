@@ -1948,6 +1948,7 @@ pub fn all_tools(
     max_output_bytes: usize,
     question_gate: QuestionGate,
     shell_tx: ShellOutputTx,
+    todos: crate::todos::TodoState,
 ) -> Vec<shuvarie_llm::DynamicTool> {
     vec![
         shuvarie_llm::into_dynamic(
@@ -1990,6 +1991,7 @@ pub fn all_tools(
                 gate: question_gate,
             },
         ),
+        shuvarie_llm::into_dynamic(crate::todos::Todo::NAME, crate::todos::Todo::new(todos)),
     ]
 }
 

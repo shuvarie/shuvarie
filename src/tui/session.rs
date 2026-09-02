@@ -281,6 +281,8 @@ impl SessionScreen {
                     usage: TokenUsage::default(),
                     cost: 0.0,
                 });
+                self.sidebar
+                    .update(SidebarMessage::SetTodos { done: 0, total: 0 });
                 None
             }
             SessionMessage::Loaded { id, title, session } => {
@@ -290,6 +292,10 @@ impl SessionScreen {
                 self.status = None;
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
+                self.sidebar.update(SidebarMessage::SetTodos {
+                    done: todo_counts(&session).0,
+                    total: todo_counts(&session).1,
+                });
                 self.chat.update(ChatMessage::Load { session });
                 None
             }
@@ -297,6 +303,10 @@ impl SessionScreen {
                 let (usage, cost) = usage_of(&session);
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
+                self.sidebar.update(SidebarMessage::SetTodos {
+                    done: todo_counts(&session).0,
+                    total: todo_counts(&session).1,
+                });
                 self.chat.update(ChatMessage::TurnReverted { session });
                 None
             }
@@ -304,6 +314,10 @@ impl SessionScreen {
                 let (usage, cost) = usage_of(&session);
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
+                self.sidebar.update(SidebarMessage::SetTodos {
+                    done: todo_counts(&session).0,
+                    total: todo_counts(&session).1,
+                });
                 self.chat.update(ChatMessage::TurnRestored { session });
                 None
             }
@@ -334,7 +348,15 @@ impl SessionScreen {
                 self.busy_kind = BusyKind::Tool;
                 self.status = Some(format!("Spawned worker: {name}"));
             }
-            ChatMessage::ToolFinished { .. } | ChatMessage::WorkerFinished { .. } => {
+            ChatMessage::ToolFinished {
+                name, ok, output, ..
+            } => {
+                self.status = None;
+                if name == "todo" && *ok {
+                    self.sync_todo_counts(output);
+                }
+            }
+            ChatMessage::WorkerFinished { .. } => {
                 self.status = None;
             }
             ChatMessage::StreamDone => {
@@ -351,6 +373,16 @@ impl SessionScreen {
             }
             _ => {}
         }
+    }
+
+    /// Parse the finished `todo` tool call's list output into sidebar counts.
+    fn sync_todo_counts(&mut self, output: &str) {
+        let Some(items) = shuvarie_core::todos::parse_items(output) else {
+            return;
+        };
+        let (done, total) = shuvarie_core::todos::done_total(&items);
+        self.sidebar
+            .update(SidebarMessage::SetTodos { done, total });
     }
 
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -474,6 +506,10 @@ fn usage_of(session: &shuvarie_core::Session) -> (TokenUsage, f64) {
         },
         session.cost,
     )
+}
+
+fn todo_counts(session: &shuvarie_core::Session) -> (usize, usize) {
+    shuvarie_core::todos::done_total(&shuvarie_core::todos::replay(&session.tool_records))
 }
 
 impl Default for SessionScreen {

@@ -780,7 +780,13 @@ You can also delegate work to three specialist worker agents, exposed as tools:
 Delegate a task to a worker when it is long, multi-step, or self-contained — the worker runs its \
   own agent loop and returns a summary. Keep doing your own work for quick, single tool calls. \
 You remain responsible for the final answer: synthesize worker results and verify the overall \
-outcome (for example, delegate to run_tests after edit_files).";
+outcome (for example, delegate to run_tests after edit_files).
+
+You can maintain a session todo list with the `todo` tool (ops: add, update, remove, list; \
+statuses: pending, in_progress, done). When the user's request needs three or more steps, add \
+a todo per step, keep exactly one in_progress while you work on it, and mark each done as soon \
+as it is finished. Todos are surfaced to the user in the chat pane and the sidebar, so keep \
+the list current.";
 
 #[derive(Debug, Default)]
 struct TurnState {
@@ -977,10 +983,14 @@ impl CoreCtx {
                 return;
             }
         };
-        let prior: Vec<shuvarie_llm::ChatMsg> = {
+        let (prior, todo_records): (
+            Vec<shuvarie_llm::ChatMsg>,
+            Vec<crate::tool_record::ToolRecord>,
+        ) = {
             let guard = s.lock().await;
-            guard.history_for_send()
+            (guard.history_for_send(), guard.tool_records.clone())
         };
+        let todo_state = crate::todos::TodoState::from_records(&todo_records);
         let loaded_context =
             self.agents_md_context
                 .clone()
@@ -1012,6 +1022,7 @@ impl CoreCtx {
             self.max_output_bytes,
             question_gate,
             crate::tools::ShellOutputTx::new(shell_tx.clone()),
+            todo_state,
         );
         let provider_name_for_catalog = self
             .connections
