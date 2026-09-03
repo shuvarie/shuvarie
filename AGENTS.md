@@ -69,6 +69,7 @@ The visual style lives in `src/tui/theme.rs` (true-color `Color::Rgb`, medieval/
 - **Skills**: `.agents/skills/` contains `ratatui`, `tokio`, `turso-db`, `toasty`, and `rig` references — consult them when working on TUI rendering, async, storage, ORM, or LLM provider/agent code. The app itself loads these skills (`shuvarie-core::skills`) into the sidebar and agent preamble.
 - **kdl-serde quirk**: kdl-serde drops entries serializing to `Bool(false)`/`Null`, so default-on flags are stored inverted (`disabled #true` = off, omitted = on) and non-Option nested fields need `deserialize_with = "kdlserde::de_default"`.
 - **Reuse**: for logic used in multiple places, prefer shared utils/modules.
+- **Modules**: when creating a mod directory, keep the `<mod_name>.rs` in the parent directory rather than creating a `mod.rs`.
 
 ## Build & test
 
