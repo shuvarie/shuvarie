@@ -3,10 +3,14 @@ CREATE TABLE "sessions" (
     "title" TEXT NOT NULL,
     "provider" TEXT,
     "model" TEXT,
+    "session_type" TEXT NOT NULL CHECK ("session_type" IN ('main', 'worker')),
+    "parent_id" UUID,
     "created_at" TEXT NOT NULL,
     "updated_at" TEXT NOT NULL,
     PRIMARY KEY ("id")
 );
+-- #[toasty::breakpoint]
+CREATE INDEX "index_sessions_by_parent_id" ON "sessions" ("parent_id");
 -- #[toasty::breakpoint]
 CREATE TABLE "message_embeddings" (
     "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,

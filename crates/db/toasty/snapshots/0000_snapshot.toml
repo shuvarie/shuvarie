@@ -35,12 +35,25 @@ nullable = true
 
 [[schema.tables.columns]]
 id = { table = 0, index = 4 }
+name = "session_type"
+ty = "String"
+storage_ty = { Enum = { name = "session_type", variants = [{ name = "main" }, { name = "worker" }] } }
+
+[[schema.tables.columns]]
+id = { table = 0, index = 5 }
+name = "parent_id"
+ty = "Bytes"
+storage_ty = "Blob"
+nullable = true
+
+[[schema.tables.columns]]
+id = { table = 0, index = 6 }
 name = "created_at"
 ty = "String"
 storage_ty = "Text"
 
 [[schema.tables.columns]]
-id = { table = 0, index = 5 }
+id = { table = 0, index = 7 }
 name = "updated_at"
 ty = "String"
 storage_ty = "Text"
@@ -52,6 +65,12 @@ on = 0
 columns = [{ column = { table = 0, index = 0 }, op = "Eq", scope = "Partition" }]
 unique = true
 primary_key = true
+
+[[schema.tables.indices]]
+id = { table = 0, index = 1 }
+name = "index_sessions_by_parent_id"
+on = 0
+columns = [{ column = { table = 0, index = 5 }, op = "Eq", scope = "Partition" }]
 
 [[schema.tables]]
 id = 1

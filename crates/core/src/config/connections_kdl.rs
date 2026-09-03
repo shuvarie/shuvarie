@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 
-use super::{span_to_line_column, Active, Connections, CoreError, ProviderConfig};
-use crate::error::ConfigParseError;
+use super::{Active, Connections, CoreError, ProviderConfig, span_to_line_column};
 use crate::Result as CoreResult;
+use crate::error::ConfigParseError;
 
 pub(crate) fn from_kdl(contents: &str) -> CoreResult<Connections> {
     from_document(&parse_document(contents)?, contents)

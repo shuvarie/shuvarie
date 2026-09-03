@@ -4,11 +4,11 @@ use shuvarie_llm::Role;
 use shuvarie_llm::TokenUsage;
 use toasty::db::Driver;
 use toasty::schema::db;
-use toasty::stmt::{List, Query, Type};
+use toasty::stmt::Type;
 
 use crate::error::{DbError, Result};
 use crate::model::{
-    Message, MessageEmbedding, MsgRole, ReasoningSegment, Session, ToolCall, UndoLog,
+    Message, MessageEmbedding, MsgRole, ReasoningSegment, Session, SessionType, ToolCall, UndoLog,
     encode_reasoning, parse_reasoning,
 };
 
@@ -197,7 +197,7 @@ impl Store {
     }
 
     pub async fn list_sessions(&mut self) -> Result<Vec<SessionSummary>> {
-        let sessions = Query::<List<Session>>::all()
+        let sessions = Session::filter(Session::fields().session_type().eq(SessionType::Main))
             .latest_by(Session::fields().updated_at())
             .exec(&mut self.db)
             .await
@@ -239,7 +239,7 @@ impl Store {
     }
 
     pub async fn most_recent_session(&mut self) -> Result<Option<StoredSession>> {
-        let latest = Query::<List<Session>>::all()
+        let latest = Session::filter(Session::fields().session_type().eq(SessionType::Main))
             .latest_by(Session::fields().updated_at())
             .first()
             .exec(&mut self.db)
@@ -266,10 +266,35 @@ impl Store {
         provider: Option<&str>,
         model: Option<&str>,
     ) -> Result<uuid::Uuid> {
+        self.insert_session(title, provider, model, SessionType::Main, None)
+            .await
+    }
+
+    pub async fn create_worker_session(
+        &mut self,
+        title: &str,
+        provider: Option<&str>,
+        model: Option<&str>,
+        parent_id: uuid::Uuid,
+    ) -> Result<uuid::Uuid> {
+        self.insert_session(title, provider, model, SessionType::Worker, Some(parent_id))
+            .await
+    }
+
+    async fn insert_session(
+        &mut self,
+        title: &str,
+        provider: Option<&str>,
+        model: Option<&str>,
+        session_type: SessionType,
+        parent_id: Option<uuid::Uuid>,
+    ) -> Result<uuid::Uuid> {
         let session = toasty::create!(Session {
             title: title.to_string(),
             provider: provider.map(|p| p.to_string()),
             model: model.map(|m| m.to_string()),
+            session_type,
+            parent_id,
         })
         .exec(&mut self.db)
         .await

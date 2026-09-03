@@ -44,6 +44,23 @@ async fn create_and_list_sessions_most_recent_first() {
 }
 
 #[tokio::test]
+async fn worker_sessions_are_hidden_from_list_and_most_recent() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let main = store.create_session("main", None, None).await.unwrap();
+    store
+        .create_worker_session("explore_workspace", Some("ollama"), Some("model-x"), main)
+        .await
+        .unwrap();
+
+    let list = store.list_sessions().await.unwrap();
+    assert_eq!(list.len(), 1, "worker sessions must not appear in the list");
+    assert_eq!(list[0].id, main);
+
+    let recent = store.most_recent_session().await.unwrap().unwrap();
+    assert_eq!(recent.id, main, "worker sessions must not be auto-resumed");
+}
+
+#[tokio::test]
 async fn append_and_load_messages_in_order() {
     let mut store = Store::open_in_memory().await.unwrap();
     let id = store.create_session("t", None, None).await.unwrap();

@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
-use crate::error::ConfigParseError;
 use crate::CoreError;
+use crate::error::ConfigParseError;
 
 /// Deserializes a field, falling back to the type's default when the node is
 /// absent. KDL-serde's deserializer only reports a clean `None` for omitted

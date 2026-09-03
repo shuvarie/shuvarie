@@ -199,9 +199,11 @@ impl ModelPicker {
         let mut items: Vec<ListItem> = Vec::new();
         let query_row_present = self.query_row().is_some();
         if let Some(q) = self.query_row() {
-            let mut line = vec![Span::raw(format!("Use \"{q}\""))
-                .fg(theme::ACCENT)
-                .add_modifier(Modifier::BOLD)];
+            let mut line = vec![
+                Span::raw(format!("Use \"{q}\""))
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ];
             line.push(Span::raw("  (no match)").fg(theme::TEXT_MUTED));
             items.push(render_list_item_line(Line::from(line), self.selected == 0));
         }

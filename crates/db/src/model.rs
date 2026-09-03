@@ -112,6 +112,13 @@ impl MsgRole {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, toasty::Embed)]
+#[column(rename_all = "snake_case")]
+pub enum SessionType {
+    Main,
+    Worker,
+}
+
 #[derive(Debug, toasty::Model)]
 pub struct Session {
     #[key]
@@ -120,6 +127,11 @@ pub struct Session {
     pub title: String,
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub session_type: SessionType,
+    #[index]
+    pub parent_id: Option<uuid::Uuid>,
+    #[belongs_to(key = parent_id, references = id)]
+    pub parent: toasty::Deferred<Session>,
     #[auto]
     pub created_at: jiff::Timestamp,
     #[auto]
