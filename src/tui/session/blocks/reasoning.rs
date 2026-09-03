@@ -129,6 +129,7 @@ impl ReasoningBlock {
             bg: None,
             padding: (0, BLOCK_PADDING.1),
             hit: None,
+            trim: true,
         }]
     }
 

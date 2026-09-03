@@ -26,6 +26,7 @@ impl UserPrompt {
             bg: Some(theme::PROMPT_BG),
             padding: BLOCK_PADDING,
             hit: None,
+            trim: true,
         }]
     }
 

@@ -211,6 +211,7 @@ impl ToolBlock {
             bg: Some(self.bg()),
             padding: BLOCK_PADDING,
             hit: None,
+            trim: false,
         }
     }
 
@@ -694,7 +695,7 @@ fn push_diff_line(lines: &mut Vec<Line<'static>>, line: &DiffLine) {
         .new_line
         .map(|n| format!("{n:>4}"))
         .unwrap_or_else(|| "    ".to_string());
-    let text = line.text.trim_end_matches('\n');
+    let text = line.text.trim_end_matches(['\r', '\n']);
     lines.push(Line::from(vec![
         Span::raw(format!("  {old_num} {new_num} ")).fg(theme::TEXT_MUTED),
         Span::raw(marker).fg(fg).bold(),
@@ -815,6 +816,69 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn finished_edit_block() -> ToolBlock {
+        let mut block = ToolBlock::new("edit_file", r#"{"path":"src/main.rs"}"#.to_string(), None);
+        block.update(ToolMessage::Finish {
+            ok: true,
+            output: String::new(),
+            stderr: String::new(),
+            file_change: Some(FileChange::Edit {
+                path: "src/main.rs".to_string(),
+                diff: vec![
+                    DiffLine {
+                        kind: DiffLineKind::Remove,
+                        old_line: Some(3),
+                        new_line: None,
+                        text: "        let value = old();\n".to_string(),
+                    },
+                    DiffLine {
+                        kind: DiffLineKind::Add,
+                        old_line: None,
+                        new_line: Some(3),
+                        text: "        let value = new();\n".to_string(),
+                    },
+                ],
+                original: String::new(),
+                new: String::new(),
+            }),
+            duration_ms: 10,
+        });
+        block
+    }
+
+    #[test]
+    fn edit_diff_rows_align_and_keep_indentation() {
+        let env = ChatEnv {
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let block = finished_edit_block();
+        let width = 80u16;
+        let seg = block.view(width, &env);
+        assert!(!seg.trim);
+        let content_width = width.saturating_sub(2 * BLOCK_PADDING.0);
+        let h = seg.measure(content_width);
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, h as u16));
+        seg.paint(buf.area, 0, 0, h, content_width, &mut buf);
+        let rows: Vec<String> = (0..h as u16)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        let minus = rows
+            .iter()
+            .find(|r| r.contains("-        let value = old();"))
+            .unwrap_or_else(|| panic!("minus row missing: {rows:?}"));
+        let plus = rows
+            .iter()
+            .find(|r| r.contains("+        let value = new();"))
+            .unwrap_or_else(|| panic!("plus row missing: {rows:?}"));
+        assert_eq!(minus.find('-').unwrap(), plus.find('+').unwrap());
     }
 
     #[test]

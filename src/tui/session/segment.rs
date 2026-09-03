@@ -37,6 +37,7 @@ pub struct Segment {
     pub bg: Option<Color>,
     pub padding: (u16, u16),
     pub hit: Option<BlockAddr>,
+    pub trim: bool,
 }
 
 impl Segment {
@@ -46,6 +47,7 @@ impl Segment {
             bg: None,
             padding: (0, 0),
             hit: None,
+            trim: true,
         }
     }
 
@@ -62,7 +64,7 @@ impl Segment {
             usize::from(self.bg.is_some())
         } else {
             Paragraph::new(self.lines.clone())
-                .wrap(Wrap { trim: true })
+                .wrap(Wrap { trim: self.trim })
                 .line_count(self.text_width(content_width))
         };
         (lines.saturating_add(2 * self.padding.1 as usize)) as u32
@@ -114,7 +116,7 @@ impl Segment {
         }
         let skip = u16::try_from(vt - text_top).unwrap_or(u16::MAX);
         let para = Paragraph::new(self.lines.clone())
-            .wrap(Wrap { trim: true })
+            .wrap(Wrap { trim: self.trim })
             .scroll((skip, 0));
         para.render(
             Rect {
@@ -124,6 +126,72 @@ impl Segment {
                 height: u16::try_from(vb - vt).unwrap_or(u16::MAX),
             },
             buf,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn buffer_rows(buf: &Buffer, w: u16, h: u16) -> Vec<String> {
+        (0..h)
+            .map(|y| {
+                (0..w)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn plain_segment_trims_leading_whitespace() {
+        let seg = Segment::plain(vec![Line::from("    indented prose")]);
+        let w = 20;
+        assert!(seg.trim);
+        let mut buf = Buffer::empty(Rect::new(0, 0, w, 1));
+        seg.paint(buf.area, 0, 0, seg.measure(w), w, &mut buf);
+        assert_eq!(buffer_rows(&buf, w, 1)[0], "indented prose");
+    }
+
+    #[test]
+    fn untrimmed_segment_keeps_leading_whitespace_when_wrapping() {
+        let long = "        let value = compute_something(with_a_long_argument, more_args);";
+        let del = Line::from(vec![
+            Span::raw("     3      "),
+            Span::raw("-"),
+            Span::raw(long.to_string()),
+        ]);
+        let seg = Segment {
+            lines: vec![del],
+            bg: None,
+            padding: (0, 0),
+            hit: None,
+            trim: false,
+        };
+        let w = 44;
+        let h = seg.measure(w);
+        assert!(h >= 2, "row must wrap");
+        let mut buf = Buffer::empty(Rect::new(0, 0, w, h as u16));
+        seg.paint(buf.area, 0, 0, h, w, &mut buf);
+        let rows = buffer_rows(&buf, w, h as u16);
+        assert!(
+            rows[0].starts_with("     3      -"),
+            "gutter: {:?}",
+            rows[0]
+        );
+        assert!(
+            rows[0].contains("        let value"),
+            "code indent: {:?}",
+            rows[0]
+        );
+        assert!(
+            rows[1..]
+                .iter()
+                .all(|r| r.is_empty() || r.starts_with(|c: char| !c.is_whitespace())),
+            "continuation rows must not be dedented: {rows:?}"
         );
     }
 }
