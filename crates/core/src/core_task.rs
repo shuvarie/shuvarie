@@ -692,24 +692,6 @@ pub async fn run(
                             }
                         }
                     }
-                    Command::Resume => {
-                        if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
-                            continue;
-                        }
-                        pending_retry = None;
-                        conn_retries = 0;
-                        let Some(s) = &ctx.session else { continue; };
-                        let last_is_interrupted = s.lock().await.last_assistant_interrupted();
-                        if !last_is_interrupted {
-                            let _ = ctx.event_tx
-                                .send(Event::SessionError {
-                                    error: "stream was not interrupted".into(),
-                                })
-                                .await;
-                            continue;
-                        }
-                        ctx.resume_last_turn().await;
-                    }
                     Command::LspStart { name } => {
                         let mut mgr = ctx.lsp.lock().await;
                         match mgr.start(&name).await {
@@ -810,7 +792,7 @@ pub async fn run(
                             let _ = ctx.event_tx
                                 .send(Event::StreamError {
                                     error: "context budget exceeded and compaction could not keep up; \
-                                            start a new message or resume to continue"
+                                            start a new message to continue"
                                         .into(),
                                 })
                                 .await;
@@ -1215,8 +1197,8 @@ impl CoreCtx {
     }
 
     /// Delete the interrupted assistant turn (message + tool calls) and re-stream
-    /// from the last user message. Used by the manual `Resume` command and by the
-    /// auto-continue path after a context overflow.
+    /// from the last user message. Used by the auto-continue path after a context
+    /// overflow.
     async fn resume_last_turn(&mut self) {
         let Some(s) = &self.session else {
             return;

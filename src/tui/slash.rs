@@ -236,7 +236,7 @@ mod tests {
         let mut menu = SlashMenu::new();
         menu.sync("/");
         assert!(menu.active());
-        assert_eq!(actions(&menu).len(), 9);
+        assert_eq!(actions(&menu).len(), 8);
         menu.sync(":mo");
         assert!(menu.active());
         assert_eq!(menu.trigger, ':');
@@ -286,13 +286,18 @@ mod tests {
     #[test]
     fn filters_by_query_and_availability() {
         let mut menu = SlashMenu::new();
-        menu.set_availability(CommandAction::Resume, false);
+        menu.set_availability(CommandAction::UndoLastTurn, false);
         menu.sync("/re");
         let acts = actions(&menu);
         assert!(acts.contains(&CommandAction::Redo));
         assert!(acts.contains(&CommandAction::Replay));
-        assert!(!acts.contains(&CommandAction::Resume));
-        menu.sync(":u");
+        menu.sync(":undo");
+        assert!(
+            actions(&menu).is_empty(),
+            "unavailable commands stay hidden"
+        );
+        menu.set_availability(CommandAction::UndoLastTurn, true);
+        menu.sync(":undo");
         assert!(actions(&menu).contains(&CommandAction::UndoLastTurn));
         menu.sync("/zzz");
         assert!(menu.filtered.is_empty());

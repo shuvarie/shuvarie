@@ -814,15 +814,12 @@ impl App {
 
     fn update_command_availability(&mut self) {
         let has_messages = self.session.has_messages();
-        let interrupted = self.session.is_interrupted() && !self.session.is_streaming();
         self.command_menu
             .set_availability(CommandAction::UndoLastTurn, has_messages);
         self.command_menu
             .set_availability(CommandAction::Redo, has_messages);
         self.command_menu
             .set_availability(CommandAction::Replay, has_messages);
-        self.command_menu
-            .set_availability(CommandAction::Resume, interrupted);
     }
 
     /// Runs a command action (from the Ctrl+M menu or the inline slash menu).
@@ -875,9 +872,6 @@ impl App {
             }
             CommandAction::Replay => {
                 self.ctx.send(shuvarie_core::Command::Replay);
-            }
-            CommandAction::Resume => {
-                self.ctx.send(shuvarie_core::Command::Resume);
             }
             CommandAction::Quit => {
                 if self.session.is_streaming() {

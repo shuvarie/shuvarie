@@ -152,10 +152,6 @@ impl Chat {
         !self.turns.borrow().is_empty()
     }
 
-    pub fn is_interrupted(&self) -> bool {
-        self.interrupted
-    }
-
     /// Mark the in-flight turn dirty so an animated spinner re-renders.
     pub fn mark_spinner_dirty(&self) {
         if let Some(turn) = self.in_flight.borrow_mut().as_mut() {

@@ -133,10 +133,6 @@ impl SessionScreen {
         self.chat.has_messages()
     }
 
-    pub fn is_interrupted(&self) -> bool {
-        self.chat.is_interrupted()
-    }
-
     /// Mark the chat dirty so an animated spinner re-renders.
     pub fn mark_spinner_dirty(&self) {
         self.chat.mark_spinner_dirty();
@@ -180,15 +176,12 @@ impl SessionScreen {
 
     fn sync_slash(&mut self) {
         let has_messages = self.chat.has_messages();
-        let interrupted = self.chat.is_interrupted() && !self.chat.is_streaming();
         self.slash
             .set_availability(CommandAction::UndoLastTurn, has_messages);
         self.slash
             .set_availability(CommandAction::Redo, has_messages);
         self.slash
             .set_availability(CommandAction::Replay, has_messages);
-        self.slash
-            .set_availability(CommandAction::Resume, interrupted);
         let buffer = self.input.buffer.value.clone();
         self.slash.sync(&buffer);
     }
@@ -563,8 +556,6 @@ impl SessionScreen {
                 theme::help_line(&[("Tab", "complete"), ("↑↓", "select"), ("Esc", "dismiss")])
             } else if self.chat.is_streaming() {
                 theme::help_line(&[("Ctrl+C", "stop"), ("Ctrl+M", "commands")])
-            } else if self.chat.is_interrupted() {
-                theme::help_line(&[("Enter", "send"), ("Ctrl+M", "resume"), ("Ctrl+C", "quit")])
             } else {
                 theme::help_line(&[
                     ("Enter", "send"),
