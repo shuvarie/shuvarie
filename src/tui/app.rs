@@ -19,6 +19,7 @@ use super::model_picker::{ModelPicker, ModelPickerEffect, ModelPickerMessage};
 use super::session::{ChatMessage, SessionEffect, SessionMessage, SessionScreen};
 use super::session_picker::{SessionPicker, SessionPickerEffect, SessionPickerMessage};
 use super::sidebar::SidebarMessage;
+use super::spinner::SpinnerKind;
 use super::welcome::{Welcome, WelcomeEffect, WelcomeMessage};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -778,23 +779,22 @@ impl App {
         self.ctx.send(shuvarie_core::Command::ListSessions);
     }
 
-    /// Whether any spinner is currently animating, so the render loop can tick.
-    pub fn has_active_spinner(&self) -> bool {
-        if self.session.busy {
-            return true;
-        }
-        if self.history_search.loading {
-            return true;
-        }
-        if self.session_picker.loading {
-            return true;
-        }
-        self.session.sidebar.lsp_servers.iter().any(|s| {
-            matches!(
-                s.status,
-                shuvarie_core::ServerStatus::Starting | shuvarie_core::ServerStatus::Stopping
-            )
-        })
+    /// The spinners currently animating, so the render loop can wake at the
+    /// earliest next frame change.
+    pub fn active_spinners(&self) -> impl Iterator<Item = SpinnerKind> + '_ {
+        let inline = self.session.busy
+            || self.history_search.loading
+            || self.session_picker.loading
+            || self.session.sidebar.lsp_servers.iter().any(|s| {
+                matches!(
+                    s.status,
+                    shuvarie_core::ServerStatus::Starting | shuvarie_core::ServerStatus::Stopping
+                )
+            });
+        self.session
+            .busy_spinner()
+            .into_iter()
+            .chain(inline.then_some(SpinnerKind::Inline))
     }
 
     /// Mark the views that are animating dirty so the next frame re-renders them.

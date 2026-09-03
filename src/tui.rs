@@ -94,14 +94,20 @@ where
     // A pending frame deadline armed when an event arrived too soon after
     // the last draw. `None` means no frame is pending.
     let mut frame_deadline: Option<tokio::time::Instant> = None;
-    // Drives spinner animation when any in-progress indicator is active.
-    let mut spinner_tick = tokio::time::interval(Duration::from_millis(100));
-    spinner_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Drives spinner animation: wakes at the earliest next frame change
+    // across the spinners currently animating. `None` when none are. Armed
+    // after each draw, before it is ever read.
+    let mut spinner_wake;
 
     'render_loop: loop {
         // Draw frame.
         rat.draw(|frame| app.view(frame, frame.area()))?;
         last_draw = Instant::now();
+
+        // Spinners advance on wall-clock time, so waking at each earliest
+        // frame boundary keeps every spinner at its own frame rate.
+        spinner_wake = spinner::next_wake(app.active_spinners())
+            .map(|until| tokio::time::Instant::now() + until);
 
         'event_listening: loop {
             let changed = tokio::select! {
@@ -120,8 +126,19 @@ where
                     frame_deadline = None;
                     break 'event_listening;
                 }
-                // Spinner tick: redraw when an in-progress indicator is active.
-                _ = spinner_tick.tick(), if app.has_active_spinner() => {
+                // Spinner wake: redraw when the next in-progress frame is
+                // due. The `if` guard only disables polling — the future
+                // expression is still evaluated, so handle `None` here.
+                _ = async {
+                    if let Some(deadline) = spinner_wake {
+                        tokio::time::sleep_until(deadline).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                }, if spinner_wake.is_some() => {
+                    // Consumed; re-armed from the current state after the
+                    // next draw.
+                    spinner_wake = None;
                     app.mark_spinners_dirty();
                     true
                 }

@@ -12,6 +12,7 @@ use super::components::{TextArea, TextAreaEffect, TextAreaMessage};
 use super::question::{QuestionEffect, QuestionMessage, QuestionUI};
 use super::sidebar::{Sidebar, SidebarMessage};
 use super::slash::{SlashMenu, SlashMessage};
+use super::spinner::SpinnerKind;
 use super::theme;
 
 pub mod blocks;
@@ -127,6 +128,15 @@ impl SessionScreen {
 
     pub fn is_streaming(&self) -> bool {
         self.chat.is_streaming()
+    }
+
+    /// The wide status-row spinner currently animating, if any.
+    pub(crate) fn busy_spinner(&self) -> Option<SpinnerKind> {
+        self.busy.then_some(match self.busy_kind {
+            BusyKind::Generating => SpinnerKind::Generating,
+            BusyKind::Tool => SpinnerKind::Tool,
+            BusyKind::Waiting => SpinnerKind::Waiting,
+        })
     }
 
     pub fn has_messages(&self) -> bool {
