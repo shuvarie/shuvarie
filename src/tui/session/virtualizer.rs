@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 
 use ratatui::prelude::*;
 use shuvarie_core::Role;
-use shuvarie_core::todos::parse_items;
 use shuvarie_core::tool_record::ToolRecord;
+use shuvarie_core::tools::todos::parse_items;
 use shuvarie_llm::{FileChange, PatchFileKind};
 use unicode_width::UnicodeWidthStr;
 

@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use ratatui::prelude::*;
 use serde_json::Value;
-use shuvarie_core::todos::{TodoStatus, done_total, parse_items};
+use shuvarie_core::tools::todos::{TodoStatus, done_total, parse_items};
 use shuvarie_llm::{DiffLine, DiffLineKind, FileChange, PatchFileKind};
 use unicode_width::UnicodeWidthStr;
 
@@ -460,7 +460,7 @@ fn todo_op_summary(args: &Value) -> Option<String> {
 /// output (last few rows + a hint), expanded shows everything.
 fn push_todo_rows(
     lines: &mut Vec<Line<'static>>,
-    items: &[shuvarie_core::todos::TodoItem],
+    items: &[shuvarie_core::tools::todos::TodoItem],
     expanded: bool,
 ) {
     let hidden = if expanded {

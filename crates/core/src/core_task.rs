@@ -1103,7 +1103,7 @@ impl CoreCtx {
             let guard = s.lock().await;
             (guard.history_for_send(), guard.tool_records.clone())
         };
-        let todo_state = crate::todos::TodoState::from_records(&todo_records);
+        let todo_state = crate::tools::todos::TodoState::from_records(&todo_records);
         let loaded_context =
             self.agents_md_context
                 .clone()

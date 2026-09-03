@@ -103,7 +103,7 @@ pub struct SessionScreen {
     pub session_title: Option<String>,
     pub error: Option<String>,
     pub(crate) retry: Option<RetryWait>,
-    working_todos: Vec<shuvarie_core::todos::TodoItem>,
+    working_todos: Vec<shuvarie_core::tools::todos::TodoItem>,
 }
 
 impl SessionScreen {
@@ -356,7 +356,7 @@ impl SessionScreen {
                 self.retry = None;
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
-                self.sync_todos(shuvarie_core::todos::replay(&session.tool_records));
+                self.sync_todos(shuvarie_core::tools::todos::replay(&session.tool_records));
                 self.chat.update(ChatMessage::Load { session });
                 None
             }
@@ -365,7 +365,7 @@ impl SessionScreen {
                 self.retry = None;
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
-                self.sync_todos(shuvarie_core::todos::replay(&session.tool_records));
+                self.sync_todos(shuvarie_core::tools::todos::replay(&session.tool_records));
                 self.chat.update(ChatMessage::TurnReverted { session });
                 None
             }
@@ -374,7 +374,7 @@ impl SessionScreen {
                 self.retry = None;
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
-                self.sync_todos(shuvarie_core::todos::replay(&session.tool_records));
+                self.sync_todos(shuvarie_core::tools::todos::replay(&session.tool_records));
                 self.chat.update(ChatMessage::TurnRestored { session });
                 None
             }
@@ -441,13 +441,13 @@ impl SessionScreen {
 
     /// Apply a full todo list: sidebar counts plus the working-items strip
     /// (the in-progress items shown under the title bar).
-    fn sync_todos(&mut self, items: Vec<shuvarie_core::todos::TodoItem>) {
-        let (done, total) = shuvarie_core::todos::done_total(&items);
+    fn sync_todos(&mut self, items: Vec<shuvarie_core::tools::todos::TodoItem>) {
+        let (done, total) = shuvarie_core::tools::todos::done_total(&items);
         self.sidebar
             .update(SidebarMessage::SetTodos { done, total });
         self.working_todos = items
             .into_iter()
-            .filter(|item| item.status == shuvarie_core::todos::TodoStatus::InProgress)
+            .filter(|item| item.status == shuvarie_core::tools::todos::TodoStatus::InProgress)
             .collect();
     }
 
@@ -455,7 +455,7 @@ impl SessionScreen {
     /// always carries the full list, so no item rows means the list is empty
     /// (`Todos (none)`).
     fn sync_todo_output(&mut self, output: &str) {
-        self.sync_todos(shuvarie_core::todos::parse_items(output).unwrap_or_default());
+        self.sync_todos(shuvarie_core::tools::todos::parse_items(output).unwrap_or_default());
     }
 
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -598,7 +598,7 @@ pub enum SessionEffect {
 
 /// Rows the working-todos strip occupies below the title bar: one per
 /// in-progress item up to [`MAX_WORKING_ROWS`], plus an overflow hint row.
-fn working_rows(todos: &[shuvarie_core::todos::TodoItem]) -> u16 {
+fn working_rows(todos: &[shuvarie_core::tools::todos::TodoItem]) -> u16 {
     let n = todos.len();
     if n == 0 {
         0
@@ -609,7 +609,10 @@ fn working_rows(todos: &[shuvarie_core::todos::TodoItem]) -> u16 {
 
 /// The strip's lines: `~ #id text` per in-progress todo, truncated to the
 /// strip width, then an overflow hint when more items are working.
-fn working_todo_lines(todos: &[shuvarie_core::todos::TodoItem], width: u16) -> Vec<Line<'static>> {
+fn working_todo_lines(
+    todos: &[shuvarie_core::tools::todos::TodoItem],
+    width: u16,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for item in todos.iter().take(MAX_WORKING_ROWS) {
         let prefix = format!("~ #{} ", item.id);
