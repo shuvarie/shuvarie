@@ -500,6 +500,7 @@ impl App {
                         }
                         AddProviderOutcome::Submit {
                             kind,
+                            catalog,
                             name,
                             api_key,
                             base_url,
@@ -510,7 +511,8 @@ impl App {
                                 kind,
                                 api_key,
                                 base_url,
-                            );
+                            )
+                            .with_catalog(catalog);
                             self.pending_model_pick = Some(id.clone());
                             self.ctx.send(shuvarie_core::Command::AddProvider {
                                 id: id.clone(),

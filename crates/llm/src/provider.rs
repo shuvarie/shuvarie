@@ -11,8 +11,17 @@ use crate::{LlmError, Result};
 #[derive(Debug, Clone)]
 pub struct ProviderClient {
     kind: ProviderType,
-    base_url: String,
+    base_url: Option<String>,
     list: ListImpl,
+}
+
+fn openai_builder(key: &str, base_url: Option<&str>) -> rig::providers::openai::ClientBuilder {
+    let builder = rig::providers::openai::Client::builder().api_key(key);
+    if let Some(url) = base_url {
+        builder.base_url(url)
+    } else {
+        builder
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -30,59 +39,79 @@ impl ProviderClient {
         api_key: Option<&str>,
         base_url: Option<&str>,
     ) -> Result<Self> {
-        let base_url = base_url.unwrap_or("").to_string();
+        let base_url = base_url
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .map(str::to_string);
         let list = match kind {
             ProviderType::Openai | ProviderType::OpenaiCompat | ProviderType::Vercel => {
                 let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
-                let client = rig::providers::openai::Client::builder()
-                    .api_key(key)
-                    .base_url(&base_url)
+                let client = openai_builder(key, base_url.as_deref())
                     .build()
                     .map_err(|e| LlmError::Provider(e.to_string()))?;
                 ListImpl::OpenAi(client)
             }
             ProviderType::Openrouter => {
                 let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
-                let client = rig::providers::openrouter::Client::builder()
-                    .api_key(key)
-                    .base_url(&base_url)
-                    .build()
-                    .map_err(|e| LlmError::Provider(e.to_string()))?;
-                ListImpl::OpenRouter(client)
+                let client = rig::providers::openrouter::Client::builder().api_key(key);
+                let client = if let Some(url) = base_url.as_deref() {
+                    client.base_url(url)
+                } else {
+                    client
+                };
+                ListImpl::OpenRouter(
+                    client
+                        .build()
+                        .map_err(|e| LlmError::Provider(e.to_string()))?,
+                )
             }
             ProviderType::Anthropic => {
                 let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
-                let client = rig::providers::anthropic::Client::builder()
-                    .api_key(key)
-                    .base_url(&base_url)
-                    .build()
-                    .map_err(|e| LlmError::Provider(e.to_string()))?;
-                ListImpl::Anthropic(client)
+                let client = rig::providers::anthropic::Client::builder().api_key(key);
+                let client = if let Some(url) = base_url.as_deref() {
+                    client.base_url(url)
+                } else {
+                    client
+                };
+                ListImpl::Anthropic(
+                    client
+                        .build()
+                        .map_err(|e| LlmError::Provider(e.to_string()))?,
+                )
             }
             ProviderType::Google => {
                 let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
-                let client = rig::providers::gemini::Client::builder()
-                    .api_key(key)
-                    .base_url(&base_url)
-                    .build()
-                    .map_err(|e| LlmError::Provider(e.to_string()))?;
-                ListImpl::Gemini(client)
+                let client = rig::providers::gemini::Client::builder().api_key(key);
+                let client = if let Some(url) = base_url.as_deref() {
+                    client.base_url(url)
+                } else {
+                    client
+                };
+                ListImpl::Gemini(
+                    client
+                        .build()
+                        .map_err(|e| LlmError::Provider(e.to_string()))?,
+                )
             }
             ProviderType::Ollama => {
-                let client = rig::providers::ollama::Client::builder()
-                    .api_key(api_key.unwrap_or(""))
-                    .base_url(&base_url)
-                    .build()
-                    .map_err(|e| LlmError::Provider(e.to_string()))?;
-                ListImpl::Ollama(client)
+                let client =
+                    rig::providers::ollama::Client::builder().api_key(api_key.unwrap_or(""));
+                let client = if let Some(url) = base_url.as_deref() {
+                    client.base_url(url)
+                } else {
+                    client
+                };
+                ListImpl::Ollama(
+                    client
+                        .build()
+                        .map_err(|e| LlmError::Provider(e.to_string()))?,
+                )
             }
             ProviderType::Azure | ProviderType::Bedrock | ProviderType::GoogleVertex => {
                 // These providers are not yet wired to a dedicated rig client;
                 // fall back to an OpenAI-compatible client at the configured URL.
                 let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
-                let client = rig::providers::openai::Client::builder()
-                    .api_key(key)
-                    .base_url(&base_url)
+                let client = openai_builder(key, base_url.as_deref())
                     .build()
                     .map_err(|e| LlmError::Provider(e.to_string()))?;
                 ListImpl::OpenAi(client)
@@ -99,8 +128,8 @@ impl ProviderClient {
         self.kind
     }
 
-    pub fn base_url(&self) -> &str {
-        &self.base_url
+    pub fn base_url(&self) -> Option<&str> {
+        self.base_url.as_deref()
     }
 
     pub fn supports_embeddings(&self) -> bool {

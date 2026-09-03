@@ -218,20 +218,17 @@ pub async fn run(
                         };
                         match client.list_models().await {
                             Ok(mut models) => {
-                                let kind = ctx
+                                let providers = crate::catalog::providers();
+                                let provider = ctx
                                     .connections
                                     .providers
                                     .get(&provider_name)
-                                    .map(|pc| pc.kind.clone())
-                                    .unwrap_or_default();
-                                let catalog_provider = crate::catalog::providers();
-                                let provider = crate::catalog::find_provider(
-                                    &catalog_provider,
-                                    &kind,
-                                );
+                                    .and_then(|pc| pc.catalog_id())
+                                    .and_then(|id| crate::catalog::find_provider(&providers, id))
+                                    .cloned();
                                 if let Some(provider) = provider {
                                     for model in &mut models {
-                                        crate::catalog::enrich(provider, model);
+                                        crate::catalog::enrich(&provider, model);
                                     }
                                 }
                                 let _ = ctx.event_tx
@@ -1137,14 +1134,13 @@ impl CoreCtx {
             crate::tools::ShellOutputTx::new(shell_tx.clone()),
             todo_state,
         );
-        let provider_name_for_catalog = self
+        let catalog_provider = crate::catalog::providers();
+        let catalog_provider = self
             .connections
             .providers
             .get(&provider_name)
-            .map(|pc| pc.kind.clone());
-        let catalog_provider = crate::catalog::providers();
-        let catalog_provider = provider_name_for_catalog
-            .and_then(|kind| crate::catalog::find_provider(&catalog_provider, &kind))
+            .and_then(|pc| pc.catalog_id())
+            .and_then(|id| crate::catalog::find_provider(&catalog_provider, id))
             .cloned();
         let budget = context_budget(&self.config, catalog_provider.as_ref(), &model)
             .map(|b| b.with_preamble_tokens(shuvarie_llm::estimate_text_tokens(&preamble)));
@@ -1802,10 +1798,10 @@ async fn persist_interrupted_turn(
 }
 
 fn build_client(pc: &ProviderConfig) -> Result<ProviderClient, String> {
-    let providers = crate::catalog::providers();
-    let kind = crate::catalog::provider_type(&providers, &pc.kind);
-    let base_url = crate::catalog::base_url_for(&providers, &pc.kind, pc.base_url.as_deref());
-    ProviderClient::build(kind, pc.api_key.as_deref(), Some(&base_url)).map_err(|e| e.to_string())
+    let kind = crate::catalog::provider_type(&pc.kind);
+    let base_url = crate::catalog::base_url_for(&pc.kind, pc.base_url.as_deref());
+    ProviderClient::build(kind, pc.api_key.as_deref(), base_url.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 async fn persist_stream_error(

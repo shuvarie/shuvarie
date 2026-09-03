@@ -148,49 +148,194 @@ pub fn resolve_env(s: &str) -> String {
 }
 
 /// The provider's effective base URL, using an explicit override or the
-/// catalog endpoint.
-pub fn effective_base_url(provider: &Provider, override_url: Option<&str>) -> String {
+/// catalog endpoint. Unresolved `$ENV_VAR` placeholders count as unknown.
+pub fn effective_base_url(provider: &Provider, override_url: Option<&str>) -> Option<String> {
     match override_url {
-        Some(u) if !u.trim().is_empty() => u.to_string(),
-        _ => api_endpoint(provider).unwrap_or_default(),
+        Some(u) if !u.trim().is_empty() => Some(u.to_string()),
+        _ => api_endpoint(provider).filter(|u| !u.contains('$')),
     }
 }
 
-/// Resolve a provider config's `kind` (a catalog id) to its [`selune::ProviderType`],
-/// falling back to a built-in mapping for known local providers (e.g. `ollama`,
-/// which the Selune catalog omits) and then to [`selune::ProviderType::OpenaiCompat`].
-pub fn provider_type(providers: &[Provider], kind: &str) -> selune::ProviderType {
-    find_provider(providers, kind)
-        .and_then(|p| p.r#type)
-        .or_else(|| known_provider_type(kind))
+/// Parse a connection `kind` as a rig transport ([`selune::ProviderType`] in
+/// kebab-case, e.g. `openai`, `openai-compat`, `google-vertex`).
+pub fn parse_provider_type(kind: &str) -> Option<selune::ProviderType> {
+    serde_json::from_value(serde_json::Value::String(kind.to_string())).ok()
+}
+
+/// The kebab-case name of a provider type, as accepted by
+/// [`parse_provider_type`].
+pub fn provider_type_name(kind: selune::ProviderType) -> &'static str {
+    match kind {
+        selune::ProviderType::Openai => "openai",
+        selune::ProviderType::OpenaiCompat => "openai-compat",
+        selune::ProviderType::Openrouter => "openrouter",
+        selune::ProviderType::Vercel => "vercel",
+        selune::ProviderType::Anthropic => "anthropic",
+        selune::ProviderType::Google => "google",
+        selune::ProviderType::Azure => "azure",
+        selune::ProviderType::Bedrock => "bedrock",
+        selune::ProviderType::GoogleVertex => "google-vertex",
+        selune::ProviderType::Ollama => "ollama",
+    }
+}
+
+/// Resolve a provider config's `kind` to its [`selune::ProviderType`]. The
+/// `kind` is the rig transport (e.g. `openai`, `ollama`); as a fallback for
+/// older configs it may also be a Selune catalog id, resolved through the
+/// catalog. Defaults to [`selune::ProviderType::OpenaiCompat`].
+pub fn provider_type(kind: &str) -> selune::ProviderType {
+    provider_type_in(&providers(), kind)
+}
+
+fn provider_type_in(providers: &[Provider], kind: &str) -> selune::ProviderType {
+    parse_provider_type(kind)
+        .or_else(|| find_provider(providers, kind).and_then(|p| p.r#type))
         .unwrap_or(selune::ProviderType::OpenaiCompat)
 }
 
-/// Built-in type mapping for provider ids not present in the catalog.
-fn known_provider_type(kind: &str) -> Option<selune::ProviderType> {
-    match kind {
-        "ollama" => Some(selune::ProviderType::Ollama),
-        _ => None,
-    }
-}
-
 /// The effective base URL for a provider config's `kind`, using an explicit
-/// override, else the catalog endpoint, else a built-in default for known
-/// local providers.
-pub fn base_url_for(providers: &[Provider], kind: &str, override_url: Option<&str>) -> String {
-    if let Some(u) = override_url.filter(|u| !u.trim().is_empty()) {
-        return u.to_string();
-    }
-    if let Some(p) = find_provider(providers, kind) {
-        return effective_base_url(p, None);
-    }
-    known_base_url(kind).unwrap_or_default()
+/// override, else a built-in default for the transport, else the catalog
+/// endpoint (for legacy catalog-id kinds). `None` lets rig use its own
+/// per-provider default.
+pub fn base_url_for(kind: &str, override_url: Option<&str>) -> Option<String> {
+    base_url_for_in(&providers(), kind, override_url)
 }
 
-/// Built-in base URL for provider ids not present in the catalog.
-fn known_base_url(kind: &str) -> Option<String> {
-    match kind {
-        "ollama" => Some("http://localhost:11434".to_string()),
-        _ => None,
+fn base_url_for_in(
+    providers: &[Provider],
+    kind: &str,
+    override_url: Option<&str>,
+) -> Option<String> {
+    if let Some(u) = override_url.filter(|u| !u.trim().is_empty()) {
+        return Some(u.to_string());
+    }
+    match parse_provider_type(kind) {
+        Some(selune::ProviderType::Ollama) => return Some("http://localhost:11434".to_string()),
+        Some(_) => return None,
+        None => {}
+    }
+    find_provider(providers, kind).and_then(|p| effective_base_url(p, None))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use selune::{InferenceProvider, ProviderType};
+
+    fn catalog_provider(
+        id: &str,
+        r#type: Option<ProviderType>,
+        endpoint: Option<&str>,
+    ) -> Provider {
+        Provider {
+            name: id.to_string(),
+            id: InferenceProvider(id.to_string()),
+            api_key: None,
+            api_endpoint: endpoint.map(str::to_string),
+            r#type,
+            doc: None,
+            default_large_model_id: None,
+            default_small_model_id: None,
+            models: Vec::new(),
+            default_headers: None,
+        }
+    }
+
+    #[test]
+    fn parses_all_transport_kinds() {
+        for (name, expected) in [
+            ("openai", ProviderType::Openai),
+            ("openai-compat", ProviderType::OpenaiCompat),
+            ("openrouter", ProviderType::Openrouter),
+            ("vercel", ProviderType::Vercel),
+            ("anthropic", ProviderType::Anthropic),
+            ("google", ProviderType::Google),
+            ("azure", ProviderType::Azure),
+            ("bedrock", ProviderType::Bedrock),
+            ("google-vertex", ProviderType::GoogleVertex),
+            ("ollama", ProviderType::Ollama),
+        ] {
+            assert_eq!(parse_provider_type(name), Some(expected), "{name}");
+            assert_eq!(provider_type_name(expected), name);
+        }
+        assert_eq!(parse_provider_type("ollama-cloud"), None);
+        assert_eq!(parse_provider_type(""), None);
+    }
+
+    #[test]
+    fn provider_type_prefers_transport_then_legacy_catalog_id() {
+        let providers = vec![catalog_provider(
+            "ollama-cloud",
+            Some(ProviderType::Ollama),
+            None,
+        )];
+        assert_eq!(provider_type_in(&providers, "ollama"), ProviderType::Ollama);
+        assert_eq!(
+            provider_type_in(&providers, "ollama-cloud"),
+            ProviderType::Ollama
+        );
+        assert_eq!(
+            provider_type_in(&providers, "gemini"),
+            ProviderType::OpenaiCompat
+        );
+    }
+
+    #[test]
+    fn base_url_prefers_override_then_type_default_then_catalog() {
+        let providers = vec![catalog_provider(
+            "acme",
+            Some(ProviderType::OpenaiCompat),
+            Some("https://acme.example/v1"),
+        )];
+        assert_eq!(
+            base_url_for_in(&providers, "ollama", None).as_deref(),
+            Some("http://localhost:11434")
+        );
+        assert_eq!(
+            base_url_for_in(&providers, "ollama", Some("  ")).as_deref(),
+            Some("http://localhost:11434")
+        );
+        assert_eq!(base_url_for_in(&providers, "anthropic", None), None);
+        assert_eq!(base_url_for_in(&providers, "openai", None), None);
+        assert_eq!(
+            base_url_for_in(&providers, "acme", None).as_deref(),
+            Some("https://acme.example/v1")
+        );
+        assert_eq!(
+            base_url_for_in(&providers, "acme", Some("https://x.dev/v1")).as_deref(),
+            Some("https://x.dev/v1")
+        );
+        assert_eq!(base_url_for_in(&providers, "unknown", None), None);
+    }
+
+    #[test]
+    fn base_url_skips_unresolved_env_placeholders() {
+        let providers = vec![catalog_provider(
+            "anthropic",
+            Some(ProviderType::Anthropic),
+            Some("$ANTHROPIC_API_ENDPOINT"),
+        )];
+        assert_eq!(base_url_for_in(&providers, "anthropic", None), None);
+    }
+
+    #[test]
+    fn effective_base_url_resolves_env() {
+        unsafe { std::env::set_var("SHUVARIE_TEST_ENDPOINT", "https://env.example/v1") };
+        assert_eq!(
+            effective_base_url(
+                &catalog_provider("x", None, Some("$SHUVARIE_TEST_ENDPOINT")),
+                None,
+            )
+            .as_deref(),
+            Some("https://env.example/v1")
+        );
+        unsafe { std::env::remove_var("SHUVARIE_TEST_ENDPOINT") };
+        assert_eq!(
+            effective_base_url(
+                &catalog_provider("x", None, Some("$SHUVARIE_TEST_ENDPOINT")),
+                None,
+            ),
+            None
+        );
     }
 }

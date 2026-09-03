@@ -21,11 +21,16 @@ pub struct Connections {
 pub struct ProviderConfig {
     /// The display name of the provider (e.g. `Ollama Cloud`).
     pub name: String,
-    /// The provider id as referenced in the Selune catalog (e.g. `anthropic`,
-    /// `openai`, `togetherai`). This is the canonical identity; behavior such
-    /// as whether an API key is required comes from the matching
-    /// [`selune::Provider`].
+    /// How Shuvarie connects to the API — the rig transport, i.e. a
+    /// [`selune::ProviderType`] in kebab-case (e.g. `openai`, `openai-compat`,
+    /// `anthropic`, `google`, `ollama`). Older configs may still carry a
+    /// Selune catalog id here; [`Self::catalog_id`] keeps those resolving.
     pub kind: String,
+    /// The Selune catalog id this connection corresponds to (e.g.
+    /// `anthropic`, `ollama-cloud`), used for metadata lookups: API-key
+    /// requirements, context limits, and pricing. When absent,
+    /// [`Self::catalog_id`] falls back to `kind` for legacy configs.
+    pub catalog: Option<String>,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
 }
@@ -86,39 +91,56 @@ impl ProviderConfig {
         Self {
             name: name.into(),
             kind: kind.into(),
+            catalog: None,
             api_key,
             base_url,
         }
     }
 
-    /// A provider is connectable when it declares no API key requirement, or
-    /// when a non-empty key is present. Provider-level key requirements come
-    /// from the Selune catalog; here we treat the absence of a catalog entry as
-    /// requiring a key only when the provider id looks remote.
+    /// Set the Selune catalog id this connection corresponds to.
+    pub fn with_catalog(mut self, catalog: Option<impl Into<String>>) -> Self {
+        self.catalog = catalog.map(Into::into);
+        self
+    }
+
+    /// The Selune catalog id for metadata lookups: the explicit `catalog`
+    /// field, else `kind` (which held the catalog id in older configs).
+    pub fn catalog_id(&self) -> Option<&str> {
+        self.catalog.as_deref().or(Some(self.kind.as_str()))
+    }
+
+    /// Whether the provider is configured enough to open a connection. An
+    /// explicit `catalog` entry governs (its `api_key` requirement); otherwise
+    /// the transport decides: a key is required unless it's a local one
+    /// (`ollama`). A `kind` that parses as neither is treated as a legacy
+    /// catalog id.
     pub fn is_connectable(&self) -> bool {
-        let catalog = crate::catalog::providers();
-        match catalog.iter().find(|p| p.id.0 == self.kind) {
-            Some(p) => match &p.api_key {
-                Some(_) => self
-                    .api_key
-                    .as_ref()
-                    .map(|k| !k.trim().is_empty())
-                    .unwrap_or(false),
-                None => true,
-            },
-            // Unknown provider id: fall back to requiring a key unless it's an
-            // Ollama-style local provider.
-            None => {
-                if self.kind == "ollama" {
-                    true
-                } else {
-                    self.api_key
-                        .as_ref()
-                        .map(|k| !k.trim().is_empty())
-                        .unwrap_or(false)
-                }
-            }
+        let has_key = self
+            .api_key
+            .as_ref()
+            .map(|k| !k.trim().is_empty())
+            .unwrap_or(false);
+        if let Some(catalog) = &self.catalog {
+            return catalog_requires_key(catalog, has_key);
         }
+        match crate::catalog::parse_provider_type(&self.kind) {
+            Some(selune::ProviderType::Ollama) => true,
+            Some(_) => has_key,
+            None => catalog_requires_key(&self.kind, has_key),
+        }
+    }
+}
+
+/// Whether a connection to the catalog entry `id` may proceed given whether a
+/// non-empty API key is present. Unknown catalog ids fall back to `has_key`.
+fn catalog_requires_key(id: &str, has_key: bool) -> bool {
+    let catalog = crate::catalog::providers();
+    match catalog.iter().find(|p| p.id.0 == id) {
+        Some(p) => match &p.api_key {
+            Some(_) => has_key,
+            None => true,
+        },
+        None => has_key,
     }
 }
 
@@ -383,5 +405,58 @@ mod tests {
         connections.save_to(&path).unwrap();
         let loaded = Connections::load_from(&path).unwrap();
         assert_eq!(connections, loaded);
+    }
+
+    #[test]
+    fn parses_catalog_child_and_round_trips() {
+        let text = "providers {\n    provider id=\"a\" name=\"Acme\" {\n        kind \"openai-compat\"\n        catalog \"groq\"\n        api-key \"gsk-x\"\n    }\n}";
+        let parsed: Connections = connections_kdl::from_kdl(text).unwrap();
+        let pc = parsed.providers.get("a").unwrap();
+        assert_eq!(pc.kind, "openai-compat");
+        assert_eq!(pc.catalog.as_deref(), Some("groq"));
+        assert_eq!(pc.catalog_id(), Some("groq"));
+        let saved = connections_kdl::to_kdl(&parsed).unwrap();
+        assert!(
+            saved.contains("catalog groq") || saved.contains("catalog \"groq\""),
+            "{saved}"
+        );
+        let reparsed: Connections = connections_kdl::from_kdl(&saved).unwrap();
+        assert_eq!(parsed, reparsed);
+    }
+
+    #[test]
+    fn catalog_id_falls_back_to_legacy_kind() {
+        let pc = ProviderConfig::new("cloud", "ollama-cloud", None, None);
+        assert_eq!(pc.catalog_id(), Some("ollama-cloud"));
+    }
+
+    #[test]
+    fn is_connectable_transport_rules() {
+        let local = ProviderConfig::new("local", "ollama", None, None);
+        assert!(local.is_connectable());
+        let remote = ProviderConfig::new("remote", "openai-compat", None, None);
+        assert!(!remote.is_connectable());
+        let keyed = ProviderConfig::new("remote", "openai", Some("sk-x".into()), None);
+        assert!(keyed.is_connectable());
+        let blank_key = ProviderConfig::new("remote", "anthropic", Some("  ".into()), None);
+        assert!(!blank_key.is_connectable());
+    }
+
+    #[test]
+    fn is_connectable_legacy_catalog_kinds() {
+        let groq = ProviderConfig::new("groq", "groq", None, None);
+        assert!(!groq.is_connectable(), "catalog entry requires a key");
+        let groq = ProviderConfig::new("groq", "groq", Some("gsk-x".into()), None);
+        assert!(groq.is_connectable());
+    }
+
+    #[test]
+    fn is_connectable_explicit_catalog_governs() {
+        let pc = ProviderConfig::new("groq-compat", "openai-compat", Some("gsk-x".into()), None)
+            .with_catalog(Some("groq"));
+        assert!(pc.is_connectable());
+        let pc = ProviderConfig::new("copilot", "openai-compat", None, None)
+            .with_catalog(Some("copilot"));
+        assert!(pc.is_connectable(), "catalog entry needs no key");
     }
 }

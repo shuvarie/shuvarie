@@ -30,14 +30,12 @@ pub fn setup(
         .clone()
         .or_else(|| connections.active.as_ref().map(|a| a.provider.clone()))?;
     let pc = connections.providers.get(&provider_name)?;
+    let kind = crate::catalog::provider_type(&pc.kind);
     let client = match clients.get(&provider_name) {
         Some(c) => c.clone(),
         None => {
-            let providers = crate::catalog::providers();
-            let kind = crate::catalog::provider_type(&providers, &pc.kind);
-            let base_url =
-                crate::catalog::base_url_for(&providers, &pc.kind, pc.base_url.as_deref());
-            let c = ProviderClient::build(kind, pc.api_key.as_deref(), Some(&base_url)).ok()?;
+            let base_url = crate::catalog::base_url_for(&pc.kind, pc.base_url.as_deref());
+            let c = ProviderClient::build(kind, pc.api_key.as_deref(), base_url.as_deref()).ok()?;
             clients.insert(provider_name.clone(), c.clone());
             c
         }
@@ -45,8 +43,6 @@ pub fn setup(
     if !client.supports_embeddings() {
         return None;
     }
-    let providers = crate::catalog::providers();
-    let kind = crate::catalog::provider_type(&providers, &pc.kind);
     let model = config
         .embedding
         .model

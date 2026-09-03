@@ -52,6 +52,7 @@ pub enum AddProviderOutcome {
     Cancel,
     Submit {
         kind: String,
+        catalog: Option<String>,
         name: String,
         api_key: Option<String>,
         base_url: Option<String>,
@@ -136,7 +137,9 @@ impl AddProviderForm {
         let default_name = self.compute_default_name(&self.kind().name);
         self.name.set(&default_name);
         self.base_url.clear();
-        if let Some(url) = shuvarie_core::catalog::api_endpoint(self.kind()) {
+        if let Some(url) =
+            shuvarie_core::catalog::api_endpoint(self.kind()).filter(|u| !u.contains('$'))
+        {
             self.base_url.set(&url);
         }
         self.api_key.clear();
@@ -365,7 +368,6 @@ impl AddProviderForm {
             return AddProviderOutcome::None;
         }
         let kind = self.kind();
-        let kind_id = kind.id.0.clone();
         let kind_name = kind.name.clone();
         let requires_key = shuvarie_core::catalog::requires_api_key(kind);
         let api_key = if requires_key {
@@ -383,8 +385,14 @@ impl AddProviderForm {
         } else {
             Some(self.base_url.value.trim().to_string())
         };
+        let catalog = kind.id.0.clone();
+        let transport = kind
+            .r#type
+            .map(|t| shuvarie_core::catalog::provider_type_name(t).to_string())
+            .unwrap_or_else(|| catalog.clone());
         AddProviderOutcome::Submit {
-            kind: kind_id,
+            kind: transport,
+            catalog: Some(catalog),
             name,
             api_key,
             base_url,
