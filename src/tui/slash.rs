@@ -236,7 +236,7 @@ mod tests {
         let mut menu = SlashMenu::new();
         menu.sync("/");
         assert!(menu.active());
-        assert_eq!(actions(&menu).len(), 8);
+        assert_eq!(actions(&menu).len(), CommandAction::ALL.len());
         menu.sync(":mo");
         assert!(menu.active());
         assert_eq!(menu.trigger, ':');

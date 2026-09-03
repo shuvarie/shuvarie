@@ -133,6 +133,20 @@ impl SessionScreen {
         self.chat.has_messages()
     }
 
+    pub fn can_continue(&self) -> bool {
+        self.chat.last_turn_interrupted()
+    }
+
+    pub fn begin_continue(&mut self) {
+        self.chat.update(ChatMessage::BeginUserTurn {
+            content: shuvarie_core::session::CONTINUE_PROMPT.to_string(),
+        });
+        self.busy = true;
+        self.busy_kind = BusyKind::Generating;
+        self.status = Some("Thinking...".to_string());
+        self.retry = None;
+    }
+
     /// Mark the chat dirty so an animated spinner re-renders.
     pub fn mark_spinner_dirty(&self) {
         self.chat.mark_spinner_dirty();
@@ -182,6 +196,8 @@ impl SessionScreen {
             .set_availability(CommandAction::Redo, has_messages);
         self.slash
             .set_availability(CommandAction::Replay, has_messages);
+        self.slash
+            .set_availability(CommandAction::Continue, self.chat.last_turn_interrupted());
         let buffer = self.input.buffer.value.clone();
         self.slash.sync(&buffer);
     }

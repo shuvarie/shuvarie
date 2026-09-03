@@ -6,6 +6,9 @@ use shuvarie_llm::TokenUsage;
 
 use crate::tool_record::ToolRecord;
 
+pub const CONTINUE_PROMPT: &str =
+    "Continue from where you left off; do not repeat what you already wrote.";
+
 #[derive(Debug, Clone, Default)]
 pub struct Session {
     pub id: Option<uuid::Uuid>,
@@ -131,6 +134,22 @@ impl Session {
             .get(&(idx as u64))
             .copied()
             .unwrap_or(false)
+    }
+
+    /// Whether `/continue` applies: the session has content and the last
+    /// message is an incomplete (interrupted) assistant message.
+    pub fn can_continue(&self) -> bool {
+        let Some(last) = self.messages.last() else {
+            return false;
+        };
+        let idx = self.messages.len() - 1;
+        last.role == shuvarie_llm::Role::Assistant
+            && !last.content.is_empty()
+            && self
+                .interrupted
+                .get(&(idx as u64))
+                .copied()
+                .unwrap_or(false)
     }
 
     pub fn add_usage(&mut self, usage: TokenUsage, cost: f64) {

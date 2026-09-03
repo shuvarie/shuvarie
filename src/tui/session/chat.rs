@@ -152,6 +152,15 @@ impl Chat {
         !self.turns.borrow().is_empty()
     }
 
+    pub fn last_turn_interrupted(&self) -> bool {
+        self.interrupted
+            && self
+                .turns
+                .borrow()
+                .last()
+                .is_some_and(|turn| turn.role == Role::Assistant)
+    }
+
     /// Mark the in-flight turn dirty so an animated spinner re-renders.
     pub fn mark_spinner_dirty(&self) {
         if let Some(turn) = self.in_flight.borrow_mut().as_mut() {

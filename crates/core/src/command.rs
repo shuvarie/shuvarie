@@ -44,6 +44,7 @@ pub enum Command {
     UndoLastTurn,
     Redo,
     Replay,
+    Continue,
     LspStart {
         name: String,
     },

@@ -820,6 +820,9 @@ impl App {
             .set_availability(CommandAction::Redo, has_messages);
         self.command_menu
             .set_availability(CommandAction::Replay, has_messages);
+        let can_continue = self.session.can_continue();
+        self.command_menu
+            .set_availability(CommandAction::Continue, can_continue);
     }
 
     /// Runs a command action (from the Ctrl+M menu or the inline slash menu).
@@ -872,6 +875,10 @@ impl App {
             }
             CommandAction::Replay => {
                 self.ctx.send(shuvarie_core::Command::Replay);
+            }
+            CommandAction::Continue => {
+                self.session.begin_continue();
+                self.ctx.send(shuvarie_core::Command::Continue);
             }
             CommandAction::Quit => {
                 if self.session.is_streaming() {

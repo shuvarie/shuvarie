@@ -16,7 +16,7 @@ use crate::config::{Connections, ProviderConfig};
 use crate::embeddings::{self, EmbeddingSetup};
 use crate::event::Event;
 use crate::question::{AnswerResponse, QuestionGate, QuestionRequest};
-use crate::session::Session;
+use crate::session::{CONTINUE_PROMPT, Session};
 
 /// How a streamed turn ended, reported back to the run loop so it can decide
 /// whether to auto-continue after a context overflow.
@@ -691,6 +691,25 @@ pub async fn run(
                                     .await;
                             }
                         }
+                    }
+                    Command::Continue => {
+                        if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
+                            continue;
+                        }
+                        pending_retry = None;
+                        conn_retries = 0;
+                        let Some(s) = &ctx.session else { continue; };
+                        if !s.lock().await.can_continue() {
+                            let _ = ctx
+                                .event_tx
+                                .send(Event::SessionError {
+                                    error: "nothing to continue".into(),
+                                })
+                                .await;
+                            continue;
+                        }
+                        ctx.self_replay_send(CONTINUE_PROMPT.to_string(), true)
+                            .await;
                     }
                     Command::LspStart { name } => {
                         let mut mgr = ctx.lsp.lock().await;
