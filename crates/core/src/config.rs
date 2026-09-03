@@ -85,6 +85,9 @@ pub struct Config {
 
     #[serde(default)]
     pub context: ContextConfig,
+
+    #[serde(default)]
+    pub retry: RetryConfig,
 }
 
 fn default_max_turns() -> usize {
@@ -213,6 +216,34 @@ fn is_zero_usize(value: &usize) -> bool {
     *value == 0
 }
 
+/// Auto-retry for provider connection failures (timeout, reset, HTTP
+/// 408/429/5xx). The interval ladder is fixed: 3s, 5s, 10s, 20s, 30s, then
+/// 60s for every further attempt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub struct RetryConfig {
+    /// Maximum auto-retry attempts per connection failure. `0` disables
+    /// retrying (a connection failure errors out immediately).
+    #[serde(
+        rename = "max-retries",
+        default,
+        deserialize_with = "kdlserde::de_default"
+    )]
+    pub max_retries: usize,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self { max_retries: 10 }
+    }
+}
+
+impl RetryConfig {
+    pub fn effective_max_retries(&self) -> usize {
+        self.max_retries
+    }
+}
+
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
@@ -233,7 +264,11 @@ impl AgentConfig {
 }
 
 fn effective(value: usize) -> usize {
-    if value == 0 { usize::MAX } else { value }
+    if value == 0 {
+        usize::MAX
+    } else {
+        value
+    }
 }
 
 /// Serde mirror of [`shuvarie_lsp::LspConfig`] for the KDL file layout; the
@@ -411,6 +446,33 @@ mod tests {
     fn empty_file_is_all_defaults() {
         let parsed: Config = kdlserde::from_str("").unwrap();
         assert_eq!(parsed, Config::default());
+    }
+
+    #[test]
+    fn retry_config_defaults_to_ten() {
+        let parsed: Config = kdlserde::from_str("").unwrap();
+        assert_eq!(parsed.retry.max_retries, 10);
+    }
+
+    #[test]
+    fn retry_config_explicit_value() {
+        let text = r#"
+            retry {
+                max-retries 3
+            }
+        "#;
+        let parsed: Config = kdlserde::from_str(text).unwrap();
+        assert_eq!(parsed.retry.max_retries, 3);
+    }
+
+    #[test]
+    fn retry_config_zero_round_trips() {
+        let mut config = Config::default();
+        config.retry.max_retries = 0;
+        let text = kdlserde::to_string(&config).unwrap();
+        assert!(text.contains("max-retries 0"), "0 must serialize: {text}");
+        let parsed: Config = kdlserde::from_str(&text).unwrap();
+        assert_eq!(parsed, config);
     }
 
     #[test]

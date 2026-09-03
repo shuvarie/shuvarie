@@ -42,6 +42,12 @@ pub enum StreamItem {
     /// The run was stopped because the context budget was exceeded. The
     /// caller should compact the session history before continuing.
     Overflow,
+    /// A transport-level connection failure (timeout, reset, refused, HTTP
+    /// 408/429/5xx). The caller may retry the turn after a backoff.
+    ConnectionError {
+        message: String,
+        reason: String,
+    },
     Error {
         message: String,
     },

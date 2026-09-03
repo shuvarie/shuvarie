@@ -487,6 +487,11 @@ impl ProviderClient {
                     let message = e.to_string();
                     if message.contains(crate::context_hook::OVERFLOW_REASON) {
                         StreamItem::Overflow
+                    } else if let Some(failure) = crate::retry::classify_connection_error(&e) {
+                        StreamItem::ConnectionError {
+                            message,
+                            reason: failure.reason,
+                        }
                     } else {
                         StreamItem::Error { message }
                     }

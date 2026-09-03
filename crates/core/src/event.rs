@@ -71,6 +71,16 @@ pub enum Event {
         error: String,
     },
     StreamCancelled,
+    /// A retryable connection failure occurred; the core task will re-send the
+    /// turn after `delay_ms`. `attempt` is the upcoming retry number (1-based)
+    /// out of `max_attempts` (from `[retry].max-retries`).
+    RetryScheduled {
+        reason: String,
+        message: String,
+        attempt: usize,
+        max_attempts: usize,
+        delay_ms: u64,
+    },
     UsageUpdate {
         usage: TokenUsage,
         cost: f64,

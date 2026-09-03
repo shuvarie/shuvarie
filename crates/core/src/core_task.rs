@@ -20,7 +20,7 @@ use crate::session::Session;
 
 /// How a streamed turn ended, reported back to the run loop so it can decide
 /// whether to auto-continue after a context overflow.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum StreamOutcome {
     /// The turn completed normally (or was cancelled/errored).
     Finished,
@@ -28,6 +28,44 @@ enum StreamOutcome {
     /// is true when the session history was successfully summarized so the
     /// next turn can continue with `[summary, tail]`.
     Overflowed { compacted: bool },
+    /// The turn failed with a retryable connection failure (timeout, reset,
+    /// refused, HTTP 408/429/5xx). The run loop schedules an auto-retry
+    /// (resuming the turn) after a backoff, up to `[retry].max-retries`.
+    ConnectionLost { reason: String, message: String },
+}
+
+/// A scheduled connection retry: when it fires plus the original error
+/// message (re-emitted as `StreamError` if the user cancels the wait).
+struct PendingRetry {
+    deadline: tokio::time::Instant,
+    message: String,
+}
+
+/// Escalating retry delay schedule: 3s, 5s, 10s, 20s, 30s, then 60s for
+/// every further attempt.
+struct RetrySchedule;
+
+impl RetrySchedule {
+    const DELAYS_SECS: [u64; 5] = [3, 5, 10, 20, 30];
+    const MAX_DELAY_SECS: u64 = 60;
+
+    fn delay_secs(attempt: usize) -> u64 {
+        Self::DELAYS_SECS
+            .get(attempt.saturating_sub(1))
+            .copied()
+            .unwrap_or(Self::MAX_DELAY_SECS)
+    }
+}
+
+/// Decide the next connection-retry step: `None` when retrying is disabled
+/// (`max_retries == 0`) or the cap is reached (give up), otherwise the
+/// 1-based attempt number and its delay.
+fn next_connection_retry(attempts_so_far: usize, max_retries: usize) -> Option<(usize, u64)> {
+    let attempt = attempts_so_far.checked_add(1)?;
+    if attempt > max_retries {
+        return None;
+    }
+    Some((attempt, RetrySchedule::delay_secs(attempt)))
 }
 
 /// Which session (if any) to load when the core task starts.
@@ -82,6 +120,11 @@ pub async fn run(
     let (stream_done_tx, mut stream_done_rx) = tokio::sync::mpsc::channel::<StreamOutcome>(1);
     let mut overflow_retries: usize = 0;
     const MAX_OVERFLOW_RETRIES: usize = 3;
+
+    // Connection-failure auto-retry state: consecutive failures within one
+    // retry chain, plus the currently scheduled wait (if any).
+    let mut conn_retries: usize = 0;
+    let mut pending_retry: Option<PendingRetry> = None;
 
     let (question_tx, mut question_rx) = tokio::sync::mpsc::channel::<QuestionRequest>(8);
     let mut pending_questions: HashMap<u64, oneshot::Sender<AnswerResponse>> = HashMap::new();
@@ -152,6 +195,7 @@ pub async fn run(
     load_startup_session(&mut ctx.store, &mut ctx.session, &ctx.event_tx, startup).await;
 
     loop {
+        let retry_deadline = pending_retry.as_ref().map(|p| p.deadline);
         tokio::select! {
             cmd = cmd_rx.recv() => {
                 let Some(cmd) = cmd else { break };
@@ -287,6 +331,8 @@ pub async fn run(
                     }
                     Command::StartSession => {
                         overflow_retries = 0;
+                        pending_retry = None;
+                        conn_retries = 0;
                         dismiss_pending_questions(&mut pending_questions);
                         ctx.session = Some(Arc::new(Mutex::new(Session::new())));
                         let _ = ctx.event_tx.send(Event::SessionStarted).await;
@@ -296,6 +342,8 @@ pub async fn run(
                             continue;
                         }
                         overflow_retries = 0;
+                        pending_retry = None;
+                        conn_retries = 0;
                         dismiss_pending_questions(&mut pending_questions);
                         ctx.session = Some(Arc::new(Mutex::new(Session::new())));
                         let _ = ctx.event_tx.send(Event::SessionStarted).await;
@@ -310,6 +358,8 @@ pub async fn run(
                             continue;
                         }
                         overflow_retries = 0;
+                        pending_retry = None;
+                        conn_retries = 0;
                         ctx.active_stream = None;
                         if ctx.session.is_none() {
                             ctx.session = Some(Arc::new(Mutex::new(Session::new())));
@@ -385,6 +435,7 @@ pub async fn run(
                         ctx.self_replay_send(content, false).await;
                     }
                     Command::CancelStream => {
+                        let mut aborted = false;
                         if let Some(handle) = ctx.active_stream.take()
                             && !handle.is_finished()
                         {
@@ -398,6 +449,13 @@ pub async fn run(
                             )
                             .await;
                             let _ = ctx.event_tx.send(Event::StreamCancelled).await;
+                            aborted = true;
+                        }
+                        if !aborted
+                            && let Some(pending) = pending_retry.take()
+                        {
+                            conn_retries = 0;
+                            let _ = ctx.event_tx.send(Event::StreamError { error: pending.message }).await;
                         }
                     }
                     Command::ListSessions => match ctx.store.list_sessions().await {
@@ -416,6 +474,8 @@ pub async fn run(
                         if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
                         }
+                        pending_retry = None;
+                        conn_retries = 0;
                         dismiss_pending_questions(&mut pending_questions);
                         match ctx.store.load_session(id).await {
                             Ok(stored) => {
@@ -442,6 +502,8 @@ pub async fn run(
                         if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
                         }
+                        pending_retry = None;
+                        conn_retries = 0;
                         match ctx.store.delete_session(id).await {
                             Ok(()) => {
                                 if let Some(s) = &ctx.session
@@ -523,6 +585,8 @@ pub async fn run(
                         if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
                         }
+                        pending_retry = None;
+                        conn_retries = 0;
                         let Some(s) = &ctx.session else { continue; };
                         let session_id = s.lock().await.id;
                         let Some(sid) = session_id else { continue; };
@@ -556,6 +620,8 @@ pub async fn run(
                         if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
                         }
+                        pending_retry = None;
+                        conn_retries = 0;
                         let Some(s) = &ctx.session else { continue; };
                         let session_id = s.lock().await.id;
                         let Some(sid) = session_id else { continue; };
@@ -589,6 +655,8 @@ pub async fn run(
                         if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
                         }
+                        pending_retry = None;
+                        conn_retries = 0;
                         let Some(s) = &ctx.session else { continue; };
                         let session_id = s.lock().await.id;
                         let Some(sid) = session_id else { continue; };
@@ -628,6 +696,8 @@ pub async fn run(
                         if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
                         }
+                        pending_retry = None;
+                        conn_retries = 0;
                         let Some(s) = &ctx.session else { continue; };
                         let last_is_interrupted = s.lock().await.last_assistant_interrupted();
                         if !last_is_interrupted {
@@ -729,6 +799,7 @@ pub async fn run(
                 match outcome {
                     StreamOutcome::Finished => {
                         overflow_retries = 0;
+                        conn_retries = 0;
                     }
                     StreamOutcome::Overflowed { compacted } => {
                         if compacted && overflow_retries < MAX_OVERFLOW_RETRIES {
@@ -745,7 +816,46 @@ pub async fn run(
                                 .await;
                         }
                     }
+                    StreamOutcome::ConnectionLost { reason, message } => {
+                        match next_connection_retry(conn_retries, ctx.config.retry.max_retries) {
+                            Some((attempt, delay_secs)) => {
+                                conn_retries = attempt;
+                                let _ = ctx
+                                    .event_tx
+                                    .send(Event::RetryScheduled {
+                                        reason,
+                                        message: message.clone(),
+                                        attempt,
+                                        max_attempts: ctx.config.retry.max_retries,
+                                        delay_ms: delay_secs * 1000,
+                                    })
+                                    .await;
+                                pending_retry = Some(PendingRetry {
+                                    deadline: tokio::time::Instant::now()
+                                        + std::time::Duration::from_secs(delay_secs),
+                                    message,
+                                });
+                            }
+                            None => {
+                                conn_retries = 0;
+                                let _ = ctx
+                                    .event_tx
+                                    .send(Event::StreamError { error: message })
+                                    .await;
+                            }
+                        }
+                    }
                 }
+            }
+            _ = async {
+                if let Some(deadline) = retry_deadline {
+                    tokio::time::sleep_until(deadline).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }, if retry_deadline.is_some() => {
+                pending_retry = None;
+                ctx.resume_last_turn().await;
             }
         }
     }
@@ -1500,6 +1610,18 @@ async fn stream_stream_to_events(
                 let _ = event_tx.send(Event::UsageUpdate { usage, cost }).await;
                 break;
             }
+            shuvarie_llm::StreamItem::ConnectionError { message, reason } => {
+                persist_stream_error(
+                    assistant_message_id,
+                    &pending_text,
+                    &pending_reasoning,
+                    &session,
+                    &mut store,
+                )
+                .await;
+                outcome = StreamOutcome::ConnectionLost { reason, message };
+                break;
+            }
             shuvarie_llm::StreamItem::Error { message } => {
                 persist_stream_error(
                     assistant_message_id,
@@ -1790,6 +1912,31 @@ mod tests {
     use selune::ProviderType;
     use shuvarie_llm::StreamItem;
     use shuvarie_llm::TokenUsage;
+
+    #[test]
+    fn retry_schedule_escalates_and_caps() {
+        assert_eq!(RetrySchedule::delay_secs(1), 3);
+        assert_eq!(RetrySchedule::delay_secs(2), 5);
+        assert_eq!(RetrySchedule::delay_secs(3), 10);
+        assert_eq!(RetrySchedule::delay_secs(4), 20);
+        assert_eq!(RetrySchedule::delay_secs(5), 30);
+        assert_eq!(RetrySchedule::delay_secs(6), 60);
+        assert_eq!(RetrySchedule::delay_secs(10), 60);
+    }
+
+    #[test]
+    fn next_connection_retry_caps_at_max() {
+        assert_eq!(next_connection_retry(0, 10), Some((1, 3)));
+        assert_eq!(next_connection_retry(1, 10), Some((2, 5)));
+        assert_eq!(next_connection_retry(4, 10), Some((5, 30)));
+        assert_eq!(next_connection_retry(5, 10), Some((6, 60)));
+        assert_eq!(next_connection_retry(9, 10), Some((10, 60)));
+        assert_eq!(next_connection_retry(10, 10), None);
+        assert_eq!(next_connection_retry(11, 10), None);
+        assert_eq!(next_connection_retry(0, 0), None, "0 = no retry");
+        assert_eq!(next_connection_retry(0, 1), Some((1, 3)));
+        assert_eq!(next_connection_retry(1, 1), None);
+    }
 
     #[tokio::test]
     async fn stream_events_forward_and_accumulate_usage() {

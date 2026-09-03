@@ -5,6 +5,7 @@ pub mod file_change;
 pub mod message;
 pub mod model;
 pub mod provider;
+pub mod retry;
 pub mod stream;
 pub mod tool;
 pub mod usage;
@@ -21,6 +22,7 @@ pub use file_change::{
 pub use message::{ChatMsg, Role};
 pub use model::Model;
 pub use provider::ProviderClient;
+pub use retry::{ConnectionFailure, classify_connection_error};
 pub use stream::{StreamItem, StreamStream};
 pub use tool::{
     DynamicTool, FileChangeHook, PortableDynamicTool, Tool, ToolContext, ToolDefinition,

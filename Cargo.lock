@@ -8163,6 +8163,8 @@ version = "0.1.0"
 dependencies = [
  "futures-core",
  "futures-util",
+ "http",
+ "reqwest 0.13.4",
  "rig",
  "selune",
  "serde",

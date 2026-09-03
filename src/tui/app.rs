@@ -359,6 +359,18 @@ impl App {
                 CoreEvent::StreamCancelled => Some(AppMessage::Session(SessionMessage::Chat(
                     ChatMessage::StreamCancelled,
                 ))),
+                CoreEvent::RetryScheduled {
+                    reason,
+                    attempt,
+                    max_attempts,
+                    delay_ms,
+                    ..
+                } => Some(AppMessage::Session(SessionMessage::RetryScheduled {
+                    reason,
+                    attempt,
+                    max_attempts,
+                    delay_ms,
+                })),
                 CoreEvent::UsageUpdate { usage, cost } => {
                     Some(AppMessage::Session(SessionMessage::UsageUpdate {
                         usage,

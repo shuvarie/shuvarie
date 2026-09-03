@@ -44,6 +44,14 @@ pub enum SessionMessage {
     },
     Question(QuestionMessage),
     Slash(SlashMessage),
+    /// A retryable connection failure; the core task re-sends the turn after
+    /// `delay_ms`. Shows a red countdown in the status row.
+    RetryScheduled {
+        reason: String,
+        attempt: usize,
+        max_attempts: usize,
+        delay_ms: u64,
+    },
     Reset,
     Loaded {
         id: uuid::Uuid,
@@ -65,6 +73,16 @@ enum BusyKind {
     Waiting,
 }
 
+/// A scheduled connection retry, rendered as a red countdown in the status
+/// row (`<reason>. Retry in <seconds>s [<attempt>/<cap>]`).
+#[derive(Debug, Clone)]
+pub(crate) struct RetryWait {
+    pub(crate) reason: String,
+    pub(crate) attempt: usize,
+    pub(crate) max_attempts: usize,
+    pub(crate) deadline: std::time::Instant,
+}
+
 /// In-progress todo rows shown in the strip under the title bar; further
 /// items collapse into an overflow hint row.
 const MAX_WORKING_ROWS: usize = 3;
@@ -84,6 +102,7 @@ pub struct SessionScreen {
     pub session_id: Option<uuid::Uuid>,
     pub session_title: Option<String>,
     pub error: Option<String>,
+    pub(crate) retry: Option<RetryWait>,
     working_todos: Vec<shuvarie_core::todos::TodoItem>,
 }
 
@@ -101,6 +120,7 @@ impl SessionScreen {
             session_id: None,
             session_title: None,
             error: None,
+            retry: None,
             working_todos: Vec::new(),
         }
     }
@@ -191,6 +211,7 @@ impl SessionScreen {
                             self.busy = true;
                             self.busy_kind = BusyKind::Generating;
                             self.status = Some("Thinking...".to_string());
+                            self.retry = None;
                             self.sync_slash();
                             return Some(SessionEffect::SendMessage { content });
                         }
@@ -285,11 +306,30 @@ impl SessionScreen {
                 }
                 None
             }
+            SessionMessage::RetryScheduled {
+                reason,
+                attempt,
+                max_attempts,
+                delay_ms,
+            } => {
+                self.retry = Some(RetryWait {
+                    reason,
+                    attempt,
+                    max_attempts,
+                    deadline: std::time::Instant::now()
+                        + std::time::Duration::from_millis(delay_ms),
+                });
+                self.busy = true;
+                self.busy_kind = BusyKind::Waiting;
+                self.status = None;
+                None
+            }
             SessionMessage::Reset => {
                 self.chat.update(ChatMessage::Reset);
                 self.busy = false;
                 self.busy_kind = BusyKind::Generating;
                 self.status = None;
+                self.retry = None;
                 self.session_id = None;
                 self.session_title = None;
                 self.sidebar.update(SidebarMessage::SetUsage {
@@ -304,6 +344,7 @@ impl SessionScreen {
                 self.session_id = Some(id);
                 self.session_title = Some(title);
                 self.status = None;
+                self.retry = None;
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
                 self.sync_todos(shuvarie_core::todos::replay(&session.tool_records));
@@ -312,6 +353,7 @@ impl SessionScreen {
             }
             SessionMessage::TurnReverted { session } => {
                 let (usage, cost) = usage_of(&session);
+                self.retry = None;
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
                 self.sync_todos(shuvarie_core::todos::replay(&session.tool_records));
@@ -320,6 +362,7 @@ impl SessionScreen {
             }
             SessionMessage::TurnRestored { session } => {
                 let (usage, cost) = usage_of(&session);
+                self.retry = None;
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
                 self.sync_todos(shuvarie_core::todos::replay(&session.tool_records));
@@ -337,21 +380,25 @@ impl SessionScreen {
                 self.busy = true;
                 self.busy_kind = BusyKind::Generating;
                 self.status = Some("Streaming...".to_string());
+                self.retry = None;
             }
             ChatMessage::ReasoningReceived { .. } => {
                 self.busy = true;
                 self.busy_kind = BusyKind::Generating;
                 self.status = Some("Thinking...".to_string());
+                self.retry = None;
             }
             ChatMessage::ToolStarted { name, .. } => {
                 self.busy = true;
                 self.busy_kind = BusyKind::Tool;
                 self.status = Some(format!("Calling tool: {name}"));
+                self.retry = None;
             }
             ChatMessage::WorkerStarted { name, .. } => {
                 self.busy = true;
                 self.busy_kind = BusyKind::Tool;
                 self.status = Some(format!("Spawned worker: {name}"));
+                self.retry = None;
             }
             ChatMessage::ToolFinished {
                 name, ok, output, ..
@@ -367,14 +414,17 @@ impl SessionScreen {
             ChatMessage::StreamDone => {
                 self.busy = false;
                 self.status = None;
+                self.retry = None;
             }
             ChatMessage::StreamError { error } => {
                 self.busy = false;
                 self.status = Some(format!("error: {error}"));
+                self.retry = None;
             }
             ChatMessage::StreamCancelled => {
                 self.busy = false;
                 self.status = None;
+                self.retry = None;
             }
             _ => {}
         }
@@ -477,7 +527,22 @@ impl SessionScreen {
             None if self.busy => Some(("Working...", BusyKind::Tool)),
             None => None,
         };
-        if let Some((status, kind)) = status {
+        if let Some(retry) = &self.retry {
+            let remaining = retry
+                .deadline
+                .saturating_duration_since(std::time::Instant::now());
+            let secs = (remaining.as_secs_f64()).ceil().max(1.0) as u64;
+            let text = format!(
+                "{}. Retry in {}s [{}/{}]",
+                retry.reason, secs, retry.attempt, retry.max_attempts
+            );
+            let spans = vec![
+                super::spinner::wait_spinner(),
+                Span::raw(" "),
+                Span::raw(text).fg(theme::ERROR),
+            ];
+            frame.render_widget(Paragraph::new(Line::from(spans)), status_area);
+        } else if let Some((status, kind)) = status {
             let mut spans = Vec::new();
             if self.busy {
                 spans.push(match kind {
@@ -786,5 +851,110 @@ mod tests {
             !strip.contains("before the end"),
             "truncated to strip width: {strip:?}"
         );
+    }
+
+    fn retry_screen(seconds: u64, attempt: usize) -> SessionScreen {
+        let mut screen = SessionScreen::new();
+        screen.retry = Some(RetryWait {
+            reason: "Connection reset".into(),
+            attempt,
+            max_attempts: 10,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(seconds),
+        });
+        screen
+    }
+
+    fn find_row(buf: &ratatui::buffer::Buffer, needle: &str) -> (u16, String) {
+        (0..buf.area().height)
+            .map(|y| (y, row_text(buf, y)))
+            .find(|(_, text)| text.contains(needle))
+            .unwrap_or_else(|| panic!("row containing {needle:?} should render"))
+    }
+
+    #[test]
+    fn retry_countdown_renders_in_status_row() {
+        let buf = draw(&retry_screen(3, 1), 100, 24);
+        let (y, text) = find_row(&buf, "Retry in");
+        assert!(
+            text.contains("Connection reset. Retry in 3s [1/10]"),
+            "row {y}: {text:?}"
+        );
+    }
+
+    #[test]
+    fn retry_countdown_ceils_remaining_seconds() {
+        let buf = draw(&retry_screen(4, 2), 100, 24);
+        let (_, text) = find_row(&buf, "Retry in");
+        assert!(text.contains("Retry in 4s [2/10]"), "ceil: {text:?}");
+    }
+
+    #[test]
+    fn retry_countdown_is_red() {
+        let buf = draw(&retry_screen(3, 1), 100, 24);
+        let (y, text) = find_row(&buf, "Retry in");
+        let col = text.find("Connection reset").unwrap() as u16;
+        assert_eq!(
+            buf[(col, y)].fg,
+            theme::ERROR,
+            "countdown text renders in ERROR color"
+        );
+    }
+
+    #[test]
+    fn retry_scheduled_sets_busy_and_state() {
+        let mut screen = SessionScreen::new();
+        screen.update(SessionMessage::RetryScheduled {
+            reason: "Connection timed out".into(),
+            attempt: 3,
+            max_attempts: 10,
+            delay_ms: 10_000,
+        });
+        let retry = screen.retry.as_ref().expect("retry state");
+        assert_eq!(retry.reason, "Connection timed out");
+        assert_eq!(retry.attempt, 3);
+        assert_eq!(retry.max_attempts, 10);
+        assert!(screen.busy);
+        assert_eq!(screen.busy_kind, BusyKind::Waiting);
+    }
+
+    #[test]
+    fn stream_error_clears_retry() {
+        let mut screen = SessionScreen::new();
+        screen.update(SessionMessage::RetryScheduled {
+            reason: "Connection reset".into(),
+            attempt: 1,
+            max_attempts: 10,
+            delay_ms: 3_000,
+        });
+        screen.update(SessionMessage::Chat(ChatMessage::StreamError {
+            error: "Connection reset".into(),
+        }));
+        assert!(screen.retry.is_none());
+        assert!(!screen.busy);
+        assert_eq!(screen.status.as_deref(), Some("error: Connection reset"));
+    }
+
+    #[test]
+    fn reset_and_turn_reverted_clear_retry() {
+        let mut screen = SessionScreen::new();
+        screen.update(SessionMessage::RetryScheduled {
+            reason: "Connection reset".into(),
+            attempt: 1,
+            max_attempts: 10,
+            delay_ms: 3_000,
+        });
+        screen.update(SessionMessage::Reset);
+        assert!(screen.retry.is_none());
+
+        screen.update(SessionMessage::RetryScheduled {
+            reason: "Connection reset".into(),
+            attempt: 2,
+            max_attempts: 10,
+            delay_ms: 5_000,
+        });
+        screen.update(SessionMessage::TurnReverted {
+            session: shuvarie_core::Session::new(),
+        });
+        assert!(screen.retry.is_none());
     }
 }
