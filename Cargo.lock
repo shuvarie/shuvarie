@@ -3173,9 +3173,23 @@ dependencies = [
 
 [[package]]
 name = "frameplay"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e08e31ba0c660b71a45ac713f5bd9f64a88b1430716e0753bd6f91ea3643240"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "frameplay-lib",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "frameplay-lib"
+version = "0.1.1"
+dependencies = [
+ "tokio",
+]
 
 [[package]]
 name = "fs4"
