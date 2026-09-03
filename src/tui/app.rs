@@ -785,6 +785,7 @@ impl App {
     /// earliest next frame change.
     pub fn active_spinners(&self) -> impl Iterator<Item = SpinnerKind> + '_ {
         let inline = self.session.busy
+            || self.session.chat.has_running_tool_blocks()
             || self.history_search.loading
             || self.session_picker.loading
             || self.session.sidebar.lsp_servers.iter().any(|s| {
@@ -801,7 +802,7 @@ impl App {
 
     /// Mark the views that are animating dirty so the next frame re-renders them.
     pub fn mark_spinners_dirty(&self) {
-        if self.session.busy {
+        if self.session.busy || self.session.chat.has_running_tool_blocks() {
             self.session.mark_spinner_dirty();
         }
         if self.session.sidebar.lsp_servers.iter().any(|s| {

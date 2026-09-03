@@ -8,7 +8,7 @@ use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 
 use shuvarie_db::Store;
-use shuvarie_llm::{FileChange, ProviderClient};
+use shuvarie_llm::{FileChange, ProviderClient, TokenUsage};
 
 use crate::command::Command;
 use crate::config::Config;
@@ -1362,6 +1362,11 @@ async fn stream_stream_to_events(
     let mut pending_worker_starts: std::collections::HashMap<String, std::time::Instant> =
         std::collections::HashMap::new();
     let mut outcome = StreamOutcome::Finished;
+    // Set when the manager stream reaches `Done`. Sending `Event::StreamDone`
+    // is deferred until the merged stream is exhausted, so worker receiver
+    // items queued behind it (a slow subagent's final tool results) are
+    // delivered to the TUI before the turn is committed.
+    let mut done: Option<(String, TokenUsage)> = None;
 
     while let Some(item) = stream.next().await {
         match item {
@@ -1531,81 +1536,10 @@ async fn stream_stream_to_events(
                 } else {
                     text
                 };
-                let mut guard = session.lock().await;
-                let combined = {
-                    let worker_usage = worker_usage.lock().unwrap();
-                    usage + *worker_usage
-                };
-                guard.push_assistant(text.clone());
-                let cost = catalog_provider
-                    .as_ref()
-                    .map(|p| crate::catalog::estimate_cost(p, &model, &combined))
-                    .unwrap_or(0.0);
-                guard.add_usage(combined, cost);
-                let id = guard.id;
-                let seq = guard.messages.len() - 1;
-                let reasoning = pending_reasoning.clone();
-                guard.reasoning.insert(seq as u64, reasoning.clone());
-                guard.tool_records.append(&mut turn_tool_records);
-                drop(guard);
-                if let Some(id) = id {
-                    if let Some(msg_id) = assistant_message_id {
-                        let _ = store
-                            .update_message(msg_id, &text, &reasoning, false, combined, cost)
-                            .await;
-                        let _ = store.truncate_undo_log(id).await;
-                        if let Some(setup) = &embedding_setup {
-                            let store_idx = store.clone();
-                            let setup_idx = setup.clone();
-                            let content_idx = text.clone();
-                            tokio::spawn(async move {
-                                let _ = embeddings::index_message(
-                                    &mut store_idx.clone(),
-                                    &setup_idx,
-                                    msg_id,
-                                    id,
-                                    seq as u64,
-                                    &content_idx,
-                                )
-                                .await;
-                            });
-                        }
-                    } else {
-                        match store
-                            .append_assistant_message(id, &text, &reasoning, false, combined, cost)
-                            .await
-                        {
-                            Ok(msg) => {
-                                if let Some(setup) = &embedding_setup {
-                                    let store_idx = store.clone();
-                                    let setup_idx = setup.clone();
-                                    let content_idx = msg.content.clone();
-                                    tokio::spawn(async move {
-                                        let _ = embeddings::index_message(
-                                            &mut store_idx.clone(),
-                                            &setup_idx,
-                                            msg.id,
-                                            id,
-                                            seq as u64,
-                                            &content_idx,
-                                        )
-                                        .await;
-                                    });
-                                }
-                            }
-                            Err(e) => {
-                                let _ = event_tx
-                                    .send(Event::StreamError {
-                                        error: format!("failed to persist message: {e}"),
-                                    })
-                                    .await;
-                            }
-                        }
-                    }
-                }
-                let _ = event_tx.send(Event::StreamDone { text, usage }).await;
-                let _ = event_tx.send(Event::UsageUpdate { usage, cost }).await;
-                break;
+                done = Some((text, usage));
+                // Keep consuming: `select_all` continues past the ended main
+                // stream and drains the worker receivers before returning
+                // `None`.
             }
             shuvarie_llm::StreamItem::ConnectionError { message, reason } => {
                 persist_stream_error(
@@ -1616,6 +1550,7 @@ async fn stream_stream_to_events(
                     &mut store,
                 )
                 .await;
+                done = None;
                 outcome = StreamOutcome::ConnectionLost { reason, message };
                 break;
             }
@@ -1629,6 +1564,7 @@ async fn stream_stream_to_events(
                 )
                 .await;
                 let _ = event_tx.send(Event::StreamError { error: message }).await;
+                done = None;
                 break;
             }
             shuvarie_llm::StreamItem::Overflow => {
@@ -1674,9 +1610,92 @@ async fn stream_stream_to_events(
                     }
                 }
                 outcome = StreamOutcome::Overflowed { compacted };
+                done = None;
                 break;
             }
         }
+    }
+
+    if let Some((text, usage)) = done {
+        let mut guard = session.lock().await;
+        let combined = {
+            let worker_usage = worker_usage.lock().unwrap();
+            usage + *worker_usage
+        };
+        guard.push_assistant(text.clone());
+        let cost = catalog_provider
+            .as_ref()
+            .map(|p| crate::catalog::estimate_cost(p, &model, &combined))
+            .unwrap_or(0.0);
+        guard.add_usage(combined, cost);
+        let id = guard.id;
+        let seq = guard.messages.len() - 1;
+        let reasoning = pending_reasoning.clone();
+        guard.reasoning.insert(seq as u64, reasoning.clone());
+        guard.tool_records.append(&mut turn_tool_records);
+        drop(guard);
+        if let Some(id) = id {
+            if let Some(msg_id) = assistant_message_id {
+                let _ = store
+                    .update_message(msg_id, &text, &reasoning, false, combined, cost)
+                    .await;
+                let _ = store.truncate_undo_log(id).await;
+                if let Some(setup) = &embedding_setup {
+                    let store_idx = store.clone();
+                    let setup_idx = setup.clone();
+                    let content_idx = text.clone();
+                    tokio::spawn(async move {
+                        let _ = embeddings::index_message(
+                            &mut store_idx.clone(),
+                            &setup_idx,
+                            msg_id,
+                            id,
+                            seq as u64,
+                            &content_idx,
+                        )
+                        .await;
+                    });
+                }
+            } else {
+                match store
+                    .append_assistant_message(id, &text, &reasoning, false, combined, cost)
+                    .await
+                {
+                    Ok(msg) => {
+                        if let Some(setup) = &embedding_setup {
+                            let store_idx = store.clone();
+                            let setup_idx = setup.clone();
+                            let content_idx = msg.content.clone();
+                            tokio::spawn(async move {
+                                let _ = embeddings::index_message(
+                                    &mut store_idx.clone(),
+                                    &setup_idx,
+                                    msg.id,
+                                    id,
+                                    seq as u64,
+                                    &content_idx,
+                                )
+                                .await;
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        let _ = event_tx
+                            .send(Event::StreamError {
+                                error: format!("failed to persist message: {e}"),
+                            })
+                            .await;
+                    }
+                }
+            }
+        }
+        let _ = event_tx.send(Event::StreamDone { text, usage }).await;
+        let _ = event_tx
+            .send(Event::UsageUpdate {
+                usage: combined,
+                cost,
+            })
+            .await;
     }
     let _ = stream_done_tx.send(outcome).await;
 }
@@ -2057,6 +2076,98 @@ mod tests {
         assert!(saw_error, "expected StreamError");
         let guard = session.lock().await;
         assert!(guard.messages.is_empty(), "no assistant message on error");
+    }
+
+    #[tokio::test]
+    async fn stream_done_waits_for_queued_worker_items_to_drain() {
+        // Mirrors the production merge shape (`select_all`, main stream
+        // first): a worker's `ToolResult` queued behind an immediately-ready
+        // main stream must still be delivered before `Event::StreamDone`, so
+        // the TUI finishes every tool block before committing the turn.
+        let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
+        let session = Arc::new(Mutex::new(Session::new()));
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(16);
+
+        let done = StreamItem::Done {
+            text: "final".into(),
+            usage: TokenUsage {
+                input_tokens: 10,
+                output_tokens: 20,
+                total_tokens: 30,
+                ..TokenUsage::default()
+            },
+        };
+        let worker_result = StreamItem::ToolResult {
+            name: "grep".into(),
+            output: "found".into(),
+            ok: true,
+            worker: Some("explore_workspace".into()),
+            file_change: None,
+            streams: None,
+        };
+        let (worker_tx, worker_rx) = tokio::sync::mpsc::channel::<StreamItem>(8);
+        let _ = worker_tx.send(worker_result).await;
+        drop(worker_tx);
+        let mut streams: Vec<
+            std::pin::Pin<Box<dyn futures_util::stream::Stream<Item = StreamItem> + Send>>,
+        > = vec![
+            Box::pin(futures_util::stream::iter(vec![done])),
+            Box::pin(futures_util::stream::unfold(
+                worker_rx,
+                |mut rx| async move { rx.recv().await.map(|item| (item, rx)) },
+            )),
+        ];
+        let stream: shuvarie_llm::StreamStream =
+            Box::pin(futures_util::stream::select_all(streams));
+
+        let session_shared = session.clone();
+        let store = Store::open_in_memory().await.unwrap();
+        let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage {
+            input_tokens: 5,
+            output_tokens: 7,
+            total_tokens: 12,
+            ..TokenUsage::default()
+        }));
+        let turn_state = Arc::new(Mutex::new(TurnState::default()));
+        let (stream_done_tx, mut stream_done_rx) = tokio::sync::mpsc::channel(1);
+        tokio::spawn(async move {
+            stream_stream_to_events(
+                stream,
+                session_shared,
+                client,
+                None,
+                store,
+                "ollama-model".into(),
+                worker_usage,
+                None,
+                event_tx,
+                turn_state,
+                stream_done_tx,
+            )
+            .await;
+        });
+
+        let mut done_seen = false;
+        let mut saw_tool_result_before_done = false;
+        loop {
+            match event_rx.recv().await {
+                Some(Event::ToolFinished { name, .. }) if name == "grep" => {
+                    assert!(!done_seen, "ToolFinished must precede StreamDone");
+                    saw_tool_result_before_done = true;
+                }
+                Some(Event::StreamDone { .. }) => done_seen = true,
+                Some(Event::UsageUpdate { usage, .. }) => {
+                    assert_eq!(usage.input_tokens, 15, "combined manager + worker usage");
+                }
+                Some(_) => {}
+                None => break,
+            }
+        }
+        assert!(saw_tool_result_before_done);
+        assert!(done_seen, "StreamDone still emitted after the drain");
+        assert!(stream_done_rx.recv().await.is_some(), "outcome still sent");
+        let guard = session.lock().await;
+        assert_eq!(guard.tokens, 42, "session accumulates combined usage");
     }
 
     #[tokio::test]

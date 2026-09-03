@@ -162,10 +162,44 @@ impl Chat {
     }
 
     /// Mark the in-flight turn dirty so an animated spinner re-renders.
+    /// A still-running tool block committed into the last turn (a late
+    /// `ToolFinished` straggler) is bumped too so its spinner and elapsed
+    /// time keep ticking.
     pub fn mark_spinner_dirty(&self) {
         if let Some(turn) = self.in_flight.borrow_mut().as_mut() {
             turn.rev += 1;
         }
+        let mut turns = self.turns.borrow_mut();
+        if let Some(turn) = turns.last_mut()
+            && turn
+                .blocks
+                .as_ref()
+                .is_some_and(|blocks| blocks.iter().any(|block| block.tool_is_running()))
+        {
+            turn.rev += 1;
+        }
+    }
+
+    /// Whether any tool block is still animating: live blocks in the
+    /// in-flight turn, plus a straggler in the last committed turn. Only
+    /// those two turns can hold running blocks — committed turns are built
+    /// from in-flight data or stored records, neither of which animates.
+    pub fn has_running_tool_blocks(&self) -> bool {
+        self.in_flight
+            .borrow()
+            .as_ref()
+            .is_some_and(Self::turn_has_running_tool)
+            || self
+                .turns
+                .borrow()
+                .last()
+                .is_some_and(Self::turn_has_running_tool)
+    }
+
+    fn turn_has_running_tool(turn: &TurnData) -> bool {
+        turn.blocks
+            .as_deref()
+            .is_some_and(|blocks| blocks.iter().any(|block| block.tool_is_running()))
     }
 
     pub fn update(&mut self, msg: ChatMessage) {
@@ -519,20 +553,38 @@ impl Chat {
         apply: impl FnOnce(&mut Block) -> bool,
     ) -> bool {
         let mut in_flight = self.in_flight.borrow_mut();
-        let Some(turn) = in_flight.as_mut() else {
-            return false;
-        };
-        let Some(blocks) = turn.blocks.as_mut() else {
-            return false;
-        };
-        match blocks
-            .iter_mut()
-            .rev()
-            .find(|block| block.tool_matches(name, worker) && block.tool_is_running())
+        if let Some(turn) = in_flight.as_mut()
+            && let Some(blocks) = turn.blocks.as_mut()
+            && let Some(block) = blocks
+                .iter_mut()
+                .rev()
+                .find(|block| block.tool_matches(name, worker) && block.tool_is_running())
         {
-            Some(block) => apply(block),
-            None => false,
+            return apply(block);
         }
+        // A finish that arrives after the turn was committed (a worker
+        // straggler drained late) still lands on its block in the committed
+        // turn; the rev bump forces the cached render to rebuild.
+        let mut turns = self.turns.borrow_mut();
+        for turn in turns.iter_mut().rev() {
+            let Some(blocks) = turn.blocks.as_mut() else {
+                continue;
+            };
+            let Some(block) = blocks
+                .iter_mut()
+                .rev()
+                .find(|block| block.tool_matches(name, worker) && block.tool_is_running())
+            else {
+                continue;
+            };
+            let updated = apply(block);
+            if updated {
+                turn.rev += 1;
+                turn.refresh_est(false);
+            }
+            return updated;
+        }
+        false
     }
 
     fn touch_in_flight(&mut self) {
@@ -1093,6 +1145,148 @@ mod tests {
         assert!(headers[0].contains("Thought"));
         assert!(headers[1].contains("Thought"));
         assert!(headers[2].contains("Thinking..."));
+    }
+
+    #[test]
+    fn commit_done_keeps_running_worker_tool_block() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "go".into(),
+        });
+        chat.update(ChatMessage::WorkerStarted {
+            name: "explore".into(),
+            args: serde_json::json!("find it"),
+        });
+        chat.update(ChatMessage::ToolStarted {
+            name: "read_file".into(),
+            args: serde_json::json!({"path": "x"}),
+            worker: Some("explore".into()),
+        });
+        chat.update(ChatMessage::StreamDone);
+        assert!(chat.in_flight.borrow().is_none());
+        let turns = chat.turns.borrow();
+        let blocks = turns.last().unwrap().blocks.as_deref().unwrap();
+        let running: Vec<_> = blocks
+            .iter()
+            .filter(|block| {
+                let Block::Tool(tool) = block else {
+                    return false;
+                };
+                tool.is_running()
+            })
+            .collect();
+        assert_eq!(
+            running.len(),
+            2,
+            "running blocks leaked into a committed turn"
+        );
+    }
+
+    #[test]
+    fn late_tool_started_reopens_in_flight_turn() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "go".into(),
+        });
+        chat.update(ChatMessage::StreamDone);
+        assert!(chat.in_flight.borrow().is_none());
+        chat.update(ChatMessage::ToolStarted {
+            name: "grep".into(),
+            args: serde_json::json!({}),
+            worker: Some("explore".into()),
+        });
+        assert!(
+            chat.in_flight.borrow().is_some(),
+            "a late ToolStarted re-created an in-flight turn after commit"
+        );
+    }
+
+    #[test]
+    fn late_tool_finished_finishes_committed_block() {
+        // A worker straggler drained after `StreamDone`: the running block
+        // lives in the committed turn and must still be finished there.
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "go".into(),
+        });
+        chat.update(ChatMessage::WorkerStarted {
+            name: "explore".into(),
+            args: serde_json::json!("find it"),
+        });
+        chat.update(ChatMessage::ToolStarted {
+            name: "read_file".into(),
+            args: serde_json::json!({"path": "x"}),
+            worker: Some("explore".into()),
+        });
+        chat.update(ChatMessage::StreamDone);
+        assert!(chat.has_running_tool_blocks());
+
+        let turns = chat.turns.borrow();
+        let rev_before = turns.last().unwrap().rev;
+        drop(turns);
+
+        chat.update(ChatMessage::ToolFinished {
+            name: "read_file".into(),
+            ok: true,
+            output: "contents".into(),
+            worker: Some("explore".into()),
+            file_change: None,
+            streams: None,
+            duration_ms: 120,
+        });
+        assert!(
+            chat.has_running_tool_blocks(),
+            "the worker call itself is still running"
+        );
+        let turns = chat.turns.borrow();
+        let turn = turns.last().unwrap();
+        assert!(
+            turn.rev > rev_before,
+            "committed turn cache must rebuild after a late finish"
+        );
+        let blocks = turn.blocks.as_deref().unwrap();
+        let Block::Tool(tool) = blocks.last().unwrap() else {
+            panic!("expected tool block")
+        };
+        assert!(!tool.is_running());
+    }
+
+    #[test]
+    fn running_committed_block_keeps_wake_armed() {
+        // The render loop's spinner wake comes from `has_running_tool_blocks`
+        // when `busy` is false, so a committed straggler keeps animating.
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "go".into(),
+        });
+        chat.update(ChatMessage::ToolStarted {
+            name: "grep".into(),
+            args: serde_json::json!({}),
+            worker: None,
+        });
+        assert!(chat.has_running_tool_blocks());
+        chat.update(ChatMessage::StreamDone);
+        assert!(chat.has_running_tool_blocks(), "straggler stays armed");
+        chat.update(ChatMessage::ToolFinished {
+            name: "grep".into(),
+            ok: true,
+            output: "out".into(),
+            worker: None,
+            file_change: None,
+            streams: None,
+            duration_ms: 5,
+        });
+        assert!(!chat.has_running_tool_blocks());
+        chat.update(ChatMessage::ToolFinished {
+            name: "grep".into(),
+            ok: true,
+            output: "out".into(),
+            worker: None,
+            file_change: None,
+            streams: None,
+            duration_ms: 5,
+        });
+        assert!(!chat.has_running_tool_blocks(), "stale finish is a no-op");
     }
 
     #[test]

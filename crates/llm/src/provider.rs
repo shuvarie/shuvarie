@@ -849,6 +849,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn merge_streams_drains_workers_after_main_done() {
+        // `select_all` is round-robin but polls the main stream first, so a
+        // worker item queued at the moment `Done` arrives is yielded after
+        // it. The merged stream must keep yielding until the receiver
+        // drains — the core only sends `Event::StreamDone` once it returns
+        // `None`.
+        let (worker_tx, worker_rx) = tokio::sync::mpsc::channel(8);
+        let done = StreamItem::Done {
+            text: "final".into(),
+            usage: crate::TokenUsage::default(),
+        };
+        let worker_item = StreamItem::ToolResult {
+            name: "grep".into(),
+            output: "found".into(),
+            ok: true,
+            worker: Some("explore_workspace".into()),
+            file_change: None,
+            streams: None,
+        };
+        let _ = worker_tx.send(worker_item.clone()).await;
+        drop(worker_tx);
+        let mut merged = merge_streams(
+            futures_util::stream::iter(vec![done.clone()]),
+            vec![worker_rx],
+        );
+        let mut collected = Vec::new();
+        while let Some(item) = merged.next().await {
+            collected.push(item);
+        }
+        assert_eq!(
+            collected,
+            vec![done, worker_item],
+            "worker items must trail Done, never be dropped"
+        );
+    }
+
+    #[tokio::test]
     async fn merge_streams_emits_worker_items_even_when_main_pending() {
         let (worker_tx, worker_rx) = tokio::sync::mpsc::channel(8);
         let mut merged = merge_streams(pending_stream(), vec![worker_rx]);
