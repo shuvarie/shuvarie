@@ -398,7 +398,7 @@ impl SessionScreen {
             ChatMessage::TokenReceived { .. } => {
                 self.busy = true;
                 self.busy_kind = BusyKind::Generating;
-                self.status = Some("Streaming...".to_string());
+                self.status = Some("Yappin'...".to_string());
                 self.retry = None;
             }
             ChatMessage::ReasoningReceived { .. } => {
