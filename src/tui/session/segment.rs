@@ -8,6 +8,10 @@ use ratatui::{
 /// same amount inset on each side.
 pub const BLOCK_PADDING: (u16, u16) = (2, 1);
 
+/// Vertical-only inset for a bare text block: one blank row above and below
+/// the content, no background, no side inset.
+pub const TEXT_PADDING: (u16, u16) = (0, 1);
+
 /// Address of a block inside the chat: the turn index and the block index
 /// within that turn. Turn indices past the committed turns address the
 /// in-flight turn.

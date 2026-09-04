@@ -10,7 +10,7 @@ use unicode_width::UnicodeWidthStr;
 use super::blocks::{
     Block, BlockMessage, ChatEnv, ReasoningBlock, ReasoningMessage, TextBlock, TextMessage,
 };
-use super::segment::{BLOCK_PADDING, BlockAddr, HitRegion, Segment};
+use super::segment::{BLOCK_PADDING, BlockAddr, HitRegion, Segment, TEXT_PADDING};
 
 /// Estimated row counters of one turn. Collected once (from stored session
 /// data at load, or from block state at materialization/mutation) so heights
@@ -104,6 +104,7 @@ impl TurnEst {
                 if content.is_empty() {
                     est.deco_rows += 1;
                 } else {
+                    est.padding_rows += 2 * u32::from(TEXT_PADDING.1);
                     est.add_text(content);
                 }
                 if interrupted_marker {

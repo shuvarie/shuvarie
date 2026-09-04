@@ -1,6 +1,6 @@
 use ratatui::prelude::*;
 
-use crate::tui::session::segment::{BLOCK_PADDING, Segment};
+use crate::tui::session::segment::{BLOCK_PADDING, Segment, TEXT_PADDING};
 use crate::tui::session::virtualizer::TurnEst;
 use crate::tui::theme;
 
@@ -66,11 +66,17 @@ impl TextBlock {
         if self.content.is_empty() {
             return Vec::new();
         }
-        vec![Segment::plain(shuvarie_highlight::render(&self.content))]
+        vec![Segment {
+            padding: TEXT_PADDING,
+            ..Segment::plain(shuvarie_highlight::render(&self.content))
+        }]
     }
 
     pub(super) fn est(&self) -> TurnEst {
-        let mut est = TurnEst::default();
+        let mut est = TurnEst {
+            padding_rows: 2 * u32::from(TEXT_PADDING.1),
+            ..TurnEst::default()
+        };
         est.add_text(&self.content);
         est
     }
@@ -102,5 +108,33 @@ impl SystemText {
         let mut est = TurnEst::deco(1);
         est.add_text(&self.content);
         est
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_block_pads_one_row_above_and_below() {
+        let block = TextBlock::new("hello world");
+        let seg = &block.view()[0];
+        assert_eq!(seg.padding, (0, 1));
+        assert_eq!(seg.bg, None);
+        assert_eq!(seg.measure(40), 3);
+        let est = block.est();
+        assert_eq!(est.padding_rows, 2);
+        assert_eq!(est.height(40), seg.measure(40));
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 3));
+        seg.paint(buf.area, 0, 0, 3, 40, &mut buf);
+        let row = |y| {
+            (0..40)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        };
+        assert_eq!(row(0).trim_end(), "");
+        assert_eq!(row(1).trim_end(), "hello world");
+        assert_eq!(row(2).trim_end(), "");
     }
 }
