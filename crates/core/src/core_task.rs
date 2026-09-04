@@ -1530,6 +1530,13 @@ async fn stream_stream_to_events(
                     })
                     .await;
             }
+            shuvarie_llm::StreamItem::Usage { usage } => {
+                let cost = catalog_provider
+                    .as_ref()
+                    .map(|p| crate::catalog::estimate_cost(p, &model, &usage))
+                    .unwrap_or(0.0);
+                let _ = event_tx.send(Event::UsageUpdate { usage, cost }).await;
+            }
             shuvarie_llm::StreamItem::Done { text, usage } => {
                 let text = if text.is_empty() && !pending_text.is_empty() {
                     std::mem::take(&mut pending_text)
@@ -1628,6 +1635,8 @@ async fn stream_stream_to_events(
             .map(|p| crate::catalog::estimate_cost(p, &model, &combined))
             .unwrap_or(0.0);
         guard.add_usage(combined, cost);
+        let usage_snapshot = guard.usage();
+        let cost_snapshot = guard.cost;
         let id = guard.id;
         let seq = guard.messages.len() - 1;
         let reasoning = pending_reasoning.clone();
@@ -1691,9 +1700,9 @@ async fn stream_stream_to_events(
         }
         let _ = event_tx.send(Event::StreamDone { text, usage }).await;
         let _ = event_tx
-            .send(Event::UsageUpdate {
-                usage: combined,
-                cost,
+            .send(Event::UsageSnapshot {
+                usage: usage_snapshot,
+                cost: cost_snapshot,
             })
             .await;
     }
@@ -1964,6 +1973,14 @@ mod tests {
             StreamItem::Delta {
                 text: "hello ".into(),
             },
+            StreamItem::Usage {
+                usage: TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 20,
+                    total_tokens: 30,
+                    ..TokenUsage::default()
+                },
+            },
             StreamItem::Delta {
                 text: "world".into(),
             },
@@ -2002,21 +2019,36 @@ mod tests {
 
         let mut deltas = String::new();
         let mut saw_done = false;
-        let mut saw_usage = false;
-        for _ in 0..6 {
+        let mut saw_live_usage = false;
+        let mut snapshot = None;
+        for _ in 0..8 {
             match event_rx.recv().await {
                 Some(Event::TokenReceived { content }) => deltas.push_str(&content),
                 Some(Event::StreamDone { .. }) => saw_done = true,
-                Some(Event::UsageUpdate { .. }) => saw_usage = true,
+                Some(Event::UsageUpdate { usage, .. }) => {
+                    assert_eq!(usage.total_tokens, 30, "per-request usage passes through");
+                    saw_live_usage = true;
+                }
+                Some(Event::UsageSnapshot { usage, cost }) => {
+                    snapshot = Some((usage, cost));
+                }
                 Some(_) => {}
                 None => break,
             }
-            if saw_done && saw_usage {
+            if saw_done && snapshot.is_some() {
                 break;
             }
         }
         assert_eq!(deltas, "hello world");
-        assert!(saw_done && saw_usage);
+        assert!(
+            saw_done && saw_live_usage,
+            "live usage and snapshot both emitted"
+        );
+        let (snapshot_usage, snapshot_cost) = snapshot.expect("UsageSnapshot after the turn");
+        assert_eq!(snapshot_usage.total_tokens, 30, "snapshot is session-total");
+        assert_eq!(snapshot_usage.input_tokens, 10);
+        assert_eq!(snapshot_usage.output_tokens, 20);
+        assert_eq!(snapshot_cost, 0.0, "no catalog provider, zero cost");
         let guard = session.lock().await;
         assert_eq!(guard.messages.len(), 1);
         assert_eq!(guard.messages[0].content, "hello world");
@@ -2105,10 +2137,19 @@ mod tests {
             file_change: None,
             streams: None,
         };
+        let worker_request_usage = StreamItem::Usage {
+            usage: TokenUsage {
+                input_tokens: 5,
+                output_tokens: 7,
+                total_tokens: 12,
+                ..TokenUsage::default()
+            },
+        };
         let (worker_tx, worker_rx) = tokio::sync::mpsc::channel::<StreamItem>(8);
+        let _ = worker_tx.send(worker_request_usage).await;
         let _ = worker_tx.send(worker_result).await;
         drop(worker_tx);
-        let mut streams: Vec<
+        let streams: Vec<
             std::pin::Pin<Box<dyn futures_util::stream::Stream<Item = StreamItem> + Send>>,
         > = vec![
             Box::pin(futures_util::stream::iter(vec![done])),
@@ -2149,6 +2190,8 @@ mod tests {
 
         let mut done_seen = false;
         let mut saw_tool_result_before_done = false;
+        let mut saw_live_usage = false;
+        let mut saw_snapshot = false;
         loop {
             match event_rx.recv().await {
                 Some(Event::ToolFinished { name, .. }) if name == "grep" => {
@@ -2157,7 +2200,15 @@ mod tests {
                 }
                 Some(Event::StreamDone { .. }) => done_seen = true,
                 Some(Event::UsageUpdate { usage, .. }) => {
-                    assert_eq!(usage.input_tokens, 15, "combined manager + worker usage");
+                    assert_eq!(
+                        usage.total_tokens, 12,
+                        "worker request usage passes through"
+                    );
+                    saw_live_usage = true;
+                }
+                Some(Event::UsageSnapshot { usage, .. }) => {
+                    assert_eq!(usage.input_tokens, 15, "snapshot combines manager + worker");
+                    saw_snapshot = true;
                 }
                 Some(_) => {}
                 None => break,
@@ -2165,6 +2216,8 @@ mod tests {
         }
         assert!(saw_tool_result_before_done);
         assert!(done_seen, "StreamDone still emitted after the drain");
+        assert!(saw_live_usage, "worker request emitted live usage");
+        assert!(saw_snapshot, "turn end emitted UsageSnapshot");
         assert!(stream_done_rx.recv().await.is_some(), "outcome still sent");
         let guard = session.lock().await;
         assert_eq!(guard.tokens, 42, "session accumulates combined usage");
@@ -2198,6 +2251,14 @@ mod tests {
                 name: "explore_workspace".into(),
                 output: "summary".into(),
                 ok: true,
+            },
+            StreamItem::Usage {
+                usage: TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 20,
+                    total_tokens: 30,
+                    ..TokenUsage::default()
+                },
             },
             StreamItem::Done {
                 text: "done".into(),
@@ -2240,6 +2301,8 @@ mod tests {
         let mut saw_worker_start = false;
         let mut saw_worker_tool = false;
         let mut saw_worker_finish = false;
+        let mut saw_live_usage = false;
+        let mut saw_snapshot = false;
         loop {
             match event_rx.recv().await {
                 Some(Event::WorkerStarted { name, .. }) if name == "explore_workspace" => {
@@ -2254,19 +2317,28 @@ mod tests {
                     saw_worker_finish = ok;
                 }
                 Some(Event::UsageUpdate { usage, .. }) => {
+                    assert_eq!(
+                        usage.total_tokens, 30,
+                        "manager request usage passes through"
+                    );
+                    saw_live_usage = true;
+                }
+                Some(Event::UsageSnapshot { usage, .. }) => {
                     assert_eq!(usage.input_tokens, 15, "manager + worker input");
                     assert_eq!(usage.output_tokens, 27, "manager + worker output");
                     assert_eq!(usage.total_tokens, 42, "manager + worker total");
-                    saw_worker_finish = true;
+                    saw_snapshot = true;
                 }
-                Some(Event::StreamDone { .. }) => break,
+                Some(Event::StreamDone { .. }) => {}
                 Some(_) => {}
                 None => break,
             }
         }
         assert!(saw_worker_start, "expected WorkerStarted");
         assert!(saw_worker_tool, "expected nested tool event");
-        assert!(saw_worker_finish, "expected WorkerFinished or UsageUpdate");
+        assert!(saw_worker_finish, "expected WorkerFinished");
+        assert!(saw_live_usage, "expected live UsageUpdate");
+        assert!(saw_snapshot, "expected turn-end UsageSnapshot");
         let guard = session.lock().await;
         assert_eq!(guard.tokens, 42, "session accumulates combined usage");
         assert_eq!(guard.input_tokens, 15);

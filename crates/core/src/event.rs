@@ -85,6 +85,13 @@ pub enum Event {
         usage: TokenUsage,
         cost: f64,
     },
+    /// Authoritative cumulative usage for the active session, sent after a
+    /// turn commits. Replaces (rather than adds to) any client-side running
+    /// totals so live per-request updates resync to the persisted numbers.
+    UsageSnapshot {
+        usage: TokenUsage,
+        cost: f64,
+    },
     SessionsLoaded {
         sessions: Vec<SessionSummary>,
     },

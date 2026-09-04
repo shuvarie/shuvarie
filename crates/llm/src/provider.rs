@@ -505,9 +505,7 @@ impl ProviderClient {
                 }
                 Ok(rig::agent::MultiTurnStreamItem::CompletionCall(call)) => {
                     tracker_clone.record(call.usage);
-                    StreamItem::Delta {
-                        text: String::new(),
-                    }
+                    StreamItem::Usage { usage: call.usage }
                 }
                 Ok(_) => StreamItem::Delta {
                     text: String::new(),
@@ -748,6 +746,11 @@ async fn run_worker_agent(
                         file_change: captured.file_change,
                         streams: captured.shell,
                     })
+                    .await;
+            }
+            Ok(rig::agent::MultiTurnStreamItem::CompletionCall(call)) => {
+                let _ = activity_tx
+                    .send(StreamItem::Usage { usage: call.usage })
                     .await;
             }
             Ok(rig::agent::MultiTurnStreamItem::FinalResponse(resp)) => {

@@ -161,6 +161,18 @@ impl Session {
         self.cached_tokens = self.cached_tokens.saturating_add(usage.cached_input_tokens);
     }
 
+    /// The session's cumulative usage as a [`TokenUsage`], for usage snapshots.
+    pub fn usage(&self) -> TokenUsage {
+        TokenUsage {
+            total_tokens: self.tokens,
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            cached_input_tokens: self.cached_tokens,
+            reasoning_tokens: self.reasoning_tokens,
+            ..TokenUsage::default()
+        }
+    }
+
     /// Build the chat history to send to the LLM for a new turn: all messages
     /// except the last (the pending user message), with compaction applied —
     /// everything before the most recent summary message is dropped (the

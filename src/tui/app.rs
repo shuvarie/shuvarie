@@ -116,6 +116,20 @@ pub struct App {
     quit: bool,
 }
 
+/// Resolve the active connection's model context window from the Selune
+/// catalog — the same lookup the core task uses for its context budget.
+fn catalog_context_length(connections: &Connections) -> Option<u64> {
+    let active = connections.active.as_ref()?;
+    let model = active.model.as_deref()?;
+    let id = connections
+        .providers
+        .get(&active.provider)
+        .and_then(|pc| pc.catalog_id())?;
+    let providers = shuvarie_core::catalog::providers();
+    let provider = shuvarie_core::catalog::find_provider(&providers, id)?;
+    shuvarie_core::catalog::context_length(provider, model).map(|c| c.max(0) as u64)
+}
+
 impl App {
     pub fn new(connections: Connections, cmd_tx: Sender<shuvarie_core::Command>) -> Self {
         let mut welcome = Welcome::new();
@@ -127,6 +141,7 @@ impl App {
         let initial_display = initial_provider
             .as_deref()
             .and_then(|id| connections.providers.get(id).map(|p| p.name.clone()));
+        let initial_context_length = catalog_context_length(&connections);
         Self {
             ctx: UpdateCtx::new(connections, cmd_tx),
             overlay: if welcome.open {
@@ -139,7 +154,7 @@ impl App {
                 s.sidebar.update(SidebarMessage::UpdateConfig {
                     provider: initial_display,
                     model: initial_model,
-                    context_length: None,
+                    context_length: initial_context_length,
                 });
                 s
             },
@@ -401,6 +416,12 @@ impl App {
                 })),
                 CoreEvent::UsageUpdate { usage, cost } => {
                     Some(AppMessage::Session(SessionMessage::UsageUpdate {
+                        usage,
+                        cost,
+                    }))
+                }
+                CoreEvent::UsageSnapshot { usage, cost } => {
+                    Some(AppMessage::Session(SessionMessage::UsageSnapshot {
                         usage,
                         cost,
                     }))
@@ -934,13 +955,15 @@ impl App {
     }
 
     fn active_context_length(&self) -> Option<u64> {
-        let active = self.ctx.connections.active.as_ref()?;
-        let model = active.model.as_deref()?;
-        self.models
-            .get(&active.provider)?
-            .iter()
-            .find(|m| m.id == model)
-            .and_then(|m| m.context_length.map(u64::from))
+        catalog_context_length(&self.ctx.connections).or_else(|| {
+            let active = self.ctx.connections.active.as_ref()?;
+            let model = active.model.as_deref()?;
+            self.models
+                .get(&active.provider)?
+                .iter()
+                .find(|m| m.id == model)
+                .and_then(|m| m.context_length.map(u64::from))
+        })
     }
 
     fn provider_display_name(&self, id: &str) -> Option<String> {
@@ -1060,6 +1083,55 @@ mod tests {
             variant: None,
         });
         connections
+    }
+
+    #[test]
+    fn catalog_context_length_maps_catalog_and_alias_model_id() {
+        let app = app_with(connected());
+        assert_eq!(
+            catalog_context_length(&app.ctx.connections),
+            Some(200_000),
+            "connection model alias `claude-sonnet-4-5` must map to the dated catalog entry"
+        );
+    }
+
+    #[test]
+    fn catalog_context_length_is_none_without_active_model() {
+        let mut connections = connected();
+        connections.active.as_mut().unwrap().model = None;
+        assert_eq!(catalog_context_length(&connections), None);
+    }
+
+    #[test]
+    fn catalog_context_length_uses_connection_catalog_field() {
+        let mut connections = connected();
+        let pc = connections.providers.get_mut("anthropic").unwrap();
+        *pc = pc.clone().with_catalog(Some("anthropic"));
+        assert_eq!(
+            catalog_context_length(&connections),
+            Some(200_000),
+            "explicit `catalog` field must drive the Selune lookup"
+        );
+    }
+
+    #[test]
+    fn catalog_context_length_resolves_tagged_ollama_cloud_variant() {
+        let mut connections = Connections::default();
+        let provider = shuvarie_core::ProviderConfig::new("Ollama Cloud", "ollama", None, None)
+            .with_catalog(Some("ollama-cloud"));
+        connections
+            .providers
+            .insert("ollama-cloud".into(), provider);
+        connections.active = Some(shuvarie_core::Active {
+            provider: "ollama-cloud".into(),
+            model: Some("glm-5.3-flash".into()),
+            variant: None,
+        });
+        assert_eq!(
+            catalog_context_length(&connections),
+            Some(1_310_720),
+            "untagged connection model `glm-5.3-flash` must map to the tagged catalog entry"
+        );
     }
 
     #[test]

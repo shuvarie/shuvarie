@@ -5,10 +5,12 @@ use shuvarie_llm::TokenUsage;
 use crate::tui::utils::num::{fmt_cost, fmt_tokens};
 
 /// The sidebar Context panel: session token usage, estimated cost, and the
-/// active model's context window. Display strings come from `utils::num` so
-/// token and cost formatting lives in one place.
+/// active model's context window (from the Selune catalog, mapped through the
+/// connection's `catalog` field and model id). The percentage of the window
+/// taken by the session's output tokens rides on the input/output token line;
+/// the window itself renders on a `Window:` line. Display strings come from
+/// `utils::num` so token and cost formatting lives in one place.
 pub struct ContextDisplay {
-    total_tokens: u64,
     input_tokens: u64,
     output_tokens: u64,
     reasoning_tokens: u64,
@@ -20,7 +22,6 @@ pub struct ContextDisplay {
 impl ContextDisplay {
     pub fn new() -> Self {
         Self {
-            total_tokens: 0,
             input_tokens: 0,
             output_tokens: 0,
             reasoning_tokens: 0,
@@ -35,7 +36,6 @@ impl ContextDisplay {
     }
 
     pub fn add_usage(&mut self, usage: &TokenUsage, cost: f64) {
-        self.total_tokens = self.total_tokens.saturating_add(usage.total_tokens);
         self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
         self.reasoning_tokens = self.reasoning_tokens.saturating_add(usage.reasoning_tokens);
@@ -44,7 +44,6 @@ impl ContextDisplay {
     }
 
     pub fn set_usage(&mut self, usage: &TokenUsage, cost: f64) {
-        self.total_tokens = usage.total_tokens;
         self.input_tokens = usage.input_tokens;
         self.output_tokens = usage.output_tokens;
         self.reasoning_tokens = usage.reasoning_tokens;
@@ -54,27 +53,22 @@ impl ContextDisplay {
 
     pub fn view(&self, lines: &mut Vec<Line<'static>>) {
         lines.push(Line::from("Context").fg(theme::ACCENT).bold());
-        if let Some(ctx) = self.context_length.filter(|&c| c > 0) {
-            let pct = (self.total_tokens as f64 / ctx as f64 * 100.0)
+        let window = self.context_length.filter(|&c| c > 0);
+        let mut tokens = format!(
+            "  ↑{} ↓{}",
+            fmt_tokens(self.input_tokens),
+            fmt_tokens(self.output_tokens),
+        );
+        if let Some(ctx) = window {
+            let pct = (self.output_tokens as f64 / ctx as f64 * 100.0)
                 .round()
                 .min(100.0);
-            lines.push(
-                Line::from(format!(
-                    "  {} / {} ({pct:.0}%)",
-                    fmt_tokens(self.total_tokens),
-                    fmt_tokens(ctx),
-                ))
-                .fg(theme::TEXT_DIM),
-            );
+            tokens.push_str(&format!(" ({pct:.0}%)"));
         }
-        lines.push(
-            Line::from(format!(
-                "  ↑{} ↓{}",
-                fmt_tokens(self.input_tokens),
-                fmt_tokens(self.output_tokens),
-            ))
-            .fg(theme::TEXT_DIM),
-        );
+        lines.push(Line::from(tokens).fg(theme::TEXT_DIM));
+        if let Some(ctx) = window {
+            lines.push(Line::from(format!("  Window: {}", fmt_tokens(ctx))).fg(theme::TEXT_DIM));
+        }
         if self.reasoning_tokens > 0 {
             lines.push(
                 Line::from(format!("  Think {}", fmt_tokens(self.reasoning_tokens)))

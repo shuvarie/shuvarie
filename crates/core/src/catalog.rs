@@ -41,9 +41,66 @@ pub fn find_provider<'a>(providers: &'a [Provider], id: &str) -> Option<&'a Prov
     providers.iter().find(|p| p.id.0 == id)
 }
 
-/// Look up a model by id within a provider.
+/// Look up a model by id within a provider. Matches the exact catalog id, a
+/// vendor-prefixed connection id (`vendor/model`), a dated snapshot alias in
+/// either direction (`claude-sonnet-4-5` ↔ `claude-sonnet-4-5-20250929`), or a
+/// unique tagged variant (`glm-5.3-flash` ↔ `glm-5.3-flash:cloud`).
 pub fn find_model<'a>(provider: &'a Provider, model_id: &str) -> Option<&'a selune::Model> {
-    provider.models.iter().find(|m| m.id == model_id)
+    provider
+        .models
+        .iter()
+        .find(|m| m.id == model_id)
+        .or_else(|| vendor_tail_match(provider, model_id))
+        .or_else(|| dated_alias_match(provider, model_id))
+        .or_else(|| tag_match(provider, model_id))
+}
+
+/// Match a connection id like `vendor/model` against a catalog entry whose id
+/// is just the bare model name.
+fn vendor_tail_match<'a>(provider: &'a Provider, model_id: &str) -> Option<&'a selune::Model> {
+    let (_, tail) = model_id.split_once('/')?;
+    provider.models.iter().find(|m| m.id == tail)
+}
+
+/// Match a model id to a dated snapshot of the same model: the differing
+/// suffix must be digits/dashes only (a date), so `claude-sonnet-4-5` matches
+/// `claude-sonnet-4-5-20250929` while `gpt-5.4` never matches `gpt-5.4-mini`.
+fn dated_alias_match<'a>(provider: &'a Provider, model_id: &str) -> Option<&'a selune::Model> {
+    provider
+        .models
+        .iter()
+        .find(|m| is_dated_alias(&m.id, model_id) || is_dated_alias(model_id, &m.id))
+}
+
+/// Match an Ollama-style tagged id against the catalog by its tag-stripped
+/// base (`glm-5.3-flash` ↔ `glm-5.3-flash:cloud`). The base must be unique in
+/// the catalog: `gpt-oss:20b` and `gpt-oss:120b` share a base but are
+/// different models, so an ambiguous base matches nothing.
+fn tag_match<'a>(provider: &'a Provider, model_id: &str) -> Option<&'a selune::Model> {
+    let base = strip_tag(model_id);
+    let mut candidates = provider.models.iter().filter(|m| strip_tag(&m.id) == base);
+    let first = candidates.next()?;
+    if candidates.next().is_some() {
+        return None;
+    }
+    Some(first)
+}
+
+fn strip_tag(id: &str) -> &str {
+    id.split(':').next().unwrap_or(id)
+}
+
+/// Whether `long` is `base` followed by a date-like suffix (`20250929`,
+/// `2024-11-20`): only digits and dashes, at least six digits total.
+fn is_dated_alias(long: &str, base: &str) -> bool {
+    if base.is_empty() {
+        return false;
+    }
+    let Some(rest) = long.strip_prefix(base) else {
+        return false;
+    };
+    let digits = rest.chars().filter(|c| c.is_ascii_digit()).count();
+    digits >= 6 && rest.chars().all(|c| c.is_ascii_digit() || c == '-')
 }
 
 /// Resolve a model's context length for the given provider, if known.
@@ -239,6 +296,129 @@ mod tests {
             models: Vec::new(),
             default_headers: None,
         }
+    }
+
+    fn test_provider(id: &str, models: impl IntoIterator<Item = (&'static str, i64)>) -> Provider {
+        Provider {
+            models: models
+                .into_iter()
+                .map(|(model, context)| selune::Model {
+                    id: model.to_string(),
+                    name: model.to_string(),
+                    reasoning: false,
+                    reasoning_options: Vec::new(),
+                    attachment: false,
+                    limit: selune::ModelLimit {
+                        context: Some(context),
+                        ..Default::default()
+                    },
+                    cost: selune::ModelCost::default(),
+                    options: None,
+                })
+                .collect(),
+            ..catalog_provider(id, None, None)
+        }
+    }
+
+    #[test]
+    fn find_model_matches_exact_vendor_tail_and_dated_aliases() {
+        let models = [
+            ("gpt-5.4", 128_000),
+            ("gpt-5.4-mini", 400_000),
+            ("claude-sonnet-4-5-20250929", 200_000),
+            ("moonshotai/kimi-k2-instruct", 131_072),
+        ];
+        let provider = test_provider("acme", models);
+        fn id_of(m: Option<&selune::Model>) -> Option<&str> {
+            m.map(|m| m.id.as_str())
+        }
+
+        assert_eq!(id_of(find_model(&provider, "gpt-5.4")), Some("gpt-5.4"));
+        assert_eq!(
+            id_of(find_model(&provider, "moonshotai/kimi-k2-instruct")),
+            Some("moonshotai/kimi-k2-instruct")
+        );
+        assert_eq!(
+            id_of(find_model(&provider, "moonshotai/gpt-5.4")),
+            Some("gpt-5.4")
+        );
+        assert_eq!(
+            id_of(find_model(&provider, "claude-sonnet-4-5")),
+            Some("claude-sonnet-4-5-20250929")
+        );
+        assert_eq!(
+            id_of(find_model(&provider, "claude-sonnet-4-5-20250929")),
+            Some("claude-sonnet-4-5-20250929")
+        );
+        assert_eq!(
+            id_of(find_model(&provider, "gpt-5.4-20250101")),
+            Some("gpt-5.4")
+        );
+        assert_eq!(
+            id_of(find_model(&provider, "gpt-5.4-2025-01-01")),
+            Some("gpt-5.4")
+        );
+        assert_eq!(
+            id_of(find_model(&provider, "gpt-5.4-mini")),
+            Some("gpt-5.4-mini")
+        );
+        assert_eq!(id_of(find_model(&provider, "gpt-5.4-preview")), None);
+        assert_eq!(id_of(find_model(&provider, "unknown")), None);
+        assert_eq!(id_of(find_model(&provider, "")), None);
+    }
+
+    #[test]
+    fn context_length_resolves_through_dated_alias() {
+        let provider = test_provider("anthropic", [("claude-sonnet-4-5-20250929", 200_000)]);
+        assert_eq!(
+            context_length(&provider, "claude-sonnet-4-5"),
+            Some(200_000)
+        );
+    }
+
+    #[test]
+    fn find_model_matches_unique_tagged_variant() {
+        let models = [
+            ("glm-5.3", 1_310_720),
+            ("glm-5.3-flash:cloud", 1_310_720),
+            ("gpt-oss:20b", 131_072),
+            ("gpt-oss:120b", 131_072),
+            ("kimi-k3", 1_048_576),
+            ("deepseek-v4-flash", 1_048_576),
+            ("deepseek-v4-flash:0731", 1_048_576),
+        ];
+        let provider = test_provider("ollama-cloud", models.iter().copied());
+        fn id_of(m: Option<&selune::Model>) -> Option<&str> {
+            m.map(|m| m.id.as_str())
+        }
+
+        assert_eq!(
+            id_of(find_model(&provider, "glm-5.3-flash")),
+            Some("glm-5.3-flash:cloud")
+        );
+        assert_eq!(
+            id_of(find_model(&provider, "kimi-k3:cloud")),
+            Some("kimi-k3")
+        );
+        assert_eq!(
+            id_of(find_model(&provider, "gpt-oss:120b")),
+            Some("gpt-oss:120b")
+        );
+        assert_eq!(id_of(find_model(&provider, "gpt-oss")), None);
+        assert_eq!(
+            id_of(find_model(&provider, "deepseek-v4-flash:cloud")),
+            None
+        );
+        assert_eq!(id_of(find_model(&provider, "glm-5.3")), Some("glm-5.3"));
+    }
+
+    #[test]
+    fn context_length_resolves_through_tagged_variant() {
+        let provider = test_provider(
+            "ollama-cloud",
+            [("glm-5.3", 1_310_720), ("glm-5.3-flash:cloud", 1_310_720)],
+        );
+        assert_eq!(context_length(&provider, "glm-5.3-flash"), Some(1_310_720));
     }
 
     #[test]

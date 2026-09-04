@@ -35,6 +35,12 @@ pub enum StreamItem {
         output: String,
         ok: bool,
     },
+    /// Usage for one completed provider request within the run. Emitted once
+    /// per agent iteration (main stream and workers), so consumers can track
+    /// token consumption before the run finishes.
+    Usage {
+        usage: TokenUsage,
+    },
     Done {
         text: String,
         usage: TokenUsage,

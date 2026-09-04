@@ -34,6 +34,12 @@ pub enum SessionMessage {
         usage: TokenUsage,
         cost: f64,
     },
+    /// Authoritative cumulative usage sent after a turn commits; replaces the
+    /// sidebar's running totals so live per-request updates resync.
+    UsageSnapshot {
+        usage: TokenUsage,
+        cost: f64,
+    },
     UpdateConfig {
         provider: Option<String>,
         model: Option<String>,
@@ -293,6 +299,11 @@ impl SessionScreen {
                     .update(SidebarMessage::UpdateUsage { usage, cost });
                 None
             }
+            SessionMessage::UsageSnapshot { usage, cost } => {
+                self.sidebar
+                    .update(SidebarMessage::SetUsage { usage, cost });
+                None
+            }
             SessionMessage::UpdateConfig {
                 provider,
                 model,
@@ -359,7 +370,8 @@ impl SessionScreen {
                 None
             }
             SessionMessage::Loaded { id, title, session } => {
-                let (usage, cost) = usage_of(&session);
+                let usage = session.usage();
+                let cost = session.cost;
                 self.session_id = Some(id);
                 self.session_title = Some(title);
                 self.status = None;
@@ -371,7 +383,8 @@ impl SessionScreen {
                 None
             }
             SessionMessage::TurnReverted { session } => {
-                let (usage, cost) = usage_of(&session);
+                let usage = session.usage();
+                let cost = session.cost;
                 self.retry = None;
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
@@ -380,7 +393,8 @@ impl SessionScreen {
                 None
             }
             SessionMessage::TurnRestored { session } => {
-                let (usage, cost) = usage_of(&session);
+                let usage = session.usage();
+                let cost = session.cost;
                 self.retry = None;
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
@@ -661,20 +675,6 @@ fn elided_span(text: &str, max_width: usize, color: Color) -> Span<'static> {
     }
     out.push('…');
     Span::raw(out).fg(color)
-}
-
-fn usage_of(session: &shuvarie_core::Session) -> (TokenUsage, f64) {
-    (
-        TokenUsage {
-            input_tokens: session.input_tokens,
-            output_tokens: session.output_tokens,
-            total_tokens: session.tokens,
-            cached_input_tokens: session.cached_tokens,
-            reasoning_tokens: session.reasoning_tokens,
-            ..Default::default()
-        },
-        session.cost,
-    )
 }
 
 impl Default for SessionScreen {

@@ -336,13 +336,101 @@ mod tests {
         });
         sidebar.update(SidebarMessage::UpdateUsage {
             usage: TokenUsage {
-                total_tokens: 12_300,
+                output_tokens: 12_300,
                 ..Default::default()
             },
             cost: 0.0,
         });
         let rendered = text(&sidebar.rendered_lines());
-        assert!(rendered.contains("12.3k / 200k (6%)"), "body: {rendered}");
+        assert!(rendered.contains("↑0 ↓12.3k (6%)"), "body: {rendered}");
+        assert!(rendered.contains("Window: 200k"), "body: {rendered}");
+    }
+
+    #[test]
+    fn context_section_window_line_below_token_line() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateConfig {
+            provider: None,
+            model: None,
+            context_length: Some(200_000),
+        });
+        sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage {
+                input_tokens: 10_100,
+                output_tokens: 12_300,
+                ..Default::default()
+            },
+            cost: 0.0,
+        });
+        let lines = sidebar.rendered_lines();
+        let pos = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| text(std::slice::from_ref(l)).contains(needle))
+        };
+        let tokens = pos("↑10.1k");
+        let fraction = pos("(6%)");
+        let window = pos("Window: 200k");
+        assert!(tokens.is_some(), "body: {}", text(&lines));
+        assert!(fraction.is_some(), "body: {}", text(&lines));
+        assert!(window.is_some(), "body: {}", text(&lines));
+        assert_eq!(fraction, tokens, "percentage rides on the token line");
+        assert!(window > tokens, "window line must come after tokens");
+    }
+
+    #[test]
+    fn context_section_window_caps_at_100_percent() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateConfig {
+            provider: None,
+            model: None,
+            context_length: Some(1_048_576),
+        });
+        sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage {
+                output_tokens: 5_000_000,
+                ..Default::default()
+            },
+            cost: 0.0,
+        });
+        let rendered = text(&sidebar.rendered_lines());
+        assert!(rendered.contains("(100%)"), "body: {rendered}");
+        assert!(rendered.contains("Window: 1M"), "body: {rendered}");
+    }
+
+    #[test]
+    fn context_section_live_updates_accumulate_then_snapshot_replaces() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage {
+                input_tokens: 1_000,
+                output_tokens: 500,
+                ..Default::default()
+            },
+            cost: 0.01,
+        });
+        sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage {
+                input_tokens: 2_000,
+                output_tokens: 1_000,
+                ..Default::default()
+            },
+            cost: 0.02,
+        });
+        let rendered = text(&sidebar.rendered_lines());
+        assert!(rendered.contains("↑3k ↓1.5k"), "body: {rendered}");
+        assert!(rendered.contains("Cost $0.03"), "body: {rendered}");
+        sidebar.update(SidebarMessage::SetUsage {
+            usage: TokenUsage {
+                input_tokens: 10,
+                output_tokens: 20,
+                ..Default::default()
+            },
+            cost: 0.5,
+        });
+        let rendered = text(&sidebar.rendered_lines());
+        assert!(rendered.contains("↑10 ↓20"), "body: {rendered}");
+        assert!(rendered.contains("Cost $0.50"), "body: {rendered}");
     }
 
     #[test]
