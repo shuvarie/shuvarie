@@ -166,6 +166,33 @@ impl App {
         self.quit
     }
 
+    /// Tab title shown by the terminal emulator: the active session title
+    /// (first line only) once a session exists, otherwise the app name with
+    /// the active provider/model when one is configured.
+    pub fn window_title(&self) -> String {
+        let session = self
+            .session
+            .session_title
+            .as_deref()
+            .and_then(|t| t.lines().next())
+            .map(str::trim)
+            .filter(|t| !t.is_empty());
+        if let Some(session) = session {
+            return format!("Shuvarie — {session}");
+        }
+        let active = self.ctx.connections.active.as_ref();
+        let model = active.and_then(|a| a.model.as_deref());
+        let provider = active
+            .and_then(|a| self.ctx.connections.providers.get(&a.provider))
+            .map(|p| p.name.as_str());
+        match (model, provider) {
+            (Some(model), Some(provider)) => format!("Shuvarie — {model} · {provider}"),
+            (Some(model), None) => format!("Shuvarie — {model}"),
+            (None, Some(provider)) => format!("Shuvarie — {provider}"),
+            (None, None) => "Shuvarie".to_string(),
+        }
+    }
+
     pub fn map_event(&self, ev: Event) -> Option<AppMessage> {
         match ev {
             Event::Terminal(term_ev) => match term_ev {
@@ -1012,4 +1039,65 @@ fn session_picker_list_height(area: Rect) -> Option<u16> {
 
 fn history_search_list_height(area: Rect) -> Option<u16> {
     overlay_inner_list_height(area, 64, 40, 2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app_with(connections: Connections) -> App {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        App::new(connections, tx)
+    }
+
+    fn connected() -> Connections {
+        let mut connections = Connections::default();
+        let provider = shuvarie_core::ProviderConfig::new("Anthropic", "anthropic", None, None);
+        connections.providers.insert("anthropic".into(), provider);
+        connections.active = Some(shuvarie_core::Active {
+            provider: "anthropic".into(),
+            model: Some("claude-sonnet-4-5".into()),
+            variant: None,
+        });
+        connections
+    }
+
+    #[test]
+    fn window_title_falls_back_to_active_provider_and_model() {
+        let app = app_with(connected());
+        assert_eq!(
+            app.window_title(),
+            "Shuvarie — claude-sonnet-4-5 · Anthropic"
+        );
+    }
+
+    #[test]
+    fn window_title_shows_app_name_without_connections() {
+        let app = app_with(Connections::default());
+        assert_eq!(app.window_title(), "Shuvarie");
+    }
+
+    #[test]
+    fn window_title_prefers_session_title() {
+        let mut app = app_with(connected());
+        app.session.session_title = Some("Fix the login bug".into());
+        assert_eq!(app.window_title(), "Shuvarie — Fix the login bug");
+    }
+
+    #[test]
+    fn window_title_uses_first_line_of_session_title() {
+        let mut app = app_with(Connections::default());
+        app.session.session_title = Some("multi\nline".into());
+        assert_eq!(app.window_title(), "Shuvarie — multi");
+    }
+
+    #[test]
+    fn window_title_falls_back_when_session_title_is_blank() {
+        let mut app = app_with(connected());
+        app.session.session_title = Some("\n".into());
+        assert_eq!(
+            app.window_title(),
+            "Shuvarie — claude-sonnet-4-5 · Anthropic"
+        );
+    }
 }

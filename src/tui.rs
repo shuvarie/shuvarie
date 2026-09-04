@@ -79,27 +79,35 @@ fn frame_budget(frame_rate: u32) -> Option<Duration> {
 /// budget has elapsed — or arms a deadline at `last_draw + budget` so further
 /// events coalesce into the pending frame. Terminal input outranks core
 /// events, and input latency is bounded by one frame budget.
-async fn render_tui<B>(
+async fn render_tui(
     mut app: App,
-    rat: &mut ratatui::Terminal<B>,
+    rat: &mut ratatui::Terminal<TerminaBackend<PlatformTerminal>>,
     mut event_rx: Receiver<CoreEvent>,
     mut event_stream: EventStream,
     frame_budget: Option<Duration>,
 ) -> io::Result<Option<uuid::Uuid>>
 where
-    B: Backend,
-    io::Error: From<<B as Backend>::Error>,
+    io::Error: From<<TerminaBackend<PlatformTerminal> as Backend>::Error>,
 {
     let mut last_draw: Instant;
     // A pending frame deadline armed when an event arrived too soon after
     // the last draw. `None` means no frame is pending.
     let mut frame_deadline: Option<tokio::time::Instant> = None;
+    // Last tab title written to the terminal. Starts empty so the first
+    // iteration writes the initial title.
+    let mut last_title = String::new();
     // Drives spinner animation: wakes at the earliest next frame change
     // across the spinners currently animating. `None` when none are. Armed
     // after each draw, before it is ever read.
     let mut spinner_wake;
 
     'render_loop: loop {
+        sync_window_title(
+            rat.backend_mut().terminal_mut(),
+            &mut last_title,
+            &app.window_title(),
+        )?;
+
         // Draw frame.
         rat.draw(|frame| app.view(frame, frame.area()))?;
         last_draw = Instant::now();
@@ -209,14 +217,32 @@ fn apply_msg(app: &mut App, msg: Option<AppMessage>) -> bool {
     }
 }
 
+/// Write the OSC 2 tab title escape when the desired title differs from the
+/// last written one. The render loop owns the terminal, so app-driven title
+/// changes are applied here rather than from `update`.
+fn sync_window_title<W: io::Write>(
+    terminal: &mut W,
+    last: &mut String,
+    title: &str,
+) -> io::Result<()> {
+    if *last != title {
+        write!(terminal, "{}", escape::set_window_title(title))?;
+        terminal.flush()?;
+        last.clear();
+        last.push_str(title);
+    }
+    Ok(())
+}
+
 fn init_terminal(terminal: &mut PlatformTerminal) -> io::Result<()> {
     write!(
         terminal,
-        "{}{}{}{}",
+        "{}{}{}{}{}",
         escape::ENTER_ALTERNATE_SCREEN,
         escape::ENABLE_MOUSE,
         escape::ENABLE_SGR_MOUSE,
-        escape::ENABLE_KITTY_KEYBOARD
+        escape::ENABLE_KITTY_KEYBOARD,
+        escape::push_window_title()
     )?;
     terminal.flush()?;
     Ok(())
@@ -225,12 +251,36 @@ fn init_terminal(terminal: &mut PlatformTerminal) -> io::Result<()> {
 fn deinit_terminal(terminal: &mut PlatformTerminal) -> io::Result<()> {
     write!(
         terminal,
-        "{}{}{}{}",
+        "{}{}{}{}{}",
         escape::DISABLE_KITTY_KEYBOARD,
         escape::DISABLE_SGR_MOUSE,
         escape::DISABLE_MOUSE,
-        escape::EXIT_ALTERNATE_SCREEN
+        escape::EXIT_ALTERNATE_SCREEN,
+        escape::pop_window_title()
     )?;
     terminal.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_window_title_writes_only_on_change() {
+        let mut out = Vec::new();
+        let mut last = String::new();
+
+        sync_window_title(&mut out, &mut last, "Shuvarie").unwrap();
+        assert!(!out.is_empty());
+        assert_eq!(last, "Shuvarie");
+
+        let unchanged = out.len();
+        sync_window_title(&mut out, &mut last, "Shuvarie").unwrap();
+        assert_eq!(out.len(), unchanged);
+
+        sync_window_title(&mut out, &mut last, "Shuvarie — fix the bug").unwrap();
+        assert!(out.len() > unchanged);
+        assert_eq!(last, "Shuvarie — fix the bug");
+    }
 }

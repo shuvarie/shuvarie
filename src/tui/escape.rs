@@ -1,6 +1,7 @@
 use termina::escape::csi::{
-    Csi, DecPrivateMode, DecPrivateModeCode, Keyboard, KittyKeyboardFlags, Mode,
+    Csi, DecPrivateMode, DecPrivateModeCode, Keyboard, KittyKeyboardFlags, Mode, Window,
 };
+use termina::escape::osc::Osc;
 
 pub const ENTER_ALTERNATE_SCREEN: Csi = Csi::Mode(Mode::SetDecPrivateMode(DecPrivateMode::Code(
     DecPrivateModeCode::ClearAndEnableAlternateScreen,
@@ -42,3 +43,20 @@ pub const DISABLE_MOUSE: Csi = Csi::Mode(Mode::ResetDecPrivateMode(DecPrivateMod
 pub const DISABLE_SGR_MOUSE: Csi = Csi::Mode(Mode::ResetDecPrivateMode(DecPrivateMode::Code(
     DecPrivateModeCode::SGRMouse,
 )));
+
+// Push/pop the window title on the title stack (CSI 22;2t / 23;2t) so the
+// pre-existing tab title is restored on exit. Terminals without a title stack
+// ignore these sequences.
+pub fn push_window_title() -> Csi {
+    Csi::Window(Box::new(Window::PushWindowTitle))
+}
+
+pub fn pop_window_title() -> Csi {
+    Csi::Window(Box::new(Window::PopWindowTitle))
+}
+
+// OSC 2: set the window (tab) title. Terminals that don't render titles
+// simply ignore the sequence.
+pub fn set_window_title(title: &str) -> Osc<'_> {
+    Osc::SetWindowTitle(title)
+}
