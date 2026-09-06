@@ -37,9 +37,13 @@ pub enum StreamItem {
     },
     /// Usage for one completed provider request within the run. Emitted once
     /// per agent iteration (main stream and workers), so consumers can track
-    /// token consumption before the run finishes.
+    /// token consumption before the run finishes. `worker` is `None` for the
+    /// main stream's requests — the only ones whose context is the
+    /// conversation itself, so consumers can anchor context-occupancy
+    /// displays on them alone.
     Usage {
         usage: TokenUsage,
+        worker: Option<String>,
     },
     Done {
         text: String,

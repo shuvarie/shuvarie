@@ -37,10 +37,18 @@ pub enum SidebarMessage {
     UpdateUsage {
         usage: TokenUsage,
         cost: f64,
+        /// The request's context footprint; `None` (worker requests, or a
+        /// zero footprint) leaves the sidebar's anchor untouched.
+        context_tokens: Option<u64>,
     },
     SetUsage {
         usage: TokenUsage,
         cost: f64,
+    },
+    /// Replaces (or clears, when `None`) the context-occupancy anchor — the
+    /// latest main-request footprint the window percentage is taken against.
+    SetContextTokens {
+        tokens: Option<u64>,
     },
     UpdateLsp {
         servers: Vec<LspStatus>,
@@ -83,11 +91,18 @@ impl Sidebar {
                 self.model = model;
                 self.context.set_context_length(context_length);
             }
-            SidebarMessage::UpdateUsage { usage, cost } => {
-                self.context.add_usage(&usage, cost);
+            SidebarMessage::UpdateUsage {
+                usage,
+                cost,
+                context_tokens,
+            } => {
+                self.context.add_usage(&usage, cost, context_tokens);
             }
             SidebarMessage::SetUsage { usage, cost } => {
                 self.context.set_usage(&usage, cost);
+            }
+            SidebarMessage::SetContextTokens { tokens } => {
+                self.context.set_context_tokens(tokens);
             }
             SidebarMessage::UpdateLsp { servers } => {
                 self.lsp_servers = servers;
@@ -297,6 +312,7 @@ mod tests {
                 ..Default::default()
             },
             cost: 0.125,
+            context_tokens: None,
         });
         let rendered = text(&sidebar.rendered_lines());
         assert!(rendered.contains("↑10.1k"), "body: {rendered}");
@@ -320,6 +336,7 @@ mod tests {
                 ..Default::default()
             },
             cost: 0.0,
+            context_tokens: None,
         });
         let rendered = text(&sidebar.rendered_lines());
         assert!(rendered.contains("Think 12k"), "body: {rendered}");
@@ -340,10 +357,11 @@ mod tests {
                 ..Default::default()
             },
             cost: 0.0,
+            context_tokens: Some(84_000),
         });
         let rendered = text(&sidebar.rendered_lines());
-        assert!(rendered.contains("↑0 ↓12.3k (6%)"), "body: {rendered}");
-        assert!(rendered.contains("Window: 200k"), "body: {rendered}");
+        assert!(rendered.contains("↑0 ↓12.3k"), "body: {rendered}");
+        assert!(rendered.contains("84k/200k (42%)"), "body: {rendered}");
     }
 
     #[test]
@@ -361,6 +379,7 @@ mod tests {
                 ..Default::default()
             },
             cost: 0.0,
+            context_tokens: Some(84_000),
         });
         let lines = sidebar.rendered_lines();
         let pos = |needle: &str| {
@@ -369,13 +388,19 @@ mod tests {
                 .position(|l| text(std::slice::from_ref(l)).contains(needle))
         };
         let tokens = pos("↑10.1k");
-        let fraction = pos("(6%)");
-        let window = pos("Window: 200k");
+        let window = pos("84k/200k (42%)");
         assert!(tokens.is_some(), "body: {}", text(&lines));
-        assert!(fraction.is_some(), "body: {}", text(&lines));
         assert!(window.is_some(), "body: {}", text(&lines));
-        assert_eq!(fraction, tokens, "percentage rides on the token line");
-        assert!(window > tokens, "window line must come after tokens");
+        assert!(
+            window > tokens,
+            "window line must come after tokens: {}",
+            text(&lines)
+        );
+        let tokens_line = text(std::slice::from_ref(&lines[tokens.unwrap()]));
+        assert!(
+            !tokens_line.contains('%'),
+            "percentage lives on the window line: {tokens_line:?}"
+        );
     }
 
     #[test]
@@ -392,10 +417,11 @@ mod tests {
                 ..Default::default()
             },
             cost: 0.0,
+            context_tokens: Some(5_000_000),
         });
         let rendered = text(&sidebar.rendered_lines());
         assert!(rendered.contains("(100%)"), "body: {rendered}");
-        assert!(rendered.contains("Window: 1M"), "body: {rendered}");
+        assert!(rendered.contains("5M/1M"), "body: {rendered}");
     }
 
     #[test]
@@ -408,6 +434,7 @@ mod tests {
                 ..Default::default()
             },
             cost: 0.01,
+            context_tokens: Some(2_500),
         });
         sidebar.update(SidebarMessage::UpdateUsage {
             usage: TokenUsage {
@@ -416,6 +443,7 @@ mod tests {
                 ..Default::default()
             },
             cost: 0.02,
+            context_tokens: None,
         });
         let rendered = text(&sidebar.rendered_lines());
         assert!(rendered.contains("↑3k ↓1.5k"), "body: {rendered}");
@@ -443,6 +471,7 @@ mod tests {
                 ..Default::default()
             },
             cost: 1.0,
+            context_tokens: Some(84_000),
         });
         sidebar.update(SidebarMessage::SetUsage {
             usage: TokenUsage {
@@ -456,5 +485,58 @@ mod tests {
         assert!(rendered.contains("10k"), "body: {rendered}");
         assert!(rendered.contains("$0.20"), "body: {rendered}");
         assert!(!rendered.contains("50k"), "body: {rendered}");
+    }
+
+    #[test]
+    fn context_section_worker_usage_keeps_anchor() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateConfig {
+            provider: None,
+            model: None,
+            context_length: Some(200_000),
+        });
+        sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage {
+                total_tokens: 84_000,
+                ..Default::default()
+            },
+            cost: 0.0,
+            context_tokens: Some(84_000),
+        });
+        sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage {
+                total_tokens: 8_000,
+                ..Default::default()
+            },
+            cost: 0.0,
+            context_tokens: None,
+        });
+        let rendered = text(&sidebar.rendered_lines());
+        assert!(
+            rendered.contains("84k/200k (42%)"),
+            "worker usage must not replace the anchor: {rendered}"
+        );
+    }
+
+    #[test]
+    fn context_section_set_context_tokens_clears_anchor() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateConfig {
+            provider: None,
+            model: None,
+            context_length: Some(200_000),
+        });
+        sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage {
+                total_tokens: 84_000,
+                ..Default::default()
+            },
+            cost: 0.0,
+            context_tokens: Some(84_000),
+        });
+        sidebar.update(SidebarMessage::SetContextTokens { tokens: None });
+        let rendered = text(&sidebar.rendered_lines());
+        assert!(rendered.contains("200k"), "body: {rendered}");
+        assert!(!rendered.contains('%'), "body: {rendered}");
     }
 }

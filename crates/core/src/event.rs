@@ -89,9 +89,16 @@ pub enum Event {
         max_attempts: usize,
         delay_ms: u64,
     },
+    /// Per-request usage for one completed LLM request (main stream or
+    /// worker), added to the session's running totals. `context_tokens` is
+    /// the request's context footprint (see
+    /// `shuvarie_llm::context_footprint`) — present only for main-stream
+    /// requests, since workers run separate conversations — so the UI can
+    /// anchor its context-occupancy display on the latest one.
     UsageUpdate {
         usage: TokenUsage,
         cost: f64,
+        context_tokens: Option<u64>,
     },
     /// Authoritative cumulative usage for the active session, sent after a
     /// turn commits. Replaces (rather than adds to) any client-side running

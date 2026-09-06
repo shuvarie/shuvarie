@@ -420,12 +420,15 @@ impl App {
                     max_attempts,
                     delay_ms,
                 })),
-                CoreEvent::UsageUpdate { usage, cost } => {
-                    Some(AppMessage::Session(SessionMessage::UsageUpdate {
-                        usage,
-                        cost,
-                    }))
-                }
+                CoreEvent::UsageUpdate {
+                    usage,
+                    cost,
+                    context_tokens,
+                } => Some(AppMessage::Session(SessionMessage::UsageUpdate {
+                    usage,
+                    cost,
+                    context_tokens,
+                })),
                 CoreEvent::UsageSnapshot { usage, cost } => {
                     Some(AppMessage::Session(SessionMessage::UsageSnapshot {
                         usage,

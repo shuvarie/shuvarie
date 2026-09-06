@@ -30,9 +30,14 @@ pub enum SessionMessage {
         error: String,
     },
     ClearError,
+    /// Per-request usage added to the sidebar's running totals;
+    /// `context_tokens` is the request's context footprint when it came from
+    /// the main stream (workers run separate conversations), so the sidebar
+    /// can anchor its context-occupancy display on the latest one.
     UsageUpdate {
         usage: TokenUsage,
         cost: f64,
+        context_tokens: Option<u64>,
     },
     /// Authoritative cumulative usage sent after a turn commits; replaces the
     /// sidebar's running totals so live per-request updates resync.
@@ -302,9 +307,16 @@ impl SessionScreen {
                 self.error = None;
                 None
             }
-            SessionMessage::UsageUpdate { usage, cost } => {
-                self.sidebar
-                    .update(SidebarMessage::UpdateUsage { usage, cost });
+            SessionMessage::UsageUpdate {
+                usage,
+                cost,
+                context_tokens,
+            } => {
+                self.sidebar.update(SidebarMessage::UpdateUsage {
+                    usage,
+                    cost,
+                    context_tokens,
+                });
                 None
             }
             SessionMessage::UsageSnapshot { usage, cost } => {
@@ -367,6 +379,11 @@ impl SessionScreen {
                 self.busy_kind = BusyKind::Waiting;
                 self.status = Some("Compacting context...".to_string());
                 self.retry = None;
+                // The post-compaction context is unknown until the replay's
+                // next response; the stale pre-compaction footprint would
+                // overstate occupancy.
+                self.sidebar
+                    .update(SidebarMessage::SetContextTokens { tokens: None });
                 None
             }
             SessionMessage::CompactionFinished => {
@@ -388,6 +405,8 @@ impl SessionScreen {
                     usage: TokenUsage::default(),
                     cost: 0.0,
                 });
+                self.sidebar
+                    .update(SidebarMessage::SetContextTokens { tokens: None });
                 self.sync_todos(Vec::new());
                 None
             }
@@ -400,6 +419,8 @@ impl SessionScreen {
                 self.retry = None;
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
+                self.sidebar
+                    .update(SidebarMessage::SetContextTokens { tokens: None });
                 self.sync_todos(shuvarie_core::tools::todos::replay(&session.tool_records));
                 self.chat.update(ChatMessage::Load { session });
                 None
@@ -410,6 +431,8 @@ impl SessionScreen {
                 self.retry = None;
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
+                self.sidebar
+                    .update(SidebarMessage::SetContextTokens { tokens: None });
                 self.sync_todos(shuvarie_core::tools::todos::replay(&session.tool_records));
                 self.chat.update(ChatMessage::TurnReverted { session });
                 None
@@ -420,6 +443,8 @@ impl SessionScreen {
                 self.retry = None;
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
+                self.sidebar
+                    .update(SidebarMessage::SetContextTokens { tokens: None });
                 self.sync_todos(shuvarie_core::tools::todos::replay(&session.tool_records));
                 self.chat.update(ChatMessage::TurnRestored { session });
                 None

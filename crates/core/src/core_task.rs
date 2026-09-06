@@ -1530,12 +1530,24 @@ async fn stream_stream_to_events(
                     })
                     .await;
             }
-            shuvarie_llm::StreamItem::Usage { usage } => {
+            shuvarie_llm::StreamItem::Usage { usage, worker } => {
                 let cost = catalog_provider
                     .as_ref()
                     .map(|p| crate::catalog::estimate_cost(p, &model, &usage))
                     .unwrap_or(0.0);
-                let _ = event_tx.send(Event::UsageUpdate { usage, cost }).await;
+                let context_tokens = if worker.is_none() {
+                    let footprint = shuvarie_llm::context_footprint(&usage);
+                    (footprint > 0).then_some(footprint)
+                } else {
+                    None
+                };
+                let _ = event_tx
+                    .send(Event::UsageUpdate {
+                        usage,
+                        cost,
+                        context_tokens,
+                    })
+                    .await;
             }
             shuvarie_llm::StreamItem::Done { text, usage } => {
                 let text = if text.is_empty() && !pending_text.is_empty() {
@@ -1983,6 +1995,7 @@ mod tests {
                     total_tokens: 30,
                     ..TokenUsage::default()
                 },
+                worker: None,
             },
             StreamItem::Delta {
                 text: "world".into(),
@@ -2147,6 +2160,7 @@ mod tests {
                 total_tokens: 12,
                 ..TokenUsage::default()
             },
+            worker: Some("explore_workspace".into()),
         };
         let (worker_tx, worker_rx) = tokio::sync::mpsc::channel::<StreamItem>(8);
         let _ = worker_tx.send(worker_request_usage).await;
@@ -2262,6 +2276,7 @@ mod tests {
                     total_tokens: 30,
                     ..TokenUsage::default()
                 },
+                worker: None,
             },
             StreamItem::Done {
                 text: "done".into(),
@@ -2319,10 +2334,19 @@ mod tests {
                 Some(Event::WorkerFinished { name, ok, .. }) if name == "explore_workspace" => {
                     saw_worker_finish = ok;
                 }
-                Some(Event::UsageUpdate { usage, .. }) => {
+                Some(Event::UsageUpdate {
+                    usage,
+                    context_tokens,
+                    ..
+                }) => {
                     assert_eq!(
                         usage.total_tokens, 30,
                         "manager request usage passes through"
+                    );
+                    assert_eq!(
+                        context_tokens,
+                        Some(30),
+                        "main-stream usage carries its context footprint"
                     );
                     saw_live_usage = true;
                 }
