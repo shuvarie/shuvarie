@@ -402,6 +402,12 @@ impl App {
                 CoreEvent::StreamCancelled => Some(AppMessage::Session(SessionMessage::Chat(
                     ChatMessage::StreamCancelled,
                 ))),
+                CoreEvent::CompactionStarted => {
+                    Some(AppMessage::Session(SessionMessage::CompactionStarted))
+                }
+                CoreEvent::CompactionFinished => {
+                    Some(AppMessage::Session(SessionMessage::CompactionFinished))
+                }
                 CoreEvent::RetryScheduled {
                     reason,
                     attempt,

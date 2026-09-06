@@ -1148,6 +1148,54 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
+    fn render_perf_probe() {
+        let unit = "## Section\n\nSome prose explaining the next steps in detail.\n\n```rust\nfn main() {\n    let x = compute(42);\n    println!(\"{x}\");\n}\n```\n\n";
+        for &text_units in &[10usize, 40, 160] {
+            let mut chat = Chat::new();
+            chat.update(ChatMessage::BeginUserTurn {
+                content: "go".into(),
+            });
+            for i in 0..40 {
+                chat.update(ChatMessage::ToolStarted {
+                    name: "read_file".into(),
+                    args: serde_json::json!({"path": format!("src/a/long/path/file_{i}.rs")}),
+                    worker: Some("explore".into()),
+                });
+                chat.update(ChatMessage::TokenReceived {
+                    content: unit.repeat(2),
+                });
+                chat.update(ChatMessage::ToolFinished {
+                    name: "read_file".into(),
+                    ok: true,
+                    output: "ok line\n".repeat(400),
+                    worker: Some("explore".into()),
+                    file_change: None,
+                    streams: None,
+                    duration_ms: 120,
+                });
+            }
+            chat.update(ChatMessage::TokenReceived {
+                content: unit.repeat(text_units),
+            });
+            let t0 = std::time::Instant::now();
+            draw(&chat, 100, 40);
+            let cold = t0.elapsed();
+            let mut worst = std::time::Duration::ZERO;
+            for _ in 0..5 {
+                let t1 = std::time::Instant::now();
+                chat.mark_spinner_dirty();
+                draw(&chat, 100, 40);
+                worst = worst.max(t1.elapsed());
+            }
+            eprintln!(
+                "text_units={text_units} cold={cold:?} spinner_rebuild_worst={warm:?}",
+                warm = worst
+            );
+        }
+    }
+
+    #[test]
     fn commit_done_keeps_running_worker_tool_block() {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {

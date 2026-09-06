@@ -1600,7 +1600,10 @@ async fn stream_stream_to_events(
                 {
                     let head = &stored.messages[..plan.head_count];
                     let head_text = crate::compaction::serialize_head(head);
-                    match crate::compaction::summarize(&client, &model, &head_text).await {
+                    let _ = event_tx.send(Event::CompactionStarted).await;
+                    let summary = crate::compaction::summarize(&client, &model, &head_text).await;
+                    let _ = event_tx.send(Event::CompactionFinished).await;
+                    match summary {
                         Ok(summary) => {
                             if let Ok(msg) = store.append_summary(sid, &summary).await {
                                 session.lock().await.summary_seq = Some(msg.seq);
@@ -2343,5 +2346,67 @@ mod tests {
         assert_eq!(guard.tokens, 42, "session accumulates combined usage");
         assert_eq!(guard.input_tokens, 15);
         assert_eq!(guard.output_tokens, 27);
+    }
+
+    #[tokio::test]
+    async fn overflow_without_plan_reports_error_without_compaction_events() {
+        // A session with no persisted id has nothing compactable: the overflow
+        // path must still emit the budget StreamError and the Overflowed
+        // outcome, but no CompactionStarted/Finished pair (there is no
+        // summarizer call to bracket).
+        let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
+        let session = Arc::new(Mutex::new(Session::new()));
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(16);
+
+        let stream: shuvarie_llm::StreamStream =
+            Box::pin(futures_util::stream::iter(vec![StreamItem::Overflow]));
+
+        let session_shared = session.clone();
+        let store = Store::open_in_memory().await.unwrap();
+        let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
+        let turn_state = Arc::new(Mutex::new(TurnState::default()));
+        let (stream_done_tx, mut stream_done_rx) = tokio::sync::mpsc::channel(1);
+        tokio::spawn(async move {
+            stream_stream_to_events(
+                stream,
+                session_shared,
+                client,
+                None,
+                store,
+                "ollama-model".into(),
+                worker_usage,
+                None,
+                event_tx,
+                turn_state,
+                stream_done_tx,
+            )
+            .await;
+        });
+
+        let mut budget_error = false;
+        let mut unexpected = false;
+        loop {
+            match event_rx.recv().await {
+                Some(Event::StreamError { error }) => {
+                    assert!(error.contains("context budget exceeded"));
+                    budget_error = true;
+                }
+                Some(Event::CompactionStarted) | Some(Event::CompactionFinished) => {
+                    unexpected = true;
+                }
+                Some(_) => {}
+                None => break,
+            }
+        }
+        assert!(budget_error, "overflow must report the budget error");
+        assert!(
+            !unexpected,
+            "no compaction events without a compaction plan"
+        );
+        assert_eq!(
+            stream_done_rx.recv().await,
+            Some(StreamOutcome::Overflowed { compacted: false }),
+            "uncompacted overflow outcome"
+        );
     }
 }

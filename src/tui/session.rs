@@ -59,6 +59,14 @@ pub enum SessionMessage {
         max_attempts: usize,
         delay_ms: u64,
     },
+    /// An LLM compaction summarizer call is running after a context-budget
+    /// overflow. No stream events arrive until `CompactionFinished`, so the
+    /// busy indicator must stay armed or the screen stops rendering for the
+    /// whole call.
+    CompactionStarted,
+    /// The compaction summarizer call finished; the core replays the
+    /// interrupted turn.
+    CompactionFinished,
     Reset,
     Loaded {
         id: uuid::Uuid,
@@ -352,6 +360,20 @@ impl SessionScreen {
                 self.busy = true;
                 self.busy_kind = BusyKind::Waiting;
                 self.status = None;
+                None
+            }
+            SessionMessage::CompactionStarted => {
+                self.busy = true;
+                self.busy_kind = BusyKind::Waiting;
+                self.status = Some("Compacting context...".to_string());
+                self.retry = None;
+                None
+            }
+            SessionMessage::CompactionFinished => {
+                self.busy = false;
+                self.busy_kind = BusyKind::Generating;
+                self.status = None;
+                self.retry = None;
                 None
             }
             SessionMessage::Reset => {
@@ -935,6 +957,24 @@ mod tests {
         assert_eq!(retry.max_attempts, 10);
         assert!(screen.busy);
         assert_eq!(screen.busy_kind, BusyKind::Waiting);
+    }
+
+    #[test]
+    fn compaction_events_drive_busy_state() {
+        let mut screen = SessionScreen::new();
+        screen.update(SessionMessage::Chat(ChatMessage::StreamError {
+            error: "context budget exceeded — compacting session history and continuing".into(),
+        }));
+        assert!(!screen.busy);
+
+        screen.update(SessionMessage::CompactionStarted);
+        assert!(screen.busy);
+        assert_eq!(screen.busy_kind, BusyKind::Waiting);
+        assert_eq!(screen.status.as_deref(), Some("Compacting context..."));
+
+        screen.update(SessionMessage::CompactionFinished);
+        assert!(!screen.busy);
+        assert!(screen.status.is_none());
     }
 
     #[test]

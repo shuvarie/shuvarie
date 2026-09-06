@@ -71,6 +71,14 @@ pub enum Event {
         error: String,
     },
     StreamCancelled,
+    /// The context budget overflowed and an LLM compaction summarizer call
+    /// is now running. No stream events arrive until the matching
+    /// [`Event::CompactionFinished`], so the TUI must keep its busy indicator
+    /// armed for the whole window.
+    CompactionStarted,
+    /// The compaction summarizer call finished (success or failure); the
+    /// core task replays the interrupted turn afterwards.
+    CompactionFinished,
     /// A retryable connection failure occurred; the core task will re-send the
     /// turn after `delay_ms`. `attempt` is the upcoming retry number (1-based)
     /// out of `max_attempts` (from `[retry].max-retries`).
