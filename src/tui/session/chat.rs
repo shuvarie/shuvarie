@@ -1973,4 +1973,73 @@ mod tests {
             .map(Block::is_expanded);
         assert_eq!(expanded, Some(true));
     }
+
+    #[test]
+    fn bench_spinner_frame_rebuild_cost() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::TokenReceived {
+            content: "Exploring the workspace now.".into(),
+        });
+        let big = {
+            let mut s = String::new();
+            for i in 0..400 {
+                s.push_str(&format!("line {i}: src/module_{i}.rs:12: fn example_{i}(x: &str) -> usize {{ x.len() }}\n"));
+            }
+            s
+        };
+        for i in 0..30 {
+            chat.update(ChatMessage::ToolStarted {
+                name: "read_file".into(),
+                args: serde_json::json!({ "path": format!("src/module_{i}.rs") }),
+                worker: Some("explore_workspace".into()),
+                call_id: Some(format!("call_{i}")),
+            });
+            chat.update(ChatMessage::ToolFinished {
+                name: "read_file".into(),
+                ok: true,
+                output: big.clone(),
+                worker: Some("explore_workspace".into()),
+                file_change: None,
+                streams: None,
+                duration_ms: 12,
+                call_id: Some(format!("call_{i}")),
+            });
+        }
+        chat.update(ChatMessage::TokenReceived {
+            content: "Here is what I found.".into(),
+        });
+        let diags = BTreeMap::new();
+        let env = ChatEnv {
+            lsp_diagnostics: &diags,
+        };
+        let turns_len = chat.turns.borrow().len();
+        let started = std::time::Instant::now();
+        let frames = 20;
+        for _ in 0..frames {
+            chat.mark_spinner_dirty();
+            let turn = chat.in_flight.borrow();
+            let turn = turn.as_ref().expect("in-flight turn");
+            let cache = render_turn_cache(
+                turn,
+                turns_len,
+                TurnFlags {
+                    in_flight: true,
+                    interrupted_marker: false,
+                },
+                100,
+                &env,
+                0,
+            )
+            .expect("cache");
+            assert!(cache.height > 0);
+        }
+        let per_frame = started.elapsed() / frames;
+        println!(
+            "spinner-frame rebuild: {per_frame:?} per frame (30 blocks x 16KB output)"
+        );
+        assert!(
+            per_frame < std::time::Duration::from_millis(50),
+            "rebuild too slow: {per_frame:?}"
+        );
+    }
 }
