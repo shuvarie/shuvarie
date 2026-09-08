@@ -142,6 +142,8 @@ pub struct SessionScreen {
     busy_kind: BusyKind,
     pub status: Option<String>,
     pub sidebar: Sidebar,
+    provider: Option<String>,
+    model: Option<String>,
     pub session_id: Option<uuid::Uuid>,
     pub session_title: Option<String>,
     pub error: Option<String>,
@@ -161,6 +163,8 @@ impl SessionScreen {
             busy_kind: BusyKind::Generating,
             status: None,
             sidebar: Sidebar::new(),
+            provider: None,
+            model: None,
             session_id: None,
             session_title: None,
             error: None,
@@ -384,11 +388,10 @@ impl SessionScreen {
                 model,
                 context_length,
             } => {
-                self.sidebar.update(SidebarMessage::UpdateConfig {
-                    provider,
-                    model,
-                    context_length,
-                });
+                self.provider = provider;
+                self.model = model;
+                self.sidebar
+                    .update(SidebarMessage::UpdateConfig { context_length });
                 None
             }
             SessionMessage::QuestionAsked { id, questions } => {
@@ -622,8 +625,8 @@ impl SessionScreen {
             Some(t) if !t.is_empty() => format!("Shuvarie · {t}"),
             _ => format!(
                 "Shuvarie · {}:{}",
-                self.sidebar.provider.as_deref().unwrap_or("?"),
-                self.sidebar.model.as_deref().unwrap_or("?")
+                self.provider.as_deref().unwrap_or("?"),
+                self.model.as_deref().unwrap_or("?")
             ),
         };
         let input_height = if self.question.open {
@@ -682,6 +685,26 @@ impl SessionScreen {
         if !self.question.open && self.slash.active() {
             let rect = self.slash.popup_rect(history_area, input_area);
             self.slash.view(frame, rect);
+        }
+
+        let connection = self.provider.as_ref().map(|p| {
+            let mut spans = vec![Span::raw(p.clone()).fg(theme::TEXT)];
+            if let Some(m) = &self.model {
+                spans.push(Span::raw(":").fg(theme::TEXT_MUTED));
+                spans.push(Span::raw(m.clone()).fg(theme::TEXT_DIM));
+            }
+            Line::from(spans)
+        });
+        let [status_area, conn_area] = match &connection {
+            Some(line) => {
+                let width = line.width() as u16;
+                Layout::horizontal([Constraint::Min(0), Constraint::Length(width)])
+                    .areas(status_area)
+            }
+            None => [status_area, Rect::ZERO],
+        };
+        if let Some(line) = connection {
+            frame.render_widget(Paragraph::new(line).alignment(Alignment::Right), conn_area);
         }
 
         let status = match self.status.as_deref() {
@@ -963,6 +986,30 @@ mod tests {
         assert!(
             chat_row.contains("first prompt"),
             "history starts below the strip: {chat_row:?}"
+        );
+    }
+
+    #[test]
+    fn provider_model_renders_right_aligned_on_status_row() {
+        let mut screen = SessionScreen::new();
+        screen.update(SessionMessage::UpdateConfig {
+            provider: Some("Anthropic".into()),
+            model: Some("claude-sonnet-4-5".into()),
+            context_length: Some(200_000),
+        });
+        assert_eq!(screen.provider.as_deref(), Some("Anthropic"));
+        assert_eq!(screen.model.as_deref(), Some("claude-sonnet-4-5"));
+
+        let buf = draw(&screen, 80, 24);
+        let status_row = content_row_text(&buf, 22);
+        assert!(
+            status_row.ends_with("Anthropic:claude-sonnet-4-5"),
+            "status row: {status_row:?}"
+        );
+        let sidebar_row = row_text(&buf, 2);
+        assert!(
+            !sidebar_row.contains("Anthropic"),
+            "sidebar must not show the provider: {sidebar_row:?}"
         );
     }
 

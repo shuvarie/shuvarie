@@ -16,8 +16,6 @@ mod context;
 
 pub struct Sidebar {
     pub version_bar: VersionBar,
-    pub provider: Option<String>,
-    pub model: Option<String>,
     context: ContextDisplay,
     pub lsp_servers: Vec<LspStatus>,
     pub lsp_enabled: bool,
@@ -31,8 +29,6 @@ pub struct Sidebar {
 
 pub enum SidebarMessage {
     UpdateConfig {
-        provider: Option<String>,
-        model: Option<String>,
         context_length: Option<u64>,
     },
     UpdateUsage {
@@ -68,8 +64,6 @@ impl Sidebar {
     pub fn new() -> Self {
         Self {
             version_bar: VersionBar::new(HorizontalAlignment::Left),
-            provider: None,
-            model: None,
             context: ContextDisplay::new(),
             lsp_servers: Vec::new(),
             lsp_enabled: true,
@@ -85,13 +79,7 @@ impl Sidebar {
     pub fn update(&mut self, msg: SidebarMessage) {
         self.dirty.set(true);
         match msg {
-            SidebarMessage::UpdateConfig {
-                provider,
-                model,
-                context_length,
-            } => {
-                self.provider = provider;
-                self.model = model;
+            SidebarMessage::UpdateConfig { context_length } => {
                 self.context.set_context_length(context_length);
             }
             SidebarMessage::UpdateUsage {
@@ -166,16 +154,6 @@ impl Sidebar {
 
     fn build_lines(&self) -> Vec<Line<'static>> {
         let mut lines: Vec<Line> = Vec::new();
-
-        if let Some(p) = &self.provider {
-            let mut line = vec![Span::raw(p.clone()).fg(theme::TEXT)];
-            if let Some(m) = &self.model {
-                line.push(Span::raw(":").fg(theme::TEXT_MUTED));
-                line.push(Span::raw(m.clone()).fg(theme::TEXT_DIM));
-            }
-            lines.push(Line::from(line));
-            lines.push(Line::from(""));
-        }
 
         self.context.view(&mut lines);
 
@@ -374,8 +352,6 @@ mod tests {
     fn context_section_shows_window_fraction() {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateConfig {
-            provider: None,
-            model: None,
             context_length: Some(200_000),
         });
         sidebar.update(SidebarMessage::UpdateUsage {
@@ -395,8 +371,6 @@ mod tests {
     fn context_section_window_line_below_token_line() {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateConfig {
-            provider: None,
-            model: None,
             context_length: Some(200_000),
         });
         sidebar.update(SidebarMessage::UpdateUsage {
@@ -434,8 +408,6 @@ mod tests {
     fn context_section_window_caps_at_100_percent() {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateConfig {
-            provider: None,
-            model: None,
             context_length: Some(1_048_576),
         });
         sidebar.update(SidebarMessage::UpdateUsage {
@@ -518,8 +490,6 @@ mod tests {
     fn context_section_worker_usage_keeps_anchor() {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateConfig {
-            provider: None,
-            model: None,
             context_length: Some(200_000),
         });
         sidebar.update(SidebarMessage::UpdateUsage {
@@ -549,8 +519,6 @@ mod tests {
     fn context_section_set_context_tokens_clears_anchor() {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateConfig {
-            provider: None,
-            model: None,
             context_length: Some(200_000),
         });
         sidebar.update(SidebarMessage::UpdateUsage {

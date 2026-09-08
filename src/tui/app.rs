@@ -153,7 +153,7 @@ impl App {
             },
             session: {
                 let mut s = SessionScreen::new();
-                s.sidebar.update(SidebarMessage::UpdateConfig {
+                s.update(SessionMessage::UpdateConfig {
                     provider: initial_display,
                     model: initial_model,
                     context_length: initial_context_length,
