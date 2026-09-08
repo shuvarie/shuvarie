@@ -5,7 +5,7 @@ mod tool;
 
 pub use context::ContextBlock;
 pub use reasoning::{ReasoningBlock, ReasoningMessage};
-pub use text::{SystemText, TextBlock, TextMessage, UserPrompt};
+pub use text::{SteeredPrompt, SystemText, TextBlock, TextMessage, UserPrompt};
 pub use tool::{ToolBlock, ToolMessage};
 
 use std::collections::BTreeMap;
@@ -39,6 +39,7 @@ pub(super) fn shows_elapsed(name: &str) -> bool {
 /// variants for the stateless decorations the engine synthesizes around turns.
 pub enum Block {
     User(UserPrompt),
+    Steered(SteeredPrompt),
     Text(TextBlock),
     System(SystemText),
     Tool(Box<ToolBlock>),
@@ -100,6 +101,7 @@ impl Block {
     pub fn est(&self) -> TurnEst {
         match self {
             Block::User(block) => block.est(),
+            Block::Steered(block) => block.est(),
             Block::Text(block) => block.est(),
             Block::System(block) => block.est(),
             Block::Tool(block) => block.est(),
@@ -116,6 +118,7 @@ impl Block {
     pub fn view(&self, width: u16, env: &ChatEnv) -> Vec<Segment> {
         match self {
             Block::User(block) => block.view(),
+            Block::Steered(block) => block.view(),
             Block::Text(block) => block.view(),
             Block::System(block) => block.view(),
             Block::Tool(block) => vec![block.view(width, env)],

@@ -57,6 +57,12 @@ impl RetrySchedule {
     }
 }
 
+/// Whether the agent loop is occupied: a live stream or a scheduled
+/// connection retry. Steered prompts queue while this is true.
+fn is_busy(ctx: &CoreCtx, pending_retry: Option<&PendingRetry>) -> bool {
+    ctx.active_stream.as_ref().is_some_and(|h| !h.is_finished()) || pending_retry.is_some()
+}
+
 /// Decide the next connection-retry step: `None` when retrying is disabled
 /// (`max_retries == 0`) or the cap is reached (give up), otherwise the
 /// 1-based attempt number and its delay.
@@ -125,6 +131,11 @@ pub async fn run(
     // retry chain, plus the currently scheduled wait (if any).
     let mut conn_retries: usize = 0;
     let mut pending_retry: Option<PendingRetry> = None;
+
+    // Steered prompts: submissions made while the agent loop is busy. Queued
+    // in order; the front is dispatched when the current round finishes (or is
+    // cancelled), the back is what Alt+Up recalls.
+    let mut steered: Vec<String> = Vec::new();
 
     let (question_tx, mut question_rx) = tokio::sync::mpsc::channel::<QuestionRequest>(8);
     let mut pending_questions: HashMap<u64, oneshot::Sender<AnswerResponse>> = HashMap::new();
@@ -331,6 +342,7 @@ pub async fn run(
                         overflow_retries = 0;
                         pending_retry = None;
                         conn_retries = 0;
+                        clear_steered(&mut steered, &ctx.event_tx).await;
                         dismiss_pending_questions(&mut pending_questions);
                         ctx.session = Some(Arc::new(Mutex::new(Session::new())));
                         let _ = ctx.event_tx.send(Event::SessionStarted).await;
@@ -342,95 +354,22 @@ pub async fn run(
                         overflow_retries = 0;
                         pending_retry = None;
                         conn_retries = 0;
+                        clear_steered(&mut steered, &ctx.event_tx).await;
                         dismiss_pending_questions(&mut pending_questions);
                         ctx.session = Some(Arc::new(Mutex::new(Session::new())));
                         let _ = ctx.event_tx.send(Event::SessionStarted).await;
                     }
                     Command::SendMessage { content } => {
-                        if ctx.active_stream.as_ref().is_some_and(|h| !h.is_finished()) {
-                            let _ = ctx.event_tx
-                                .send(Event::StreamError {
-                                    error: "a reply is already streaming".into(),
-                                })
-                                .await;
+                        if is_busy(&ctx, pending_retry.as_ref()) {
+                            steered.push(content.clone());
+                            let _ = ctx.event_tx.send(Event::PromptSteered { content }).await;
                             continue;
                         }
                         overflow_retries = 0;
                         pending_retry = None;
                         conn_retries = 0;
                         ctx.active_stream = None;
-                        if ctx.session.is_none() {
-                            ctx.session = Some(Arc::new(Mutex::new(Session::new())));
-                            let _ = ctx.event_tx.send(Event::SessionStarted).await;
-                        }
-                        let s = ctx.session.as_ref().unwrap();
-                        s.lock().await.push_user(content.clone());
-
-                        {
-                            let mut guard = s.lock().await;
-                            if guard.id.is_none() {
-                                let title = title_for(&content);
-                                match ctx
-                                    .store
-                                    .create_session(
-                                        &title,
-                                        ctx.connections.active.as_ref().map(|a| a.provider.as_str()),
-                                        ctx.connections.active.as_ref().and_then(|a| a.model.as_deref()),
-                                    )
-                                    .await
-                                {
-                                    Ok(id) => {
-                                        guard.id = Some(id);
-                                        guard.title = Some(title.clone());
-                                        let _ = ctx.event_tx.send(Event::SessionCreated { id, title }).await;
-                                    }
-                                    Err(e) => {
-                                        let _ = ctx.event_tx
-                                            .send(Event::StreamError {
-                                                error: format!("failed to create session: {e}"),
-                                            })
-                                            .await;
-                                        continue;
-                                    }
-                                }
-                            }
-                            let id = guard.id.unwrap();
-                            let seq = guard.messages.len() - 1;
-                            let msg = ctx
-                                .store
-                                .append_message(id, guard.messages.last().unwrap().role, &content)
-                                .await;
-                            match msg {
-                                Ok(msg) => {
-                                    if let Some(setup) = &ctx.embedding_setup {
-                                        let store_idx = ctx.store.clone();
-                                        let setup_idx = setup.clone();
-                                        let content_idx = msg.content.clone();
-                                        tokio::spawn(async move {
-                                            let _ = embeddings::index_message(
-                                                &mut store_idx.clone(),
-                                                &setup_idx,
-                                                msg.id,
-                                                id,
-                                                seq as u64,
-                                                &content_idx,
-                                            )
-                                            .await;
-                                        });
-                                    }
-                                }
-                                Err(e) => {
-                                    let _ = ctx.event_tx
-                                        .send(Event::StreamError {
-                                            error: format!("failed to persist message: {e}"),
-                                        })
-                                        .await;
-                                    continue;
-                                }
-                            }
-                        }
-
-                        ctx.self_replay_send(content, false).await;
+                        ctx.start_user_turn(content, false).await;
                     }
                     Command::CancelStream => {
                         let mut aborted = false;
@@ -454,6 +393,14 @@ pub async fn run(
                         {
                             conn_retries = 0;
                             let _ = ctx.event_tx.send(Event::StreamError { error: pending.message }).await;
+                            aborted = true;
+                        }
+                        // The current agent-loop window ended; the next
+                        // steered prompt takes over immediately.
+                        if aborted && !steered.is_empty() {
+                            let content = steered.remove(0);
+                            ctx.active_stream = None;
+                            ctx.start_user_turn(content, true).await;
                         }
                     }
                     Command::ListSessions => match ctx.store.list_sessions().await {
@@ -474,6 +421,7 @@ pub async fn run(
                         }
                         pending_retry = None;
                         conn_retries = 0;
+                        clear_steered(&mut steered, &ctx.event_tx).await;
                         dismiss_pending_questions(&mut pending_questions);
                         match ctx.store.load_session(id).await {
                             Ok(stored) => {
@@ -502,6 +450,7 @@ pub async fn run(
                         }
                         pending_retry = None;
                         conn_retries = 0;
+                        clear_steered(&mut steered, &ctx.event_tx).await;
                         match ctx.store.delete_session(id).await {
                             Ok(()) => {
                                 if let Some(s) = &ctx.session
@@ -709,6 +658,13 @@ pub async fn run(
                         ctx.self_replay_send(CONTINUE_PROMPT.to_string(), true)
                             .await;
                     }
+                    Command::RecallSteered { stacked } => {
+                        let content = steered.pop();
+                        let _ = ctx
+                            .event_tx
+                            .send(Event::SteeredRecalled { stacked, content })
+                            .await;
+                    }
                     Command::LspStart { name } => {
                         let mut mgr = ctx.lsp.lock().await;
                         match mgr.start(&name).await {
@@ -799,6 +755,13 @@ pub async fn run(
                     StreamOutcome::Finished => {
                         overflow_retries = 0;
                         conn_retries = 0;
+                        // The agent-loop round completed; steer in the next
+                        // queued prompt, if any.
+                        if !steered.is_empty() {
+                            let content = steered.remove(0);
+                            ctx.active_stream = None;
+                            ctx.start_user_turn(content, true).await;
+                        }
                     }
                     StreamOutcome::Overflowed { compacted } => {
                         if compacted && overflow_retries < MAX_OVERFLOW_RETRIES {
@@ -1049,6 +1012,103 @@ async fn redo_turn(store: &mut Store, session_id: uuid::Uuid) -> Result<bool, St
 }
 
 impl CoreCtx {
+    /// Persist and start streaming a new user turn: an accepted `SendMessage`
+    /// or a dispatched steered prompt. Emits [`Event::TurnStarted`] (with the
+    /// `steered` flag) before the first stream event so the TUI renders the
+    /// user prompt in order.
+    async fn start_user_turn(&mut self, content: String, steered: bool) {
+        if self.session.is_none() {
+            self.session = Some(Arc::new(Mutex::new(Session::new())));
+            let _ = self.event_tx.send(Event::SessionStarted).await;
+        }
+        let s = self.session.clone().unwrap();
+        s.lock().await.push_user(content.clone());
+
+        {
+            let mut guard = s.lock().await;
+            if guard.id.is_none() {
+                let title = title_for(&content);
+                match self
+                    .store
+                    .create_session(
+                        &title,
+                        self.connections
+                            .active
+                            .as_ref()
+                            .map(|a| a.provider.as_str()),
+                        self.connections
+                            .active
+                            .as_ref()
+                            .and_then(|a| a.model.as_deref()),
+                    )
+                    .await
+                {
+                    Ok(id) => {
+                        guard.id = Some(id);
+                        guard.title = Some(title.clone());
+                        let _ = self
+                            .event_tx
+                            .send(Event::SessionCreated { id, title })
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = self
+                            .event_tx
+                            .send(Event::StreamError {
+                                error: format!("failed to create session: {e}"),
+                            })
+                            .await;
+                        return;
+                    }
+                }
+            }
+            let id = guard.id.unwrap();
+            let seq = guard.messages.len() - 1;
+            let msg = self
+                .store
+                .append_message(id, guard.messages.last().unwrap().role, &content)
+                .await;
+            match msg {
+                Ok(msg) => {
+                    if let Some(setup) = &self.embedding_setup {
+                        let store_idx = self.store.clone();
+                        let setup_idx = setup.clone();
+                        let content_idx = msg.content.clone();
+                        tokio::spawn(async move {
+                            let _ = embeddings::index_message(
+                                &mut store_idx.clone(),
+                                &setup_idx,
+                                msg.id,
+                                id,
+                                seq as u64,
+                                &content_idx,
+                            )
+                            .await;
+                        });
+                    }
+                }
+                Err(e) => {
+                    let _ = self
+                        .event_tx
+                        .send(Event::StreamError {
+                            error: format!("failed to persist message: {e}"),
+                        })
+                        .await;
+                    return;
+                }
+            }
+        }
+
+        let _ = self
+            .event_tx
+            .send(Event::TurnStarted {
+                content: content.clone(),
+                steered,
+            })
+            .await;
+        self.self_replay_send(content, false).await;
+    }
+
     /// Build a stream for the given user content and spawn the event-forwarding
     /// task. When `push_user` is set, the content is first appended as a user
     /// message (used by `SendMessage`); otherwise it is re-sent as-is (used by
@@ -1311,6 +1371,16 @@ async fn stream_busy(active_stream: &Option<AbortHandle>, event_tx: &Sender<Even
         return true;
     }
     false
+}
+
+/// Wipe the steered queue (session-level transition) and tell the TUI to drop
+/// its queued-prompt display.
+async fn clear_steered(steered: &mut Vec<String>, event_tx: &Sender<Event>) {
+    if steered.is_empty() {
+        return;
+    }
+    steered.clear();
+    let _ = event_tx.send(Event::SteeredCleared).await;
 }
 
 /// Settle all pending questions as dismissed (dropping the responder makes

@@ -5,7 +5,7 @@ use shuvarie_llm::TokenUsage;
 use termina::event::{KeyCode, KeyEvent};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::tui::utils::{alt, ctrl};
+use crate::tui::utils::{alt, alt_shift, ctrl};
 
 use super::commands::{self, CommandAction};
 use super::components::{TextArea, TextAreaEffect, TextAreaMessage};
@@ -88,6 +88,24 @@ pub enum SessionMessage {
     },
     TurnRestored {
         session: shuvarie_core::Session,
+    },
+    /// A user turn started streaming in the core: either an accepted submit
+    /// or a dispatched steered prompt. Renders the user prompt and arms the
+    /// busy indicator; when `steered`, the first queued entry also leaves the
+    /// chat display.
+    TurnStarted {
+        content: String,
+        steered: bool,
+    },
+    /// Recall a steered prompt into the input area (Alt+Up / Alt+Shift+Up).
+    RecallSteered {
+        stacked: bool,
+    },
+    /// The core answered a recall request: the recalled content, or `None`
+    /// when nothing was queued.
+    SteeredRecalled {
+        stacked: bool,
+        content: Option<String>,
     },
 }
 
@@ -224,6 +242,11 @@ impl SessionScreen {
             };
         }
         if alt(key) {
+            if key.code == KeyCode::Up {
+                return Some(SessionMessage::RecallSteered {
+                    stacked: alt_shift(key),
+                });
+            }
             return self.input.map_event(key).map(SessionMessage::Text);
         }
         match key.code {
@@ -275,13 +298,9 @@ impl SessionScreen {
                                     return None;
                                 }
                             };
-                            self.chat.update(ChatMessage::BeginUserTurn {
-                                content: content.clone(),
-                            });
-                            self.busy = true;
-                            self.busy_kind = BusyKind::Generating;
-                            self.status = Some("Thinking...".to_string());
-                            self.retry = None;
+                            // Display of the user prompt is event-driven: the
+                            // core's `TurnStarted` decides whether this begins a
+                            // turn or gets steered behind a busy agent.
                             self.sync_slash();
                             return Some(SessionEffect::SendMessage { content });
                         }
@@ -485,6 +504,33 @@ impl SessionScreen {
                 self.chat.update(ChatMessage::TurnRestored { session });
                 None
             }
+            SessionMessage::TurnStarted { content, steered } => {
+                if steered {
+                    self.chat.update(ChatMessage::SteeredDispatched);
+                }
+                self.chat.update(ChatMessage::BeginUserTurn { content });
+                self.busy = true;
+                self.busy_kind = BusyKind::Generating;
+                self.status = Some("Thinking...".to_string());
+                self.retry = None;
+                self.sync_slash();
+                None
+            }
+            SessionMessage::RecallSteered { stacked } => {
+                Some(SessionEffect::RecallSteered { stacked })
+            }
+            SessionMessage::SteeredRecalled { stacked, content } => {
+                let content = content?;
+                self.chat.update(ChatMessage::SteeredRecalled);
+                if stacked && !self.input.is_empty() {
+                    let existing = self.input.buffer.value.clone();
+                    self.input.buffer.set(&format!("{content}\n\n{existing}"));
+                } else {
+                    self.input.buffer.set(&content);
+                }
+                self.sync_slash();
+                None
+            }
         }
     }
 
@@ -675,6 +721,10 @@ impl SessionScreen {
         if let Some(error) = &self.error {
             frame.render_widget(Paragraph::new(error.as_str()).fg(theme::ERROR), footer_area);
         } else {
+            let recall = self
+                .chat
+                .has_steered()
+                .then_some(("Alt+↑", "recall steered"));
             let footer = if !self.question.open && self.slash.active() {
                 theme::help_line(&[("Tab", "complete"), ("↑↓", "select"), ("Esc", "dismiss")])
             } else if self.chat.is_streaming() {
@@ -683,18 +733,22 @@ impl SessionScreen {
                 } else {
                     "clear"
                 };
-                theme::help_line(&[("Ctrl+C", ctrl_c), ("Ctrl+M", "commands")])
+                let mut bindings = vec![("Ctrl+C", ctrl_c), ("Ctrl+M", "commands")];
+                bindings.extend(recall);
+                theme::help_line(&bindings)
             } else {
                 let ctrl_c = if self.input.is_empty() {
                     "quit"
                 } else {
                     "clear"
                 };
-                theme::help_line(&[
+                let mut bindings = vec![
                     ("Enter", "send"),
                     ("Ctrl+M", "commands"),
                     ("Ctrl+C", ctrl_c),
-                ])
+                ];
+                bindings.extend(recall);
+                theme::help_line(&bindings)
             };
             frame.render_widget(Paragraph::new(footer).fg(theme::TEXT_MUTED), footer_area);
         }
@@ -711,6 +765,9 @@ pub enum SessionEffect {
         answers: Option<Vec<Vec<String>>>,
     },
     RunCommand(CommandAction),
+    RecallSteered {
+        stacked: bool,
+    },
 }
 
 /// Rows the working-todos strip occupies below the title bar: one per
@@ -781,6 +838,7 @@ mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
     use shuvarie_core::tool_record::ToolRecord;
+    use termina::event::Modifiers;
 
     fn todo_record(args_json: &str) -> ToolRecord {
         ToolRecord {
@@ -1142,5 +1200,158 @@ mod tests {
             session: shuvarie_core::Session::new(),
         });
         assert!(screen.retry.is_none());
+    }
+
+    fn queued(content: &str) -> SessionMessage {
+        SessionMessage::Chat(ChatMessage::SteeredQueued {
+            content: content.into(),
+        })
+    }
+
+    #[test]
+    fn alt_up_maps_recall_and_alt_shift_up_stacks() {
+        let screen = SessionScreen::new();
+        assert!(matches!(
+            screen.map_event(&KeyEvent::new(KeyCode::Up, Modifiers::ALT)),
+            Some(SessionMessage::RecallSteered { stacked: false })
+        ));
+        assert!(matches!(
+            screen.map_event(&KeyEvent::new(
+                KeyCode::Up,
+                Modifiers::ALT | Modifiers::SHIFT
+            )),
+            Some(SessionMessage::RecallSteered { stacked: true })
+        ));
+    }
+
+    #[test]
+    fn recall_steered_requests_recall_effect() {
+        let mut screen = SessionScreen::new();
+        assert!(matches!(
+            screen.update(SessionMessage::RecallSteered { stacked: false }),
+            Some(SessionEffect::RecallSteered { stacked: false })
+        ));
+    }
+
+    #[test]
+    fn steered_recall_overwrites_input() {
+        let mut screen = SessionScreen::new();
+        screen.input.buffer.set("draft text");
+        screen.update(queued("steered one"));
+        screen.update(SessionMessage::SteeredRecalled {
+            stacked: false,
+            content: Some("steered one".into()),
+        });
+        assert_eq!(screen.input.buffer.value, "steered one");
+        assert!(!screen.chat.has_steered());
+    }
+
+    #[test]
+    fn steered_stacked_recall_prepends_with_blank_lines() {
+        let mut screen = SessionScreen::new();
+        screen.input.buffer.set("draft text");
+        screen.update(queued("first"));
+        screen.update(queued("second"));
+        screen.update(SessionMessage::SteeredRecalled {
+            stacked: true,
+            content: Some("first".into()),
+        });
+        assert_eq!(screen.input.buffer.value, "first\n\ndraft text");
+        assert!(screen.chat.has_steered());
+
+        screen.update(SessionMessage::SteeredRecalled {
+            stacked: true,
+            content: Some("second".into()),
+        });
+        assert_eq!(screen.input.buffer.value, "second\n\nfirst\n\ndraft text");
+        assert!(!screen.chat.has_steered());
+    }
+
+    #[test]
+    fn steered_stacked_recall_into_empty_input_has_no_leading_blank_lines() {
+        let mut screen = SessionScreen::new();
+        screen.update(queued("solo"));
+        screen.update(SessionMessage::SteeredRecalled {
+            stacked: true,
+            content: Some("solo".into()),
+        });
+        assert_eq!(screen.input.buffer.value, "solo");
+    }
+
+    #[test]
+    fn steered_recall_with_empty_queue_is_a_noop() {
+        let mut screen = SessionScreen::new();
+        screen.input.buffer.set("draft text");
+        screen.update(SessionMessage::SteeredRecalled {
+            stacked: false,
+            content: None,
+        });
+        assert_eq!(screen.input.buffer.value, "draft text");
+    }
+
+    #[test]
+    fn turn_started_renders_user_turn_and_busy() {
+        let mut screen = SessionScreen::new();
+        screen.update(SessionMessage::TurnStarted {
+            content: "hello".into(),
+            steered: false,
+        });
+        assert!(screen.busy);
+        assert_eq!(screen.busy_kind, BusyKind::Generating);
+        assert_eq!(screen.status.as_deref(), Some("Thinking..."));
+        assert!(screen.chat.has_messages());
+    }
+
+    #[test]
+    fn turn_started_steered_drops_first_queued_entry() {
+        let mut screen = SessionScreen::new();
+        screen.update(queued("one"));
+        screen.update(queued("two"));
+        screen.update(SessionMessage::TurnStarted {
+            content: "one".into(),
+            steered: true,
+        });
+        assert!(screen.chat.has_steered(), "one entry should remain");
+        assert!(screen.busy);
+    }
+
+    #[test]
+    fn steered_cleared_event_empties_display() {
+        let mut screen = SessionScreen::new();
+        screen.update(queued("one"));
+        screen.update(queued("two"));
+        screen.update(SessionMessage::Chat(ChatMessage::SteeredCleared));
+        assert!(!screen.chat.has_steered());
+    }
+
+    #[test]
+    fn steered_prompts_render_in_chat_pane() {
+        let mut screen = SessionScreen::new();
+        screen.update(SessionMessage::Chat(ChatMessage::BeginUserTurn {
+            content: "running task".into(),
+        }));
+        screen.update(SessionMessage::Chat(ChatMessage::SteeredQueued {
+            content: "queued prompt".into(),
+        }));
+        let buf = draw(&screen, 100, 24);
+        let (_, header) = find_row(&buf, "steered");
+        assert!(
+            header.contains("sends after this turn"),
+            "header: {header:?}"
+        );
+        let (_, body) = find_row(&buf, "queued prompt");
+        assert!(!body.is_empty());
+    }
+
+    #[test]
+    fn footer_hints_recall_when_steered_present() {
+        let mut screen = SessionScreen::new();
+        let buf = draw(&screen, 100, 24);
+        assert!(!row_text(&buf, buf.area().height - 1).contains("recall"));
+
+        screen.update(queued("one"));
+        let buf = draw(&screen, 100, 24);
+        let (_, footer) = find_row(&buf, "recall steered");
+        assert!(footer.contains("Alt+↑"), "footer: {footer:?}");
     }
 }

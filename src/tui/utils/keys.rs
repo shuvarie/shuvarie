@@ -54,7 +54,6 @@ pub fn ctrl_alt_shift(key: &KeyEvent) -> bool {
 /// Map alt+shift key
 ///
 /// Match nice: -1
-#[allow(dead_code)]
 #[inline]
 pub fn alt_shift(key: &KeyEvent) -> bool {
     key.modifiers.contains(Modifiers::SHIFT | Modifiers::ALT)

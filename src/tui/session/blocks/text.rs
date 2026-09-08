@@ -40,6 +40,50 @@ impl UserPrompt {
     }
 }
 
+/// A queued (steered) user prompt: shown in the chat while the agent works,
+/// to be sent as the next user turn when the current round completes. Renders
+/// like a user prompt with a muted queue header.
+pub struct SteeredPrompt {
+    content: String,
+}
+
+impl SteeredPrompt {
+    pub fn new(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+        }
+    }
+
+    pub fn view(&self) -> Vec<Segment> {
+        if self.content.is_empty() {
+            return Vec::new();
+        }
+        let mut lines = vec![Line::from(
+            Span::raw("↻ steered — sends after this turn")
+                .fg(theme::ACCENT)
+                .italic(),
+        )];
+        lines.extend(shuvarie_highlight::render(&self.content));
+        vec![Segment {
+            lines,
+            bg: Some(theme::PROMPT_BG),
+            padding: BLOCK_PADDING,
+            hit: None,
+            trim: true,
+        }]
+    }
+
+    pub(super) fn est(&self) -> TurnEst {
+        let mut est = TurnEst {
+            padding_rows: 2 * u32::from(BLOCK_PADDING.1),
+            deco_rows: 1,
+            ..TurnEst::default()
+        };
+        est.add_text(&self.content);
+        est
+    }
+}
+
 /// A chunk of assistant markdown. Text streams into the trailing chunk of the
 /// in-flight turn; a tool call splits the stream into separate chunks.
 pub struct TextBlock {

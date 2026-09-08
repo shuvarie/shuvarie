@@ -45,6 +45,12 @@ pub enum Command {
     Redo,
     Replay,
     Continue,
+    /// Recall the most recently steered prompt into the input area. `stacked`
+    /// (Alt+Shift+Up) prepends the content to the existing text (separated by
+    /// two line feeds) instead of overwriting it.
+    RecallSteered {
+        stacked: bool,
+    },
     LspStart {
         name: String,
     },

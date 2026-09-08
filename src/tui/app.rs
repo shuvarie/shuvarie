@@ -425,6 +425,24 @@ impl App {
                 CoreEvent::StreamDone { .. } => Some(AppMessage::Session(SessionMessage::Chat(
                     ChatMessage::StreamDone,
                 ))),
+                CoreEvent::PromptSteered { content } => Some(AppMessage::Session(
+                    SessionMessage::Chat(ChatMessage::SteeredQueued { content }),
+                )),
+                CoreEvent::TurnStarted { content, steered } => {
+                    Some(AppMessage::Session(SessionMessage::TurnStarted {
+                        content,
+                        steered,
+                    }))
+                }
+                CoreEvent::SteeredRecalled { stacked, content } => {
+                    Some(AppMessage::Session(SessionMessage::SteeredRecalled {
+                        stacked,
+                        content,
+                    }))
+                }
+                CoreEvent::SteeredCleared => Some(AppMessage::Session(SessionMessage::Chat(
+                    ChatMessage::SteeredCleared,
+                ))),
                 CoreEvent::StreamError { error } => Some(AppMessage::Session(
                     SessionMessage::Chat(ChatMessage::StreamError { error }),
                 )),
@@ -545,6 +563,10 @@ impl App {
                         }
                         SessionEffect::CancelStream => {
                             self.ctx.send(shuvarie_core::Command::CancelStream);
+                        }
+                        SessionEffect::RecallSteered { stacked } => {
+                            self.ctx
+                                .send(shuvarie_core::Command::RecallSteered { stacked });
                         }
                         SessionEffect::AnswerQuestion { id, answers } => {
                             self.ctx

@@ -9,8 +9,8 @@ use shuvarie_db::ReasoningSegment;
 use shuvarie_llm::{FileChange, ShellStreams};
 
 use super::blocks::{
-    Block, BlockMessage, ChatEnv, ContextBlock, ReasoningBlock, SystemText, TextBlock, ToolBlock,
-    ToolMessage, UserPrompt,
+    Block, BlockMessage, ChatEnv, ContextBlock, ReasoningBlock, SteeredPrompt, SystemText,
+    TextBlock, ToolBlock, ToolMessage, UserPrompt,
 };
 use super::segment::BlockAddr;
 use super::virtualizer::{TurnData, TurnEst, TurnFlags, locate, paint_turn};
@@ -94,6 +94,16 @@ pub enum ChatMessage {
         row: u16,
     },
     ToggleLastTool,
+    /// A prompt was queued (steered) while the agent works.
+    SteeredQueued {
+        content: String,
+    },
+    /// The first queued prompt was dispatched as a new user turn.
+    SteeredDispatched,
+    /// The most recently queued prompt was recalled into the input area.
+    SteeredRecalled,
+    /// The queue was wiped by a session-level transition.
+    SteeredCleared,
 }
 
 /// Viewport-relative scroll position. `sticky_bottom` tracks the streaming
@@ -115,6 +125,9 @@ struct Scroll {
 pub struct Chat {
     turns: RefCell<Vec<TurnData>>,
     in_flight: RefCell<Option<TurnData>>,
+    /// Queued (steered) prompts waiting for the current agent-loop round to
+    /// end. Rendered as pseudo-turns pinned after the in-flight turn.
+    steered: RefCell<Vec<TurnData>>,
     streaming: bool,
     interrupted: bool,
     lsp_diagnostics: BTreeMap<String, Vec<DiagnosticInfo>>,
@@ -132,6 +145,7 @@ impl Chat {
         Self {
             turns: RefCell::new(Vec::new()),
             in_flight: RefCell::new(None),
+            steered: RefCell::new(Vec::new()),
             streaming: false,
             interrupted: false,
             lsp_diagnostics: BTreeMap::new(),
@@ -150,6 +164,11 @@ impl Chat {
 
     pub fn is_streaming(&self) -> bool {
         self.streaming
+    }
+
+    /// Whether any steered prompts are queued (drives the recall help hint).
+    pub fn has_steered(&self) -> bool {
+        !self.steered.borrow().is_empty()
     }
 
     pub fn has_messages(&self) -> bool {
@@ -328,6 +347,7 @@ impl Chat {
             ChatMessage::Reset => {
                 *self.turns.borrow_mut() = Vec::new();
                 *self.in_flight.borrow_mut() = None;
+                self.steered.borrow_mut().clear();
                 self.stored = None;
                 self.stored_len = 0;
                 self.streaming = false;
@@ -369,6 +389,23 @@ impl Chat {
                 }
             }
             ChatMessage::ToggleLastTool => self.toggle_last_tool(),
+            ChatMessage::SteeredQueued { content } => {
+                let mut turn = TurnData::new(Role::User);
+                turn.set_blocks(vec![Block::Steered(SteeredPrompt::new(content))], false);
+                self.steered.borrow_mut().push(turn);
+            }
+            ChatMessage::SteeredDispatched => {
+                let mut steered = self.steered.borrow_mut();
+                if !steered.is_empty() {
+                    steered.remove(0);
+                }
+            }
+            ChatMessage::SteeredRecalled => {
+                self.steered.borrow_mut().pop();
+            }
+            ChatMessage::SteeredCleared => {
+                self.steered.borrow_mut().clear();
+            }
         }
     }
 
@@ -409,6 +446,12 @@ impl Chat {
                 .as_ref()
                 .map_or(0, |turn| turn.height(content_width, env_rev)),
         );
+        {
+            let steered = self.steered.borrow();
+            for slot in steered.iter() {
+                heights.push(slot.height(content_width, env_rev));
+            }
+        }
 
         let sticky = self.scroll.borrow().sticky_bottom;
         let anchor = (!sticky).then(|| locate(&heights, self.scroll.borrow().offset));
@@ -459,6 +502,26 @@ impl Chat {
                     );
                     heights[turns_len] = turn.height(content_width, env_rev);
                 }
+            }
+            y += heights[turns_len];
+            let mut steered = self.steered.borrow_mut();
+            for (i, slot) in steered.iter_mut().enumerate() {
+                let idx = turns_len + 1 + i;
+                let h = heights[idx];
+                if y + h > lo && y < hi {
+                    slot.ensure_cache(
+                        idx,
+                        content_width,
+                        &env,
+                        env_rev,
+                        TurnFlags {
+                            in_flight: false,
+                            interrupted_marker: false,
+                        },
+                    );
+                    heights[idx] = slot.height(content_width, env_rev);
+                }
+                y += h;
             }
         }
 
@@ -515,7 +578,7 @@ impl Chat {
                 }
                 y += h;
             }
-            if let Some(turn) = in_flight.as_mut() {
+            let in_flight_h = if let Some(turn) = in_flight.as_mut() {
                 let h = turn.height(content_width, env_rev);
                 if y + h > scroll_y && y < scroll_y + viewport {
                     turn.ensure_cache(
@@ -532,6 +595,32 @@ impl Chat {
                         paint_turn(cache, y, scroll_y, area, content_width, buf);
                     }
                 }
+                Some(h)
+            } else {
+                None
+            };
+            y += in_flight_h.unwrap_or(0);
+            let mut steered = self.steered.borrow_mut();
+            for (i, slot) in steered.iter_mut().enumerate() {
+                let idx = turns_len + 1 + i;
+                let mut h = slot.height(content_width, env_rev);
+                if y + h > scroll_y && y < scroll_y + viewport {
+                    slot.ensure_cache(
+                        idx,
+                        content_width,
+                        &env,
+                        env_rev,
+                        TurnFlags {
+                            in_flight: false,
+                            interrupted_marker: false,
+                        },
+                    );
+                    h = slot.height(content_width, env_rev);
+                    if let Some(cache) = slot.cache() {
+                        paint_turn(cache, y, scroll_y, area, content_width, buf);
+                    }
+                }
+                y += h;
             }
         }
 
@@ -2034,12 +2123,101 @@ mod tests {
             assert!(cache.height > 0);
         }
         let per_frame = started.elapsed() / frames;
-        println!(
-            "spinner-frame rebuild: {per_frame:?} per frame (30 blocks x 16KB output)"
-        );
+        println!("spinner-frame rebuild: {per_frame:?} per frame (30 blocks x 16KB output)");
         assert!(
             per_frame < std::time::Duration::from_millis(50),
             "rebuild too slow: {per_frame:?}"
+        );
+    }
+
+    fn steered_contents(chat: &Chat) -> Vec<String> {
+        chat.steered
+            .borrow()
+            .iter()
+            .map(|turn| {
+                let blocks = turn.blocks.as_deref().unwrap();
+                let Block::Steered(block) = &blocks[0] else {
+                    panic!("not a steered block");
+                };
+                block
+                    .view()
+                    .into_iter()
+                    .flat_map(|segment| segment.lines)
+                    .skip(1)
+                    .map(|line| {
+                        line.spans
+                            .iter()
+                            .map(|span| span.content.clone())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn steered_queue_lifecycle() {
+        let mut chat = Chat::new();
+        assert!(!chat.has_steered());
+
+        chat.update(ChatMessage::SteeredQueued {
+            content: "first".into(),
+        });
+        chat.update(ChatMessage::SteeredQueued {
+            content: "second".into(),
+        });
+        assert_eq!(
+            steered_contents(&chat),
+            vec!["first".to_string(), "second".into()]
+        );
+
+        chat.update(ChatMessage::SteeredDispatched);
+        assert_eq!(steered_contents(&chat), vec!["second".to_string()]);
+
+        chat.update(ChatMessage::SteeredRecalled);
+        assert!(!chat.has_steered());
+
+        chat.update(ChatMessage::SteeredQueued {
+            content: "x".into(),
+        });
+        chat.update(ChatMessage::SteeredCleared);
+        assert!(!chat.has_steered());
+    }
+
+    #[test]
+    fn steered_entries_render_below_in_flight_turn() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "first prompt".into(),
+        });
+        chat.update(ChatMessage::TokenReceived {
+            content: "streaming answer".into(),
+        });
+        chat.update(ChatMessage::SteeredQueued {
+            content: "queued prompt".into(),
+        });
+        let buf = draw(&chat, 100, 24);
+        let row_text = |y: u16| {
+            (0..buf.area().width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        };
+        let find = |needle: &str| {
+            (0..buf.area().height)
+                .map(|y| (y, row_text(y)))
+                .find(|(_, text)| text.contains(needle))
+                .map(|(y, _)| y)
+        };
+        let (header, body, stream) = (
+            find("steered").expect("steered header should render"),
+            find("queued prompt").expect("steered body should render"),
+            find("streaming answer").expect("in-flight turn should render"),
+        );
+        assert!(row_text(header).contains("sends after this turn"));
+        assert!(
+            body > stream,
+            "steered entry renders below the in-flight turn"
         );
     }
 }

@@ -71,6 +71,28 @@ pub enum Event {
         text: String,
         usage: TokenUsage,
     },
+    /// The agent is busy, so a submitted prompt was queued (steered) instead
+    /// of starting a new turn; it will be sent when the current agent-loop
+    /// round completes.
+    PromptSteered {
+        content: String,
+    },
+    /// A new user turn started streaming: either an accepted `SendMessage`
+    /// (`steered: false`) or a dispatched steered prompt (`steered: true`, in
+    /// which case the first queued entry must leave the chat display).
+    TurnStarted {
+        content: String,
+        steered: bool,
+    },
+    /// Reply to [`Command::RecallSteered`]: the recalled prompt content, or
+    /// `None` when nothing was queued.
+    SteeredRecalled {
+        stacked: bool,
+        content: Option<String>,
+    },
+    /// The steered queue was wiped by a session-level transition (new,
+    /// loaded, or deleted session).
+    SteeredCleared,
     StreamError {
         error: String,
     },

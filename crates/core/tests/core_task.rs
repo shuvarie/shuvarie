@@ -13,6 +13,28 @@ fn empty_connections() -> Connections {
     Connections::default()
 }
 
+/// A connection whose endpoint refuses connections: the stream fails with a
+/// retryable `Connection failed`, so the busy state (and the retry wait) is
+/// deterministic on any machine.
+fn dead_endpoint_connections() -> Connections {
+    let mut connections = empty_connections();
+    connections.providers.insert(
+        "dead".into(),
+        ProviderConfig::new(
+            "dead",
+            "ollama",
+            None,
+            Some("http://127.0.0.1:9".to_string()),
+        ),
+    );
+    connections.active = Some(Active {
+        provider: "dead".into(),
+        model: Some("test-model".into()),
+        variant: None,
+    });
+    connections
+}
+
 fn temp_connections_path(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "shuvarie-test-{name}-{}",
@@ -224,24 +246,13 @@ async fn cancel_with_no_active_stream_keeps_task_alive() {
 }
 
 #[tokio::test]
-async fn double_send_while_streaming_is_rejected() {
+async fn send_while_streaming_is_steered() {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
-    let mut connections = empty_connections();
-    connections.providers.insert(
-        "ollama".into(),
-        ProviderConfig::new("ollama", "ollama", None, None),
-    );
-    connections.active = Some(Active {
-        provider: "ollama".into(),
-        model: Some("test-model".into()),
-        variant: None,
-    });
-
     let handle = tokio::spawn(run(
         empty_config(),
-        connections,
+        dead_endpoint_connections(),
         Store::open_in_memory().await.unwrap(),
         StartupSession::None,
         None,
@@ -262,19 +273,243 @@ async fn double_send_while_streaming_is_rejected() {
         .await
         .unwrap();
 
-    let mut saw_rejection = false;
-    for _ in 0..6 {
+    let mut saw_steered = false;
+    for _ in 0..8 {
         match event_rx.recv().await {
-            Some(Event::StreamError { error }) if error.contains("already streaming") => {
-                saw_rejection = true;
+            Some(Event::PromptSteered { content }) => {
+                assert_eq!(content, "second");
+                saw_steered = true;
                 break;
             }
             Some(_) => {}
             None => break,
         }
     }
-    assert!(saw_rejection, "expected second send to be rejected");
+    assert!(saw_steered, "expected the second send to be steered");
     cmd_tx.send(Command::CancelStream).await.unwrap();
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn steered_recall_round_trip() {
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+
+    let handle = tokio::spawn(run(
+        empty_config(),
+        dead_endpoint_connections(),
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        cmd_rx,
+        event_tx,
+    ));
+    cmd_tx
+        .send(Command::SendMessage {
+            content: "first".into(),
+        })
+        .await
+        .unwrap();
+    cmd_tx
+        .send(Command::SendMessage {
+            content: "second".into(),
+        })
+        .await
+        .unwrap();
+
+    let mut steered = 0;
+    for _ in 0..10 {
+        match event_rx.recv().await {
+            Some(Event::PromptSteered { content }) => {
+                assert_eq!(content, "second");
+                steered += 1;
+                break;
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    assert_eq!(steered, 1, "expected the second send to be steered");
+
+    cmd_tx
+        .send(Command::RecallSteered { stacked: true })
+        .await
+        .unwrap();
+    let mut recalled = false;
+    for _ in 0..5 {
+        match event_rx.recv().await {
+            Some(Event::SteeredRecalled { stacked, content }) => {
+                assert!(stacked);
+                assert_eq!(content.as_deref(), Some("second"));
+                recalled = true;
+                break;
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    assert!(recalled, "expected the steered prompt to be recalled");
+
+    cmd_tx
+        .send(Command::RecallSteered { stacked: false })
+        .await
+        .unwrap();
+    let mut empty_recall = false;
+    for _ in 0..5 {
+        match event_rx.recv().await {
+            Some(Event::SteeredRecalled { content, .. }) => {
+                assert!(content.is_none(), "queue was drained by the first recall");
+                empty_recall = true;
+                break;
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    assert!(empty_recall, "expected an empty-queue recall reply");
+
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn cancel_dispatches_first_steered_prompt() {
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+
+    let handle = tokio::spawn(run(
+        empty_config(),
+        dead_endpoint_connections(),
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        cmd_rx,
+        event_tx,
+    ));
+    cmd_tx
+        .send(Command::SendMessage {
+            content: "first".into(),
+        })
+        .await
+        .unwrap();
+    cmd_tx
+        .send(Command::SendMessage {
+            content: "second".into(),
+        })
+        .await
+        .unwrap();
+
+    let mut steered = false;
+    for _ in 0..10 {
+        match event_rx.recv().await {
+            Some(Event::PromptSteered { content }) => {
+                assert_eq!(content, "second");
+                steered = true;
+                break;
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    assert!(steered, "expected the second send to be steered");
+
+    // Wait for the retry wait to be scheduled: the stream task is gone by
+    // then, so the cancel lands on a stable busy state and reliably takes the
+    // retry-cancel path (cancelling between the task ending and its outcome
+    // being processed would leave the queue to the next window instead).
+    let mut retrying = false;
+    for _ in 0..10 {
+        match event_rx.recv().await {
+            Some(Event::RetryScheduled { .. }) => {
+                retrying = true;
+                break;
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    assert!(retrying, "expected a scheduled retry for the dead endpoint");
+
+    cmd_tx.send(Command::CancelStream).await.unwrap();
+    let mut dispatched = false;
+    for _ in 0..10 {
+        match event_rx.recv().await {
+            Some(Event::TurnStarted { content, steered }) => {
+                assert!(steered, "dispatch must be flagged as steered");
+                assert_eq!(content, "second");
+                dispatched = true;
+                break;
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    assert!(dispatched, "cancel must dispatch the first steered prompt");
+
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn new_session_clears_steered_queue() {
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+
+    let handle = tokio::spawn(run(
+        empty_config(),
+        dead_endpoint_connections(),
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        cmd_rx,
+        event_tx,
+    ));
+    cmd_tx
+        .send(Command::SendMessage {
+            content: "first".into(),
+        })
+        .await
+        .unwrap();
+    cmd_tx
+        .send(Command::SendMessage {
+            content: "second".into(),
+        })
+        .await
+        .unwrap();
+
+    // Wait until the failed stream scheduled its retry: the stream task is
+    // gone by then, so the busy gate no longer rejects `NewSession`.
+    let mut retrying = false;
+    for _ in 0..10 {
+        match event_rx.recv().await {
+            Some(Event::RetryScheduled { .. }) => {
+                retrying = true;
+                break;
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    assert!(retrying, "expected a scheduled retry for the dead ollama");
+
+    cmd_tx.send(Command::NewSession).await.unwrap();
+    let mut cleared = false;
+    for _ in 0..5 {
+        match event_rx.recv().await {
+            Some(Event::SteeredCleared) => {
+                cleared = true;
+                break;
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    assert!(cleared, "a session-level transition must wipe the queue");
+
     drop(cmd_tx);
     let _ = handle.await;
 }
