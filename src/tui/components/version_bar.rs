@@ -14,11 +14,15 @@ pub struct VersionBar {
 impl VersionBar {
     pub fn new(alignment: HorizontalAlignment) -> Self {
         const VERSION: &str = env!("CARGO_PKG_VERSION");
+        let version = match option_env!("GIT_COMMIT_SHORT_HASH") {
+            Some(hash) => format!("v{VERSION}-{hash}"),
+            None => format!("v{VERSION}"),
+        };
 
         Self {
             line: Line::from(vec![
                 Span::raw("⚔️ Shuvarie ").fg(theme::ACCENT).bold(),
-                Span::raw(format!("v{}", VERSION)).fg(theme::TEXT_DIM),
+                Span::raw(version).fg(theme::TEXT_DIM),
             ])
             .alignment(alignment),
         }
