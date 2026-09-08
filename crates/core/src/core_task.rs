@@ -164,6 +164,7 @@ pub async fn run(
     let _ = event_tx
         .send(Event::SkillsLoaded {
             skills: skills.skills.clone(),
+            warnings: skills.warnings.clone(),
         })
         .await;
 

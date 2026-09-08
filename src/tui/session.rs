@@ -14,6 +14,7 @@ use super::sidebar::{Sidebar, SidebarMessage};
 use super::slash::{SlashMenu, SlashMessage};
 use super::spinner::SpinnerKind;
 use super::theme;
+use shuvarie_core::Skill;
 
 pub mod blocks;
 pub mod chat;
@@ -30,6 +31,10 @@ pub enum SessionMessage {
         error: String,
     },
     ClearError,
+    /// Replaces the session's skill list (mirrors what the sidebar shows).
+    SetSkills {
+        skills: Vec<Skill>,
+    },
     /// Per-request usage added to the sidebar's running totals;
     /// `context_tokens` is the request's context footprint when it came from
     /// the main stream (workers run separate conversations), so the sidebar
@@ -124,6 +129,7 @@ pub struct SessionScreen {
     pub error: Option<String>,
     pub(crate) retry: Option<RetryWait>,
     working_todos: Vec<shuvarie_core::tools::todos::TodoItem>,
+    skills: Vec<Skill>,
 }
 
 impl SessionScreen {
@@ -142,6 +148,7 @@ impl SessionScreen {
             error: None,
             retry: None,
             working_todos: Vec::new(),
+            skills: Vec::new(),
         }
     }
 
@@ -179,6 +186,24 @@ impl SessionScreen {
     /// Mark the chat dirty so an animated spinner re-renders.
     pub fn mark_spinner_dirty(&self) {
         self.chat.mark_spinner_dirty();
+    }
+
+    /// Expand a `/skill:<name> [args]` submit into the skill's prompt
+    /// content. `Ok(None)` when the text is not a skill invocation;
+    /// `Err(reason)` for an unknown skill or an unreadable SKILL.md.
+    fn expand_skill(&self, content: &str) -> Result<Option<String>, String> {
+        let Some(invocation) = commands::parse_skill_invocation(content) else {
+            return Ok(None);
+        };
+        let skill = self
+            .skills
+            .iter()
+            .find(|s| s.name == invocation.name)
+            .ok_or_else(|| format!("unknown skill: {}", invocation.name))?;
+        skill
+            .invocation_content(invocation.args.as_deref())
+            .map(Some)
+            .map_err(|e| format!("failed to read skill {}: {e}", invocation.name))
     }
 
     pub fn map_event(&self, key: &KeyEvent) -> Option<SessionMessage> {
@@ -242,7 +267,14 @@ impl SessionScreen {
                                 self.sync_slash();
                                 return Some(SessionEffect::RunCommand(action));
                             }
-                            let content = commands::unescape(&content).to_string();
+                            let content = match self.expand_skill(&content) {
+                                Ok(Some(expanded)) => expanded,
+                                Ok(None) => commands::unescape(&content).to_string(),
+                                Err(error) => {
+                                    self.error = Some(error);
+                                    return None;
+                                }
+                            };
                             self.chat.update(ChatMessage::BeginUserTurn {
                                 content: content.clone(),
                             });
@@ -305,6 +337,10 @@ impl SessionScreen {
             }
             SessionMessage::ClearError => {
                 self.error = None;
+                None
+            }
+            SessionMessage::SetSkills { skills } => {
+                self.skills = skills;
                 None
             }
             SessionMessage::UsageUpdate {

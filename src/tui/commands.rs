@@ -147,6 +147,37 @@ pub fn parse_command(text: &str) -> Option<CommandAction> {
         .find(|a| a.slash_name().eq_ignore_ascii_case(rest))
 }
 
+/// A parsed `/skill:<name> [args]` invocation (also accepted with the `:`
+/// trigger: `:skill:<name>`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkillInvocation {
+    pub name: String,
+    pub args: Option<String>,
+}
+
+/// Parse submitted text as a skill invocation: `<trigger>skill:<name> [args]`.
+/// Escaped prefixes (`//`, `::`) never parse. The first token after `skill:`
+/// is the skill name; the rest (trimmed) is the args.
+pub fn parse_skill_invocation(text: &str) -> Option<SkillInvocation> {
+    let text = text.trim();
+    let first = text.chars().next()?;
+    if !TRIGGER_CHARS.contains(&first) || is_escaped(text) {
+        return None;
+    }
+    let rest = text[first.len_utf8()..].strip_prefix("skill:")?;
+    let (name, args) = match rest.find(char::is_whitespace) {
+        Some(i) => (&rest[..i], rest[i..].trim()),
+        None => (rest, ""),
+    };
+    if name.is_empty() {
+        return None;
+    }
+    Some(SkillInvocation {
+        name: name.to_string(),
+        args: (!args.is_empty()).then(|| args.to_string()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,5 +238,49 @@ mod tests {
         assert_eq!(parse_command(""), None);
         assert_eq!(parse_command("/undo now"), None);
         assert_eq!(parse_command(":/undo"), None);
+    }
+
+    #[test]
+    fn parse_skill_invocations() {
+        assert_eq!(
+            parse_skill_invocation("/skill:tokio"),
+            Some(SkillInvocation {
+                name: "tokio".into(),
+                args: None
+            })
+        );
+        assert_eq!(
+            parse_skill_invocation("/skill:tokio explain buffering"),
+            Some(SkillInvocation {
+                name: "tokio".into(),
+                args: Some("explain buffering".into())
+            })
+        );
+        assert_eq!(
+            parse_skill_invocation(":skill:tokio"),
+            Some(SkillInvocation {
+                name: "tokio".into(),
+                args: None
+            })
+        );
+        assert_eq!(
+            parse_skill_invocation("  /skill:tokio  "),
+            Some(SkillInvocation {
+                name: "tokio".into(),
+                args: None
+            })
+        );
+    }
+
+    #[test]
+    fn parse_skill_invocation_rejects() {
+        assert_eq!(parse_skill_invocation("//skill:tokio"), None);
+        assert_eq!(parse_skill_invocation("::skill:tokio"), None);
+        assert_eq!(parse_skill_invocation("/skill:"), None);
+        assert_eq!(parse_skill_invocation("/skill: x"), None);
+        assert_eq!(parse_skill_invocation("/skills:tokio"), None);
+        assert_eq!(parse_skill_invocation("skill:tokio"), None);
+        assert_eq!(parse_skill_invocation("/undo"), None);
+        assert_eq!(parse_skill_invocation("hello"), None);
     }
 }

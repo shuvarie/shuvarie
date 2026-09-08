@@ -37,12 +37,22 @@ pub(crate) fn resolve_read(path: &str) -> Result<PathBuf, String> {
     let joined = root.join(expand_home(path));
     let canonical = joined.canonicalize().map_err(|e| format!("{path}: {e}"))?;
     let rel = canonical.strip_prefix(&root).unwrap_or(&canonical);
-    if let Some(comp) = hidden_component(rel) {
+    let exempt_roots = crate::skills::global_skill_dirs(
+        dirs::home_dir().as_deref(),
+        crate::config::config_dir().ok().as_deref(),
+    );
+    if let Some(comp) = hidden_component(rel)
+        && !under_global_skill_dirs(&canonical, &exempt_roots)
+    {
         return Err(format!(
             "'{path}' is under the hidden path '{comp}'; hidden files and directories cannot be read"
         ));
     }
     Ok(canonical)
+}
+
+fn under_global_skill_dirs(path: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| path.starts_with(root))
 }
 
 pub(crate) fn resolve_write(path: &str) -> Result<PathBuf, String> {
@@ -153,6 +163,31 @@ mod tests {
         assert!(resolve_write("src/f.txt").is_ok());
         let _ = std::fs::remove_file(&outside);
         drop(dir);
+    }
+
+    #[test]
+    fn global_skill_dirs_exempt_from_hidden_rule() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("home");
+        let global_config = home.join(".config/shuvarie");
+        let roots = crate::skills::global_skill_dirs(Some(&home), Some(&global_config));
+        assert_eq!(
+            roots,
+            vec![global_config.join("skills"), home.join(".agents/skills"),]
+        );
+        assert!(under_global_skill_dirs(
+            &global_config.join("skills/ratatui/SKILL.md"),
+            &roots
+        ));
+        assert!(under_global_skill_dirs(
+            &home.join(".agents/skills/tokio/SKILL.md"),
+            &roots
+        ));
+        assert!(!under_global_skill_dirs(
+            &global_config.join("connections.kdl"),
+            &roots
+        ));
+        assert!(!under_global_skill_dirs(&home.join(".env"), &roots));
     }
 
     #[test]

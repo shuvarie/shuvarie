@@ -32,5 +32,5 @@ pub use session::Session;
 pub use shuvarie_db::{MsgRole, SearchHit, SearchSource, SessionSummary};
 pub use shuvarie_llm::{ChatMsg, Model, Role, TokenUsage};
 pub use shuvarie_lsp::{DiagnosticInfo, DiagnosticSeverity, LspStatus, ServerStatus};
-pub use skills::{Skill, Skills};
+pub use skills::{Skill, SkillWarning, Skills};
 pub use tools::todos::TodoState;

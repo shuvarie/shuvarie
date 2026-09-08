@@ -92,6 +92,7 @@ pub enum AppMessage {
     },
     SkillsLoaded {
         skills: Vec<shuvarie_core::Skill>,
+        warnings: Vec<shuvarie_core::SkillWarning>,
     },
 }
 
@@ -474,7 +475,9 @@ impl App {
                     Some(AppMessage::LspDiagnostics { path, diagnostics })
                 }
                 CoreEvent::LspError { error } => Some(AppMessage::LspError { error }),
-                CoreEvent::SkillsLoaded { skills } => Some(AppMessage::SkillsLoaded { skills }),
+                CoreEvent::SkillsLoaded { skills, warnings } => {
+                    Some(AppMessage::SkillsLoaded { skills, warnings })
+                }
             },
         }
     }
@@ -824,10 +827,12 @@ impl App {
             AppMessage::LspError { error } => {
                 self.session.update(SessionMessage::ShowError { error });
             }
-            AppMessage::SkillsLoaded { skills } => {
-                self.session
-                    .sidebar
-                    .update(SidebarMessage::UpdateSkills { skills });
+            AppMessage::SkillsLoaded { skills, warnings } => {
+                self.session.sidebar.update(SidebarMessage::UpdateSkills {
+                    skills: skills.clone(),
+                    warnings,
+                });
+                self.session.update(SessionMessage::SetSkills { skills });
             }
         }
         None

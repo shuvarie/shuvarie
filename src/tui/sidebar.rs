@@ -3,7 +3,7 @@ use std::cell::{Cell, RefCell};
 use ratatui::layout::{Alignment, Rect};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph};
-use shuvarie_core::{LspStatus, Skill};
+use shuvarie_core::{LspStatus, Skill, SkillWarning};
 use shuvarie_llm::TokenUsage;
 use termina::event::KeyEvent;
 
@@ -22,6 +22,7 @@ pub struct Sidebar {
     pub lsp_servers: Vec<LspStatus>,
     pub lsp_enabled: bool,
     pub skills: Vec<Skill>,
+    pub skill_warnings: Vec<SkillWarning>,
     pub todos_done: usize,
     pub todos_total: usize,
     dirty: Cell<bool>,
@@ -55,6 +56,7 @@ pub enum SidebarMessage {
     },
     UpdateSkills {
         skills: Vec<Skill>,
+        warnings: Vec<SkillWarning>,
     },
     SetTodos {
         done: usize,
@@ -72,6 +74,7 @@ impl Sidebar {
             lsp_servers: Vec::new(),
             lsp_enabled: true,
             skills: Vec::new(),
+            skill_warnings: Vec::new(),
             todos_done: 0,
             todos_total: 0,
             dirty: Cell::new(true),
@@ -107,8 +110,9 @@ impl Sidebar {
             SidebarMessage::UpdateLsp { servers } => {
                 self.lsp_servers = servers;
             }
-            SidebarMessage::UpdateSkills { skills } => {
+            SidebarMessage::UpdateSkills { skills, warnings } => {
                 self.skills = skills;
+                self.skill_warnings = warnings;
             }
             SidebarMessage::SetTodos { done, total } => {
                 self.todos_done = done;
@@ -243,12 +247,35 @@ impl Sidebar {
             lines.push(Line::from("  none").fg(theme::TEXT_MUTED));
         } else {
             for skill in &self.skills {
-                lines.push(
-                    Line::from(format!("  {}", skill.name))
-                        .fg(theme::TEXT)
-                        .bold(),
-                );
+                let mut spans = vec![Span::styled(
+                    format!("  {}", skill.name),
+                    if skill.disable_model_invocation {
+                        Style::new().fg(theme::TEXT_MUTED)
+                    } else {
+                        Style::new().fg(theme::TEXT).bold()
+                    },
+                )];
+                if skill.global {
+                    spans.push(Span::styled(
+                        " (global)",
+                        Style::new().fg(theme::TEXT_MUTED),
+                    ));
+                }
+                lines.push(Line::from(spans));
             }
+        }
+        for warning in &self.skill_warnings {
+            let label = warning
+                .path
+                .parent()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| warning.path.display().to_string());
+            lines.push(
+                Line::from(format!("  ! {label}: {}", warning.message))
+                    .fg(theme::WARNING)
+                    .italic(),
+            );
         }
 
         lines

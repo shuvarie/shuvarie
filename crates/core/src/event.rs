@@ -149,5 +149,6 @@ pub enum Event {
     },
     SkillsLoaded {
         skills: Vec<crate::Skill>,
+        warnings: Vec<crate::SkillWarning>,
     },
 }
