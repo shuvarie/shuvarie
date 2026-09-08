@@ -28,6 +28,13 @@ pub(super) fn format_duration_ms(ms: u64) -> String {
     }
 }
 
+/// Tool blocks that carry the elapsed/taken meta row: only the long-running
+/// calls where timing is worth the extra row. Thinking blocks time themselves
+/// in the reasoning header.
+pub(super) fn shows_elapsed(name: &str) -> bool {
+    name == "run_shell" || name == "explore_workspace"
+}
+
 /// One chat block: a TEA model per variant for the stateful kinds, unit
 /// variants for the stateless decorations the engine synthesizes around turns.
 pub enum Block {

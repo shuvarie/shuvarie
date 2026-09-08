@@ -6,7 +6,7 @@ use shuvarie_core::tools::todos::{TodoStatus, done_total, parse_items};
 use shuvarie_llm::{DiffLine, DiffLineKind, FileChange, PatchFileKind};
 use unicode_width::UnicodeWidthStr;
 
-use super::format_duration_ms;
+use super::{format_duration_ms, shows_elapsed};
 use crate::tui::session::blocks::{ChatEnv, Segment};
 use crate::tui::session::segment::BLOCK_PADDING;
 use crate::tui::session::virtualizer::{TurnEst, collapsed_rows, file_change_row_est};
@@ -125,15 +125,15 @@ impl ToolBlock {
 
     /// Estimated row counters mirroring [`Self::view`]: header, collapse state
     /// (which follows `expanded` — `question`/`todo` flip it on finish), file
-    /// change rows, and the elapsed meta row. LSP diagnostics rows are
-    /// environment-dependent and not estimated.
+    /// change rows, and the elapsed meta row for `shows_elapsed` tools. LSP
+    /// diagnostics rows are environment-dependent and not estimated.
     pub(super) fn est(&self) -> TurnEst {
         let mut est = TurnEst {
             tool_count: 1,
             padding_rows: 2 * u32::from(BLOCK_PADDING.1),
             tool_header_width: (self.name.chars().count() + 1) as u32
                 + UnicodeWidthStr::width(self.args.as_str()).min(120) as u32,
-            tool_rows: 1,
+            tool_rows: u32::from(shows_elapsed(&self.name)),
             ..TurnEst::default()
         };
         let output_rows = self.output.lines().count() as u32;
@@ -264,7 +264,7 @@ impl ToolBlock {
                 }
             }
         }
-        if self.name != "question" {
+        if shows_elapsed(&self.name) {
             lines.push(elapsed_line(self));
         }
         lines
@@ -514,7 +514,9 @@ fn push_todo_rows(
 
 /// The bottom meta row of a tool block: `Elapsed 4.5s` while the call is
 /// running (recomputed every frame from the wall clock), `Took 10.3s` once it
-/// finishes — the finished value comes from the core-measured duration.
+/// finishes — the finished value comes from the core-measured duration. Only
+/// shown for `shows_elapsed` blocks, with the value dimmed like the label so
+/// timing never competes with the block's content.
 fn elapsed_line(tool: &ToolBlock) -> Line<'static> {
     if tool.status == ToolStatus::Running {
         let ms = tool
@@ -523,7 +525,9 @@ fn elapsed_line(tool: &ToolBlock) -> Line<'static> {
             .unwrap_or_default();
         Line::from(vec![
             Span::raw("  Elapsed ").fg(theme::TEXT_MUTED).italic(),
-            Span::raw(format_duration_ms(ms)).fg(theme::ACCENT).italic(),
+            Span::raw(format_duration_ms(ms))
+                .fg(theme::TEXT_MUTED)
+                .italic(),
         ])
     } else {
         Line::from(vec![
@@ -936,8 +940,8 @@ mod tests {
             lsp_diagnostics: &BTreeMap::new(),
         };
         let block = ToolBlock::from_record(&ToolRecord {
-            name: "grep".to_string(),
-            args_json: "{}".to_string(),
+            name: "run_shell".to_string(),
+            args_json: r#"{"command":"ls"}"#.to_string(),
             output: String::new(),
             stderr: String::new(),
             ok: true,
@@ -951,6 +955,67 @@ mod tests {
         });
         let text = block_text(&block, &env);
         assert!(text.contains("Took 1m 05s"), "header/body: {text}");
+        assert_eq!(block.est().tool_rows, 1);
+    }
+
+    #[test]
+    fn other_tool_blocks_omit_elapsed_row() {
+        let env = ChatEnv {
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let mut block = ToolBlock::new("grep", r#"{"pattern":"x"}"#.to_string(), None, None);
+        assert_eq!(block.est().tool_rows, 0);
+        let running = block_text(&block, &env);
+        assert!(
+            !running.contains("Elapsed "),
+            "running header/body: {running}"
+        );
+        assert!(!running.contains("Took "));
+        block.update(ToolMessage::Finish {
+            ok: true,
+            output: "match".to_string(),
+            stderr: String::new(),
+            file_change: None,
+            duration_ms: 10_300,
+        });
+        let finished = block_text(&block, &env);
+        assert!(
+            !finished.contains("Elapsed "),
+            "finished header/body: {finished}"
+        );
+        assert!(!finished.contains("Took "));
+    }
+
+    #[test]
+    fn worker_block_shows_elapsed_and_took() {
+        let env = ChatEnv {
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let mut block = ToolBlock::new(
+            "explore_workspace",
+            r#"{"task":"find the config loader"}"#.to_string(),
+            Some(String::new()),
+            None,
+        );
+        assert_eq!(block.est().tool_rows, 1);
+        let running = block_text(&block, &env);
+        assert!(
+            running.contains("Elapsed "),
+            "running header/body: {running}"
+        );
+        block.update(ToolMessage::Finish {
+            ok: true,
+            output: "report".to_string(),
+            stderr: String::new(),
+            file_change: None,
+            duration_ms: 12_000,
+        });
+        let finished = block_text(&block, &env);
+        assert!(
+            finished.contains("Took 12.0s"),
+            "finished header/body: {finished}"
+        );
+        assert!(!finished.contains("Elapsed "));
     }
 
     fn todo_output() -> String {

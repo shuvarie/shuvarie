@@ -1450,15 +1450,15 @@ mod tests {
             content: "go".into(),
         });
         chat.update(ChatMessage::ToolStarted {
-            name: "grep".into(),
-            args: serde_json::json!({}),
+            name: "run_shell".into(),
+            args: serde_json::json!({"command": "ls"}),
             worker: None,
             call_id: None,
         });
         chat.update(ChatMessage::ToolFinished {
-            name: "grep".into(),
+            name: "run_shell".into(),
             ok: true,
-            output: "out".into(),
+            output: "exit 0\nout".into(),
             worker: None,
             file_change: None,
             streams: None,

@@ -9,6 +9,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::blocks::{
     Block, BlockMessage, ChatEnv, ReasoningBlock, ReasoningMessage, TextBlock, TextMessage,
+    shows_elapsed,
 };
 use super::segment::{BLOCK_PADDING, BlockAddr, HitRegion, Segment, TEXT_PADDING};
 
@@ -126,7 +127,7 @@ impl TurnEst {
         if let Some(change) = &record.file_change {
             self.tool_rows += file_change_row_est(change);
         }
-        self.tool_rows += 1;
+        self.tool_rows += u32::from(shows_elapsed(&record.name));
     }
 }
 
