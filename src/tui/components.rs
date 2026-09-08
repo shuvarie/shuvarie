@@ -391,6 +391,7 @@ pub enum TextAreaMessage {
     CursorUp,
     CursorDown,
     Submit,
+    Clear,
 }
 
 pub enum TextAreaEffect {
@@ -529,6 +530,10 @@ impl TextArea {
                 self.buffer.clear();
                 Some(TextAreaEffect::Submit { content })
             }
+            TextAreaMessage::Clear => {
+                self.buffer.clear();
+                None
+            }
         }
     }
 
@@ -538,6 +543,10 @@ impl TextArea {
         let inner_w = width.saturating_sub(4).max(1);
         let rows = self.buffer.row_count(inner_w).max(1) as u16;
         rows.min(self.max_height) + 2
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buffer.value.is_empty()
     }
 
     #[allow(dead_code)]

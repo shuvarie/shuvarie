@@ -678,12 +678,22 @@ impl SessionScreen {
             let footer = if !self.question.open && self.slash.active() {
                 theme::help_line(&[("Tab", "complete"), ("↑↓", "select"), ("Esc", "dismiss")])
             } else if self.chat.is_streaming() {
-                theme::help_line(&[("Ctrl+C", "stop"), ("Ctrl+M", "commands")])
+                let ctrl_c = if self.input.is_empty() {
+                    "stop"
+                } else {
+                    "clear"
+                };
+                theme::help_line(&[("Ctrl+C", ctrl_c), ("Ctrl+M", "commands")])
             } else {
+                let ctrl_c = if self.input.is_empty() {
+                    "quit"
+                } else {
+                    "clear"
+                };
                 theme::help_line(&[
                     ("Enter", "send"),
                     ("Ctrl+M", "commands"),
-                    ("Ctrl+C", "quit"),
+                    ("Ctrl+C", ctrl_c),
                 ])
             };
             frame.render_widget(Paragraph::new(footer).fg(theme::TEXT_MUTED), footer_area);

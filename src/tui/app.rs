@@ -12,6 +12,7 @@ use crate::tui::utils::ctrl;
 use super::add_provider::{AddProviderForm, AddProviderMessage, AddProviderOutcome};
 use super::command_menu::{CommandMenu, CommandMenuMessage};
 use super::commands::CommandAction;
+use super::components::TextAreaMessage;
 use super::confirm_quit::{ConfirmQuit, ConfirmQuitEffect, ConfirmQuitMessage};
 use super::context::UpdateCtx;
 use super::history_search::{HistorySearch, HistorySearchEffect, HistorySearchMessage};
@@ -290,6 +291,11 @@ impl App {
                     match key.kind {
                         KeyEventKind::Press => match key.code {
                             KeyCode::Char('c') if ctrl(&key) => {
+                                if !self.session.input.is_empty() {
+                                    return Some(AppMessage::Session(SessionMessage::Text(
+                                        TextAreaMessage::Clear,
+                                    )));
+                                }
                                 if self.session.is_streaming() {
                                     return Some(AppMessage::Session(
                                         SessionMessage::CancelRequested,
