@@ -423,9 +423,9 @@ impl SessionScreen {
                 None
             }
             SessionMessage::CompactionFinished => {
-                self.busy = false;
+                self.busy = true;
                 self.busy_kind = BusyKind::Generating;
-                self.status = None;
+                self.status = Some("Resuming after compaction...".to_string());
                 self.retry = None;
                 None
             }
@@ -1034,8 +1034,61 @@ mod tests {
         assert_eq!(screen.status.as_deref(), Some("Compacting context..."));
 
         screen.update(SessionMessage::CompactionFinished);
+        assert!(screen.busy);
+        assert_eq!(screen.busy_kind, BusyKind::Generating);
+        assert_eq!(
+            screen.status.as_deref(),
+            Some("Resuming after compaction...")
+        );
+    }
+
+    #[test]
+    fn compaction_busy_stays_armed_across_turn_reverted() {
+        let mut screen = SessionScreen::new();
+        screen.update(SessionMessage::CompactionStarted);
+        screen.update(SessionMessage::CompactionFinished);
+
+        screen.update(SessionMessage::TurnReverted {
+            session: shuvarie_core::Session::new(),
+        });
+        assert!(screen.busy);
+        assert_eq!(
+            screen.status.as_deref(),
+            Some("Resuming after compaction...")
+        );
+    }
+
+    #[test]
+    fn stream_activity_after_compaction_refreshes_status() {
+        let mut screen = SessionScreen::new();
+        screen.update(SessionMessage::CompactionStarted);
+        screen.update(SessionMessage::CompactionFinished);
+
+        screen.update(SessionMessage::Chat(ChatMessage::ToolStarted {
+            name: "read_file".into(),
+            args: serde_json::json!({}),
+            worker: None,
+        }));
+        assert!(screen.busy);
+        assert_eq!(screen.busy_kind, BusyKind::Tool);
+        assert_eq!(screen.status.as_deref(), Some("Calling tool: read_file"));
+    }
+
+    #[test]
+    fn stream_error_after_compaction_clears_busy() {
+        let mut screen = SessionScreen::new();
+        screen.update(SessionMessage::CompactionStarted);
+        screen.update(SessionMessage::CompactionFinished);
+        assert!(screen.busy);
+
+        screen.update(SessionMessage::Chat(ChatMessage::StreamError {
+            error: "provider unreachable".into(),
+        }));
         assert!(!screen.busy);
-        assert!(screen.status.is_none());
+        assert_eq!(
+            screen.status.as_deref(),
+            Some("error: provider unreachable")
+        );
     }
 
     #[test]
