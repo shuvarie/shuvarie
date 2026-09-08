@@ -798,6 +798,7 @@ mod tests {
             file_change: None,
             streams: None,
             duration_ms: 0,
+            call_id: None,
         })
     }
 
@@ -1068,6 +1069,7 @@ mod tests {
             name: "read_file".into(),
             args: serde_json::json!({}),
             worker: None,
+            call_id: None,
         }));
         assert!(screen.busy);
         assert_eq!(screen.busy_kind, BusyKind::Tool);

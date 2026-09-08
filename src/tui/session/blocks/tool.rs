@@ -38,10 +38,13 @@ pub enum ToolMessage {
 
 /// One agent tool call: status, human-readable header, collapsible output
 /// rows, optional diff review, and LSP diagnostics. Owns its own collapse
-/// state (`question` blocks default to expanded once finished).
+/// state (`question` blocks default to expanded once finished). `call_id` is
+/// the provider's per-call id (empty for persisted records) — finishes match
+/// their block by it when a model batches several calls of one tool.
 pub struct ToolBlock {
     name: String,
     args: String,
+    call_id: String,
     status: ToolStatus,
     output: String,
     stderr: String,
@@ -53,10 +56,16 @@ pub struct ToolBlock {
 }
 
 impl ToolBlock {
-    pub fn new(name: impl Into<String>, args: String, worker: Option<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        args: String,
+        worker: Option<String>,
+        call_id: Option<String>,
+    ) -> Self {
         Self {
             name: name.into(),
             args,
+            call_id: call_id.unwrap_or_default(),
             status: ToolStatus::Running,
             output: String::new(),
             stderr: String::new(),
@@ -72,6 +81,7 @@ impl ToolBlock {
         Self {
             name: record.name.clone(),
             args: record.args_json.clone(),
+            call_id: String::new(),
             status: if record.ok {
                 ToolStatus::Ok
             } else {
@@ -89,6 +99,11 @@ impl ToolBlock {
 
     pub fn matches(&self, name: &str, worker: &Option<String>) -> bool {
         self.name == name && self.worker == *worker
+    }
+
+    /// The provider call id this block was started with, if any.
+    pub fn call_id(&self) -> Option<&str> {
+        (!self.call_id.is_empty()).then_some(self.call_id.as_str())
     }
 
     pub fn is_running(&self) -> bool {
@@ -819,7 +834,12 @@ mod tests {
     }
 
     fn finished_edit_block() -> ToolBlock {
-        let mut block = ToolBlock::new("edit_file", r#"{"path":"src/main.rs"}"#.to_string(), None);
+        let mut block = ToolBlock::new(
+            "edit_file",
+            r#"{"path":"src/main.rs"}"#.to_string(),
+            None,
+            None,
+        );
         block.update(ToolMessage::Finish {
             ok: true,
             output: String::new(),
@@ -886,7 +906,7 @@ mod tests {
         let env = ChatEnv {
             lsp_diagnostics: &BTreeMap::new(),
         };
-        let block = ToolBlock::new("run_shell", r#"{"command":"ls"}"#.to_string(), None);
+        let block = ToolBlock::new("run_shell", r#"{"command":"ls"}"#.to_string(), None, None);
         let text = block_text(&block, &env);
         assert!(text.contains("Elapsed "), "header/body: {text}");
         assert!(!text.contains("Took "));
@@ -897,7 +917,7 @@ mod tests {
         let env = ChatEnv {
             lsp_diagnostics: &BTreeMap::new(),
         };
-        let mut block = ToolBlock::new("run_shell", r#"{"command":"ls"}"#.to_string(), None);
+        let mut block = ToolBlock::new("run_shell", r#"{"command":"ls"}"#.to_string(), None, None);
         block.update(ToolMessage::Finish {
             ok: true,
             output: "done".to_string(),
@@ -945,6 +965,7 @@ mod tests {
         let mut block = ToolBlock::new(
             "todo",
             r#"{"op":"add","text":"update UI"}"#.to_string(),
+            None,
             None,
         );
         block.update(ToolMessage::Finish {
@@ -1001,6 +1022,7 @@ mod tests {
         let mut block = ToolBlock::new(
             "todo",
             r#"{"op":"update","id":9,"status":"done"}"#.to_string(),
+            None,
             None,
         );
         block.update(ToolMessage::Finish {

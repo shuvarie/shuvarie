@@ -34,7 +34,7 @@ pub enum Block {
     User(UserPrompt),
     Text(TextBlock),
     System(SystemText),
-    Tool(ToolBlock),
+    Tool(Box<ToolBlock>),
     Reasoning(ReasoningBlock),
     Context(ContextBlock),
     Summary,
@@ -143,6 +143,13 @@ impl Block {
 
     pub fn tool_matches(&self, name: &str, worker: &Option<String>) -> bool {
         matches!(self, Block::Tool(tool) if tool.matches(name, worker))
+    }
+
+    pub fn tool_call_id(&self) -> Option<&str> {
+        match self {
+            Block::Tool(tool) => tool.call_id(),
+            _ => None,
+        }
     }
 
     pub fn tool_is_running(&self) -> bool {

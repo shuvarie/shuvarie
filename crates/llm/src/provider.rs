@@ -437,13 +437,15 @@ impl ProviderClient {
                         StreamItem::WorkerStart {
                             name,
                             args: tool_call.function.arguments,
+                            call_id: internal_call_id,
                         }
                     } else {
-                        tool_names.insert(internal_call_id, name.clone());
+                        tool_names.insert(internal_call_id.clone(), name.clone());
                         StreamItem::ToolStart {
                             name,
                             args: tool_call.function.arguments,
                             worker: None,
+                            call_id: internal_call_id,
                         }
                     }
                 }
@@ -484,11 +486,13 @@ impl ProviderClient {
                             worker: None,
                             file_change: captured.file_change,
                             streams: captured.shell,
+                            call_id: internal_call_id,
                         },
                         None => StreamItem::WorkerResult {
                             name: pending_workers.pop_front().unwrap_or_default(),
                             output,
                             ok,
+                            call_id: internal_call_id,
                         },
                     }
                 }
@@ -702,12 +706,13 @@ async fn run_worker_agent(
                     internal_call_id,
                 },
             )) => {
-                tool_names.insert(internal_call_id, tool_call.function.name.clone());
+                tool_names.insert(internal_call_id.clone(), tool_call.function.name.clone());
                 let _ = activity_tx
                     .send(StreamItem::ToolStart {
                         name: tool_call.function.name,
                         args: tool_call.function.arguments,
                         worker: Some(name.to_string()),
+                        call_id: internal_call_id,
                     })
                     .await;
             }
@@ -748,6 +753,7 @@ async fn run_worker_agent(
                         worker: Some(name.to_string()),
                         file_change: captured.file_change,
                         streams: captured.shell,
+                        call_id: internal_call_id,
                     })
                     .await;
             }
@@ -832,6 +838,7 @@ mod tests {
                 name: "read_file".into(),
                 args: json!({ "path": "x.rs" }),
                 worker: Some("explore_workspace".into()),
+                call_id: "w1".into(),
             },
             StreamItem::ToolResult {
                 name: "read_file".into(),
@@ -840,6 +847,7 @@ mod tests {
                 worker: Some("explore_workspace".into()),
                 file_change: None,
                 streams: None,
+                call_id: "w1".into(),
             },
         ];
         let _ = worker_tx.send(worker_items[0].clone()).await;
@@ -876,6 +884,7 @@ mod tests {
             worker: Some("explore_workspace".into()),
             file_change: None,
             streams: None,
+            call_id: "w2".into(),
         };
         let _ = worker_tx.send(worker_item.clone()).await;
         drop(worker_tx);
@@ -901,6 +910,7 @@ mod tests {
         let item = StreamItem::WorkerStart {
             name: "run_tests".into(),
             args: json!({ "task": "run tests" }),
+            call_id: "w3".into(),
         };
         let _ = worker_tx.send(item.clone()).await;
         let got = tokio::time::timeout(std::time::Duration::from_secs(2), merged.next())

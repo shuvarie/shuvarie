@@ -33,6 +33,7 @@ pub enum ChatMessage {
         name: String,
         args: Value,
         worker: Option<String>,
+        call_id: Option<String>,
     },
     ToolFinished {
         name: String,
@@ -42,6 +43,7 @@ pub enum ChatMessage {
         file_change: Option<FileChange>,
         streams: Option<ShellStreams>,
         duration_ms: u64,
+        call_id: Option<String>,
     },
     ToolOutput {
         tool: String,
@@ -52,12 +54,14 @@ pub enum ChatMessage {
     WorkerStarted {
         name: String,
         args: Value,
+        call_id: Option<String>,
     },
     WorkerFinished {
         name: String,
         ok: bool,
         output: String,
         duration_ms: u64,
+        call_id: Option<String>,
     },
     StreamDone,
     StreamError {
@@ -227,11 +231,21 @@ impl Chat {
                 let turn = in_flight.get_or_insert_with(|| TurnData::new(Role::Assistant));
                 turn.push_block(Block::Context(ContextBlock::new(paths)));
             }
-            ChatMessage::ToolStarted { name, args, worker } => {
+            ChatMessage::ToolStarted {
+                name,
+                args,
+                worker,
+                call_id,
+            } => {
                 self.streaming = true;
                 let mut in_flight = self.in_flight.borrow_mut();
                 let turn = in_flight.get_or_insert_with(|| TurnData::new(Role::Assistant));
-                turn.push_block(Block::Tool(ToolBlock::new(name, args.to_string(), worker)));
+                turn.push_block(Block::Tool(Box::new(ToolBlock::new(
+                    name,
+                    args.to_string(),
+                    worker,
+                    call_id,
+                ))));
             }
             ChatMessage::ToolFinished {
                 name,
@@ -241,12 +255,13 @@ impl Chat {
                 file_change,
                 streams,
                 duration_ms,
+                call_id,
             } => {
                 let (display_output, display_stderr) = match streams {
                     Some(streams) => (streams.stdout, streams.stderr),
                     None => (output, String::new()),
                 };
-                self.with_running_tool(&name, &worker, |block| {
+                self.with_running_tool(&name, &worker, call_id.as_deref(), |block| {
                     block.update(BlockMessage::Tool(ToolMessage::Finish {
                         ok,
                         output: display_output,
@@ -263,30 +278,36 @@ impl Chat {
                 stdout,
                 stderr,
             } => {
-                let updated = self.with_running_tool(&tool, &worker, |block| {
+                let updated = self.with_running_tool(&tool, &worker, None, |block| {
                     block.update(BlockMessage::Tool(ToolMessage::Output { stdout, stderr }))
                 });
                 if updated {
                     self.touch_in_flight();
                 }
             }
-            ChatMessage::WorkerStarted { name, args } => {
+            ChatMessage::WorkerStarted {
+                name,
+                args,
+                call_id,
+            } => {
                 self.streaming = true;
                 let mut in_flight = self.in_flight.borrow_mut();
                 let turn = in_flight.get_or_insert_with(|| TurnData::new(Role::Assistant));
-                turn.push_block(Block::Tool(ToolBlock::new(
+                turn.push_block(Block::Tool(Box::new(ToolBlock::new(
                     name,
                     args.to_string(),
                     Some(String::new()),
-                )));
+                    call_id,
+                ))));
             }
             ChatMessage::WorkerFinished {
                 name,
                 ok,
                 output,
                 duration_ms,
+                call_id,
             } => {
-                self.with_running_tool(&name, &Some(String::new()), |block| {
+                self.with_running_tool(&name, &Some(String::new()), call_id.as_deref(), |block| {
                     block.update(BlockMessage::Tool(ToolMessage::Finish {
                         ok,
                         output,
@@ -546,19 +567,31 @@ impl Chat {
         );
     }
 
+    /// Find the still-running block a finish belongs to and apply it. A
+    /// finish carries the provider's call id, so batched calls of one tool
+    /// (all `Running` at once) each land on their own block; the name+worker
+    /// match is only a fallback for finishes without an id.
     fn with_running_tool(
         &mut self,
         name: &str,
         worker: &Option<String>,
+        call_id: Option<&str>,
         apply: impl FnOnce(&mut Block) -> bool,
     ) -> bool {
+        let is_match = |block: &Block| {
+            if !block.tool_is_running() {
+                return false;
+            }
+            let own = block.tool_call_id().unwrap_or_default();
+            match call_id.filter(|id| !id.is_empty()) {
+                Some(id) if !own.is_empty() => id == own,
+                _ => block.tool_matches(name, worker),
+            }
+        };
         let mut in_flight = self.in_flight.borrow_mut();
         if let Some(turn) = in_flight.as_mut()
             && let Some(blocks) = turn.blocks.as_mut()
-            && let Some(block) = blocks
-                .iter_mut()
-                .rev()
-                .find(|block| block.tool_matches(name, worker) && block.tool_is_running())
+            && let Some(block) = blocks.iter_mut().rev().find(|block| is_match(block))
         {
             return apply(block);
         }
@@ -570,11 +603,7 @@ impl Chat {
             let Some(blocks) = turn.blocks.as_mut() else {
                 continue;
             };
-            let Some(block) = blocks
-                .iter_mut()
-                .rev()
-                .find(|block| block.tool_matches(name, worker) && block.tool_is_running())
-            else {
+            let Some(block) = blocks.iter_mut().rev().find(|block| is_match(block)) else {
                 continue;
             };
             let updated = apply(block);
@@ -901,7 +930,7 @@ fn materialize_blocks(session: &shuvarie_core::Session, idx: usize) -> Vec<Block
                 .filter(|record| record.message_seq as usize == idx)
                 .enumerate()
             {
-                blocks.push(Block::Tool(ToolBlock::from_record(record)));
+                blocks.push(Block::Tool(Box::new(ToolBlock::from_record(record))));
                 drain_reasoning(&mut blocks, &mut seg_i, count + 1);
             }
             drain_reasoning(&mut blocks, &mut seg_i, usize::MAX);
@@ -1082,6 +1111,7 @@ mod tests {
             name: "read_file".into(),
             args: serde_json::json!({}),
             worker: None,
+            call_id: None,
         });
         let tool_only = render_turn_lines(&chat, None, 80).unwrap();
         assert!(tool_only.contains("(Working...)"));
@@ -1136,6 +1166,7 @@ mod tests {
             name: "read_file".into(),
             args: serde_json::json!({}),
             worker: None,
+            call_id: None,
         });
         chat.update(ChatMessage::ReasoningReceived {
             content: "again".into(),
@@ -1161,6 +1192,7 @@ mod tests {
                     name: "read_file".into(),
                     args: serde_json::json!({"path": format!("src/a/long/path/file_{i}.rs")}),
                     worker: Some("explore".into()),
+                    call_id: None,
                 });
                 chat.update(ChatMessage::TokenReceived {
                     content: unit.repeat(2),
@@ -1173,6 +1205,7 @@ mod tests {
                     file_change: None,
                     streams: None,
                     duration_ms: 120,
+                    call_id: None,
                 });
             }
             chat.update(ChatMessage::TokenReceived {
@@ -1204,11 +1237,13 @@ mod tests {
         chat.update(ChatMessage::WorkerStarted {
             name: "explore".into(),
             args: serde_json::json!("find it"),
+            call_id: None,
         });
         chat.update(ChatMessage::ToolStarted {
             name: "read_file".into(),
             args: serde_json::json!({"path": "x"}),
             worker: Some("explore".into()),
+            call_id: None,
         });
         chat.update(ChatMessage::StreamDone);
         assert!(chat.in_flight.borrow().is_none());
@@ -1242,6 +1277,7 @@ mod tests {
             name: "grep".into(),
             args: serde_json::json!({}),
             worker: Some("explore".into()),
+            call_id: None,
         });
         assert!(
             chat.in_flight.borrow().is_some(),
@@ -1260,11 +1296,13 @@ mod tests {
         chat.update(ChatMessage::WorkerStarted {
             name: "explore".into(),
             args: serde_json::json!("find it"),
+            call_id: None,
         });
         chat.update(ChatMessage::ToolStarted {
             name: "read_file".into(),
             args: serde_json::json!({"path": "x"}),
             worker: Some("explore".into()),
+            call_id: None,
         });
         chat.update(ChatMessage::StreamDone);
         assert!(chat.has_running_tool_blocks());
@@ -1281,6 +1319,7 @@ mod tests {
             file_change: None,
             streams: None,
             duration_ms: 120,
+            call_id: None,
         });
         assert!(
             chat.has_running_tool_blocks(),
@@ -1311,6 +1350,7 @@ mod tests {
             name: "grep".into(),
             args: serde_json::json!({}),
             worker: None,
+            call_id: None,
         });
         assert!(chat.has_running_tool_blocks());
         chat.update(ChatMessage::StreamDone);
@@ -1323,6 +1363,7 @@ mod tests {
             file_change: None,
             streams: None,
             duration_ms: 5,
+            call_id: None,
         });
         assert!(!chat.has_running_tool_blocks());
         chat.update(ChatMessage::ToolFinished {
@@ -1333,8 +1374,103 @@ mod tests {
             file_change: None,
             streams: None,
             duration_ms: 5,
+            call_id: None,
         });
         assert!(!chat.has_running_tool_blocks(), "stale finish is a no-op");
+    }
+
+    #[test]
+    fn batched_same_tool_finishes_land_on_their_own_blocks() {
+        // A model can batch several calls of one tool in a single response:
+        // rig streams every call's start before any result, so all blocks are
+        // running at once. Each finish must land on the block of its own
+        // call id — matching by name alone reverses the outputs onto the
+        // sibling blocks (the first block would show the newest list).
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "go".into(),
+        });
+        chat.update(ChatMessage::ToolStarted {
+            name: "todo".into(),
+            args: serde_json::json!({ "op": "add", "text": "first" }),
+            worker: None,
+            call_id: Some("call-1".into()),
+        });
+        chat.update(ChatMessage::ToolStarted {
+            name: "todo".into(),
+            args: serde_json::json!({ "op": "add", "text": "second" }),
+            worker: None,
+            call_id: Some("call-2".into()),
+        });
+        chat.update(ChatMessage::ToolFinished {
+            name: "todo".into(),
+            ok: true,
+            output: "Todos (0/1 done)\n  #1 [ ] first".into(),
+            worker: None,
+            file_change: None,
+            streams: None,
+            duration_ms: 1,
+            call_id: Some("call-1".into()),
+        });
+        chat.update(ChatMessage::ToolFinished {
+            name: "todo".into(),
+            ok: true,
+            output: "Todos (0/2 done)\n  #1 [ ] first\n  #2 [ ] second".into(),
+            worker: None,
+            file_change: None,
+            streams: None,
+            duration_ms: 1,
+            call_id: Some("call-2".into()),
+        });
+        let text = render_turn_lines(&chat, None, 80).unwrap();
+        let first_header = text.find("todo + \"first\"").expect("first header");
+        let second_header = text.find("todo + \"second\"").expect("second header");
+        assert!(
+            first_header < second_header,
+            "blocks stay in call order: {text}"
+        );
+        let one_done = text.find("0/1 done").expect("first list count");
+        let two_done = text.find("0/2 done").expect("second list count");
+        assert!(
+            one_done < two_done,
+            "each block shows its own call's snapshot: {text}"
+        );
+        assert!(
+            one_done < second_header,
+            "the first block's body precedes the second block: {text}"
+        );
+    }
+
+    #[test]
+    fn finish_without_call_id_falls_back_to_name_and_worker() {
+        // Shell-output paths (and legacy flows) have no call id; they match
+        // by name + worker as before.
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "go".into(),
+        });
+        chat.update(ChatMessage::ToolStarted {
+            name: "grep".into(),
+            args: serde_json::json!({}),
+            worker: None,
+            call_id: None,
+        });
+        chat.update(ChatMessage::ToolFinished {
+            name: "grep".into(),
+            ok: true,
+            output: "out".into(),
+            worker: None,
+            file_change: None,
+            streams: None,
+            duration_ms: 3,
+            call_id: None,
+        });
+        let text = render_turn_lines(&chat, None, 80).unwrap();
+        assert!(text.contains("out"), "finish landed on the block: {text}");
+        assert!(
+            text.contains("Took"),
+            "finished blocks show the took meta row: {text}"
+        );
     }
 
     #[test]
@@ -1392,6 +1528,7 @@ mod tests {
             name: "edit_file".into(),
             args: serde_json::json!({}),
             worker: None,
+            call_id: None,
         });
         chat.update(ChatMessage::ToolFinished {
             name: "edit_file".into(),
@@ -1401,6 +1538,7 @@ mod tests {
             file_change: None,
             streams: None,
             duration_ms: 0,
+            call_id: None,
         });
         chat.update(ChatMessage::StreamDone);
         chat.update(ChatMessage::BeginUserTurn {
@@ -1800,6 +1938,7 @@ mod tests {
             name: "read_file".into(),
             args: serde_json::json!({}),
             worker: None,
+            call_id: None,
         });
         chat.update(ChatMessage::ToolFinished {
             name: "read_file".into(),
@@ -1809,6 +1948,7 @@ mod tests {
             file_change: None,
             streams: None,
             duration_ms: 0,
+            call_id: None,
         });
 
         let buf = draw(&chat, 80, 20);

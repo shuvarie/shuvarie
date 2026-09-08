@@ -37,6 +37,7 @@ pub enum Event {
         name: String,
         args: serde_json::Value,
         worker: Option<String>,
+        call_id: String,
     },
     ToolFinished {
         name: String,
@@ -46,6 +47,7 @@ pub enum Event {
         file_change: Option<FileChange>,
         streams: Option<ShellStreams>,
         duration_ms: u64,
+        call_id: String,
     },
     ToolOutput {
         tool: String,
@@ -56,12 +58,14 @@ pub enum Event {
     WorkerStarted {
         name: String,
         args: serde_json::Value,
+        call_id: String,
     },
     WorkerFinished {
         name: String,
         ok: bool,
         output: String,
         duration_ms: u64,
+        call_id: String,
     },
     StreamDone {
         text: String,

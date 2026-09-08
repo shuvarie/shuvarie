@@ -343,9 +343,19 @@ impl App {
                 CoreEvent::ContextLoaded { paths } => Some(AppMessage::Session(
                     SessionMessage::Chat(ChatMessage::ContextLoaded { paths }),
                 )),
-                CoreEvent::ToolStarted { name, args, worker } => Some(AppMessage::Session(
-                    SessionMessage::Chat(ChatMessage::ToolStarted { name, args, worker }),
-                )),
+                CoreEvent::ToolStarted {
+                    name,
+                    args,
+                    worker,
+                    call_id,
+                } => Some(AppMessage::Session(SessionMessage::Chat(
+                    ChatMessage::ToolStarted {
+                        name,
+                        args,
+                        worker,
+                        call_id: Some(call_id),
+                    },
+                ))),
                 CoreEvent::ToolFinished {
                     name,
                     ok,
@@ -354,6 +364,7 @@ impl App {
                     file_change,
                     streams,
                     duration_ms,
+                    call_id,
                 } => Some(AppMessage::Session(SessionMessage::Chat(
                     ChatMessage::ToolFinished {
                         name,
@@ -363,6 +374,7 @@ impl App {
                         file_change,
                         streams,
                         duration_ms,
+                        call_id: Some(call_id),
                     },
                 ))),
                 CoreEvent::ToolOutput {
@@ -378,20 +390,30 @@ impl App {
                         stderr,
                     },
                 ))),
-                CoreEvent::WorkerStarted { name, args } => Some(AppMessage::Session(
-                    SessionMessage::Chat(ChatMessage::WorkerStarted { name, args }),
-                )),
+                CoreEvent::WorkerStarted {
+                    name,
+                    args,
+                    call_id,
+                } => Some(AppMessage::Session(SessionMessage::Chat(
+                    ChatMessage::WorkerStarted {
+                        name,
+                        args,
+                        call_id: Some(call_id),
+                    },
+                ))),
                 CoreEvent::WorkerFinished {
                     name,
                     ok,
                     output,
                     duration_ms,
+                    call_id,
                 } => Some(AppMessage::Session(SessionMessage::Chat(
                     ChatMessage::WorkerFinished {
                         name,
                         ok,
                         output,
                         duration_ms,
+                        call_id: Some(call_id),
                     },
                 ))),
                 CoreEvent::StreamDone { .. } => Some(AppMessage::Session(SessionMessage::Chat(

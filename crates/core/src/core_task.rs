@@ -1413,11 +1413,15 @@ async fn stream_stream_to_events(
                     .await;
             }
             shuvarie_llm::StreamItem::Reasoning { .. } => {}
-            shuvarie_llm::StreamItem::ToolStart { name, args, worker } => {
+            shuvarie_llm::StreamItem::ToolStart {
+                name,
+                args,
+                worker,
+                call_id,
+            } => {
                 let args_json = args.to_string();
-                let key = format!("{}:{:?}", name, worker);
                 pending_tool_args.insert(
-                    key,
+                    call_id.clone(),
                     PendingTool {
                         args_json,
                         started: std::time::Instant::now(),
@@ -1438,7 +1442,12 @@ async fn stream_stream_to_events(
                     ts.assistant_seq = assistant_seq;
                 }
                 let _ = event_tx
-                    .send(Event::ToolStarted { name, args, worker })
+                    .send(Event::ToolStarted {
+                        name,
+                        args,
+                        worker,
+                        call_id,
+                    })
                     .await;
             }
             shuvarie_llm::StreamItem::ToolResult {
@@ -1448,14 +1457,14 @@ async fn stream_stream_to_events(
                 worker,
                 file_change,
                 streams,
+                call_id,
             } => {
                 let (fc_json, original, new) = serialize_file_change(&file_change);
                 let (display_output, display_stderr) = match &streams {
                     Some(s) => (s.stdout.clone(), s.stderr.clone()),
                     None => (output.clone(), String::new()),
                 };
-                let key = format!("{}:{:?}", name, worker);
-                let (args_json, duration_ms) = match pending_tool_args.remove(&key) {
+                let (args_json, duration_ms) = match pending_tool_args.remove(&call_id) {
                     Some(pending) => (
                         pending.args_json,
                         pending.started.elapsed().as_millis() as u64,
@@ -1513,16 +1522,32 @@ async fn stream_stream_to_events(
                         file_change,
                         streams,
                         duration_ms,
+                        call_id,
                     })
                     .await;
             }
-            shuvarie_llm::StreamItem::WorkerStart { name, args } => {
-                pending_worker_starts.insert(name.clone(), std::time::Instant::now());
-                let _ = event_tx.send(Event::WorkerStarted { name, args }).await;
+            shuvarie_llm::StreamItem::WorkerStart {
+                name,
+                args,
+                call_id,
+            } => {
+                pending_worker_starts.insert(call_id.clone(), std::time::Instant::now());
+                let _ = event_tx
+                    .send(Event::WorkerStarted {
+                        name,
+                        args,
+                        call_id,
+                    })
+                    .await;
             }
-            shuvarie_llm::StreamItem::WorkerResult { name, output, ok } => {
+            shuvarie_llm::StreamItem::WorkerResult {
+                name,
+                output,
+                ok,
+                call_id,
+            } => {
                 let duration_ms = pending_worker_starts
-                    .remove(&name)
+                    .remove(&call_id)
                     .map(|started| started.elapsed().as_millis() as u64)
                     .unwrap_or_default();
                 let _ = event_tx
@@ -1531,6 +1556,7 @@ async fn stream_stream_to_events(
                         ok,
                         output,
                         duration_ms,
+                        call_id,
                     })
                     .await;
             }
@@ -2191,6 +2217,7 @@ mod tests {
             worker: Some("explore_workspace".into()),
             file_change: None,
             streams: None,
+            call_id: "w1".into(),
         };
         let worker_request_usage = StreamItem::Usage {
             usage: TokenUsage {
@@ -2290,11 +2317,13 @@ mod tests {
             StreamItem::WorkerStart {
                 name: "explore_workspace".into(),
                 args: serde_json::json!({ "task": "find the bug" }),
+                call_id: "w1".into(),
             },
             StreamItem::ToolStart {
                 name: "grep".into(),
                 args: serde_json::json!({ "pattern": "bug" }),
                 worker: Some("explore_workspace".into()),
+                call_id: "t1".into(),
             },
             StreamItem::ToolResult {
                 name: "grep".into(),
@@ -2303,11 +2332,13 @@ mod tests {
                 worker: Some("explore_workspace".into()),
                 file_change: None,
                 streams: None,
+                call_id: "t1".into(),
             },
             StreamItem::WorkerResult {
                 name: "explore_workspace".into(),
                 output: "summary".into(),
                 ok: true,
+                call_id: "w1".into(),
             },
             StreamItem::Usage {
                 usage: TokenUsage {

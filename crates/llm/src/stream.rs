@@ -17,6 +17,9 @@ pub enum StreamItem {
         name: String,
         args: Value,
         worker: Option<String>,
+        /// The provider call id (`internal_call_id`) that ties the result back
+        /// to its own start when a model batches several calls of one tool.
+        call_id: String,
     },
     ToolResult {
         name: String,
@@ -25,15 +28,18 @@ pub enum StreamItem {
         worker: Option<String>,
         file_change: Option<FileChange>,
         streams: Option<ShellStreams>,
+        call_id: String,
     },
     WorkerStart {
         name: String,
         args: Value,
+        call_id: String,
     },
     WorkerResult {
         name: String,
         output: String,
         ok: bool,
+        call_id: String,
     },
     /// Usage for one completed provider request within the run. Emitted once
     /// per agent iteration (main stream and workers), so consumers can track
