@@ -17,6 +17,13 @@ pub enum QuestionMessage {
     Escape,
     CustomInput(char),
     CustomBackspace,
+    CustomDelete,
+    CustomLeft,
+    CustomRight,
+    CustomHome,
+    CustomEnd,
+    CustomLeftWord,
+    CustomRightWord,
 }
 
 pub enum QuestionEffect {
@@ -130,16 +137,33 @@ impl QuestionUI {
             return None;
         }
         if self.typing_custom {
-            if key.modifiers.contains(Modifiers::CONTROL) {
+            if ctrl_mod(key) {
                 return match key.code {
-                    KeyCode::Char('b') => Some(QuestionMessage::CustomInput('\u{2}')),
+                    KeyCode::Char('b') => Some(QuestionMessage::CustomLeft),
+                    KeyCode::Char('f') => Some(QuestionMessage::CustomRight),
+                    KeyCode::Char('a') => Some(QuestionMessage::CustomHome),
+                    KeyCode::Char('e') => Some(QuestionMessage::CustomEnd),
+                    KeyCode::Char('d') => Some(QuestionMessage::CustomDelete),
                     KeyCode::Char('h') => Some(QuestionMessage::CustomBackspace),
+                    _ => None,
+                };
+            }
+            if key.modifiers.contains(Modifiers::ALT) {
+                return match key.code {
+                    KeyCode::Char('b') => Some(QuestionMessage::CustomLeftWord),
+                    KeyCode::Char('f') => Some(QuestionMessage::CustomRightWord),
                     _ => None,
                 };
             }
             return match key.code {
                 KeyCode::Enter => Some(QuestionMessage::Toggle),
                 KeyCode::Backspace => Some(QuestionMessage::CustomBackspace),
+                KeyCode::Delete => Some(QuestionMessage::CustomDelete),
+                KeyCode::Left => Some(QuestionMessage::CustomLeft),
+                KeyCode::Right => Some(QuestionMessage::CustomRight),
+                KeyCode::Home => Some(QuestionMessage::CustomHome),
+                KeyCode::End => Some(QuestionMessage::CustomEnd),
+                KeyCode::Escape => Some(QuestionMessage::Escape),
                 KeyCode::Char(c) => Some(QuestionMessage::CustomInput(c)),
                 _ => None,
             };
@@ -172,20 +196,18 @@ impl QuestionUI {
         match msg {
             QuestionMessage::CustomInput(c) => {
                 if self.typing_custom {
-                    if c == '\u{2}' {
-                        self.typing_buffer.left();
-                    } else {
-                        self.typing_buffer.push(c);
-                    }
+                    self.typing_buffer.push(c);
                 }
                 None
             }
-            QuestionMessage::CustomBackspace => {
-                if self.typing_custom {
-                    self.typing_buffer.backspace();
-                }
-                None
-            }
+            QuestionMessage::CustomBackspace => self.edit_custom(InputBuffer::backspace),
+            QuestionMessage::CustomDelete => self.edit_custom(InputBuffer::delete),
+            QuestionMessage::CustomLeft => self.edit_custom(InputBuffer::left),
+            QuestionMessage::CustomRight => self.edit_custom(InputBuffer::right),
+            QuestionMessage::CustomHome => self.edit_custom(InputBuffer::home),
+            QuestionMessage::CustomEnd => self.edit_custom(InputBuffer::end),
+            QuestionMessage::CustomLeftWord => self.edit_custom(InputBuffer::left_word),
+            QuestionMessage::CustomRightWord => self.edit_custom(InputBuffer::right_word),
             QuestionMessage::Escape => {
                 if self.typing_custom {
                     self.typing_custom = false;
@@ -241,6 +263,13 @@ impl QuestionUI {
                 None
             }
         }
+    }
+
+    fn edit_custom(&mut self, edit: fn(&mut InputBuffer)) -> Option<QuestionEffect> {
+        if self.typing_custom {
+            edit(&mut self.typing_buffer);
+        }
+        None
     }
 
     fn toggle(&mut self, from_nav: bool) -> Option<QuestionEffect> {
@@ -364,6 +393,11 @@ impl QuestionUI {
         ];
         if self.typing_custom {
             lines.push(self.typing_buffer.cursor_line(theme::TEXT, theme::ACCENT));
+            lines.push(theme::help_line(&[
+                ("←/→", "move"),
+                ("Enter", "save"),
+                ("Esc", "cancel"),
+            ]));
             return lines;
         }
         for (i, option) in q.options.iter().enumerate() {
@@ -422,9 +456,7 @@ impl QuestionUI {
             lines.push(Line::from(spans));
         }
         if lines.len() < max_rows {
-            let hints: &[(&str, &str)] = if self.typing_custom {
-                &[("Enter", "save"), ("Esc", "cancel")]
-            } else if self.questions.len() > 1 {
+            let hints: &[(&str, &str)] = if self.questions.len() > 1 {
                 &[
                     ("↑/↓", "choose"),
                     ("←/→", "question"),
