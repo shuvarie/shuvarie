@@ -35,6 +35,13 @@ pub(super) fn shows_elapsed(name: &str) -> bool {
     name == "run_shell" || name == "explore_workspace"
 }
 
+/// Tool blocks whose successful output is not previewed when collapsed: file
+/// contents and directory listings the header already summarizes. Failed
+/// calls keep their (short) error message visible.
+pub(super) fn hides_output_when_collapsed(name: &str) -> bool {
+    name == "read_file" || name == "list_dir"
+}
+
 /// One chat block: a TEA model per variant for the stateful kinds, unit
 /// variants for the stateless decorations the engine synthesizes around turns.
 pub enum Block {

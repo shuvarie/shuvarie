@@ -6,7 +6,7 @@ use shuvarie_core::tools::todos::{TodoStatus, done_total, parse_items};
 use shuvarie_llm::{DiffLine, DiffLineKind, FileChange, PatchFileKind};
 use unicode_width::UnicodeWidthStr;
 
-use super::{format_duration_ms, shows_elapsed};
+use super::{format_duration_ms, hides_output_when_collapsed, shows_elapsed};
 use crate::tui::session::blocks::{ChatEnv, Segment};
 use crate::tui::session::segment::BLOCK_PADDING;
 use crate::tui::session::virtualizer::{TurnEst, collapsed_rows, file_change_row_est};
@@ -430,6 +430,9 @@ fn push_output_rows(lines: &mut Vec<Line<'static>>, tool: &ToolBlock, is_shell: 
     } else {
         (stdout_rows.as_slice(), theme::TEXT_DIM)
     };
+    if tool.status == ToolStatus::Ok && hides_output_when_collapsed(&tool.name) {
+        return;
+    }
     let hidden = rows.len().saturating_sub(COLLAPSED_OUTPUT_LINES);
     for row in &rows[hidden..] {
         lines.push(Line::from(Span::raw((*row).to_string()).fg(fg)));
@@ -1099,5 +1102,100 @@ mod tests {
         });
         let text = block_text(&block, &env);
         assert!(text.contains("unknown todo id 9"), "header/body: {text}");
+    }
+
+    #[test]
+    fn collapsed_read_file_hides_successful_output() {
+        let env = ChatEnv {
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let mut block = ToolBlock::new(
+            "read_file",
+            r#"{"path":"src/main.rs"}"#.to_string(),
+            None,
+            None,
+        );
+        block.update(ToolMessage::Finish {
+            ok: true,
+            output: "fn main() {}\nfn second() {}\nfn third() {}\nfn fourth() {}".to_string(),
+            stderr: String::new(),
+            file_change: None,
+            duration_ms: 5,
+        });
+        let text = block_text(&block, &env);
+        assert!(
+            text.contains("read_file src/main.rs"),
+            "header/body: {text}"
+        );
+        assert!(text.contains("· lines 1–4"), "header/body: {text}");
+        assert!(!text.contains("fn main()"), "output leaked: {text}");
+        assert!(!text.contains("more lines"), "hint leaked: {text}");
+        assert_eq!(block.est().tool_rows, 0);
+    }
+
+    #[test]
+    fn read_file_toggle_reveals_output() {
+        let env = ChatEnv {
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let mut block = ToolBlock::new(
+            "read_file",
+            r#"{"path":"src/main.rs"}"#.to_string(),
+            None,
+            None,
+        );
+        block.update(ToolMessage::Finish {
+            ok: true,
+            output: "fn main() {}\nfn second() {}".to_string(),
+            stderr: String::new(),
+            file_change: None,
+            duration_ms: 5,
+        });
+        block.toggle();
+        let text = block_text(&block, &env);
+        assert!(text.contains("fn main() {}"), "header/body: {text}");
+        assert_eq!(block.est().tool_rows, 2);
+    }
+
+    #[test]
+    fn collapsed_list_dir_hides_successful_output() {
+        let env = ChatEnv {
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let mut block = ToolBlock::new("list_dir", r#"{"path":"crates"}"#.to_string(), None, None);
+        block.update(ToolMessage::Finish {
+            ok: true,
+            output: "core/\nllm/\nmain.rs".to_string(),
+            stderr: String::new(),
+            file_change: None,
+            duration_ms: 5,
+        });
+        let text = block_text(&block, &env);
+        assert!(text.contains("list_dir"), "header/body: {text}");
+        assert!(!text.contains("core/"), "output leaked: {text}");
+        assert!(!text.contains("more lines"), "hint leaked: {text}");
+        assert_eq!(block.est().tool_rows, 0);
+    }
+
+    #[test]
+    fn failed_read_file_keeps_error_visible() {
+        let env = ChatEnv {
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let mut block = ToolBlock::new(
+            "read_file",
+            r#"{"path":"src/main.rs"}"#.to_string(),
+            None,
+            None,
+        );
+        block.update(ToolMessage::Finish {
+            ok: false,
+            output: "'src/main.rs' is a directory, not a file".to_string(),
+            stderr: String::new(),
+            file_change: None,
+            duration_ms: 5,
+        });
+        let text = block_text(&block, &env);
+        assert!(text.contains("is a directory"), "header/body: {text}");
     }
 }

@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::blocks::{
     Block, BlockMessage, ChatEnv, ReasoningBlock, ReasoningMessage, TextBlock, TextMessage,
-    shows_elapsed,
+    hides_output_when_collapsed, shows_elapsed,
 };
 use super::segment::{BLOCK_PADDING, BlockAddr, HitRegion, Segment, TEXT_PADDING};
 
@@ -133,7 +133,8 @@ impl TurnEst {
 
 /// Collapsed-visible output rows of a persisted tool call. `question` blocks
 /// reload collapsed (no body rows); `todo` shows the tail rows like other
-/// tools; `run_shell` prefers the stderr tail for display.
+/// tools; `run_shell` prefers the stderr tail for display; `read_file` and
+/// `list_dir` show no body rows at all when they succeeded.
 fn output_row_est(record: &ToolRecord) -> u32 {
     match record.name.as_str() {
         "question" => 0,
@@ -141,6 +142,7 @@ fn output_row_est(record: &ToolRecord) -> u32 {
             let rows = parse_items(&record.output).map_or(0, |items| items.len() as u32);
             collapsed_rows(rows)
         }
+        name if hides_output_when_collapsed(name) && record.ok => 0,
         name => {
             let display = if name == "run_shell" && !record.stderr.is_empty() {
                 &record.stderr
