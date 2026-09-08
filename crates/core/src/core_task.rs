@@ -1186,6 +1186,7 @@ impl CoreCtx {
         let store_shared = self.store.clone();
         let model_shared = model.clone();
         let worker_usage = worker_set.usage;
+        let keep_recent_tokens = self.config.context.keep_recent_tokens;
         let embedding_shared = self.embedding_setup.clone();
         let turn_state_shared = Arc::new(Mutex::new(TurnState::default()));
         let stream_done = self.stream_done_tx.clone();
@@ -1199,6 +1200,7 @@ impl CoreCtx {
                     catalog_provider,
                     store_shared,
                     model_shared,
+                    keep_recent_tokens,
                     worker_usage,
                     embedding_shared,
                     tx,
@@ -1342,6 +1344,7 @@ async fn stream_stream_to_events(
     catalog_provider: Option<selune::Provider>,
     mut store: Store,
     model: String,
+    keep_recent_tokens: u64,
     worker_usage: Arc<std::sync::Mutex<shuvarie_llm::TokenUsage>>,
     embedding_setup: Option<EmbeddingSetup>,
     event_tx: Sender<Event>,
@@ -1608,10 +1611,12 @@ async fn stream_stream_to_events(
                 let mut compacted = false;
                 if let Some(sid) = session.lock().await.id
                     && let Ok(stored) = store.load_session(sid).await
-                    && let Some(plan) = crate::compaction::select_plan(&stored.messages)
+                    && let Some(plan) =
+                        crate::compaction::select_plan(&stored.messages, keep_recent_tokens)
                 {
-                    let head = &stored.messages[..plan.head_count];
-                    let head_text = crate::compaction::serialize_head(head);
+                    let head = &stored.messages[plan.start..plan.cut];
+                    let records = span_tool_records(&stored, plan.start..plan.cut);
+                    let head_text = crate::compaction::serialize_head(head, &records, plan.start);
                     let _ = event_tx.send(Event::CompactionStarted).await;
                     let summary = crate::compaction::summarize(&client, &model, &head_text).await;
                     let _ = event_tx.send(Event::CompactionFinished).await;
@@ -1722,6 +1727,37 @@ async fn stream_stream_to_events(
             .await;
     }
     let _ = stream_done_tx.send(outcome).await;
+}
+
+/// Tool records whose assistant message falls in the compaction span, with
+/// dense message indices matching the loaded session's message order so the
+/// transcript serializer can attach them to their messages.
+fn span_tool_records(
+    stored: &shuvarie_db::StoredSession,
+    span: std::ops::Range<usize>,
+) -> Vec<crate::tool_record::ToolRecord> {
+    let id_to_index: std::collections::HashMap<u64, usize> = stored
+        .messages
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (m.id, i))
+        .collect();
+    stored
+        .tool_calls
+        .iter()
+        .filter(|tc| {
+            id_to_index
+                .get(&tc.message_id)
+                .is_some_and(|&idx| span.contains(&idx))
+        })
+        .map(|tc| {
+            let mut record = crate::tool_record::ToolRecord::from_stored(tc.clone());
+            if let Some(idx) = id_to_index.get(&record.message_id) {
+                record.message_seq = *idx as u64;
+            }
+            record
+        })
+        .collect()
 }
 
 async fn ensure_assistant_row(
@@ -2024,6 +2060,7 @@ mod tests {
                 None,
                 store,
                 "ollama-model".into(),
+                20_000,
                 worker_usage,
                 None,
                 event_tx,
@@ -2101,6 +2138,7 @@ mod tests {
                 None,
                 store,
                 "ollama-model".into(),
+                20_000,
                 worker_usage,
                 None,
                 event_tx,
@@ -2196,6 +2234,7 @@ mod tests {
                 None,
                 store,
                 "ollama-model".into(),
+                20_000,
                 worker_usage,
                 None,
                 event_tx,
@@ -2307,6 +2346,7 @@ mod tests {
                 None,
                 store,
                 "ollama-model".into(),
+                20_000,
                 worker_usage,
                 None,
                 event_tx,
@@ -2398,6 +2438,7 @@ mod tests {
                 None,
                 store,
                 "ollama-model".into(),
+                20_000,
                 worker_usage,
                 None,
                 event_tx,

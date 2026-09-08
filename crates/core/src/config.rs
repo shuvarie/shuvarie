@@ -97,8 +97,7 @@ fn default_max_turns() -> usize {
 /// Context-window management: bounds the input tokens sent to the LLM. One
 /// forecast (anchored on the last call's real request size) drives three
 /// layers — the per-call mechanical trim, the stop-before-call overflow
-/// guard, and the pre-send LLM compaction — all sharing this budget. See
-/// `docs/design/context-compaction.md` for the pipeline design.
+/// guard, and the pre-send LLM compaction — all sharing this budget.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct ContextConfig {
