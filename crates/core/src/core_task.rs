@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -24,6 +25,9 @@ use crate::session::{CONTINUE_PROMPT, Session};
 enum StreamOutcome {
     /// The turn completed normally (or was cancelled/errored).
     Finished,
+    /// The turn was cut at an action boundary so a queued steered prompt
+    /// could take over. The partial output is persisted as interrupted.
+    Preempted,
     /// The turn was stopped because the context budget overflowed. `compacted`
     /// is true when the session history was successfully summarized so the
     /// next turn can continue with `[summary, tail]`.
@@ -55,6 +59,81 @@ impl RetrySchedule {
             .copied()
             .unwrap_or(Self::MAX_DELAY_SECS)
     }
+}
+
+/// Shared steering-preemption state between the run loop and the active
+/// stream task. The run loop sets `ARMED` when a prompt is steered while this
+/// stream is busy; the stream task flips it to `FINALIZING` when it cuts the
+/// stream at an action boundary, so a concurrent `CancelStream` will not
+/// abort it mid-persist. SeqCst ordering makes the two-sided race (cancel vs.
+/// cut) linearizable: whichever side observes the other's state acts on it.
+#[derive(Debug, Clone, Default)]
+struct SteerSignal(Arc<AtomicU8>);
+
+const STEER_IDLE: u8 = 0;
+const STEER_ARMED: u8 = 1;
+const STEER_FINALIZING: u8 = 2;
+
+impl SteerSignal {
+    /// Arm preemption. A no-op while the stream task is already finalizing a
+    /// cut, so a steer racing the cut cannot un-guard `CancelStream`.
+    fn arm(&self) {
+        if self.0.load(Ordering::SeqCst) != STEER_FINALIZING {
+            self.0.store(STEER_ARMED, Ordering::SeqCst);
+        }
+    }
+
+    /// Disarm preemption. A no-op while the stream task is finalizing (its
+    /// outcome processing resets the signal afterwards).
+    fn disarm(&self) {
+        if self.0.load(Ordering::SeqCst) != STEER_FINALIZING {
+            self.0.store(STEER_IDLE, Ordering::SeqCst);
+        }
+    }
+
+    /// Unconditionally back to idle — only valid once the stream task has
+    /// ended (outcome processing or a fresh turn replacing it).
+    fn reset(&self) {
+        self.0.store(STEER_IDLE, Ordering::SeqCst);
+    }
+
+    fn is_armed(&self) -> bool {
+        self.0.load(Ordering::SeqCst) == STEER_ARMED
+    }
+
+    /// The stream task claims the cut. Succeeds exactly once, from `ARMED`.
+    fn begin_preempt(&self) -> bool {
+        self.0
+            .compare_exchange(
+                STEER_ARMED,
+                STEER_FINALIZING,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+
+    fn is_finalizing(&self) -> bool {
+        self.0.load(Ordering::SeqCst) == STEER_FINALIZING
+    }
+}
+
+/// Which turn action the main stream is currently in, tracked so a steered
+/// prompt can cut in at the next action boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionPhase {
+    /// Nothing streamed yet this turn: the first action cannot be preempted.
+    Fresh,
+    /// A reasoning segment is streaming.
+    Thinking,
+    /// Text deltas are streaming.
+    Text,
+    /// A tool batch is running (some calls started, results pending).
+    Tools,
+    /// The last action completed — a thinking or text segment finished, or
+    /// the whole tool batch settled and surfaced its results. The next
+    /// main-stream item starts a new action.
+    Between,
 }
 
 /// Whether the agent loop is occupied: a live stream or a scheduled
@@ -109,6 +188,7 @@ struct CoreCtx {
     worker_turns: usize,
     max_output_chars: usize,
     max_output_bytes: usize,
+    steer: SteerSignal,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -133,9 +213,13 @@ pub async fn run(
     let mut pending_retry: Option<PendingRetry> = None;
 
     // Steered prompts: submissions made while the agent loop is busy. Queued
-    // in order; the front is dispatched when the current round finishes (or is
-    // cancelled), the back is what Alt+Up recalls.
+    // in order; the front is dispatched as the next user turn at the next
+    // completed action boundary of the active stream (after a tool batch
+    // settles or after a thinking/text segment — the stream task then cuts
+    // the turn), when the turn finishes, or when it is cancelled. The back is
+    // what Alt+Up recalls.
     let mut steered: Vec<String> = Vec::new();
+    let steer = SteerSignal::default();
 
     let (question_tx, mut question_rx) = tokio::sync::mpsc::channel::<QuestionRequest>(8);
     let mut pending_questions: HashMap<u64, oneshot::Sender<AnswerResponse>> = HashMap::new();
@@ -203,6 +287,7 @@ pub async fn run(
         worker_turns,
         max_output_chars,
         max_output_bytes,
+        steer,
     };
     load_startup_session(&mut ctx.store, &mut ctx.session, &ctx.event_tx, startup).await;
 
@@ -342,7 +427,7 @@ pub async fn run(
                         overflow_retries = 0;
                         pending_retry = None;
                         conn_retries = 0;
-                        clear_steered(&mut steered, &ctx.event_tx).await;
+                        clear_steered(&mut steered, &ctx.steer, &ctx.event_tx).await;
                         dismiss_pending_questions(&mut pending_questions);
                         ctx.session = Some(Arc::new(Mutex::new(Session::new())));
                         let _ = ctx.event_tx.send(Event::SessionStarted).await;
@@ -354,7 +439,7 @@ pub async fn run(
                         overflow_retries = 0;
                         pending_retry = None;
                         conn_retries = 0;
-                        clear_steered(&mut steered, &ctx.event_tx).await;
+                        clear_steered(&mut steered, &ctx.steer, &ctx.event_tx).await;
                         dismiss_pending_questions(&mut pending_questions);
                         ctx.session = Some(Arc::new(Mutex::new(Session::new())));
                         let _ = ctx.event_tx.send(Event::SessionStarted).await;
@@ -362,6 +447,7 @@ pub async fn run(
                     Command::SendMessage { content } => {
                         if is_busy(&ctx, pending_retry.as_ref()) {
                             steered.push(content.clone());
+                            ctx.steer.arm();
                             let _ = ctx.event_tx.send(Event::PromptSteered { content }).await;
                             continue;
                         }
@@ -376,17 +462,27 @@ pub async fn run(
                         if let Some(handle) = ctx.active_stream.take()
                             && !handle.is_finished()
                         {
-                            handle.abort();
-                            dismiss_pending_questions(&mut pending_questions);
-                            persist_interrupted_turn(
-                                ctx.turn_state.take(),
-                                &mut ctx.store,
-                                &ctx.session,
-                                &ctx.event_tx,
-                            )
-                            .await;
-                            let _ = ctx.event_tx.send(Event::StreamCancelled).await;
-                            aborted = true;
+                            if ctx.steer.is_finalizing() {
+                                // The stream task is already cutting itself at
+                                // an action boundary to dispatch a steered
+                                // prompt; it persists the turn and reports
+                                // `StreamOutcome::Preempted`. Keep the handle
+                                // so the ending task still counts as busy and
+                                // don't abort it mid-persist.
+                                ctx.active_stream = Some(handle);
+                            } else {
+                                handle.abort();
+                                dismiss_pending_questions(&mut pending_questions);
+                                persist_interrupted_turn(
+                                    ctx.turn_state.take(),
+                                    &mut ctx.store,
+                                    &ctx.session,
+                                    &ctx.event_tx,
+                                )
+                                .await;
+                                let _ = ctx.event_tx.send(Event::StreamCancelled).await;
+                                aborted = true;
+                            }
                         }
                         if !aborted
                             && let Some(pending) = pending_retry.take()
@@ -397,10 +493,13 @@ pub async fn run(
                         }
                         // The current agent-loop window ended; the next
                         // steered prompt takes over immediately.
-                        if aborted && !steered.is_empty() {
-                            let content = steered.remove(0);
-                            ctx.active_stream = None;
-                            ctx.start_user_turn(content, true).await;
+                        if aborted {
+                            ctx.steer.reset();
+                            if !steered.is_empty() {
+                                let content = steered.remove(0);
+                                ctx.active_stream = None;
+                                ctx.start_user_turn(content, true).await;
+                            }
                         }
                     }
                     Command::ListSessions => match ctx.store.list_sessions().await {
@@ -421,7 +520,7 @@ pub async fn run(
                         }
                         pending_retry = None;
                         conn_retries = 0;
-                        clear_steered(&mut steered, &ctx.event_tx).await;
+                        clear_steered(&mut steered, &ctx.steer, &ctx.event_tx).await;
                         dismiss_pending_questions(&mut pending_questions);
                         match ctx.store.load_session(id).await {
                             Ok(stored) => {
@@ -450,7 +549,7 @@ pub async fn run(
                         }
                         pending_retry = None;
                         conn_retries = 0;
-                        clear_steered(&mut steered, &ctx.event_tx).await;
+                        clear_steered(&mut steered, &ctx.steer, &ctx.event_tx).await;
                         match ctx.store.delete_session(id).await {
                             Ok(()) => {
                                 if let Some(s) = &ctx.session
@@ -604,6 +703,7 @@ pub async fn run(
                         }
                         pending_retry = None;
                         conn_retries = 0;
+                        ctx.steer.reset();
                         let Some(s) = &ctx.session else { continue; };
                         let session_id = s.lock().await.id;
                         let Some(sid) = session_id else { continue; };
@@ -645,6 +745,7 @@ pub async fn run(
                         }
                         pending_retry = None;
                         conn_retries = 0;
+                        ctx.steer.reset();
                         let Some(s) = &ctx.session else { continue; };
                         if !s.lock().await.can_continue() {
                             let _ = ctx
@@ -660,6 +761,9 @@ pub async fn run(
                     }
                     Command::RecallSteered { stacked } => {
                         let content = steered.pop();
+                        if steered.is_empty() {
+                            ctx.steer.disarm();
+                        }
                         let _ = ctx
                             .event_tx
                             .send(Event::SteeredRecalled { stacked, content })
@@ -752,15 +856,19 @@ pub async fn run(
             outcome = stream_done_rx.recv() => {
                 let Some(outcome) = outcome else { continue };
                 match outcome {
-                    StreamOutcome::Finished => {
+                    StreamOutcome::Finished | StreamOutcome::Preempted => {
                         overflow_retries = 0;
                         conn_retries = 0;
-                        // The agent-loop round completed; steer in the next
-                        // queued prompt, if any.
+                        ctx.active_stream = None;
+                        // Steer in the next queued prompt, if any. A steered
+                        // prompt only ever preempts the stream it was queued
+                        // during, so disarming here keeps later queue entries
+                        // waiting for this turn to complete naturally.
                         if !steered.is_empty() {
                             let content = steered.remove(0);
-                            ctx.active_stream = None;
                             ctx.start_user_turn(content, true).await;
+                        } else {
+                            ctx.steer.reset();
                         }
                     }
                     StreamOutcome::Overflowed { compacted } => {
@@ -769,6 +877,7 @@ pub async fn run(
                             ctx.resume_last_turn().await;
                         } else {
                             overflow_retries = 0;
+                            ctx.steer.reset();
                             let _ = ctx.event_tx
                                 .send(Event::StreamError {
                                     error: "context budget exceeded and compaction could not keep up; \
@@ -800,6 +909,7 @@ pub async fn run(
                             }
                             None => {
                                 conn_retries = 0;
+                                ctx.steer.reset();
                                 let _ = ctx
                                     .event_tx
                                     .send(Event::StreamError { error: message })
@@ -1017,6 +1127,10 @@ impl CoreCtx {
     /// `steered` flag) before the first stream event so the TUI renders the
     /// user prompt in order.
     async fn start_user_turn(&mut self, content: String, steered: bool) {
+        // A new turn always starts with the preemption signal off: dispatched
+        // steered prompts only preempt the stream they were queued during,
+        // and a fresh turn must not inherit a stale armed signal.
+        self.steer.reset();
         if self.session.is_none() {
             self.session = Some(Arc::new(Mutex::new(Session::new())));
             let _ = self.event_tx.send(Event::SessionStarted).await;
@@ -1251,6 +1365,7 @@ impl CoreCtx {
         let embedding_shared = self.embedding_setup.clone();
         let turn_state_shared = Arc::new(Mutex::new(TurnState::default()));
         let stream_done = self.stream_done_tx.clone();
+        let steer_shared = self.steer.clone();
         self.turn_state = Some(turn_state_shared.clone());
         self.active_stream = Some(
             tokio::spawn(async move {
@@ -1267,6 +1382,7 @@ impl CoreCtx {
                     tx,
                     turn_state_shared,
                     stream_done,
+                    steer_shared,
                 )
                 .await;
             })
@@ -1375,7 +1491,8 @@ async fn stream_busy(active_stream: &Option<AbortHandle>, event_tx: &Sender<Even
 
 /// Wipe the steered queue (session-level transition) and tell the TUI to drop
 /// its queued-prompt display.
-async fn clear_steered(steered: &mut Vec<String>, event_tx: &Sender<Event>) {
+async fn clear_steered(steered: &mut Vec<String>, steer: &SteerSignal, event_tx: &Sender<Event>) {
+    steer.disarm();
     if steered.is_empty() {
         return;
     }
@@ -1407,6 +1524,24 @@ fn client_for<'a>(
     Ok(clients.get(name).unwrap())
 }
 
+/// Whether `item` opens the next turn action while `action` has just
+/// completed one — the boundary at which a queued steered prompt cuts in.
+/// The first action of a turn (Fresh) cannot be preempted and a running tool
+/// batch (Tools) must settle first; bookkeeping items (usage, worker
+/// activity, empty deltas) never start an action.
+fn starts_action_after_boundary(item: &shuvarie_llm::StreamItem, action: &ActionPhase) -> bool {
+    if matches!(action, ActionPhase::Fresh | ActionPhase::Tools) {
+        return false;
+    }
+    match item {
+        shuvarie_llm::StreamItem::Delta { text } if !text.is_empty() => true,
+        shuvarie_llm::StreamItem::Reasoning { text } if !text.is_empty() => true,
+        shuvarie_llm::StreamItem::ToolStart { worker: None, .. } => true,
+        shuvarie_llm::StreamItem::WorkerStart { .. } => true,
+        _ => false,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn stream_stream_to_events(
     mut stream: shuvarie_llm::StreamStream,
@@ -1421,6 +1556,7 @@ async fn stream_stream_to_events(
     event_tx: Sender<Event>,
     turn_state: Arc<Mutex<TurnState>>,
     stream_done_tx: Sender<StreamOutcome>,
+    steer: SteerSignal,
 ) {
     use futures_util::StreamExt;
 
@@ -1441,8 +1577,27 @@ async fn stream_stream_to_events(
     // items queued behind it (a slow subagent's final tool results) are
     // delivered to the TUI before the turn is committed.
     let mut done: Option<(String, TokenUsage)> = None;
+    // Which turn action the main stream is in. Worker-internal activity and
+    // bookkeeping items (usage) never move it, so steering can only cut in
+    // between the agent's own actions.
+    let mut action = ActionPhase::Fresh;
 
     while let Some(item) = stream.next().await {
+        if starts_action_after_boundary(&item, &action) && steer.is_armed() && steer.begin_preempt()
+        {
+            let session_opt = Some(session.clone());
+            persist_interrupted_turn(
+                Some(turn_state.clone()),
+                &mut store,
+                &session_opt,
+                &event_tx,
+            )
+            .await;
+            let _ = event_tx.send(Event::StreamCancelled).await;
+            done = None;
+            outcome = StreamOutcome::Preempted;
+            break;
+        }
         match item {
             shuvarie_llm::StreamItem::Delta { text } if !text.is_empty() => {
                 pending_text.push_str(&text);
@@ -1451,6 +1606,7 @@ async fn stream_stream_to_events(
                     ts.pending_text = pending_text.clone();
                 }
                 let _ = event_tx.send(Event::TokenReceived { content: text }).await;
+                action = ActionPhase::Text;
             }
             shuvarie_llm::StreamItem::Delta { .. } => {}
             shuvarie_llm::StreamItem::Reasoning { text } if !text.is_empty() => {
@@ -1481,6 +1637,7 @@ async fn stream_stream_to_events(
                 let _ = event_tx
                     .send(Event::ReasoningReceived { content: text })
                     .await;
+                action = ActionPhase::Thinking;
             }
             shuvarie_llm::StreamItem::Reasoning { .. } => {}
             shuvarie_llm::StreamItem::ToolStart {
@@ -1489,6 +1646,7 @@ async fn stream_stream_to_events(
                 worker,
                 call_id,
             } => {
+                let is_main = worker.is_none();
                 let args_json = args.to_string();
                 pending_tool_args.insert(
                     call_id.clone(),
@@ -1519,6 +1677,9 @@ async fn stream_stream_to_events(
                         call_id,
                     })
                     .await;
+                if is_main {
+                    action = ActionPhase::Tools;
+                }
             }
             shuvarie_llm::StreamItem::ToolResult {
                 name,
@@ -1542,6 +1703,7 @@ async fn stream_stream_to_events(
                     None => (String::new(), 0),
                 };
                 let worker_name = worker.as_deref();
+                let is_main = worker.is_none();
                 if let Some(msg_id) = assistant_message_id {
                     let session_id = session.lock().await.id;
                     if let Some(sid) = session_id {
@@ -1595,6 +1757,13 @@ async fn stream_stream_to_events(
                         call_id,
                     })
                     .await;
+                if is_main {
+                    action = if pending_tool_args.is_empty() && pending_worker_starts.is_empty() {
+                        ActionPhase::Between
+                    } else {
+                        ActionPhase::Tools
+                    };
+                }
             }
             shuvarie_llm::StreamItem::WorkerStart {
                 name,
@@ -1609,6 +1778,7 @@ async fn stream_stream_to_events(
                         call_id,
                     })
                     .await;
+                action = ActionPhase::Tools;
             }
             shuvarie_llm::StreamItem::WorkerResult {
                 name,
@@ -1629,6 +1799,11 @@ async fn stream_stream_to_events(
                         call_id,
                     })
                     .await;
+                action = if pending_tool_args.is_empty() && pending_worker_starts.is_empty() {
+                    ActionPhase::Between
+                } else {
+                    ActionPhase::Tools
+                };
             }
             shuvarie_llm::StreamItem::Usage { usage, worker } => {
                 let cost = catalog_provider
@@ -1953,7 +2128,7 @@ async fn persist_interrupted_turn(
             g.interrupted.insert(seq as u64, true);
             g.tool_records.extend(tool_records);
         }
-    } else if !text.is_empty()
+    } else if (!text.is_empty() || !reasoning.is_empty())
         && store
             .append_assistant_message(
                 id,
@@ -1969,6 +2144,9 @@ async fn persist_interrupted_turn(
         let mut g = s.lock().await;
         g.push_assistant(text);
         let seq = g.messages.len() - 1;
+        if !reasoning.is_empty() {
+            g.reasoning.insert(seq as u64, reasoning.clone());
+        }
         g.interrupted.insert(seq as u64, true);
     }
 }
@@ -2163,6 +2341,7 @@ mod tests {
                 event_tx,
                 turn_state,
                 stream_done_tx,
+                SteerSignal::default(),
             )
             .await;
         });
@@ -2241,6 +2420,7 @@ mod tests {
                 event_tx,
                 turn_state,
                 stream_done_tx,
+                SteerSignal::default(),
             )
             .await;
         });
@@ -2338,6 +2518,7 @@ mod tests {
                 event_tx,
                 turn_state,
                 stream_done_tx,
+                SteerSignal::default(),
             )
             .await;
         });
@@ -2454,6 +2635,7 @@ mod tests {
                 event_tx,
                 turn_state,
                 stream_done_tx,
+                SteerSignal::default(),
             )
             .await;
         });
@@ -2546,6 +2728,7 @@ mod tests {
                 event_tx,
                 turn_state,
                 stream_done_tx,
+                SteerSignal::default(),
             )
             .await;
         });
@@ -2575,5 +2758,477 @@ mod tests {
             Some(StreamOutcome::Overflowed { compacted: false }),
             "uncompacted overflow outcome"
         );
+    }
+
+    /// Spawn the stream task over a fixed item list with a store-backed
+    /// session row, mirroring production where the session row exists before
+    /// the stream starts.
+    async fn spawn_preempt_stream(
+        items: Vec<StreamItem>,
+        steer: SteerSignal,
+    ) -> (
+        Arc<Mutex<Session>>,
+        tokio::sync::mpsc::Receiver<Event>,
+        tokio::sync::mpsc::Receiver<StreamOutcome>,
+    ) {
+        let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
+        let session = Arc::new(Mutex::new(Session::new()));
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+        let mut store = Store::open_in_memory().await.unwrap();
+        let id = store.create_session("preempt", None, None).await.unwrap();
+        session.lock().await.id = Some(id);
+        let stream: shuvarie_llm::StreamStream = Box::pin(futures_util::stream::iter(items));
+        let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
+        let turn_state = Arc::new(Mutex::new(TurnState::default()));
+        let (stream_done_tx, stream_done_rx) = tokio::sync::mpsc::channel(1);
+        let session_shared = session.clone();
+        tokio::spawn(async move {
+            stream_stream_to_events(
+                stream,
+                session_shared,
+                client,
+                None,
+                store,
+                "ollama-model".into(),
+                20_000,
+                worker_usage,
+                None,
+                event_tx,
+                turn_state,
+                stream_done_tx,
+                steer,
+            )
+            .await;
+        });
+        (session, event_rx, stream_done_rx)
+    }
+
+    fn main_tool_start(name: &str, call_id: &str) -> StreamItem {
+        StreamItem::ToolStart {
+            name: name.into(),
+            args: serde_json::json!({}),
+            worker: None,
+            call_id: call_id.into(),
+        }
+    }
+
+    fn main_tool_result(name: &str, call_id: &str) -> StreamItem {
+        StreamItem::ToolResult {
+            name: name.into(),
+            output: "ok".into(),
+            ok: true,
+            worker: None,
+            file_change: None,
+            streams: None,
+            call_id: call_id.into(),
+        }
+    }
+
+    fn worker_tool_result(call_id: &str) -> StreamItem {
+        StreamItem::ToolResult {
+            name: "grep".into(),
+            output: "found".into(),
+            ok: true,
+            worker: Some("explore_workspace".into()),
+            file_change: None,
+            streams: None,
+            call_id: call_id.into(),
+        }
+    }
+    #[tokio::test]
+    async fn steered_prompt_cuts_after_text_segment_before_tools_run() {
+        let steer = SteerSignal::default();
+        steer.arm();
+        let (session, mut event_rx, mut stream_done_rx) = spawn_preempt_stream(
+            vec![
+                StreamItem::Delta {
+                    text: "plan".into(),
+                },
+                main_tool_start("read_file", "c1"),
+                main_tool_result("read_file", "c1"),
+                StreamItem::Done {
+                    text: "plan".into(),
+                    usage: TokenUsage::default(),
+                },
+            ],
+            steer,
+        )
+        .await;
+
+        let mut saw_cancel = false;
+        let mut saw_tool = false;
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                Event::ToolStarted { .. } => saw_tool = true,
+                Event::StreamCancelled => {
+                    saw_cancel = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_cancel, "cut emitted StreamCancelled");
+        assert!(
+            !saw_tool,
+            "the committed tool call must never execute once steered"
+        );
+        assert_eq!(stream_done_rx.recv().await, Some(StreamOutcome::Preempted));
+        let guard = session.lock().await;
+        assert_eq!(
+            guard.messages.last().map(|m| m.content.as_str()),
+            Some("plan"),
+            "partial text persisted as the interrupted assistant message"
+        );
+        assert!(guard.tool_records.is_empty(), "no tool ran");
+    }
+
+    #[tokio::test]
+    async fn steered_prompt_cuts_after_thinking_segment() {
+        let steer = SteerSignal::default();
+        steer.arm();
+        let (session, mut event_rx, mut stream_done_rx) = spawn_preempt_stream(
+            vec![
+                StreamItem::Reasoning {
+                    text: "thinking it through".into(),
+                },
+                StreamItem::Delta {
+                    text: "the answer".into(),
+                },
+                StreamItem::Done {
+                    text: "the answer".into(),
+                    usage: TokenUsage::default(),
+                },
+            ],
+            steer,
+        )
+        .await;
+
+        let mut saw_cancel = false;
+        let mut saw_token = false;
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                Event::TokenReceived { .. } => saw_token = true,
+                Event::StreamCancelled => {
+                    saw_cancel = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_cancel);
+        assert!(
+            !saw_token,
+            "text following the thinking segment must never stream"
+        );
+        assert_eq!(stream_done_rx.recv().await, Some(StreamOutcome::Preempted));
+        let guard = session.lock().await;
+        assert_eq!(guard.messages.len(), 1);
+        assert_eq!(guard.messages[0].content, "");
+        assert_eq!(guard.interrupted.get(&0), Some(&true));
+        let reasoning = guard.reasoning.get(&0).expect("reasoning persisted");
+        assert_eq!(reasoning.len(), 1);
+        assert_eq!(reasoning[0].text, "thinking it through");
+    }
+
+    #[tokio::test]
+    async fn steered_prompt_waits_for_full_turn_without_boundary() {
+        let steer = SteerSignal::default();
+        steer.arm();
+        let (session, mut event_rx, mut stream_done_rx) = spawn_preempt_stream(
+            vec![
+                StreamItem::Delta { text: "hi".into() },
+                StreamItem::Done {
+                    text: "hi".into(),
+                    usage: TokenUsage::default(),
+                },
+            ],
+            steer,
+        )
+        .await;
+
+        let mut saw_done = false;
+        while let Some(event) = event_rx.recv().await {
+            if matches!(event, Event::StreamDone { .. }) {
+                saw_done = true;
+            }
+        }
+        assert!(saw_done, "no boundary crossed: the turn completes normally");
+        assert_eq!(
+            stream_done_rx.recv().await,
+            Some(StreamOutcome::Finished),
+            "armed steering must not preempt a turn that never crosses a boundary"
+        );
+        let guard = session.lock().await;
+        assert!(guard.interrupted.is_empty(), "turn committed cleanly");
+    }
+
+    #[tokio::test]
+    async fn steered_prompt_ignores_worker_activity() {
+        let steer = SteerSignal::default();
+        steer.arm();
+        let (session, mut event_rx, mut stream_done_rx) = spawn_preempt_stream(
+            vec![
+                StreamItem::WorkerStart {
+                    name: "explore_workspace".into(),
+                    args: serde_json::json!({}),
+                    call_id: "w1".into(),
+                },
+                StreamItem::ToolStart {
+                    name: "grep".into(),
+                    args: serde_json::json!({}),
+                    worker: Some("explore_workspace".into()),
+                    call_id: "t1".into(),
+                },
+                worker_tool_result("t1"),
+                StreamItem::Delta {
+                    text: "straggler-era delta".into(),
+                },
+                StreamItem::Done {
+                    text: "x".into(),
+                    usage: TokenUsage::default(),
+                },
+            ],
+            steer,
+        )
+        .await;
+
+        // The worker's internal tool call is not the batch settling (the
+        // worker tool itself is still running), so no cut may fire — the
+        // following text delta streams and the turn completes normally.
+        let mut saw_token = false;
+        let mut saw_cancel = false;
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                Event::TokenReceived { .. } => saw_token = true,
+                Event::StreamCancelled => saw_cancel = true,
+                _ => {}
+            }
+        }
+        assert!(saw_token, "worker activity must not trigger the cut");
+        assert!(!saw_cancel);
+        assert_eq!(stream_done_rx.recv().await, Some(StreamOutcome::Finished));
+        assert!(
+            session.lock().await.interrupted.is_empty(),
+            "the turn committed cleanly"
+        );
+    }
+
+    #[tokio::test]
+    async fn steered_prompt_cuts_when_worker_batch_settles() {
+        let steer = SteerSignal::default();
+        steer.arm();
+        let (session, mut event_rx, mut stream_done_rx) = spawn_preempt_stream(
+            vec![
+                StreamItem::WorkerStart {
+                    name: "explore_workspace".into(),
+                    args: serde_json::json!({}),
+                    call_id: "w1".into(),
+                },
+                StreamItem::ToolStart {
+                    name: "grep".into(),
+                    args: serde_json::json!({}),
+                    worker: Some("explore_workspace".into()),
+                    call_id: "t1".into(),
+                },
+                worker_tool_result("t1"),
+                StreamItem::WorkerResult {
+                    name: "explore_workspace".into(),
+                    output: "summary".into(),
+                    ok: true,
+                    call_id: "w1".into(),
+                },
+                StreamItem::Delta {
+                    text: "next round".into(),
+                },
+                StreamItem::Done {
+                    text: "next round".into(),
+                    usage: TokenUsage::default(),
+                },
+            ],
+            steer,
+        )
+        .await;
+
+        let mut saw_worker_finish = false;
+        let mut saw_cancel = false;
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                Event::WorkerFinished { .. } => saw_worker_finish = true,
+                Event::StreamCancelled => {
+                    saw_cancel = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_worker_finish);
+        assert!(saw_cancel, "cut fires after the worker batch settles");
+        assert_eq!(stream_done_rx.recv().await, Some(StreamOutcome::Preempted));
+        let guard = session.lock().await;
+        assert_eq!(
+            guard.tool_records.len(),
+            1,
+            "the worker's internal tool call stays persisted"
+        );
+        assert_eq!(
+            guard.tool_records[0].worker.as_deref(),
+            Some("explore_workspace")
+        );
+    }
+
+    #[tokio::test]
+    async fn steered_prompt_cuts_only_after_whole_multi_tool_batch() {
+        let steer = SteerSignal::default();
+        steer.arm();
+        let (session, mut event_rx, mut stream_done_rx) = spawn_preempt_stream(
+            vec![
+                main_tool_start("read_file", "c1"),
+                main_tool_start("read_file", "c2"),
+                main_tool_result("read_file", "c1"),
+                main_tool_result("read_file", "c2"),
+                StreamItem::Delta {
+                    text: "next round".into(),
+                },
+                StreamItem::Done {
+                    text: "next round".into(),
+                    usage: TokenUsage::default(),
+                },
+            ],
+            steer,
+        )
+        .await;
+
+        let mut tool_finishes = 0;
+        let mut saw_cancel = false;
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                Event::ToolFinished { .. } => tool_finishes += 1,
+                Event::StreamCancelled => {
+                    saw_cancel = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            tool_finishes, 2,
+            "both batch results surface before the cut"
+        );
+        assert!(saw_cancel, "cut fires once the whole batch settled");
+        assert_eq!(stream_done_rx.recv().await, Some(StreamOutcome::Preempted));
+        assert_eq!(session.lock().await.tool_records.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn unarmed_signal_never_cuts() {
+        let steer = SteerSignal::default();
+        let (session, mut event_rx, mut stream_done_rx) = spawn_preempt_stream(
+            vec![
+                StreamItem::Delta { text: "a".into() },
+                main_tool_start("read_file", "c1"),
+                main_tool_result("read_file", "c1"),
+                StreamItem::Done {
+                    text: "a".into(),
+                    usage: TokenUsage::default(),
+                },
+            ],
+            steer,
+        )
+        .await;
+
+        let mut saw_cancel = false;
+        while let Some(event) = event_rx.recv().await {
+            if matches!(event, Event::StreamCancelled) {
+                saw_cancel = true;
+            }
+        }
+        assert!(!saw_cancel);
+        assert_eq!(stream_done_rx.recv().await, Some(StreamOutcome::Finished));
+        assert!(session.lock().await.interrupted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn steered_prompt_cuts_mid_stream_when_armed_between_actions() {
+        // Drives the stream from a channel so the signal can be armed after
+        // the text action started, mirroring a user submitting mid-stream:
+        // the cut lands at the next action boundary (before the second tool
+        // call executes).
+        let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
+        let session = Arc::new(Mutex::new(Session::new()));
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+        let mut store = Store::open_in_memory().await.unwrap();
+        let id = store
+            .create_session("interleaved", None, None)
+            .await
+            .unwrap();
+        session.lock().await.id = Some(id);
+        let (item_tx, item_rx) = tokio::sync::mpsc::channel::<StreamItem>(8);
+        let stream: shuvarie_llm::StreamStream =
+            Box::pin(futures_util::stream::unfold(item_rx, |mut rx| async move {
+                rx.recv().await.map(|item| (item, rx))
+            }));
+        let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
+        let turn_state = Arc::new(Mutex::new(TurnState::default()));
+        let (stream_done_tx, mut stream_done_rx) = tokio::sync::mpsc::channel(1);
+        let steer = SteerSignal::default();
+        let session_shared = session.clone();
+        let steer_shared = steer.clone();
+        tokio::spawn(async move {
+            stream_stream_to_events(
+                stream,
+                session_shared,
+                client,
+                None,
+                store,
+                "ollama-model".into(),
+                20_000,
+                worker_usage,
+                None,
+                event_tx,
+                turn_state,
+                stream_done_tx,
+                steer_shared,
+            )
+            .await;
+        });
+
+        let _ = item_tx
+            .send(StreamItem::Delta {
+                text: "working".into(),
+            })
+            .await;
+        match event_rx.recv().await {
+            Some(Event::TokenReceived { content }) => assert_eq!(content, "working"),
+            other => panic!("expected token event, got {other:?}"),
+        }
+        let _ = item_tx.send(main_tool_start("edit_file", "c1")).await;
+        match event_rx.recv().await {
+            Some(Event::ToolStarted { name, .. }) => assert_eq!(name, "edit_file"),
+            other => panic!("expected tool start, got {other:?}"),
+        }
+        // The user steers while the tool runs; the cut must wait for the
+        // batch to settle, then fire before the next segment.
+        steer.arm();
+        let _ = item_tx.send(main_tool_result("edit_file", "c1")).await;
+        match event_rx.recv().await {
+            Some(Event::ToolFinished { name, .. }) => assert_eq!(name, "edit_file"),
+            other => panic!("expected tool finish, got {other:?}"),
+        }
+        let _ = item_tx
+            .send(StreamItem::Delta {
+                text: "should never stream".into(),
+            })
+            .await;
+        match event_rx.recv().await {
+            Some(Event::StreamCancelled) => {}
+            other => panic!("expected cancellation at the boundary, got {other:?}"),
+        }
+        assert_eq!(stream_done_rx.recv().await, Some(StreamOutcome::Preempted));
+        drop(item_tx);
+        let guard = session.lock().await;
+        assert_eq!(guard.messages.len(), 1);
+        assert_eq!(guard.messages[0].content, "working");
+        assert_eq!(guard.interrupted.get(&0), Some(&true));
+        assert_eq!(guard.tool_records.len(), 1);
     }
 }

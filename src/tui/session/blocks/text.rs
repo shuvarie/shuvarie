@@ -41,8 +41,9 @@ impl UserPrompt {
 }
 
 /// A queued (steered) user prompt: shown in the chat while the agent works,
-/// to be sent as the next user turn when the current round completes. Renders
-/// like a user prompt with a muted queue header.
+/// to be sent as the next user turn once the agent finishes its current
+/// action (a tool call, a thinking segment, or a text segment). Renders like
+/// a user prompt with a muted queue header.
 pub struct SteeredPrompt {
     content: String,
 }
@@ -59,7 +60,7 @@ impl SteeredPrompt {
             return Vec::new();
         }
         let mut lines = vec![Line::from(
-            Span::raw("↻ steered — sends after this turn")
+            Span::raw("↻ steered — sends after the current action")
                 .fg(theme::ACCENT)
                 .italic(),
         )];

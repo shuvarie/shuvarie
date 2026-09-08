@@ -72,8 +72,9 @@ pub enum Event {
         usage: TokenUsage,
     },
     /// The agent is busy, so a submitted prompt was queued (steered) instead
-    /// of starting a new turn; it will be sent when the current agent-loop
-    /// round completes.
+    /// of starting a new turn; it will be sent as the next user turn once the
+    /// agent finishes its current action (tool call, thinking, or text
+    /// segment), or when the turn completes.
     PromptSteered {
         content: String,
     },

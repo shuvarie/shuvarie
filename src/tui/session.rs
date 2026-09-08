@@ -1383,7 +1383,7 @@ mod tests {
         let buf = draw(&screen, 100, 24);
         let (_, header) = find_row(&buf, "steered");
         assert!(
-            header.contains("sends after this turn"),
+            header.contains("sends after the current action"),
             "header: {header:?}"
         );
         let (_, body) = find_row(&buf, "queued prompt");

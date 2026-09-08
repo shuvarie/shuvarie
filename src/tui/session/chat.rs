@@ -125,8 +125,9 @@ struct Scroll {
 pub struct Chat {
     turns: RefCell<Vec<TurnData>>,
     in_flight: RefCell<Option<TurnData>>,
-    /// Queued (steered) prompts waiting for the current agent-loop round to
-    /// end. Rendered as pseudo-turns pinned after the in-flight turn.
+    /// Queued (steered) prompts waiting to take over at the agent's next
+    /// completed action (tool call, thinking, or text segment). Rendered as
+    /// pseudo-turns pinned after the in-flight turn.
     steered: RefCell<Vec<TurnData>>,
     streaming: bool,
     interrupted: bool,
@@ -2214,7 +2215,7 @@ mod tests {
             find("queued prompt").expect("steered body should render"),
             find("streaming answer").expect("in-flight turn should render"),
         );
-        assert!(row_text(header).contains("sends after this turn"));
+        assert!(row_text(header).contains("sends after the current action"));
         assert!(
             body > stream,
             "steered entry renders below the in-flight turn"
