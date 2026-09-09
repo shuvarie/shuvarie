@@ -4,8 +4,9 @@ use crate::tui::session::segment::Segment;
 use crate::tui::session::virtualizer::TurnEst;
 use crate::tui::theme;
 
-/// Project context files loaded for the in-flight turn, rendered as one
-/// `◈ Loaded <path>` line per path (contents go to the agent preamble).
+/// Context files loaded for the session (announced once per chat, not per
+/// request), rendered as one `◈ Loaded <path>` line per path (contents go
+/// to the agent preamble).
 pub struct ContextBlock {
     paths: Vec<String>,
 }

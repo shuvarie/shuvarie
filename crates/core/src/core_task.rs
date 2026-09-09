@@ -181,7 +181,9 @@ struct CoreCtx {
     question_tx: Sender<QuestionRequest>,
     config: Config,
     workspace_root: PathBuf,
-    agents_md_context: crate::context::LoadedContext,
+    /// Whether `Event::ContextLoaded` was already sent for the current
+    /// session; context files are announced once per chat, not per request.
+    context_announced: bool,
     skills: crate::skills::Skills,
     session: Option<Arc<Mutex<Session>>>,
     manager_turns: usize,
@@ -243,7 +245,6 @@ pub async fn run(
     }
 
     let workspace_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let agents_md_context = crate::context::load_agents_md(&workspace_root);
     let lsp_config = shuvarie_lsp::LspConfig::from(&config.lsp);
     let lsp = std::sync::Arc::new(tokio::sync::Mutex::new(shuvarie_lsp::LspManager::new(
         workspace_root.clone(),
@@ -280,7 +281,7 @@ pub async fn run(
         question_tx,
         config,
         workspace_root,
-        agents_md_context,
+        context_announced: false,
         skills,
         session: None,
         manager_turns,
@@ -427,6 +428,7 @@ pub async fn run(
                         overflow_retries = 0;
                         pending_retry = None;
                         conn_retries = 0;
+                        ctx.context_announced = false;
                         clear_steered(&mut steered, &ctx.steer, &ctx.event_tx).await;
                         dismiss_pending_questions(&mut pending_questions);
                         ctx.session = Some(Arc::new(Mutex::new(Session::new())));
@@ -439,6 +441,7 @@ pub async fn run(
                         overflow_retries = 0;
                         pending_retry = None;
                         conn_retries = 0;
+                        ctx.context_announced = false;
                         clear_steered(&mut steered, &ctx.steer, &ctx.event_tx).await;
                         dismiss_pending_questions(&mut pending_questions);
                         ctx.session = Some(Arc::new(Mutex::new(Session::new())));
@@ -526,6 +529,7 @@ pub async fn run(
                             Ok(stored) => {
                                 let loaded = Session::from_stored(stored);
                                 ctx.session = Some(Arc::new(Mutex::new(loaded.clone())));
+                                ctx.context_announced = false;
                                 let _ = ctx.event_tx
                                     .send(Event::SessionLoaded {
                                         id,
@@ -556,6 +560,7 @@ pub async fn run(
                                     && s.lock().await.id == Some(id)
                                 {
                                     *s.lock().await = Session::new();
+                                    ctx.context_announced = false;
                                 }
                                 let _ = ctx.event_tx.send(Event::SessionDeleted { id }).await;
                             }
@@ -1276,14 +1281,14 @@ impl CoreCtx {
             (guard.history_for_send(), guard.tool_records.clone())
         };
         let todo_state = crate::tools::todos::TodoState::from_records(&todo_records);
-        let loaded_context =
-            self.agents_md_context
-                .clone()
-                .merged(crate::context::load_context_dir(
-                    &self.workspace_root,
-                    self.agents_md_context.remaining_budget(),
-                ));
-        if !loaded_context.is_empty() {
+        let agents_md = crate::context::load_agents_md(&self.workspace_root);
+        let agents_budget = agents_md.remaining_budget();
+        let loaded_context = agents_md.merged(crate::context::load_context_dir(
+            &self.workspace_root,
+            agents_budget,
+        ));
+        if !loaded_context.is_empty() && !self.context_announced {
+            self.context_announced = true;
             let _ = self
                 .event_tx
                 .send(Event::ContextLoaded {
