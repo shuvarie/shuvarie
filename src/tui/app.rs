@@ -995,6 +995,9 @@ impl App {
                 self.session.begin_continue();
                 self.ctx.send(shuvarie_core::Command::Continue);
             }
+            CommandAction::Reload => {
+                self.ctx.send(shuvarie_core::Command::Reload);
+            }
             CommandAction::Quit => {
                 if self.session.is_streaming() {
                     self.ctx.send(shuvarie_core::Command::CancelStream);

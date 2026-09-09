@@ -10,11 +10,12 @@ pub enum CommandAction {
     Redo,
     Replay,
     Continue,
+    Reload,
     Quit,
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 9] = [
+    pub const ALL: [CommandAction; 10] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::OpenSessionPicker,
@@ -23,6 +24,7 @@ impl CommandAction {
         CommandAction::Redo,
         CommandAction::Replay,
         CommandAction::Continue,
+        CommandAction::Reload,
         CommandAction::Quit,
     ];
 
@@ -36,6 +38,7 @@ impl CommandAction {
             CommandAction::Redo => "redo",
             CommandAction::Replay => "replay",
             CommandAction::Continue => "continue",
+            CommandAction::Reload => "reload",
             CommandAction::Quit => "quit",
         }
     }
@@ -97,6 +100,12 @@ pub fn default_commands() -> Vec<CommandEntry> {
             name: "Continue",
             description: "Resume the interrupted reply",
             action: CommandAction::Continue,
+            available: true,
+        },
+        CommandEntry {
+            name: "Reload skills",
+            description: "Re-discover skills without a restart",
+            action: CommandAction::Reload,
             available: true,
         },
         CommandEntry {
@@ -220,6 +229,7 @@ mod tests {
         );
         assert_eq!(parse_command("/undo"), Some(CommandAction::UndoLastTurn));
         assert_eq!(parse_command("/continue"), Some(CommandAction::Continue));
+        assert_eq!(parse_command("/reload"), Some(CommandAction::Reload));
         assert_eq!(parse_command(":Continue"), Some(CommandAction::Continue));
         assert_eq!(parse_command("  /new  "), Some(CommandAction::NewSession));
         assert_eq!(parse_command(":quit"), Some(CommandAction::Quit));

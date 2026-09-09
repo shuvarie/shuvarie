@@ -764,6 +764,17 @@ pub async fn run(
                         ctx.self_replay_send(CONTINUE_PROMPT.to_string(), true)
                             .await;
                     }
+                    Command::Reload => {
+                        ctx.skills =
+                            crate::skills::Skills::load(&ctx.workspace_root, &ctx.config.skills);
+                        let _ = ctx
+                            .event_tx
+                            .send(Event::SkillsLoaded {
+                                skills: ctx.skills.skills.clone(),
+                                warnings: ctx.skills.warnings.clone(),
+                            })
+                            .await;
+                    }
                     Command::RecallSteered { stacked } => {
                         let content = steered.pop();
                         if steered.is_empty() {
