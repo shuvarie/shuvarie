@@ -1,6 +1,5 @@
 use futures_util::StreamExt;
 use selune::ProviderType;
-use serde_json::Value;
 use std::sync::Arc;
 
 use crate::message::ChatMsg;
@@ -456,7 +455,6 @@ impl ProviderClient {
                     },
                 )) => {
                     let mut output = String::new();
-                    let mut ok = true;
                     for content in tool_result.content.iter() {
                         if let Some(text) = content.as_text() {
                             if !output.is_empty() {
@@ -465,19 +463,13 @@ impl ProviderClient {
                             output.push_str(text);
                         }
                     }
+                    let captured = file_hook.take(&internal_call_id);
+                    let mut ok = !captured.failed;
                     if output.is_empty() {
                         ok = false;
                         output = String::from("(no output)");
-                    } else if output.starts_with("{\"error\":") {
-                        ok = false;
-                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&output)
-                            && let Some(message) = value.get("error").and_then(Value::as_str)
-                        {
-                            output = message.to_string();
-                        }
                     }
                     let name = tool_names.remove(&internal_call_id);
-                    let captured = file_hook.take(&internal_call_id);
                     match name {
                         Some(name) => StreamItem::ToolResult {
                             name,
@@ -725,7 +717,6 @@ async fn run_worker_agent(
                 let tool_name = tool_names.remove(&internal_call_id).unwrap_or_default();
                 let captured = file_hook.take(&internal_call_id);
                 let mut output = String::new();
-                let mut ok = true;
                 for content in tool_result.content.iter() {
                     if let Some(text) = content.as_text() {
                         if !output.is_empty() {
@@ -734,16 +725,10 @@ async fn run_worker_agent(
                         output.push_str(text);
                     }
                 }
+                let mut ok = !captured.failed;
                 if output.is_empty() {
                     ok = false;
                     output = String::from("(no output)");
-                } else if output.starts_with("{\"error\":") {
-                    ok = false;
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&output)
-                        && let Some(message) = value.get("error").and_then(Value::as_str)
-                    {
-                        output = message.to_string();
-                    }
                 }
                 let _ = activity_tx
                     .send(StreamItem::ToolResult {

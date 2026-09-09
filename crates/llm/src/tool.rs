@@ -36,7 +36,9 @@ where
 /// [`ToolContext`] — [`FileChange`]s from the file tools and
 /// [`ShellStreams`] from `run_shell` — keyed by the tool call's
 /// `internal_call_id` so the stream can correlate them with the
-/// corresponding `ToolResult`.
+/// corresponding `ToolResult`. The structured failure disposition of the
+/// raw result is captured alongside so `ok` does not depend on sniffing
+/// the result text.
 #[derive(Clone, Default)]
 pub struct FileChangeHook {
     changes: Arc<Mutex<HashMap<String, CapturedResult>>>,
@@ -46,6 +48,7 @@ pub struct FileChangeHook {
 pub struct CapturedResult {
     pub file_change: Option<FileChange>,
     pub shell: Option<ShellStreams>,
+    pub failed: bool,
 }
 
 impl FileChangeHook {
@@ -69,14 +72,17 @@ impl AgentHook for FileChangeHook {
         _ctx: &HookContext,
         event: ToolResultEvent<'_>,
     ) -> impl futures_util::Future<Output = ToolResultAction> + Send {
-        let mut captured = CapturedResult::default();
+        let mut captured = CapturedResult {
+            failed: event.raw_result.is_error(),
+            ..CapturedResult::default()
+        };
         if let Some(change) = event.tool_context.result::<FileChange>() {
             captured.file_change = Some(change.clone());
         }
         if let Some(shell) = event.tool_context.result::<ShellStreams>() {
             captured.shell = Some(shell.clone());
         }
-        if captured.file_change.is_some() || captured.shell.is_some() {
+        if captured.file_change.is_some() || captured.shell.is_some() || captured.failed {
             self.changes
                 .lock()
                 .unwrap()

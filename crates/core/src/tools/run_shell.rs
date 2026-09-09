@@ -324,7 +324,10 @@ impl Tool for RunShell {
             }
 
             let status = run.status;
-            let status_line = format!("exit {status}:");
+            let status_line = match status.code() {
+                Some(code) => format!("exit {code}:"),
+                None => format!("exit {status}:"),
+            };
             ctx.insert_result(ShellStreams {
                 stdout: format!("{status_line}\n{}", run.out),
                 stderr: run.err,
