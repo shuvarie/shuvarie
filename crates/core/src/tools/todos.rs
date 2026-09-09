@@ -79,7 +79,7 @@ pub struct TodoOutcome {
     pub items: Vec<TodoItem>,
 }
 
-/// Parse the tool arguments into a [`TodoOp`]. Lenient about missing optional
+/// Parse one flat operation object into a [`TodoOp`]. Lenient about missing optional
 /// fields, strict about the ones the operation needs.
 pub fn parse_op(args: &Value) -> Result<TodoOp, String> {
     let op = args
@@ -112,6 +112,20 @@ pub fn parse_op(args: &Value) -> Result<TodoOp, String> {
         other => Err(format!(
             "unknown op '{other}' (expected add, update, remove, or list)"
         )),
+    }
+}
+
+/// Parse the tool arguments into a sequence of [`TodoOp`]s. A batch is passed
+/// as `items` (an array of per-op objects, applied in order); without it, the
+/// flat top-level arguments describe a single operation.
+pub fn parse_ops(args: &Value) -> Result<Vec<TodoOp>, String> {
+    match args.get("items") {
+        Some(Value::Array(entries)) if entries.is_empty() => {
+            Err("argument 'items' cannot be empty (use op 'list' to show the list)".into())
+        }
+        Some(Value::Array(entries)) => entries.iter().map(parse_op).collect(),
+        Some(_) => Err("argument 'items' must be an array of operations".into()),
+        None => Ok(vec![parse_op(args)?]),
     }
 }
 
@@ -275,10 +289,12 @@ pub fn replay(records: &[ToolRecord]) -> Vec<TodoItem> {
         let Ok(args) = serde_json::from_str::<Value>(&record.args_json) else {
             continue;
         };
-        let Ok(op) = parse_op(&args) else {
+        let Ok(ops) = parse_ops(&args) else {
             continue;
         };
-        let _ = apply_op(&mut items, &mut next_id, &op);
+        for op in &ops {
+            let _ = apply_op(&mut items, &mut next_id, op);
+        }
     }
     items
 }
@@ -326,13 +342,22 @@ impl TodoState {
         }
     }
 
-    pub fn apply(&self, op: TodoOp) -> Result<TodoOutcome, String> {
+    pub fn apply(&self, ops: &[TodoOp]) -> Result<TodoOutcome, String> {
         let mut inner = self.inner.lock().unwrap();
         let mut items = inner.items.clone();
-        let summary = apply_op(&mut items, &mut inner.next_id, &op)?;
+        let mut next_id = inner.next_id;
+        let mut summaries: Vec<String> = Vec::new();
+        for op in ops {
+            if let Some(summary) = apply_op(&mut items, &mut next_id, op)? {
+                summaries.push(summary);
+            }
+        }
         inner.items = items.clone();
-        let summary = summary.unwrap_or_default();
-        Ok(TodoOutcome { summary, items })
+        inner.next_id = next_id;
+        Ok(TodoOutcome {
+            summary: summaries.join("\n"),
+            items,
+        })
     }
 
     pub fn items(&self) -> Vec<TodoItem> {
@@ -360,15 +385,17 @@ impl Tool for Todo {
     fn description(&self) -> String {
         "Maintain the session todo list that is surfaced to the user in the chat pane and the \
          sidebar. Operations: add a todo (text, optional status), update one by id (new text \
-         and/or status), remove one by id, or list all. Statuses: pending, in_progress, done. \
-         Use it for multi-step work: add a todo per step, keep exactly one in_progress while \
-         you work on it, and mark each done as soon as it is finished. Returns the full list \
-         after every mutation."
+         and/or status), remove one by id, or list all. Pass `items` (an array of {op, text, \
+         id, status} objects) to run several operations in one call, applied in order; the \
+         whole call fails atomically if any op is invalid. Statuses: pending, in_progress, \
+         done. Use it for multi-step work: add a todo per step, keep exactly one in_progress \
+         while you work on it, and mark each done as soon as it is finished. Returns the full \
+         list after every mutation."
             .to_string()
     }
 
     fn parameters(&self) -> Value {
-        json!({
+        let op_schema = json!({
             "type": "object",
             "properties": {
                 "op": { "type": "string", "enum": ["add", "update", "remove", "list"], "description": "Operation to perform" },
@@ -377,6 +404,20 @@ impl Tool for Todo {
                 "status": { "type": "string", "enum": ["pending", "in_progress", "done"], "description": "Status to set (add: defaults to pending; update: optional)" }
             },
             "required": ["op"]
+        });
+        json!({
+            "type": "object",
+            "properties": {
+                "op": { "type": "string", "enum": ["add", "update", "remove", "list"], "description": "Operation to perform (single-op form; ignored when items is given)" },
+                "text": { "type": "string", "description": "Todo text (add, or update to retitle)" },
+                "id": { "type": "integer", "minimum": 1, "description": "Todo id (update/remove)" },
+                "status": { "type": "string", "enum": ["pending", "in_progress", "done"], "description": "Status to set (add: defaults to pending; update: optional)" },
+                "items": {
+                    "type": "array",
+                    "description": "Batch form: operations applied in order (overrides the flat op/text/id/status arguments)",
+                    "items": op_schema
+                }
+            }
         })
     }
 
@@ -385,8 +426,8 @@ impl Tool for Todo {
         _ctx: &mut ToolContext,
         args: Value,
     ) -> Result<ToolOutput, ToolExecutionError> {
-        let op = parse_op(&args).map_err(ToolExecutionError::other)?;
-        let outcome = self.state.apply(op).map_err(ToolExecutionError::other)?;
+        let ops = parse_ops(&args).map_err(ToolExecutionError::other)?;
+        let outcome = self.state.apply(&ops).map_err(ToolExecutionError::other)?;
         Ok(ToolOutput::text(format_outcome(&outcome)))
     }
 }
@@ -450,31 +491,80 @@ mod tests {
     }
 
     #[test]
+    fn parse_ops_batch_form() {
+        let ops = parse_ops(&op_value(
+            r#"{"items":[{"op":"add","text":"a"},{"op":"update","id":1,"status":"done"},{"op":"remove","id":2}]}"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            ops,
+            vec![
+                add("a"),
+                TodoOp::Update {
+                    id: 1,
+                    text: None,
+                    status: Some(TodoStatus::Done)
+                },
+                TodoOp::Remove { id: 2 },
+            ]
+        );
+        assert!(parse_ops(&op_value(r#"{"items":[]}"#)).is_err());
+        assert!(parse_ops(&op_value(r#"{"items":{"op":"add"}}"#)).is_err());
+        assert!(parse_ops(&op_value(r#"{"items":[{"text":"a"}]}"#)).is_err());
+    }
+
+    #[test]
     fn apply_round_trip() {
         let state = TodoState::new();
-        let out = state.apply(add("one")).unwrap();
+        let out = state.apply(&[add("one")]).unwrap();
         assert_eq!(out.summary, "Added #1 \"one\"");
         assert_eq!(out.items.len(), 1);
         let out = state
-            .apply(TodoOp::Update {
+            .apply(&[TodoOp::Update {
                 id: 1,
                 text: None,
                 status: Some(TodoStatus::Done),
-            })
+            }])
             .unwrap();
         assert_eq!(out.items[0].status, TodoStatus::Done);
         assert_eq!(done_total(&out.items), (1, 1));
-        let out = state.apply(TodoOp::Remove { id: 1 }).unwrap();
+        let out = state.apply(&[TodoOp::Remove { id: 1 }]).unwrap();
         assert!(out.items.is_empty());
-        assert!(state.apply(TodoOp::Remove { id: 1 }).is_err());
+        assert!(state.apply(&[TodoOp::Remove { id: 1 }]).is_err());
+    }
+
+    #[test]
+    fn apply_batch_runs_in_order() {
+        let state = TodoState::new();
+        let out = state
+            .apply(&[
+                add("first"),
+                TodoOp::Add {
+                    text: "second".into(),
+                    status: TodoStatus::InProgress,
+                },
+            ])
+            .unwrap();
+        assert_eq!(out.summary, "Added #1 \"first\"\nAdded #2 \"second\"");
+        assert_eq!(out.items.len(), 2);
+        assert_eq!(out.items[1].status, TodoStatus::InProgress);
+    }
+
+    #[test]
+    fn apply_batch_is_atomic() {
+        let state = TodoState::new();
+        assert!(state.apply(&[add("a"), TodoOp::Remove { id: 99 }]).is_err());
+        assert!(state.items().is_empty());
+        let out = state.apply(&[add("b")]).unwrap();
+        assert_eq!(out.items[0].id, 1);
     }
 
     #[test]
     fn ids_stay_monotonic_after_remove() {
         let state = TodoState::new();
-        state.apply(add("a")).unwrap();
-        state.apply(TodoOp::Remove { id: 1 }).unwrap();
-        let out = state.apply(add("b")).unwrap();
+        state.apply(&[add("a")]).unwrap();
+        state.apply(&[TodoOp::Remove { id: 1 }]).unwrap();
+        let out = state.apply(&[add("b")]).unwrap();
         assert_eq!(out.items[0].id, 2);
     }
 
@@ -482,18 +572,18 @@ mod tests {
     fn format_then_parse_round_trips() {
         let state = TodoState::new();
         state
-            .apply(TodoOp::Add {
+            .apply(&[TodoOp::Add {
                 text: "set up schema".into(),
                 status: TodoStatus::Done,
-            })
+            }])
             .unwrap();
         state
-            .apply(TodoOp::Add {
+            .apply(&[TodoOp::Add {
                 text: "write migration".into(),
                 status: TodoStatus::InProgress,
-            })
+            }])
             .unwrap();
-        state.apply(add("update UI")).unwrap();
+        state.apply(&[add("update UI")]).unwrap();
         let items = state.items();
         let parsed = parse_items(&format_list(&items)).unwrap();
         assert_eq!(parsed, items);
@@ -520,6 +610,19 @@ mod tests {
             new_content: None,
             duration_ms: 0,
         }
+    }
+
+    #[test]
+    fn replay_applies_batch_records() {
+        let records = vec![record(
+            "todo",
+            r#"{"items":[{"op":"add","text":"a"},{"op":"add","text":"b","status":"done"}]}"#,
+            true,
+            None,
+        )];
+        let items = TodoState::from_records(&records).items();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[1].status, TodoStatus::Done);
     }
 
     #[test]
