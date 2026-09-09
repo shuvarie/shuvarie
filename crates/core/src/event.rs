@@ -178,4 +178,10 @@ pub enum Event {
         skills: Vec<crate::Skill>,
         warnings: Vec<crate::SkillWarning>,
     },
+    /// A startup warning surfaced as a dismissible popup — currently: the
+    /// `shell.path` configured in config.kdl was not found, so `run_shell`
+    /// falls back to the platform default shell.
+    ShellWarning {
+        message: String,
+    },
 }

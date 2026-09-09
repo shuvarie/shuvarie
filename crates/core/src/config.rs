@@ -54,6 +54,7 @@ fn merge_layer(config: &mut Config, layer: &ConfigLayer) {
             "agent" => config.agent = layer.config.agent.clone(),
             "skills" => config.skills = layer.config.skills.clone(),
             "context" => config.context = layer.config.context.clone(),
+            "shell" => config.shell = layer.config.shell.clone(),
             "lsp" => {
                 config.lsp.disabled = layer.config.lsp.disabled;
                 for (lang, spec) in &layer.config.lsp.servers {
@@ -85,6 +86,9 @@ pub struct Config {
 
     #[serde(default)]
     pub context: ContextConfig,
+
+    #[serde(default)]
+    pub shell: ShellConfig,
 
     #[serde(default)]
     pub retry: RetryConfig,
@@ -150,6 +154,15 @@ impl ContextConfig {
     pub fn usable(&self, context_length: u64) -> u64 {
         context_length.saturating_sub(self.reserved)
     }
+}
+
+/// The shell `run_shell` executes through. `path` accepts an absolute or
+/// relative executable path, or a bare command name looked up in `PATH`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub struct ShellConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -488,6 +501,28 @@ mod tests {
         assert_eq!(parsed.embedding, EmbeddingConfig::default());
         assert_eq!(parsed.context, ContextConfig::default());
         assert_eq!(parsed.lsp, LspConfigRepr::default());
+    }
+
+    #[test]
+    fn shell_path_round_trips() {
+        let text = r#"
+            shell {
+                path "/usr/bin/zsh"
+            }
+        "#;
+        let parsed: Config = kdlserde::from_str(text).unwrap();
+        assert_eq!(parsed.shell.path.as_deref(), Some("/usr/bin/zsh"));
+
+        let text = kdlserde::to_string(&parsed).unwrap();
+        let reparsed: Config = kdlserde::from_str(&text).unwrap();
+        assert_eq!(parsed, reparsed);
+    }
+
+    #[test]
+    fn shell_section_absent_is_none() {
+        let parsed: Config = kdlserde::from_str("ui { frame-rate 30 }").unwrap();
+        assert_eq!(parsed.shell, ShellConfig::default());
+        assert_eq!(parsed.shell.path, None);
     }
 
     #[test]

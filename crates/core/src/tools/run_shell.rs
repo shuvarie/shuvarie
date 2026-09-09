@@ -2,6 +2,7 @@ use serde_json::{Value, json};
 use shuvarie_llm::{ShellStreams, Tool, ToolContext, ToolExecutionError, ToolOutput};
 
 use super::{DEFAULT_TIMEOUT_SECS, arg_value, workspace_root};
+use crate::shell::Shell;
 
 const MAX_COMMAND_OUTPUT: usize = 16 * 1024;
 const SHELL_CAPTURE_BYTES: usize = 64 * 1024;
@@ -97,11 +98,12 @@ impl Drop for KillGuard {
 
 pub(crate) struct RunShell {
     shell_tx: ShellOutputTx,
+    shell: Shell,
 }
 
 impl RunShell {
-    pub(crate) fn new(shell_tx: ShellOutputTx) -> Self {
-        Self { shell_tx }
+    pub(crate) fn new(shell_tx: ShellOutputTx, shell: Shell) -> Self {
+        Self { shell_tx, shell }
     }
 }
 
@@ -113,12 +115,10 @@ impl Tool for RunShell {
     type Error = ToolExecutionError;
 
     fn description(&self) -> String {
-        #[cfg(unix)]
-        const DESCRIPTION: &str = "Run a shell command line in the workspace, executed through the system's Bourne shell (`sh -c`). Pipes, redirects, and shell operators work naturally. Output streams live to the user while the command runs. Captured stdout and stderr (combined) are returned, capped at 16 KB. The command and its children are killed when it exceeds the timeout; if the command is expected to take longer and is not waiting for interactive input, retry with a larger timeout_secs value. The working directory can be set with `cwd`.";
-        #[cfg(windows)]
-        const DESCRIPTION: &str = "Run a shell command line in the workspace, executed through the system's PowerShell (`powershell -NoProfile -Command`). Pipes, redirects, and shell operators work naturally. Output streams live to the user while the command runs. Captured stdout and stderr (combined) are returned, capped at 16 KB. The command and its children are killed when it exceeds the timeout; if the command is expected to take longer and is not waiting for interactive input, retry with a larger timeout_secs value. The working directory can be set with `cwd`.";
-
-        DESCRIPTION.to_string()
+        format!(
+            "Run a shell command line in the workspace, executed through the resolved shell (`{}`). Pipes, redirects, and shell operators work naturally. Output streams live to the user while the command runs. Captured stdout and stderr (combined) are returned, capped at 16 KB. The command and its children are killed when it exceeds the timeout; if the command is expected to take longer and is not waiting for interactive input, retry with a larger timeout_secs value. The working directory can be set with `cwd`.",
+            self.shell.invocation()
+        )
     }
 
     fn parameters(&self) -> Value {
@@ -159,8 +159,8 @@ impl Tool for RunShell {
                 }
                 None => workspace_root()?,
             };
-            let mut builder = tokio::process::Command::new(shell_bin());
-            shell_args(&mut builder, &command);
+            let mut builder = tokio::process::Command::new(&self.shell.path);
+            self.shell.apply(&mut builder, &command);
             builder
                 .current_dir(&cwd_abs)
                 .stdout(std::process::Stdio::piped())
@@ -292,12 +292,6 @@ impl Tool for RunShell {
     }
 }
 
-#[cfg(unix)]
-#[inline]
-fn shell_bin() -> &'static str {
-    "sh"
-}
-
 fn spawn_pipe_reader<R>(
     mut pipe: R,
     tx: tokio::sync::mpsc::Sender<(bool, Vec<u8>)>,
@@ -329,24 +323,6 @@ fn cap_buffer(buf: &mut Vec<u8>) {
     }
 }
 
-#[cfg(unix)]
-#[inline]
-fn shell_args(cmd: &mut tokio::process::Command, command: &str) {
-    cmd.arg("-c").arg(command);
-}
-
-#[cfg(windows)]
-#[inline]
-fn shell_bin() -> &'static str {
-    "powershell"
-}
-
-#[cfg(windows)]
-#[inline]
-fn shell_args(cmd: &mut tokio::process::Command, command: &str) {
-    cmd.arg("-NoProfile").arg("-Command").arg(command);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,7 +330,19 @@ mod tests {
     use tempfile::TempDir;
 
     fn run_shell_tool() -> RunShell {
-        RunShell::new(ShellOutputTx::new(tokio::sync::mpsc::channel(64).0))
+        RunShell::new(
+            ShellOutputTx::new(tokio::sync::mpsc::channel(64).0),
+            crate::shell::resolve(None).shell,
+        )
+    }
+
+    #[test]
+    fn description_names_resolved_shell() {
+        let description = run_shell_tool().description();
+        assert!(
+            description.contains(&crate::shell::resolve(None).shell.invocation()),
+            "{description}"
+        );
     }
 
     #[tokio::test]
@@ -424,7 +412,7 @@ mod tests {
     async fn run_shell_streams_output() {
         let (dir, _guard) = tempdir();
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-        let tool = RunShell::new(ShellOutputTx::new(tx));
+        let tool = RunShell::new(ShellOutputTx::new(tx), crate::shell::resolve(None).shell);
         let out = tool
             .call(
                 &mut new_ctx(),
@@ -448,7 +436,10 @@ mod tests {
     async fn run_shell_worker_chunks_are_tagged() {
         let (dir, _guard) = tempdir();
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-        let tool = RunShell::new(ShellOutputTx::new(tx).tagged("run_tests"));
+        let tool = RunShell::new(
+            ShellOutputTx::new(tx).tagged("run_tests"),
+            crate::shell::resolve(None).shell,
+        );
         tool.call(&mut new_ctx(), json!({ "command": "echo tagged" }))
             .await
             .unwrap();

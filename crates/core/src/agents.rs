@@ -4,6 +4,7 @@ use shuvarie_llm::ProviderClient;
 use shuvarie_llm::TokenUsage;
 
 use crate::lsp_manager::SharedManager;
+use crate::shell::Shell;
 use crate::tools::{self, FileLocks, ReadCache, ShellOutputTx};
 
 pub struct WorkerSet {
@@ -22,6 +23,7 @@ pub fn build_workers(
     max_output_bytes: usize,
     context_budget: Option<shuvarie_llm::ContextBudget>,
     shell_tx: ShellOutputTx,
+    shell: Shell,
 ) -> WorkerSet {
     let usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
     let workers = vec![
@@ -47,7 +49,7 @@ pub fn build_workers(
             TESTER_PREAMBLE,
             client.clone(),
             model,
-            tools::command_tools(shell_tx.tagged("run_tests")),
+            tools::command_tools(shell_tx.tagged("run_tests"), shell),
             Arc::clone(&usage),
             worker_max_turns,
             None,

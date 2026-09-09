@@ -33,6 +33,7 @@ mod slash;
 mod spinner;
 mod theme;
 mod utils;
+mod warning;
 mod welcome;
 
 pub async fn run_tui(

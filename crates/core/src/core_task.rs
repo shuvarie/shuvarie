@@ -18,6 +18,7 @@ use crate::embeddings::{self, EmbeddingSetup};
 use crate::event::Event;
 use crate::question::{AnswerResponse, QuestionGate, QuestionRequest};
 use crate::session::{CONTINUE_PROMPT, Session};
+use crate::shell::Shell;
 
 /// How a streamed turn ended, reported back to the run loop so it can decide
 /// whether to auto-continue after a context overflow.
@@ -181,6 +182,7 @@ struct CoreCtx {
     question_tx: Sender<QuestionRequest>,
     config: Config,
     workspace_root: PathBuf,
+    shell: Shell,
     /// Whether `Event::ContextLoaded` was already sent for the current
     /// session; context files are announced once per chat, not per request.
     context_announced: bool,
@@ -264,6 +266,14 @@ pub async fn run(
         })
         .await;
 
+    let shell_resolution = crate::shell::resolve(config.shell.path.as_deref());
+    if let Some(warning) = shell_resolution.warning {
+        let _ = event_tx
+            .send(Event::ShellWarning { message: warning })
+            .await;
+    }
+    let shell = shell_resolution.shell;
+
     let manager_turns = config.agent.effective_max_turns();
     let worker_turns = config.agent.effective_worker_max_turns();
     let max_output_chars = config.context.tool_output_max_chars;
@@ -281,6 +291,7 @@ pub async fn run(
         question_tx,
         config,
         workspace_root,
+        shell,
         context_announced: false,
         skills,
         session: None,
@@ -1323,6 +1334,7 @@ impl CoreCtx {
             self.max_output_bytes,
             question_gate,
             crate::tools::ShellOutputTx::new(shell_tx.clone()),
+            self.shell.clone(),
             todo_state,
         );
         let catalog_provider = crate::catalog::providers();
@@ -1358,6 +1370,7 @@ impl CoreCtx {
             self.max_output_bytes,
             budget.clone(),
             crate::tools::ShellOutputTx::new(shell_tx),
+            self.shell.clone(),
         );
         let stream = client
             .stream(

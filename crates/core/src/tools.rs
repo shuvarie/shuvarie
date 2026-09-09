@@ -19,6 +19,7 @@ use shuvarie_llm::{DiffLine, DiffLineKind, DynamicTool, Tool};
 
 use crate::lsp_manager::SharedManager;
 use crate::question::QuestionGate;
+use crate::shell::Shell;
 
 use edit_file::EditFile;
 use glob::Glob;
@@ -154,6 +155,7 @@ pub fn all_tools(
     max_output_bytes: usize,
     question_gate: QuestionGate,
     shell_tx: ShellOutputTx,
+    shell: Shell,
     todo_state: todos::TodoState,
 ) -> Vec<DynamicTool> {
     vec![
@@ -166,7 +168,7 @@ pub fn all_tools(
             WriteFile::new(read_cache.clone(), Some(lsp.clone()), locks.clone()),
         ),
         shuvarie_llm::into_dynamic("edit_file", EditFile::new(Some(lsp.clone()), locks.clone())),
-        shuvarie_llm::into_dynamic("run_shell", RunShell::new(shell_tx.clone())),
+        shuvarie_llm::into_dynamic("run_shell", RunShell::new(shell_tx.clone(), shell.clone())),
         shuvarie_llm::into_dynamic("list_dir", ListDir),
         shuvarie_llm::into_dynamic("grep", Grep),
         shuvarie_llm::into_dynamic("glob", Glob),
@@ -196,10 +198,10 @@ pub fn read_tools(
     ]
 }
 
-pub fn command_tools(shell_tx: ShellOutputTx) -> Vec<DynamicTool> {
+pub fn command_tools(shell_tx: ShellOutputTx, shell: Shell) -> Vec<DynamicTool> {
     vec![shuvarie_llm::into_dynamic(
         "run_shell",
-        RunShell::new(shell_tx),
+        RunShell::new(shell_tx, shell),
     )]
 }
 

@@ -21,6 +21,7 @@ use super::session::{ChatMessage, SessionEffect, SessionMessage, SessionScreen};
 use super::session_picker::{SessionPicker, SessionPickerEffect, SessionPickerMessage};
 use super::sidebar::SidebarMessage;
 use super::spinner::SpinnerKind;
+use super::warning::{WarningMessage, WarningPopup};
 use super::welcome::{Welcome, WelcomeEffect, WelcomeMessage};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -95,6 +96,10 @@ pub enum AppMessage {
         skills: Vec<shuvarie_core::Skill>,
         warnings: Vec<shuvarie_core::SkillWarning>,
     },
+    ShellWarning {
+        message: String,
+    },
+    Warning(WarningMessage),
 }
 
 #[derive(Debug)]
@@ -113,6 +118,7 @@ pub struct App {
     pub model_picker: ModelPicker,
     pub session_picker: SessionPicker,
     pub history_search: HistorySearch,
+    pub warning: WarningPopup,
     pub models: HashMap<String, Vec<Model>>,
     pending_model_pick: Option<String>,
     quit: bool,
@@ -167,6 +173,7 @@ impl App {
             model_picker: ModelPicker::new(),
             session_picker: SessionPicker::new(),
             history_search: HistorySearch::new(),
+            warning: WarningPopup::new(),
             models: HashMap::new(),
             pending_model_pick: None,
             quit: false,
@@ -241,6 +248,12 @@ impl App {
                     _ => None,
                 },
                 TermEvent::Key(key) => {
+                    // Transient warning popup: swallows one key press and
+                    // dismisses, leaving the underlying overlay untouched.
+                    if self.warning.open {
+                        return self.warning.map_event(&key).map(AppMessage::Warning);
+                    }
+
                     // Overlay events
                     match self.overlay {
                         Overlay::CommandMenu => {
@@ -524,6 +537,7 @@ impl App {
                 CoreEvent::SkillsLoaded { skills, warnings } => {
                     Some(AppMessage::SkillsLoaded { skills, warnings })
                 }
+                CoreEvent::ShellWarning { message } => Some(AppMessage::ShellWarning { message }),
             },
         }
     }
@@ -884,6 +898,12 @@ impl App {
                 });
                 self.session.update(SessionMessage::SetSkills { skills });
             }
+            AppMessage::ShellWarning { message } => {
+                self.warning.open(message);
+            }
+            AppMessage::Warning(m) => {
+                self.warning.update(m);
+            }
         }
         None
     }
@@ -1078,6 +1098,7 @@ impl App {
         self.history_search.view(frame, area);
         self.command_menu.view(frame, area);
         self.confirm_quit.view(frame, area);
+        self.warning.view(frame, area);
     }
 }
 

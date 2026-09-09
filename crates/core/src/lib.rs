@@ -13,6 +13,7 @@ pub mod lsp_manager;
 pub mod permissions;
 pub mod question;
 pub mod session;
+pub mod shell;
 pub mod skills;
 pub mod test_util;
 pub mod tool_record;
@@ -22,7 +23,7 @@ pub mod truncate;
 pub use command::Command;
 pub use config::{
     Active, AgentConfig, Config, Connections, ContextConfig, EmbeddingConfig, LspConfigRepr,
-    LspServerSpecRepr, ProviderConfig, SkillsConfig, UiPrefs,
+    LspServerSpecRepr, ProviderConfig, ShellConfig, SkillsConfig, UiPrefs,
 };
 pub use core_task::{StartupSession, run};
 pub use error::{ConfigParseError, CoreError, Result};
