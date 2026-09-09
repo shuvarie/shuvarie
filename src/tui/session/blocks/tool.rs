@@ -1,3 +1,4 @@
+use std::cell::{Cell, RefCell};
 use std::time::Instant;
 
 use ratatui::prelude::*;
@@ -7,7 +8,9 @@ use shuvarie_llm::{DiffLine, DiffLineKind, FileChange, PatchFileKind};
 use unicode_width::UnicodeWidthStr;
 
 use super::{format_duration_ms, hides_output_when_collapsed, shows_elapsed};
-use crate::tui::session::blocks::{ChatEnv, Segment};
+use crate::tui::session::blocks::{
+    BodyCache, BodyKey, ChatEnv, Segment, cached_body, measure_lines,
+};
 use crate::tui::session::segment::BLOCK_PADDING;
 use crate::tui::session::virtualizer::{TurnEst, collapsed_rows, file_change_row_est};
 use crate::tui::{spinner, theme};
@@ -53,6 +56,8 @@ pub struct ToolBlock {
     file_change: Option<FileChange>,
     started_at: Option<Instant>,
     duration_ms: u64,
+    rev: Cell<u64>,
+    cache: RefCell<Option<BodyCache>>,
 }
 
 impl ToolBlock {
@@ -74,6 +79,8 @@ impl ToolBlock {
             file_change: None,
             started_at: Some(Instant::now()),
             duration_ms: 0,
+            rev: Cell::new(0),
+            cache: RefCell::new(None),
         }
     }
 
@@ -94,6 +101,8 @@ impl ToolBlock {
             file_change: record.file_change.clone(),
             started_at: None,
             duration_ms: record.duration_ms,
+            rev: Cell::new(0),
+            cache: RefCell::new(None),
         }
     }
 
@@ -192,6 +201,7 @@ impl ToolBlock {
                 }
                 self.output = stdout;
                 self.stderr = stderr;
+                self.rev.set(self.rev.get() + 1);
                 true
             }
             ToolMessage::Finish {
@@ -215,26 +225,68 @@ impl ToolBlock {
                 self.started_at = None;
                 self.duration_ms = duration_ms;
                 self.expanded = self.name == "question" || self.name == "todo";
+                self.rev.set(self.rev.get() + 1);
                 true
             }
         }
     }
 
-    pub(super) fn view(&self, width: u16, env: &ChatEnv) -> Segment {
-        Segment {
-            lines: self.block_lines(width, env),
-            bg: Some(self.bg()),
-            padding: BLOCK_PADDING,
-            hit: None,
-            trim: false,
+    /// Mark a never-finished call as failed. A turn that reaches `Done` with
+    /// a call still running (a worker that died mid-run) must not keep its
+    /// spinner and elapsed timer animating forever.
+    pub(super) fn finish_unreturned(&mut self) -> bool {
+        if self.status != ToolStatus::Running {
+            return false;
         }
+        self.status = ToolStatus::Failed;
+        self.started_at = None;
+        if self.output.is_empty() {
+            self.output = "(no result — the call never returned)".to_string();
+        }
+        self.rev.set(self.rev.get() + 1);
+        true
     }
 
-    fn block_lines(&self, width: u16, env: &ChatEnv) -> Vec<Line<'static>> {
+    pub(super) fn view(&self, width: u16, env: &ChatEnv, env_rev: u64) -> (Segment, u32) {
+        let text_width = width.saturating_sub(2 * BLOCK_PADDING.0).max(1);
         let inner_w = width.saturating_sub(2 * BLOCK_PADDING.0).max(8) as usize;
-        let is_shell = self.name == "run_shell";
+        let header = self.header_line(inner_w);
+        let header_h = measure_lines(std::slice::from_ref(&header), text_width, false);
+        let (body, body_h) = cached_body(
+            &self.cache,
+            BodyKey {
+                width,
+                rev: self.rev.get(),
+                expanded: self.expanded,
+                env_rev,
+            },
+            text_width,
+            false,
+            || self.body_lines(env),
+        );
+        let elapsed = shows_elapsed(&self.name).then(|| elapsed_line(self));
+        let elapsed_h = elapsed
+            .as_ref()
+            .map(|line| measure_lines(std::slice::from_ref(line), text_width, false))
+            .unwrap_or(0);
+        let mut lines = Vec::with_capacity(1 + body.len() + usize::from(elapsed.is_some()));
+        lines.push(header);
+        lines.extend(body);
+        lines.extend(elapsed);
+        (
+            Segment {
+                lines,
+                bg: Some(self.bg()),
+                padding: BLOCK_PADDING,
+                hit: None,
+                trim: false,
+            },
+            2 * u32::from(BLOCK_PADDING.1) + header_h + body_h + elapsed_h,
+        )
+    }
+
+    fn body_lines(&self, env: &ChatEnv) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
-        lines.push(self.header_line(inner_w));
         if self.name == "question" {
             push_question_block_lines(&mut lines, self);
         } else if self.name == "todo" {
@@ -244,7 +296,7 @@ impl ToolBlock {
             }
         } else {
             let before = lines.len();
-            push_output_rows(&mut lines, self, is_shell);
+            push_output_rows(&mut lines, self, self.name == "run_shell");
             let has_output = lines.len() > before;
             if let Some(change) = &self.file_change {
                 if has_output {
@@ -263,9 +315,6 @@ impl ToolBlock {
                     push_diagnostics_lines(&mut lines, env, path);
                 }
             }
-        }
-        if shows_elapsed(&self.name) {
-            lines.push(elapsed_line(self));
         }
         lines
     }
@@ -827,8 +876,9 @@ mod tests {
     use super::*;
 
     fn block_text(block: &ToolBlock, env: &ChatEnv) -> String {
-        block
-            .block_lines(80, env)
+        let (segment, _) = block.view(80, env, 0);
+        segment
+            .lines
             .iter()
             .map(|line| {
                 line.spans
@@ -882,10 +932,11 @@ mod tests {
         };
         let block = finished_edit_block();
         let width = 80u16;
-        let seg = block.view(width, &env);
+        let (seg, height) = block.view(width, &env, 0);
         assert!(!seg.trim);
+        assert_eq!(seg.measure(width), height);
         let content_width = width.saturating_sub(2 * BLOCK_PADDING.0);
-        let h = seg.measure(content_width);
+        let h = seg.measure(width);
         let mut buf = Buffer::empty(Rect::new(0, 0, width, h as u16));
         seg.paint(buf.area, 0, 0, h, content_width, &mut buf);
         let rows: Vec<String> = (0..h as u16)

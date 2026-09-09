@@ -1,8 +1,10 @@
+use std::cell::{Cell, RefCell};
 use std::time::Instant;
 
 use ratatui::prelude::*;
 
 use super::format_duration_ms;
+use crate::tui::session::blocks::{BodyCache, BodyKey, cached_body, measure_lines};
 use crate::tui::session::segment::{BLOCK_PADDING, Segment};
 use crate::tui::session::virtualizer::TurnEst;
 use crate::tui::{spinner, theme};
@@ -18,6 +20,8 @@ pub struct ReasoningBlock {
     thinking: bool,
     started_at: Option<Instant>,
     duration_ms: u64,
+    rev: Cell<u64>,
+    cache: RefCell<Option<BodyCache>>,
 }
 
 impl ReasoningBlock {
@@ -29,6 +33,8 @@ impl ReasoningBlock {
             thinking: true,
             started_at: Some(Instant::now()),
             duration_ms: 0,
+            rev: Cell::new(0),
+            cache: RefCell::new(None),
         }
     }
 
@@ -40,6 +46,8 @@ impl ReasoningBlock {
             thinking: false,
             started_at: None,
             duration_ms,
+            rev: Cell::new(0),
+            cache: RefCell::new(None),
         }
     }
 
@@ -47,6 +55,7 @@ impl ReasoningBlock {
         match msg {
             ReasoningMessage::Append(chunk) => {
                 self.text.push_str(&chunk);
+                self.rev.set(self.rev.get() + 1);
                 true
             }
             ReasoningMessage::Finish => {
@@ -88,49 +97,71 @@ impl ReasoningBlock {
         }
     }
 
-    /// One padded segment: the header line, plus the body lines when
-    /// expanded (the engine stamps the hit address on the first segment, so
-    /// the whole block toggles on click).
-    pub fn view(&self) -> Vec<Segment> {
-        let header = if self.thinking {
+    /// One padded segment: the header line (rebuilt every frame — it carries
+    /// the spinner and the live elapsed time while thinking), plus the body
+    /// lines from the cache when expanded (the engine stamps the hit address
+    /// on the segment, so the whole block toggles on click).
+    pub fn view(&self, width: u16) -> (Segment, u32) {
+        let text_width = width.max(1);
+        let header = self.header_line();
+        let header_h = measure_lines(std::slice::from_ref(&header), text_width, true);
+        let (body, body_h) = cached_body(
+            &self.cache,
+            BodyKey {
+                width,
+                rev: self.rev.get(),
+                expanded: self.expanded,
+                env_rev: 0,
+            },
+            text_width,
+            true,
+            || {
+                self.text
+                    .lines()
+                    .map(|l| Line::from(Span::raw(format!("  {l}")).fg(theme::TEXT_DIM).italic()))
+                    .collect()
+            },
+        );
+        let mut lines = Vec::with_capacity(1 + body.len());
+        lines.push(header);
+        lines.extend(body);
+        (
+            Segment {
+                lines,
+                bg: None,
+                padding: (0, BLOCK_PADDING.1),
+                hit: None,
+                trim: true,
+            },
+            2 * u32::from(BLOCK_PADDING.1) + header_h + body_h,
+        )
+    }
+
+    fn header_line(&self) -> Line<'static> {
+        if self.thinking {
             let ms = self
                 .started_at
                 .map(|started| started.elapsed().as_millis() as u64)
                 .unwrap_or(self.duration_ms);
-            vec![
+            Line::from(vec![
                 spinner::spinner(),
                 Span::raw(" "),
                 self.label("Thinking..."),
                 Span::raw(format!(" {}", format_duration_ms(ms)))
                     .fg(theme::TEXT_MUTED)
                     .italic(),
-            ]
+            ])
         } else {
             let arrow = if self.expanded { "v" } else { ">" };
-            vec![
+            Line::from(vec![
                 Span::raw("  ").fg(theme::TEXT_MUTED),
                 self.label("Thought"),
                 Span::raw(format!(" {}", format_duration_ms(self.duration_ms)))
                     .fg(theme::TEXT_MUTED)
                     .italic(),
                 Span::raw(format!(" {arrow}")).fg(theme::TEXT_MUTED),
-            ]
-        };
-        let mut lines = vec![Line::from(header)];
-        if self.expanded {
-            lines.extend(
-                self.text
-                    .lines()
-                    .map(|l| Line::from(Span::raw(format!("  {l}")).fg(theme::TEXT_DIM).italic())),
-            );
+            ])
         }
-        vec![Segment {
-            lines,
-            bg: None,
-            padding: (0, BLOCK_PADDING.1),
-            hit: None,
-            trim: true,
-        }]
     }
 
     fn label(&self, text: &str) -> Span<'static> {
