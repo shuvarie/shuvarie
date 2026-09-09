@@ -234,7 +234,7 @@ fn webfetch_convert(html: &str, plain: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::test_util::new_ctx;
+    use crate::test_util::new_ctx;
 
     #[tokio::test]
     async fn webfetch_rejects_non_http_urls() {

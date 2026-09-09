@@ -136,7 +136,7 @@ impl Tool for WriteFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::test_util::{new_ctx, tempdir};
+    use crate::test_util::{new_ctx, tempdir};
     use crate::tools::read_file::ReadFile;
 
     fn write_file_tool(read_cache: ReadCache) -> WriteFile {

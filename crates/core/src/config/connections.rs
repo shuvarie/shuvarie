@@ -246,12 +246,14 @@ mod tests {
 
     #[test]
     fn full_active_round_trip() {
-        let mut connections = Connections::default();
-        connections.active = Some(Active {
-            provider: "6f9619ff-8b86-d011-b42d-00cf4fc964ff".into(),
-            model: Some("glm-5.3-flash".into()),
-            variant: Some("high".into()),
-        });
+        let connections = Connections {
+            active: Some(Active {
+                provider: "6f9619ff-8b86-d011-b42d-00cf4fc964ff".into(),
+                model: Some("glm-5.3-flash".into()),
+                variant: Some("high".into()),
+            }),
+            ..Connections::default()
+        };
         let saved = connections_kdl::to_kdl(&connections).unwrap();
         assert!(
             saved.contains("variant high") || saved.contains("variant \"high\""),

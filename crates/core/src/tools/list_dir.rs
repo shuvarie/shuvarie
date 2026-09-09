@@ -62,7 +62,7 @@ impl Tool for ListDir {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::test_util::{new_ctx, tempdir};
+    use crate::test_util::{new_ctx, tempdir};
 
     #[tokio::test]
     async fn list_dir_sorted() {

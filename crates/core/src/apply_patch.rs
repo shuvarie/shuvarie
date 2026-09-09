@@ -718,8 +718,8 @@ mod tests {
         assert_eq!(seek_sequence(&lines, &pattern, 0, false), Some(0));
     }
 
-    fn tempdir() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
-        let guard = crate::test_util::test_util::lock_cwd();
+    fn tempdir() -> (tempfile::TempDir, crate::test_util::CwdGuard) {
+        let guard = crate::test_util::lock_cwd();
         let dir = tempfile::TempDir::new().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
         (dir, guard)

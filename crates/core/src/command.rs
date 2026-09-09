@@ -25,6 +25,11 @@ pub enum Command {
     SendMessage {
         content: String,
     },
+    /// Run a bash-mode (`!`-prefixed) command through the resolved shell.
+    /// Display-only: the output never persists or reaches the model.
+    RunBash {
+        command: String,
+    },
     CancelStream,
     ListSessions,
     LoadSession {

@@ -32,6 +32,7 @@ use run_shell::RunShell;
 use webfetch::WebFetch;
 use write_file::WriteFile;
 
+pub(crate) use run_shell::run_shell_command;
 pub use run_shell::{ShellChunk, ShellOutputTx};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -234,7 +235,7 @@ pub fn edit_tools(
 mod tests {
     use super::*;
     use crate::permissions::{resolve_read, resolve_write};
-    use crate::test_util::test_util::tempdir;
+    use crate::test_util::tempdir;
     use tempfile::TempDir;
 
     #[test]

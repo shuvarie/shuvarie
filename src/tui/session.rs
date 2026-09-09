@@ -16,11 +16,13 @@ use super::spinner::SpinnerKind;
 use super::theme;
 use shuvarie_core::Skill;
 
+pub mod bash;
 pub mod blocks;
 pub mod chat;
 pub mod segment;
 pub mod virtualizer;
 
+pub use bash::BashMessage;
 pub use chat::ChatMessage;
 
 pub enum SessionMessage {
@@ -61,6 +63,9 @@ pub enum SessionMessage {
     },
     Question(QuestionMessage),
     Slash(SlashMessage),
+    /// A bash-mode (`!`) run's display-only popup: start, live output,
+    /// finish, or Escape dismissal.
+    Bash(bash::BashMessage),
     /// A retryable connection failure; the core task re-sends the turn after
     /// `delay_ms`. Shows a red countdown in the status row.
     RetryScheduled {
@@ -138,6 +143,8 @@ pub struct SessionScreen {
     pub question: QuestionUI,
     slash: SlashMenu,
     pub chat: chat::Chat,
+    /// Floating display-only window for the latest bash-mode run.
+    pub bash: bash::BashPopup,
     pub busy: bool,
     busy_kind: BusyKind,
     pub status: Option<String>,
@@ -159,6 +166,7 @@ impl SessionScreen {
             question: QuestionUI::new(),
             slash: SlashMenu::new(),
             chat: chat::Chat::new(),
+            bash: bash::BashPopup::new(),
             busy: false,
             busy_kind: BusyKind::Generating,
             status: None,
@@ -189,6 +197,12 @@ impl SessionScreen {
 
     pub fn has_messages(&self) -> bool {
         self.chat.has_messages()
+    }
+
+    /// Bash mode: the prompt starts with `!`, so a submit runs the rest as a
+    /// local shell command instead of prompting the agent.
+    pub fn is_bash_mode(&self) -> bool {
+        self.input.buffer.value.starts_with('!')
     }
 
     pub fn can_continue(&self) -> bool {
@@ -231,6 +245,11 @@ impl SessionScreen {
     pub fn map_event(&self, key: &KeyEvent) -> Option<SessionMessage> {
         if self.question.open {
             return self.question.map_event(key).map(SessionMessage::Question);
+        }
+        // The bash popup floats above the chat; Escape dismisses it before
+        // the event reaches anything underneath.
+        if let Some(m) = self.bash.map_event(key) {
+            return Some(SessionMessage::Bash(m));
         }
         if self.slash.active()
             && let Some(m) = self.slash.map_event(key)
@@ -290,6 +309,14 @@ impl SessionScreen {
                 if let Some(effect) = self.input.update(m) {
                     match effect {
                         TextAreaEffect::Submit { content } => {
+                            if let Some(raw) = content.strip_prefix('!') {
+                                let command = raw.trim().to_string();
+                                self.sync_slash();
+                                if command.is_empty() {
+                                    return None;
+                                }
+                                return Some(SessionEffect::RunBash { command });
+                            }
                             if let Some(action) = commands::parse_command(&content) {
                                 self.sync_slash();
                                 return Some(SessionEffect::RunCommand(action));
@@ -316,6 +343,10 @@ impl SessionScreen {
             SessionMessage::Chat(msg) => {
                 self.observe_chat(&msg);
                 self.chat.update(msg);
+                None
+            }
+            SessionMessage::Bash(m) => {
+                self.bash.update(m);
                 None
             }
             SessionMessage::Slash(m) => match m {
@@ -629,6 +660,7 @@ impl SessionScreen {
                 self.model.as_deref().unwrap_or("?")
             ),
         };
+        let bash_mode = self.is_bash_mode();
         let input_height = if self.question.open {
             self.question.desired_height(content_area.width as usize)
         } else {
@@ -679,12 +711,24 @@ impl SessionScreen {
         if self.question.open {
             self.question.view(frame, input_area);
         } else {
-            self.input.view(frame, input_area);
+            let text_color = if bash_mode {
+                theme::ACCENT
+            } else {
+                theme::TEXT
+            };
+            self.input.view(frame, input_area, text_color);
         }
 
         if !self.question.open && self.slash.active() {
             let rect = self.slash.popup_rect(history_area, input_area);
             self.slash.view(frame, rect);
+        }
+
+        // The bash popup floats over the chat content, directly above the
+        // input area; painted last so it sits on top of everything else in
+        // the content column.
+        if !self.question.open {
+            self.bash.view(frame, history_area, input_area);
         }
 
         let connection = self.provider.as_ref().map(|p| {
@@ -757,6 +801,9 @@ impl SessionScreen {
                     "clear"
                 };
                 let mut bindings = vec![("Ctrl+C", ctrl_c), ("Ctrl+M", "commands")];
+                if bash_mode {
+                    bindings.insert(0, ("Enter", "run"));
+                }
                 bindings.extend(recall);
                 theme::help_line(&bindings)
             } else {
@@ -765,11 +812,9 @@ impl SessionScreen {
                 } else {
                     "clear"
                 };
-                let mut bindings = vec![
-                    ("Enter", "send"),
-                    ("Ctrl+M", "commands"),
-                    ("Ctrl+C", ctrl_c),
-                ];
+                let enter = if bash_mode { "run" } else { "send" };
+                let mut bindings =
+                    vec![("Enter", enter), ("Ctrl+M", "commands"), ("Ctrl+C", ctrl_c)];
                 bindings.extend(recall);
                 theme::help_line(&bindings)
             };
@@ -781,6 +826,11 @@ impl SessionScreen {
 pub enum SessionEffect {
     SendMessage {
         content: String,
+    },
+    /// Run a bash-mode (`!`-prefixed) command locally through the resolved
+    /// shell. Never persisted, never sent to the model.
+    RunBash {
+        command: String,
     },
     CancelStream,
     AnswerQuestion {
@@ -1400,5 +1450,110 @@ mod tests {
         let buf = draw(&screen, 100, 24);
         let (_, footer) = find_row(&buf, "recall steered");
         assert!(footer.contains("Alt+↑"), "footer: {footer:?}");
+    }
+
+    #[test]
+    fn bash_mode_submit_strips_prefix_and_runs_local() {
+        let mut screen = SessionScreen::new();
+        screen.input.buffer.set("!cargo build --release");
+        assert!(screen.is_bash_mode());
+        assert!(matches!(
+            screen.update(SessionMessage::Text(TextAreaMessage::Submit)),
+            Some(SessionEffect::RunBash { command })
+                if command == "cargo build --release"
+        ));
+        assert!(screen.input.buffer.value.is_empty());
+        assert!(!screen.chat.has_messages(), "bash runs never create turns");
+    }
+
+    #[test]
+    fn bash_mode_submit_trims_after_bang() {
+        let mut screen = SessionScreen::new();
+        screen.input.buffer.set("!  ls -la\n");
+        assert!(matches!(
+            screen.update(SessionMessage::Text(TextAreaMessage::Submit)),
+            Some(SessionEffect::RunBash { command }) if command == "ls -la"
+        ));
+    }
+
+    #[test]
+    fn bash_mode_bare_exclamation_is_ignored() {
+        let mut screen = SessionScreen::new();
+        screen.input.buffer.set("!");
+        assert!(screen.is_bash_mode());
+        assert!(
+            screen
+                .update(SessionMessage::Text(TextAreaMessage::Submit))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn plain_submit_still_sends_message() {
+        let mut screen = SessionScreen::new();
+        screen.input.buffer.set("hello agent");
+        assert!(!screen.is_bash_mode());
+        assert!(matches!(
+            screen.update(SessionMessage::Text(TextAreaMessage::Submit)),
+            Some(SessionEffect::SendMessage { content })
+                if content == "hello agent"
+        ));
+    }
+
+    #[test]
+    fn footer_shows_run_hint_in_bash_mode() {
+        let mut screen = SessionScreen::new();
+        screen.input.buffer.set("!echo hi");
+        let buf = draw(&screen, 100, 24);
+        let (_, footer) = find_row(&buf, "Enter");
+        assert!(footer.contains("run"), "footer: {footer:?}");
+        assert!(!footer.contains("send"), "footer: {footer:?}");
+    }
+
+    #[test]
+    fn bash_events_open_the_popup_and_escape_dismisses_it() {
+        let mut screen = SessionScreen::new();
+        screen.update(SessionMessage::Bash(BashMessage::Started {
+            id: 7,
+            command: "cargo build".into(),
+        }));
+        assert!(screen.bash.open());
+        assert!(screen.bash.running());
+
+        screen.update(SessionMessage::Bash(BashMessage::Output {
+            id: 7,
+            stdout: "Compiling…".into(),
+            stderr: String::new(),
+        }));
+        let buf = draw(&screen, 100, 24);
+        let (_, header) = find_row(&buf, "$ cargo build");
+        let (_, body) = find_row(&buf, "Compiling");
+        assert!(body < header, "output rows render below the command header");
+
+        screen.update(SessionMessage::Bash(BashMessage::Finished {
+            id: 7,
+            ok: true,
+            exit: Some(0),
+            stdout: "exit 0:\ndone".into(),
+            stderr: String::new(),
+            duration_ms: 120,
+        }));
+        assert!(screen.bash.open(), "finished run stays visible");
+
+        screen.update(SessionMessage::Bash(BashMessage::Dismiss));
+        assert!(!screen.bash.open());
+    }
+
+    #[test]
+    fn escape_reaches_the_bash_popup_before_the_input() {
+        let mut screen = SessionScreen::new();
+        screen.update(SessionMessage::Bash(BashMessage::Started {
+            id: 0,
+            command: "ls".into(),
+        }));
+        assert!(matches!(
+            screen.map_event(&KeyCode::Escape.into()),
+            Some(SessionMessage::Bash(BashMessage::Dismiss))
+        ));
     }
 }

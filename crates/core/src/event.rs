@@ -55,6 +55,29 @@ pub enum Event {
         stdout: String,
         stderr: String,
     },
+    /// A bash-mode (`!`) command started running; display-only, never
+    /// persisted or sent to the model. `id` routes the follow-up events.
+    BashStarted {
+        id: u64,
+        command: String,
+    },
+    /// Live output tails for a running bash-mode command.
+    BashOutput {
+        id: u64,
+        stdout: String,
+        stderr: String,
+    },
+    /// A bash-mode command finished. `exit` is `None` when the process died
+    /// to a signal (or failed to spawn, in which case `stdout` carries the
+    /// spawn error).
+    BashFinished {
+        id: u64,
+        ok: bool,
+        exit: Option<i32>,
+        stdout: String,
+        stderr: String,
+        duration_ms: u64,
+    },
     WorkerStarted {
         name: String,
         args: serde_json::Value,

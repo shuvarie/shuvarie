@@ -114,11 +114,7 @@ async fn role_round_trip() {
         .unwrap();
 
     let loaded = store.load_session(id).await.unwrap();
-    let roles: Vec<Role> = loaded
-        .messages
-        .iter()
-        .map(|m| m.role.clone().into())
-        .collect();
+    let roles: Vec<Role> = loaded.messages.iter().map(|m| m.role.into()).collect();
     assert_eq!(roles, vec![Role::System, Role::User, Role::Assistant]);
 }
 

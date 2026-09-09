@@ -132,7 +132,7 @@ fn walk_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::test_util::{new_ctx, tempdir};
+    use crate::test_util::{new_ctx, tempdir};
 
     #[tokio::test]
     async fn grep_finds_and_caps() {

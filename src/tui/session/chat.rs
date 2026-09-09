@@ -202,12 +202,13 @@ impl Chat {
         {
             turn.rev += 1;
         }
+        drop(turns);
     }
 
     /// Whether any tool block is still animating: live blocks in the
-    /// in-flight turn, plus a straggler in the last committed turn. Only
-    /// those two turns can hold running blocks — committed turns are built
-    /// from in-flight data or stored records, neither of which animates.
+    /// in-flight turn or a straggler in the last committed turn. Only those
+    /// turns can hold running blocks — committed turns are built from
+    /// in-flight data or stored records, neither of which animates.
     pub fn has_running_tool_blocks(&self) -> bool {
         self.in_flight
             .borrow()
@@ -822,6 +823,30 @@ impl Chat {
                 }
             }
         }
+        if target.is_none() {
+            let in_flight_h = self
+                .in_flight
+                .borrow()
+                .as_ref()
+                .map_or(0, |turn| turn.height(width, env_rev));
+            start += in_flight_h;
+            let steered = self.steered.borrow();
+            for turn in steered.iter() {
+                let h = turn.height(width, env_rev);
+                if content_y < start + h {
+                    if let Some(cache) = turn.cache() {
+                        let local = content_y - start;
+                        target = cache
+                            .hits
+                            .iter()
+                            .find(|region| local >= region.start && local < region.end)
+                            .map(|region| region.addr.clone());
+                    }
+                    break;
+                }
+                start += h;
+            }
+        }
         if let Some(addr) = target {
             self.toggle_block(addr);
         }
@@ -854,7 +879,7 @@ impl Chat {
                 slot.rev += 1;
                 slot.refresh_est(self.interrupted && !self.streaming && addr.turn + 1 == turns_len);
             }
-        } else {
+        } else if addr.turn == turns_len {
             let mut in_flight = self.in_flight.borrow_mut();
             let Some(turn) = in_flight.as_mut() else {
                 return;

@@ -229,6 +229,9 @@ pub async fn run(
     let mut pending_questions: HashMap<u64, oneshot::Sender<AnswerResponse>> = HashMap::new();
     let mut next_question_id: u64 = 0;
 
+    // Bash-mode (`!`) runs, routed back to the TUI by id.
+    let mut next_bash_id: u64 = 0;
+
     let mut clients: HashMap<String, ProviderClient> = HashMap::new();
     // Refresh the provider catalog from the service (falling back to embedded)
     // before wiring up clients, so pricing/context/embedding lookups see fresh
@@ -470,6 +473,71 @@ pub async fn run(
                         conn_retries = 0;
                         ctx.active_stream = None;
                         ctx.start_user_turn(content, false).await;
+                    }
+                    Command::RunBash { command } => {
+                        let id = next_bash_id;
+                        next_bash_id += 1;
+                        let _ = ctx
+                            .event_tx
+                            .send(Event::BashStarted {
+                                id,
+                                command: command.clone(),
+                            })
+                            .await;
+                        let shell = ctx.shell.clone();
+                        let event_tx = ctx.event_tx.clone();
+                        let cwd = ctx.workspace_root.clone();
+                        tokio::spawn(async move {
+                            let started = std::time::Instant::now();
+                            let (chunk_tx, mut chunk_rx) =
+                                tokio::sync::mpsc::channel::<crate::tools::ShellChunk>(64);
+                            let pump = tokio::spawn({
+                                let event_tx = event_tx.clone();
+                                async move {
+                                    while let Some(chunk) = chunk_rx.recv().await {
+                                        let _ = event_tx
+                                            .send(Event::BashOutput {
+                                                id,
+                                                stdout: chunk.stdout,
+                                                stderr: chunk.stderr,
+                                            })
+                                            .await;
+                                    }
+                                }
+                            });
+                            let result = crate::tools::run_shell_command(
+                                &shell,
+                                &command,
+                                &cwd,
+                                None,
+                                &crate::tools::ShellOutputTx::new(chunk_tx),
+                            )
+                            .await;
+                            let _ = pump.await;
+                            let duration_ms = started.elapsed().as_millis() as u64;
+                            let finished = match result {
+                                Ok(run) => Event::BashFinished {
+                                    id,
+                                    ok: run.status.success(),
+                                    exit: run.status.code(),
+                                    stdout: match run.status.code() {
+                                        Some(code) => format!("exit {code}:\n{}", run.out),
+                                        None => run.out,
+                                    },
+                                    stderr: run.err,
+                                    duration_ms,
+                                },
+                                Err(error) => Event::BashFinished {
+                                    id,
+                                    ok: false,
+                                    exit: None,
+                                    stdout: error,
+                                    stderr: String::new(),
+                                    duration_ms,
+                                },
+                            };
+                            let _ = event_tx.send(finished).await;
+                        });
                     }
                     Command::CancelStream => {
                         let mut aborted = false;

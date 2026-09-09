@@ -15,7 +15,8 @@ pub mod question;
 pub mod session;
 pub mod shell;
 pub mod skills;
-pub mod test_util;
+#[cfg(test)]
+pub(crate) mod test_util;
 pub mod tool_record;
 pub mod tools;
 pub mod truncate;

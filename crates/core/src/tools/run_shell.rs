@@ -1,6 +1,8 @@
 use serde_json::{Value, json};
 use shuvarie_llm::{ShellStreams, Tool, ToolContext, ToolExecutionError, ToolOutput};
 
+use std::path::Path;
+
 use super::{DEFAULT_TIMEOUT_SECS, arg_value, workspace_root};
 use crate::shell::Shell;
 
@@ -66,6 +68,142 @@ fn display_stream(bytes: &[u8]) -> String {
         .chars()
         .take(MAX_COMMAND_OUTPUT)
         .collect()
+}
+
+/// One finished shell run: the exit status, whether the run hit its timeout,
+/// and the captured streams (`out`/`err` are display-capped, `captured` is the
+/// trimmed full capture for error messages).
+pub(crate) struct ShellRun {
+    pub status: std::process::ExitStatus,
+    pub timed_out: bool,
+    pub out: String,
+    pub err: String,
+    pub captured: String,
+}
+
+/// Spawns `command` through `shell` in `cwd`, streaming live output tails
+/// through `shell_tx` as they arrive. `timeout_secs: None` runs unbounded;
+/// a timeout kills the process group and reports the partial capture.
+pub(crate) async fn run_shell_command(
+    shell: &Shell,
+    command: &str,
+    cwd: &Path,
+    timeout_secs: Option<u64>,
+    shell_tx: &ShellOutputTx,
+) -> Result<ShellRun, String> {
+    let mut builder = tokio::process::Command::new(&shell.path);
+    shell.apply(&mut builder, command);
+    builder
+        .current_dir(cwd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null());
+    #[cfg(unix)]
+    builder.process_group(0);
+    let mut child = builder.spawn().map_err(|e| format!("spawn shell: {e}"))?;
+    let pgid = child.id();
+    let mut guard = KillGuard(pgid);
+
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<(bool, Vec<u8>)>(64);
+    let mut readers = Vec::new();
+    if let Some(pipe) = child.stdout.take() {
+        readers.push(spawn_pipe_reader(pipe, chunk_tx.clone(), false));
+    }
+    if let Some(pipe) = child.stderr.take() {
+        readers.push(spawn_pipe_reader(pipe, chunk_tx.clone(), true));
+    }
+    drop(chunk_tx);
+
+    let mut captured: Vec<u8> = Vec::new();
+    let mut out: Vec<u8> = Vec::new();
+    let mut err: Vec<u8> = Vec::new();
+    let mut last_emit =
+        std::time::Instant::now() - std::time::Duration::from_millis(SHELL_STREAM_INTERVAL_MS);
+    let interval = std::time::Duration::from_millis(SHELL_STREAM_INTERVAL_MS);
+    let deadline =
+        timeout_secs.map(|secs| tokio::time::Instant::now() + std::time::Duration::from_secs(secs));
+    let status = loop {
+        tokio::select! {
+            maybe_chunk = chunk_rx.recv() => {
+                match maybe_chunk {
+                    Some((is_stderr, chunk)) => {
+                        captured.extend_from_slice(&chunk);
+                        cap_buffer(&mut captured);
+                        if is_stderr {
+                            err.extend_from_slice(&chunk);
+                            cap_buffer(&mut err);
+                        } else {
+                            out.extend_from_slice(&chunk);
+                            cap_buffer(&mut out);
+                        }
+                        if last_emit.elapsed() >= interval {
+                            last_emit = std::time::Instant::now();
+                            shell_tx.send_streams(&out, &err).await;
+                        }
+                    }
+                    None => {
+                        let status = child
+                            .wait()
+                            .await
+                            .map_err(|e| format!("wait shell: {e}"))?;
+                        break status;
+                    }
+                }
+            }
+            status = child.wait() => {
+                // Drain remaining output so it is not lost with the pipes.
+                while let Some((is_stderr, chunk)) = chunk_rx.recv().await {
+                    captured.extend_from_slice(&chunk);
+                    cap_buffer(&mut captured);
+                    if is_stderr {
+                        err.extend_from_slice(&chunk);
+                        cap_buffer(&mut err);
+                    } else {
+                        out.extend_from_slice(&chunk);
+                        cap_buffer(&mut out);
+                    }
+                }
+                let status = status.map_err(|e| format!("wait shell: {e}"))?;
+                break status;
+            }
+            // An absolute deadline, so recreating the sleep each loop keeps
+            // the same fire time; `pending` never resolves when unbounded.
+            _ = async {
+                match deadline {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                if let Some(pgid) = pgid {
+                    kill_process_group(pgid);
+                }
+                let _ = child.kill().await;
+                let status = child.wait().await.map_err(|e| format!("wait shell: {e}"))?;
+                shell_tx.send_streams(&out, &err).await;
+                guard.disarm();
+                return Ok(ShellRun {
+                    status,
+                    timed_out: true,
+                    out: display_stream(&out),
+                    err: display_stream(&err),
+                    captured: String::from_utf8_lossy(&captured).trim().to_string(),
+                });
+            }
+        }
+    };
+
+    for reader in readers {
+        let _ = reader.await;
+    }
+    guard.disarm();
+
+    Ok(ShellRun {
+        status,
+        timed_out: false,
+        out: display_stream(&out),
+        err: display_stream(&err),
+        captured: String::from_utf8_lossy(&captured).trim().to_string(),
+    })
 }
 
 #[cfg(unix)]
@@ -159,132 +297,53 @@ impl Tool for RunShell {
                 }
                 None => workspace_root()?,
             };
-            let mut builder = tokio::process::Command::new(&self.shell.path);
-            self.shell.apply(&mut builder, &command);
-            builder
-                .current_dir(&cwd_abs)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .stdin(std::process::Stdio::null());
-            #[cfg(unix)]
-            builder.process_group(0);
-            let mut child = builder.spawn().map_err(|e| format!("spawn shell: {e}"))?;
-            let pgid = child.id();
-            let mut guard = KillGuard(pgid);
+            let run = run_shell_command(
+                &self.shell,
+                &command,
+                &cwd_abs,
+                Some(timeout_secs),
+                &self.shell_tx,
+            )
+            .await?;
 
-            let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<(bool, Vec<u8>)>(64);
-            let mut readers = Vec::new();
-            if let Some(pipe) = child.stdout.take() {
-                readers.push(spawn_pipe_reader(pipe, chunk_tx.clone(), false));
-            }
-            if let Some(pipe) = child.stderr.take() {
-                readers.push(spawn_pipe_reader(pipe, chunk_tx.clone(), true));
-            }
-            drop(chunk_tx);
-
-            let mut captured: Vec<u8> = Vec::new();
-            let mut out: Vec<u8> = Vec::new();
-            let mut err: Vec<u8> = Vec::new();
-            let mut last_emit = std::time::Instant::now() - std::time::Duration::from_millis(SHELL_STREAM_INTERVAL_MS);
-            let interval = std::time::Duration::from_millis(SHELL_STREAM_INTERVAL_MS);
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-            let status = loop {
-                tokio::select! {
-                    maybe_chunk = chunk_rx.recv() => {
-                        match maybe_chunk {
-                            Some((is_stderr, chunk)) => {
-                                captured.extend_from_slice(&chunk);
-                                cap_buffer(&mut captured);
-                                if is_stderr {
-                                    err.extend_from_slice(&chunk);
-                                    cap_buffer(&mut err);
-                                } else {
-                                    out.extend_from_slice(&chunk);
-                                    cap_buffer(&mut out);
-                                }
-                                if last_emit.elapsed() >= interval {
-                                    last_emit = std::time::Instant::now();
-                                    self.shell_tx.send_streams(&out, &err).await;
-                                }
-                            }
-                            None => {
-                                let status = child
-                                    .wait()
-                                    .await
-                                    .map_err(|e| format!("wait shell: {e}"))?;
-                                break status;
-                            }
-                        }
-                    }
-                    status = child.wait() => {
-                        // Drain remaining output so it is not lost with the pipes.
-                        while let Some((is_stderr, chunk)) = chunk_rx.recv().await {
-                            captured.extend_from_slice(&chunk);
-                            cap_buffer(&mut captured);
-                            if is_stderr {
-                                err.extend_from_slice(&chunk);
-                                cap_buffer(&mut err);
-                            } else {
-                                out.extend_from_slice(&chunk);
-                                cap_buffer(&mut out);
-                            }
-                        }
-                        let status = status.map_err(|e| format!("wait shell: {e}"))?;
-                        break status;
-                    }
-                    _ = tokio::time::sleep_until(deadline) => {
-                        if let Some(pgid) = pgid {
-                            kill_process_group(pgid);
-                        }
-                        let _ = child.kill().await;
-                        let _ = child.wait().await;
-                        self.shell_tx.send_streams(&out, &err).await;
-                        let partial = String::from_utf8_lossy(&captured).trim().to_string();
-                        let mut message = format!(
-                            "shell command timed out after {timeout_secs}s (killed)"
-                        );
-                        if !partial.is_empty() {
-                            message.push_str(&format!("\n{partial}"));
-                        }
-                        message.push_str(&format!(
-                            "\n\n<shell_metadata>\nshell tool terminated the command after exceeding the {timeout_secs}s timeout. If this command is expected to take longer and is not waiting for interactive input, retry with a larger timeout_secs value.\n</shell_metadata>"
-                        ));
-                        let stdout =
-                            format!("timeout {timeout_secs}s:\n{}", display_stream(&out));
-                        ctx.insert_result(ShellStreams {
-                            stdout,
-                            stderr: display_stream(&err),
-                        });
-                        return Err(message);
-                    }
+            if run.timed_out {
+                let mut message = format!(
+                    "shell command timed out after {timeout_secs}s (killed)"
+                );
+                if !run.captured.is_empty() {
+                    message.push_str(&format!("\n{}", run.captured));
                 }
-            };
-
-            for reader in readers {
-                let _ = reader.await;
+                message.push_str(&format!(
+                    "\n\n<shell_metadata>\nshell tool terminated the command after exceeding the {timeout_secs}s timeout. If this command is expected to take longer and is not waiting for interactive input, retry with a larger timeout_secs value.\n</shell_metadata>"
+                ));
+                ctx.insert_result(ShellStreams {
+                    stdout: format!("timeout {timeout_secs}s:\n{}", run.out),
+                    stderr: run.err,
+                });
+                return Err(message);
             }
-            guard.disarm();
 
-            let trimmed = String::from_utf8_lossy(&captured)
-                .trim_end()
-                .to_string();
-            let trimmed = trimmed.trim();
-            let capped: String = trimmed.chars().take(MAX_COMMAND_OUTPUT).collect();
+            let status = run.status;
             let status_line = format!("exit {status}:");
-            let stdout = format!("{status_line}\n{}", display_stream(&out));
             ctx.insert_result(ShellStreams {
-                stdout,
-                stderr: display_stream(&err),
+                stdout: format!("{status_line}\n{}", run.out),
+                stderr: run.err,
             });
             if !status.success() {
-                return Err(format!("shell exited with {status}:\n{capped}"));
+                return Err(format!(
+                    "shell exited with {status}:\n{}",
+                    run.captured.chars().take(MAX_COMMAND_OUTPUT).collect::<String>()
+                ));
             }
-            if trimmed.is_empty() {
+            if run.captured.is_empty() {
                 Ok(ToolOutput::text(format!(
                     "shell exited with {status} (no output)"
                 )))
             } else {
-                Ok(ToolOutput::text(format!("{status_line}\n{capped}")))
+                Ok(ToolOutput::text(format!(
+                    "{status_line}\n{}",
+                    run.captured.chars().take(MAX_COMMAND_OUTPUT).collect::<String>()
+                )))
             }
         }
         .await;
@@ -326,7 +385,7 @@ fn cap_buffer(buf: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::test_util::{new_ctx, tempdir};
+    use crate::test_util::{new_ctx, tempdir};
     use tempfile::TempDir;
 
     fn run_shell_tool() -> RunShell {
@@ -450,6 +509,52 @@ mod tests {
             }
         }
         assert!(tagged);
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn run_shell_command_runs_unbounded_without_timeout() {
+        let (dir, _guard) = tempdir();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let shell = crate::shell::resolve(None).shell;
+        let run = run_shell_command(
+            &shell,
+            "echo unbounded; sleep 1.5",
+            dir.path(),
+            None,
+            &ShellOutputTx::new(tx),
+        )
+        .await
+        .unwrap();
+        assert!(!run.timed_out);
+        assert!(run.status.success());
+        assert_eq!(run.status.code(), Some(0));
+        assert!(run.out.contains("unbounded"), "{}", run.out);
+        let mut saw_stream = false;
+        while let Ok(chunk) = rx.try_recv() {
+            if chunk.stdout.contains("unbounded") {
+                saw_stream = true;
+            }
+        }
+        assert!(saw_stream, "unbounded runs still stream live tails");
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn run_shell_command_reports_failure_status() {
+        let (dir, _guard) = tempdir();
+        let shell = crate::shell::resolve(None).shell;
+        let run = run_shell_command(
+            &shell,
+            "exit 7",
+            dir.path(),
+            None,
+            &ShellOutputTx::new(tokio::sync::mpsc::channel(64).0),
+        )
+        .await
+        .unwrap();
+        assert!(!run.status.success());
+        assert_eq!(run.status.code(), Some(7));
         drop(dir);
     }
 

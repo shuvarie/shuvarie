@@ -17,7 +17,7 @@ use super::confirm_quit::{ConfirmQuit, ConfirmQuitEffect, ConfirmQuitMessage};
 use super::context::UpdateCtx;
 use super::history_search::{HistorySearch, HistorySearchEffect, HistorySearchMessage};
 use super::model_picker::{ModelPicker, ModelPickerEffect, ModelPickerMessage};
-use super::session::{ChatMessage, SessionEffect, SessionMessage, SessionScreen};
+use super::session::{BashMessage, ChatMessage, SessionEffect, SessionMessage, SessionScreen};
 use super::session_picker::{SessionPicker, SessionPickerEffect, SessionPickerMessage};
 use super::sidebar::SidebarMessage;
 use super::spinner::SpinnerKind;
@@ -409,6 +409,29 @@ impl App {
                         stderr,
                     },
                 ))),
+                CoreEvent::BashStarted { id, command } => Some(AppMessage::Session(
+                    SessionMessage::Bash(BashMessage::Started { id, command }),
+                )),
+                CoreEvent::BashOutput { id, stdout, stderr } => Some(AppMessage::Session(
+                    SessionMessage::Bash(BashMessage::Output { id, stdout, stderr }),
+                )),
+                CoreEvent::BashFinished {
+                    id,
+                    ok,
+                    exit,
+                    stdout,
+                    stderr,
+                    duration_ms,
+                } => Some(AppMessage::Session(SessionMessage::Bash(
+                    BashMessage::Finished {
+                        id,
+                        ok,
+                        exit,
+                        stdout,
+                        stderr,
+                        duration_ms,
+                    },
+                ))),
                 CoreEvent::WorkerStarted {
                     name,
                     args,
@@ -574,6 +597,9 @@ impl App {
                             }
                             self.ctx
                                 .send(shuvarie_core::Command::SendMessage { content });
+                        }
+                        SessionEffect::RunBash { command } => {
+                            self.ctx.send(shuvarie_core::Command::RunBash { command });
                         }
                         SessionEffect::CancelStream => {
                             self.ctx.send(shuvarie_core::Command::CancelStream);
@@ -918,6 +944,7 @@ impl App {
     pub fn active_spinners(&self) -> impl Iterator<Item = SpinnerKind> + '_ {
         let inline = self.session.busy
             || self.session.chat.has_running_tool_blocks()
+            || self.session.bash.running()
             || self.history_search.loading
             || self.session_picker.loading
             || self.session.sidebar.lsp_servers.iter().any(|s| {

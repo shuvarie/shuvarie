@@ -103,10 +103,10 @@ fn check_write_target(abs: &Path, root: &Path, display: &str) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::test_util::lock_cwd;
+    use crate::test_util::lock_cwd;
     use tempfile::TempDir;
 
-    fn tempdir() -> (TempDir, std::sync::MutexGuard<'static, ()>) {
+    fn tempdir() -> (TempDir, crate::test_util::CwdGuard) {
         let guard = lock_cwd();
         let dir = TempDir::new().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();

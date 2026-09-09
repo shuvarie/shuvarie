@@ -564,7 +564,9 @@ impl TextArea {
         self.buffer.set(s);
     }
 
-    pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
+    /// `text_color` recolors the buffer text — bash mode, where a submit
+    /// runs the prompt as a local shell command.
+    pub fn view(&self, frame: &mut Frame<'_>, area: Rect, text_color: Color) {
         let block = Block::new()
             .bg(crate::tui::theme::SURFACE)
             .padding(ratatui::widgets::Padding::symmetric(2, 1));
@@ -587,12 +589,9 @@ impl TextArea {
                 inner,
             );
         } else {
-            let lines = self.buffer.cursor_lines(
-                crate::tui::theme::TEXT,
-                crate::tui::theme::ACCENT,
-                width,
-                viewport,
-            );
+            let lines =
+                self.buffer
+                    .cursor_lines(text_color, crate::tui::theme::ACCENT, width, viewport);
             frame.render_widget(Paragraph::new(lines).alignment(Alignment::Left), inner);
         }
     }
@@ -860,5 +859,23 @@ mod tests {
         b.set("hello");
         b.right_word();
         assert_eq!(b.cursor, "hello".len());
+    }
+
+    #[test]
+    fn view_colors_text_for_bash_mode() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut area = TextArea::with_max_height("p", 8);
+        area.set("hi");
+        for text_color in [crate::tui::theme::TEXT, crate::tui::theme::ACCENT] {
+            let mut terminal = Terminal::new(TestBackend::new(40, 5)).unwrap();
+            terminal
+                .draw(|frame| area.view(frame, Rect::new(0, 0, 40, 5), text_color))
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            let cell = &buf[(2, 1)];
+            assert_eq!(cell.symbol(), "h");
+            assert_eq!(cell.style().fg, Some(text_color));
+        }
     }
 }

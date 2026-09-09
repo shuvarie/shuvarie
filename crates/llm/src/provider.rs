@@ -833,7 +833,7 @@ mod tests {
             text: "main".into(),
         }]);
         let mut merged = merge_streams(main_stream, vec![worker_rx]);
-        let worker_items = vec![
+        let worker_items = [
             StreamItem::ToolStart {
                 name: "read_file".into(),
                 args: json!({ "path": "x.rs" }),

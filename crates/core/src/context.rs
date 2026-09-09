@@ -236,11 +236,10 @@ pub fn build_preamble(base: &str, context: &LoadedContext) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::MutexGuard;
     use tempfile::TempDir;
 
-    fn tempdir() -> (TempDir, MutexGuard<'static, ()>) {
-        let guard = crate::test_util::test_util::lock_cwd();
+    fn tempdir() -> (TempDir, crate::test_util::CwdGuard) {
+        let guard = crate::test_util::lock_cwd();
         let dir = TempDir::new().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
         (dir, guard)

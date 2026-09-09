@@ -153,7 +153,7 @@ fn is_binary_file(data: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::test_util::{new_ctx, tempdir};
+    use crate::test_util::{new_ctx, tempdir};
 
     fn read_file_tool() -> ReadFile {
         ReadFile::new(ReadCache::new(), 0, 0)
