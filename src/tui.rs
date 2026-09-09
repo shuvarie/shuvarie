@@ -47,13 +47,13 @@ pub async fn run_tui(
     let reader = term.event_reader();
     let event_stream = EventStream::new(reader, |_| true);
 
+    let initial_cols = term.get_dimensions()?.cols;
+    let frame_budget = frame_budget(config.ui.frame_rate);
     let mut rat = ratatui::Terminal::new(TerminaBackend::new(term))?;
     let connections = Connections::load().map_err(|e| io::Error::other(e.to_string()))?;
-    let app = App::new(connections, cmd_tx);
+    let app = App::new(config.ui, connections, cmd_tx, initial_cols);
 
     init_terminal(rat.backend_mut().terminal_mut())?;
-
-    let frame_budget = frame_budget(config.ui.frame_rate);
 
     let session_id = render_tui(app, &mut rat, event_rx, event_stream, frame_budget).await;
 

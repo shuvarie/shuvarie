@@ -3,16 +3,21 @@ use std::cell::{Cell, RefCell};
 use ratatui::layout::{Alignment, Rect};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph};
-use shuvarie_core::{LspStatus, Skill, SkillWarning};
+use shuvarie_core::{LspStatus, ServerStatus, SidebarPref, Skill, SkillWarning};
 use shuvarie_llm::TokenUsage;
-use termina::event::KeyEvent;
+use termina::event::{KeyCode, KeyEvent};
 
 use crate::tui::components::VersionBar;
 use crate::tui::sidebar::context::ContextDisplay;
+use crate::tui::utils::{ctrl, text::truncate_spans};
 
 use super::theme;
 
 mod context;
+
+/// Viewport width below which the sidebar auto-collapses when the pref is
+/// `auto`. At 80+ columns today's layout is unchanged.
+pub const COLLAPSE_BELOW_COLS: u16 = 80;
 
 pub struct Sidebar {
     pub version_bar: VersionBar,
@@ -23,6 +28,12 @@ pub struct Sidebar {
     pub skill_warnings: Vec<SkillWarning>,
     pub todos_done: usize,
     pub todos_total: usize,
+    /// Default expansion from `[ui] sidebar`.
+    pref: SidebarPref,
+    /// Manual Ctrl+W override; wins over `pref` until the config changes it.
+    manual: Option<bool>,
+    /// Last known viewport width, so a toggle can flip the effective state.
+    width: u16,
     dirty: Cell<bool>,
     lines_cache: RefCell<Vec<Line<'static>>>,
 }
@@ -58,6 +69,17 @@ pub enum SidebarMessage {
         done: usize,
         total: usize,
     },
+    /// Applies the `[ui] sidebar` pref and clears any manual override.
+    SetPref {
+        pref: SidebarPref,
+    },
+    /// Tracks the viewport width so a toggle can flip the effective state.
+    SetWidth {
+        cols: u16,
+    },
+    /// Manual collapse/expand override (Ctrl+W): flips the current effective
+    /// state and sticks until `SetPref` arrives again.
+    Toggle,
 }
 
 impl Sidebar {
@@ -71,6 +93,9 @@ impl Sidebar {
             skill_warnings: Vec::new(),
             todos_done: 0,
             todos_total: 0,
+            pref: SidebarPref::Auto,
+            manual: None,
+            width: 0,
             dirty: Cell::new(true),
             lines_cache: RefCell::new(Vec::new()),
         }
@@ -106,11 +131,36 @@ impl Sidebar {
                 self.todos_done = done;
                 self.todos_total = total;
             }
+            SidebarMessage::SetPref { pref } => {
+                self.pref = pref;
+                self.manual = None;
+            }
+            SidebarMessage::SetWidth { cols } => {
+                self.width = cols;
+            }
+            SidebarMessage::Toggle => {
+                self.manual = Some(!self.collapsed_at(self.width));
+            }
         }
     }
 
-    #[allow(dead_code)]
-    pub fn map_event(&self, _key: &KeyEvent) -> Option<SidebarMessage> {
+    /// Whether the sidebar renders collapsed at the given viewport width: the
+    /// manual override wins, then the config pref, then the width rule.
+    pub fn collapsed_at(&self, width: u16) -> bool {
+        self.manual.unwrap_or(match self.pref {
+            SidebarPref::Auto => width < COLLAPSE_BELOW_COLS,
+            SidebarPref::Expanded => false,
+            SidebarPref::Collapsed => true,
+        })
+    }
+
+    pub fn map_event(&self, key: &KeyEvent) -> Option<SidebarMessage> {
+        if ctrl(key)
+            && key.code == KeyCode::Char('w')
+            && key.kind == termina::event::KeyEventKind::Press
+        {
+            return Some(SidebarMessage::Toggle);
+        }
         None
     }
 
@@ -152,6 +202,32 @@ impl Sidebar {
         self.lines_cache.borrow().clone()
     }
 
+    /// The one-line stand-in for the collapsed sidebar, shown between the
+    /// status row and the key hint: context info (token totals, window
+    /// fraction, cost) and LSP server states — no skills, no todos. Truncated
+    /// to `max_width` display columns.
+    pub fn collapsed_line(&self, max_width: usize) -> Line<'static> {
+        let mut spans = self.context.compact_spans();
+        if self.lsp_enabled && !self.lsp_servers.is_empty() {
+            spans.push(Span::raw("  │  ").fg(theme::TEXT_MUTED));
+            for (i, s) in self.lsp_servers.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::raw("  ").fg(theme::TEXT_MUTED));
+                }
+                match server_marker(s.status) {
+                    Some((marker, color)) => spans.push(Span::raw(marker.to_string()).fg(color)),
+                    None => spans.push(super::spinner::spinner()),
+                }
+                spans.push(Span::raw(" ").fg(theme::TEXT_MUTED));
+                spans.push(Span::raw(s.name.clone()).fg(theme::TEXT));
+                if s.diagnostics > 0 {
+                    spans.push(Span::raw(format!(" ⚑{}", s.diagnostics)).fg(theme::WARNING));
+                }
+            }
+        }
+        Line::from(truncate_spans(spans, max_width))
+    }
+
     fn build_lines(&self) -> Vec<Line<'static>> {
         let mut lines: Vec<Line> = Vec::new();
 
@@ -181,23 +257,11 @@ impl Sidebar {
             lines.push(Line::from("  no servers").fg(theme::TEXT_MUTED));
         } else {
             for s in &self.lsp_servers {
-                let (marker, color) = match s.status {
-                    shuvarie_core::ServerStatus::Running => ("✓", theme::SUCCESS),
-                    shuvarie_core::ServerStatus::Starting => ("", theme::WARNING),
-                    shuvarie_core::ServerStatus::Stopping => ("", theme::WARNING),
-                    shuvarie_core::ServerStatus::Stopped => ("○", theme::TEXT_MUTED),
-                    shuvarie_core::ServerStatus::Failed => ("✗", theme::ERROR),
-                };
                 let mut row = vec![
                     Span::raw("  ").fg(theme::TEXT_MUTED),
-                    if matches!(
-                        s.status,
-                        shuvarie_core::ServerStatus::Starting
-                            | shuvarie_core::ServerStatus::Stopping
-                    ) {
-                        super::spinner::spinner()
-                    } else {
-                        Span::raw(marker.to_string()).fg(color)
+                    match server_marker(s.status) {
+                        Some((marker, color)) => Span::raw(marker.to_string()).fg(color),
+                        None => super::spinner::spinner(),
                     },
                     Span::raw(" ").fg(theme::TEXT_MUTED),
                     Span::raw(s.name.clone()).fg(theme::TEXT),
@@ -263,6 +327,17 @@ impl Sidebar {
 impl Default for Sidebar {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Status marker for a settled server; `None` while animating (the spinner
+/// span stands in).
+fn server_marker(status: ServerStatus) -> Option<(&'static str, Color)> {
+    match status {
+        ServerStatus::Running => Some(("✓", theme::SUCCESS)),
+        ServerStatus::Starting | ServerStatus::Stopping => None,
+        ServerStatus::Stopped => Some(("○", theme::TEXT_MUTED)),
+        ServerStatus::Failed => Some(("✗", theme::ERROR)),
     }
 }
 
@@ -533,5 +608,161 @@ mod tests {
         let rendered = text(&sidebar.rendered_lines());
         assert!(rendered.contains("200k"), "body: {rendered}");
         assert!(!rendered.contains('%'), "body: {rendered}");
+    }
+
+    fn lsp_status(name: &str, status: ServerStatus, diagnostics: usize) -> LspStatus {
+        LspStatus {
+            name: name.to_string(),
+            language: name.to_string(),
+            status,
+            pid: None,
+            diagnostics,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn collapsed_follows_width_by_default() {
+        let sidebar = Sidebar::new();
+        assert!(sidebar.collapsed_at(79), "below the threshold collapses");
+        assert!(!sidebar.collapsed_at(80), "at the threshold stays expanded");
+    }
+
+    #[test]
+    fn collapsed_pref_expands_everywhere() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::SetPref {
+            pref: SidebarPref::Expanded,
+        });
+        assert!(!sidebar.collapsed_at(0));
+        assert!(!sidebar.collapsed_at(40));
+    }
+
+    #[test]
+    fn collapsed_pref_collapses_everywhere() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::SetPref {
+            pref: SidebarPref::Collapsed,
+        });
+        assert!(sidebar.collapsed_at(0));
+        assert!(sidebar.collapsed_at(200));
+    }
+
+    #[test]
+    fn toggle_overrides_until_pref_reset() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::SetWidth { cols: 200 });
+        sidebar.update(SidebarMessage::Toggle);
+        assert!(sidebar.collapsed_at(200), "expanded + toggle collapses");
+        sidebar.update(SidebarMessage::Toggle);
+        assert!(!sidebar.collapsed_at(200), "toggle back expands");
+        sidebar.update(SidebarMessage::SetPref {
+            pref: SidebarPref::Auto,
+        });
+        assert!(!sidebar.collapsed_at(200), "pref reset clears the override");
+    }
+
+    #[test]
+    fn toggle_on_narrow_screen_expands() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::SetWidth { cols: 40 });
+        sidebar.update(SidebarMessage::Toggle);
+        assert!(!sidebar.collapsed_at(40));
+    }
+
+    #[test]
+    fn map_event_toggles_on_ctrl_w() {
+        let sidebar = Sidebar::new();
+        let key = KeyEvent::new(KeyCode::Char('w'), termina::event::Modifiers::CONTROL);
+        assert!(matches!(
+            sidebar.map_event(&key),
+            Some(SidebarMessage::Toggle)
+        ));
+        let release = KeyEvent {
+            kind: termina::event::KeyEventKind::Release,
+            ..KeyEvent::new(KeyCode::Char('w'), termina::event::Modifiers::CONTROL)
+        };
+        assert!(sidebar.map_event(&release).is_none());
+        let plain = KeyEvent::new(KeyCode::Char('w'), termina::event::Modifiers::empty());
+        assert!(sidebar.map_event(&plain).is_none());
+    }
+
+    #[test]
+    fn collapsed_line_shows_context_and_lsp_not_skills() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateConfig {
+            context_length: Some(200_000),
+        });
+        sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage {
+                input_tokens: 10_100,
+                output_tokens: 12_300,
+                ..Default::default()
+            },
+            cost: 0.125,
+            context_tokens: Some(84_000),
+        });
+        sidebar.update(SidebarMessage::SetTodos { done: 2, total: 5 });
+        sidebar.update(SidebarMessage::UpdateSkills {
+            skills: vec![Skill {
+                name: "ratatui".into(),
+                path: "/skills/ratatui".into(),
+                description: String::new(),
+                tags: Vec::new(),
+                category: None,
+                global: false,
+                disable_model_invocation: false,
+            }],
+            warnings: Vec::new(),
+        });
+        sidebar.update(SidebarMessage::UpdateLsp {
+            servers: vec![
+                lsp_status("rust-analyzer", ServerStatus::Running, 3),
+                lsp_status("gopls", ServerStatus::Stopped, 0),
+            ],
+        });
+        let line = sidebar.collapsed_line(200);
+        let rendered: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(rendered.contains("↑10.1k ↓12.3k"), "body: {rendered}");
+        assert!(rendered.contains("84k/200k (42%)"), "body: {rendered}");
+        assert!(rendered.contains("$0.12"), "body: {rendered}");
+        assert!(rendered.contains("✓ rust-analyzer ⚑3"), "body: {rendered}");
+        assert!(rendered.contains("○ gopls"), "body: {rendered}");
+        assert!(!rendered.contains("Skills"), "body: {rendered}");
+        assert!(!rendered.contains("Todos"), "body: {rendered}");
+    }
+
+    #[test]
+    fn collapsed_line_omits_lsp_when_disabled_or_empty() {
+        let mut sidebar = Sidebar::new();
+        sidebar.lsp_enabled = false;
+        sidebar.lsp_servers = vec![lsp_status("rust-analyzer", ServerStatus::Running, 0)];
+        let line = sidebar.collapsed_line(200);
+        let rendered: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(!rendered.contains("rust-analyzer"), "body: {rendered}");
+
+        let sidebar = Sidebar::new();
+        let line = sidebar.collapsed_line(200);
+        let rendered: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(!rendered.contains("│"), "body: {rendered}");
+    }
+
+    #[test]
+    fn collapsed_line_truncates_to_width() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateLsp {
+            servers: vec![
+                lsp_status("rust-analyzer-with-a-long-name", ServerStatus::Running, 0),
+                lsp_status(
+                    "gopls-and-another-long-server-name",
+                    ServerStatus::Running,
+                    0,
+                ),
+            ],
+        });
+        let line = sidebar.collapsed_line(30);
+        let rendered: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(rendered.chars().count() == 30, "body: {rendered}");
+        assert!(rendered.ends_with('…'), "body: {rendered}");
     }
 }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use ratatui::prelude::*;
-use shuvarie_core::{Connections, Event as CoreEvent, Model};
+use shuvarie_core::{Connections, Event as CoreEvent, Model, UiPrefs};
 use termina::Event as TermEvent;
 use termina::event::{KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use tokio::sync::mpsc::Sender;
@@ -139,7 +139,12 @@ fn catalog_context_length(connections: &Connections) -> Option<u64> {
 }
 
 impl App {
-    pub fn new(connections: Connections, cmd_tx: Sender<shuvarie_core::Command>) -> Self {
+    pub fn new(
+        ui: UiPrefs,
+        connections: Connections,
+        cmd_tx: Sender<shuvarie_core::Command>,
+        viewport_cols: u16,
+    ) -> Self {
         let mut welcome = Welcome::new();
         if !connections.has_connected_providers() {
             welcome.open();
@@ -163,6 +168,11 @@ impl App {
                     provider: initial_display,
                     model: initial_model,
                     context_length: initial_context_length,
+                });
+                s.sidebar
+                    .update(SidebarMessage::SetPref { pref: ui.sidebar });
+                s.sidebar.update(SidebarMessage::SetWidth {
+                    cols: viewport_cols,
                 });
                 s
             },
@@ -753,6 +763,9 @@ impl App {
                 }
             }
             AppMessage::Resized { rows, cols } => {
+                self.session
+                    .sidebar
+                    .update(SidebarMessage::SetWidth { cols });
                 let area = Rect::new(0, 0, cols, rows);
                 match self.overlay {
                     Overlay::CommandMenu => {
@@ -1045,6 +1058,9 @@ impl App {
             CommandAction::Reload => {
                 self.ctx.send(shuvarie_core::Command::Reload);
             }
+            CommandAction::ToggleSidebar => {
+                self.session.sidebar.update(SidebarMessage::Toggle);
+            }
             CommandAction::Quit => {
                 if self.session.is_streaming() {
                     self.ctx.send(shuvarie_core::Command::CancelStream);
@@ -1185,7 +1201,7 @@ mod tests {
 
     fn app_with(connections: Connections) -> App {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        App::new(connections, tx)
+        App::new(UiPrefs::default(), connections, tx, 120)
     }
 
     fn connected() -> Connections {
@@ -1285,6 +1301,25 @@ mod tests {
         assert_eq!(
             app.window_title(),
             "Shuvarie — claude-sonnet-4-5 · Anthropic"
+        );
+    }
+
+    #[test]
+    fn resized_tracks_sidebar_width_for_toggle() {
+        let mut app = app_with(connected());
+        assert!(!app.session.sidebar.collapsed_at(200), "wide default");
+        app.update(AppMessage::Resized { rows: 24, cols: 50 });
+        assert!(app.session.sidebar.collapsed_at(50), "narrow auto-collapse");
+        app.update(AppMessage::Session(SessionMessage::Sidebar(
+            SidebarMessage::Toggle,
+        )));
+        assert!(
+            !app.session.sidebar.collapsed_at(50),
+            "toggle expands on the narrow screen"
+        );
+        assert!(
+            !app.session.sidebar.collapsed_at(200),
+            "manual override sticks across widths"
         );
     }
 }

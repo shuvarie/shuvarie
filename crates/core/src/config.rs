@@ -187,6 +187,16 @@ pub struct EmbeddingConfig {
     pub dimensions: Option<u32>,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SidebarPref {
+    /// Follow the terminal width: expanded at 80+ columns, collapsed below.
+    #[default]
+    Auto,
+    Expanded,
+    Collapsed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub struct UiPrefs {
@@ -194,11 +204,27 @@ pub struct UiPrefs {
     /// (one draw per event, the original behavior). Defaults to 60.
     #[serde(deserialize_with = "kdlserde::de_frame_rate")]
     pub frame_rate: u32,
+
+    /// Default sidebar expansion: `auto` (width-based), `expanded`, or
+    /// `collapsed`. `auto` is omitted from the saved file.
+    #[serde(
+        default,
+        deserialize_with = "kdlserde::de_default",
+        skip_serializing_if = "sidebar_pref_is_auto"
+    )]
+    pub sidebar: SidebarPref,
+}
+
+fn sidebar_pref_is_auto(pref: &SidebarPref) -> bool {
+    *pref == SidebarPref::Auto
 }
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        Self { frame_rate: 60 }
+        Self {
+            frame_rate: 60,
+            sidebar: SidebarPref::Auto,
+        }
     }
 }
 
@@ -637,6 +663,31 @@ mod tests {
             panic!("expected config parse error");
         };
         assert_eq!(parse_err.line, 2);
+    }
+
+    #[test]
+    fn ui_sidebar_pref_round_trips() {
+        for (text, expected) in [
+            ("", SidebarPref::Auto),
+            ("ui { sidebar expanded }", SidebarPref::Expanded),
+            ("ui { sidebar collapsed }", SidebarPref::Collapsed),
+        ] {
+            let parsed: Config = kdlserde::from_str(text).unwrap();
+            assert_eq!(parsed.ui.sidebar, expected, "text: {text:?}");
+        }
+
+        let mut config = Config::default();
+        config.ui.sidebar = SidebarPref::Expanded;
+        let text = kdlserde::to_string(&config).unwrap();
+        assert!(text.contains("sidebar expanded"), "body: {text}");
+        let parsed: Config = kdlserde::from_str(&text).unwrap();
+        assert_eq!(parsed, config);
+
+        let config = Config::default();
+        let text = kdlserde::to_string(&config).unwrap();
+        assert!(!text.contains("sidebar"), "auto must be omitted: {text}");
+        let parsed: Config = kdlserde::from_str(&text).unwrap();
+        assert_eq!(parsed, config);
     }
 
     #[test]

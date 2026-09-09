@@ -103,4 +103,30 @@ impl ContextDisplay {
         lines.push(Line::from(format!("  Cost {}", fmt_cost(self.cost))).fg(theme::TEXT_DIM));
         lines.push(Line::from(""));
     }
+
+    /// Dim spans of the essentials — token totals, the context-window
+    /// fraction, and the cost — for the collapsed-sidebar status line.
+    pub(crate) fn compact_spans(&self) -> Vec<Span<'static>> {
+        let mut spans = Vec::new();
+        spans.push(
+            Span::raw(format!(
+                "↑{} ↓{}",
+                fmt_tokens(self.input_tokens),
+                fmt_tokens(self.output_tokens),
+            ))
+            .fg(theme::TEXT_DIM),
+        );
+        if let Some(window) = self.context_length.filter(|&c| c > 0) {
+            let window_text = match self.context_tokens {
+                Some(tokens) => {
+                    let pct = (tokens as f64 / window as f64 * 100.0).round().min(100.0);
+                    format!(" {}/{} ({pct:.0}%)", fmt_tokens(tokens), fmt_tokens(window))
+                }
+                None => format!(" {}", fmt_tokens(window)),
+            };
+            spans.push(Span::raw(window_text).fg(theme::TEXT_DIM));
+        }
+        spans.push(Span::raw(format!(" {}", fmt_cost(self.cost))).fg(theme::TEXT_DIM));
+        spans
+    }
 }

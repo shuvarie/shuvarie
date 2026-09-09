@@ -24,7 +24,7 @@ pub mod truncate;
 pub use command::Command;
 pub use config::{
     Active, AgentConfig, Config, Connections, ContextConfig, EmbeddingConfig, LspConfigRepr,
-    LspServerSpecRepr, ProviderConfig, ShellConfig, SkillsConfig, UiPrefs,
+    LspServerSpecRepr, ProviderConfig, ShellConfig, SidebarPref, SkillsConfig, UiPrefs,
 };
 pub use core_task::{StartupSession, run};
 pub use error::{ConfigParseError, CoreError, Result};

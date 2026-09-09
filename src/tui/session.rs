@@ -63,6 +63,8 @@ pub enum SessionMessage {
     },
     Question(QuestionMessage),
     Slash(SlashMessage),
+    /// Sidebar control: collapse toggle (Ctrl+W) and pref/width updates.
+    Sidebar(SidebarMessage),
     /// A bash-mode (`!`) run's display-only popup: start, live output,
     /// finish, or Escape dismissal.
     Bash(bash::BashMessage),
@@ -257,6 +259,9 @@ impl SessionScreen {
             return Some(SessionMessage::Slash(m));
         }
         if ctrl(key) {
+            if let Some(m) = self.sidebar.map_event(key) {
+                return Some(SessionMessage::Sidebar(m));
+            }
             return match key.code {
                 KeyCode::Char('n') => Some(SessionMessage::Chat(ChatMessage::ScrollDown)),
                 KeyCode::Char('p') => Some(SessionMessage::Chat(ChatMessage::ScrollUp)),
@@ -347,6 +352,10 @@ impl SessionScreen {
             }
             SessionMessage::Bash(m) => {
                 self.bash.update(m);
+                None
+            }
+            SessionMessage::Sidebar(m) => {
+                self.sidebar.update(m);
                 None
             }
             SessionMessage::Slash(m) => match m {
@@ -646,11 +655,16 @@ impl SessionScreen {
     }
 
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
-        let [sidebar_area, content_area] = Layout::horizontal([Length(30), Min(0)])
-            .spacing(1)
-            .areas(area);
-
-        self.sidebar.view(frame, sidebar_area);
+        let collapsed = self.sidebar.collapsed_at(area.width);
+        let content_area = if collapsed {
+            area
+        } else {
+            let [sidebar_area, content_area] = Layout::horizontal([Length(30), Min(0)])
+                .spacing(1)
+                .areas(area);
+            self.sidebar.view(frame, sidebar_area);
+            content_area
+        };
 
         let title = match &self.session_title {
             Some(t) if !t.is_empty() => format!("Shuvarie · {t}"),
@@ -673,6 +687,7 @@ impl SessionScreen {
             history_area,
             input_area,
             status_area,
+            info_area,
             footer_area,
         ] = Layout::vertical([
             Length(1),
@@ -680,6 +695,7 @@ impl SessionScreen {
             Min(0),
             Length(input_height),
             Length(1),
+            Length(u16::from(collapsed)),
             Length(1),
         ])
         .areas(content_area);
@@ -783,6 +799,11 @@ impl SessionScreen {
             }
             spans.push(Span::raw(status).fg(theme::TEXT_MUTED));
             frame.render_widget(Paragraph::new(Line::from(spans)), status_area);
+        }
+
+        if collapsed {
+            let info = self.sidebar.collapsed_line(usize::from(info_area.width));
+            frame.render_widget(Paragraph::new(info), info_area);
         }
 
         if let Some(error) = &self.error {
@@ -1554,6 +1575,91 @@ mod tests {
         assert!(matches!(
             screen.map_event(&KeyCode::Escape.into()),
             Some(SessionMessage::Bash(BashMessage::Dismiss))
+        ));
+    }
+
+    fn info_screen() -> SessionScreen {
+        let mut screen = SessionScreen::new();
+        screen.sidebar.update(SidebarMessage::UpdateConfig {
+            context_length: Some(200_000),
+        });
+        screen.sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage {
+                input_tokens: 10_100,
+                output_tokens: 12_300,
+                ..Default::default()
+            },
+            cost: 0.125,
+            context_tokens: Some(84_000),
+        });
+        screen.sidebar.update(SidebarMessage::UpdateLsp {
+            servers: vec![shuvarie_core::LspStatus {
+                name: "rust-analyzer".into(),
+                language: "rust".into(),
+                status: shuvarie_core::ServerStatus::Running,
+                pid: None,
+                diagnostics: 3,
+                error: None,
+            }],
+        });
+        screen
+    }
+
+    #[test]
+    fn narrow_screen_collapses_sidebar_and_shows_info_line() {
+        let screen = info_screen();
+        let buf = draw(&screen, 79, 24);
+        let full: String = (0..24).map(|y| row_text(&buf, y)).collect();
+        assert!(!full.contains("Skills"), "sidebar hidden: {full:?}");
+        let (y, info) = find_row(&buf, "rust-analyzer");
+        assert!(info.contains("↑10.1k ↓12.3k"), "row {y}: {info:?}");
+        assert!(info.contains("84k/200k (42%)"), "row {y}: {info:?}");
+        assert!(info.contains("$0.12"), "row {y}: {info:?}");
+        assert!(info.contains("⚑3"), "row {y}: {info:?}");
+        let (footer_y, _) = find_row(&buf, "Ctrl+M");
+        assert_eq!(footer_y + 1, buf.area().height, "footer is the last row");
+        assert_eq!(y, footer_y - 1, "info line sits between status and footer");
+    }
+
+    #[test]
+    fn wide_screen_keeps_sidebar_and_skips_info_line() {
+        let screen = info_screen();
+        let buf = draw(&screen, 80, 24);
+        let (y, _) = find_row(&buf, "rust-analyzer");
+        assert!(y < 20, "LSP renders in the sidebar column: row {y}");
+        let (info_y, _) = find_row(&buf, "84k/200k");
+        assert_ne!(info_y, y, "window fraction lives in the sidebar panel");
+        assert!(
+            !row_text(&buf, buf.area().height - 2).contains("rust-analyzer"),
+            "no standalone info line above the footer"
+        );
+        assert!(
+            find_row(&buf, "Context").1.contains("Context"),
+            "sidebar Context panel renders"
+        );
+    }
+
+    #[test]
+    fn sidebar_toggle_message_flips_collapse() {
+        let mut screen = SessionScreen::new();
+        screen
+            .sidebar
+            .update(SidebarMessage::SetWidth { cols: 200 });
+        assert!(!screen.sidebar.collapsed_at(200));
+        screen.update(SessionMessage::Sidebar(SidebarMessage::Toggle));
+        assert!(screen.sidebar.collapsed_at(200));
+        screen.update(SessionMessage::Sidebar(SidebarMessage::Toggle));
+        assert!(!screen.sidebar.collapsed_at(200));
+    }
+
+    #[test]
+    fn ctrl_w_maps_to_sidebar_toggle() {
+        let screen = SessionScreen::new();
+        let key =
+            termina::event::KeyEvent::new(KeyCode::Char('w'), termina::event::Modifiers::CONTROL);
+        assert!(matches!(
+            screen.map_event(&key),
+            Some(SessionMessage::Sidebar(SidebarMessage::Toggle))
         ));
     }
 }

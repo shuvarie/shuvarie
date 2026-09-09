@@ -11,11 +11,12 @@ pub enum CommandAction {
     Replay,
     Continue,
     Reload,
+    ToggleSidebar,
     Quit,
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 10] = [
+    pub const ALL: [CommandAction; 11] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::OpenSessionPicker,
@@ -25,6 +26,7 @@ impl CommandAction {
         CommandAction::Replay,
         CommandAction::Continue,
         CommandAction::Reload,
+        CommandAction::ToggleSidebar,
         CommandAction::Quit,
     ];
 
@@ -39,6 +41,7 @@ impl CommandAction {
             CommandAction::Replay => "replay",
             CommandAction::Continue => "continue",
             CommandAction::Reload => "reload",
+            CommandAction::ToggleSidebar => "sidebar",
             CommandAction::Quit => "quit",
         }
     }
@@ -106,6 +109,12 @@ pub fn default_commands() -> Vec<CommandEntry> {
             name: "Reload skills",
             description: "Re-discover skills without a restart",
             action: CommandAction::Reload,
+            available: true,
+        },
+        CommandEntry {
+            name: "Toggle sidebar",
+            description: "Collapse or expand the sidebar",
+            action: CommandAction::ToggleSidebar,
             available: true,
         },
         CommandEntry {
