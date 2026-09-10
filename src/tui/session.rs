@@ -1,8 +1,10 @@
+use std::time::{Duration, Instant};
+
 use ratatui::layout::{Alignment, Constraint::*, Layout, Rect};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph};
 use shuvarie_llm::TokenUsage;
-use termina::event::{KeyCode, KeyEvent};
+use termina::event::{KeyCode, KeyEvent, KeyEventKind};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::tui::utils::{alt, alt_shift, ctrl};
@@ -29,6 +31,7 @@ pub enum SessionMessage {
     Text(TextAreaMessage),
     Chat(ChatMessage),
     CancelRequested,
+    EscapePressed,
     ShowError {
         error: String,
     },
@@ -142,6 +145,8 @@ pub(crate) struct RetryWait {
 /// items collapse into an overflow hint row.
 const MAX_WORKING_ROWS: usize = 3;
 
+const DOUBLE_ESCAPE_WINDOW: Duration = Duration::from_millis(500);
+
 /// The session screen: sidebar, title bar with the working-todos strip, chat
 /// history pane (a [`chat::Chat`] TEA model), input, question prompt, slash
 /// menu, status row, and footer.
@@ -161,6 +166,7 @@ pub struct SessionScreen {
     pub session_title: Option<String>,
     pub error: Option<String>,
     pub(crate) retry: Option<RetryWait>,
+    last_escape: Option<Instant>,
     working_todos: Vec<shuvarie_core::tools::todos::TodoItem>,
     skills: Vec<Skill>,
 }
@@ -182,6 +188,7 @@ impl SessionScreen {
             session_title: None,
             error: None,
             retry: None,
+            last_escape: None,
             working_todos: Vec::new(),
             skills: Vec::new(),
         }
@@ -226,6 +233,7 @@ impl SessionScreen {
         self.busy_kind = BusyKind::Generating;
         self.status = Some("Thinking...".to_string());
         self.retry = None;
+        self.last_escape = None;
     }
 
     /// Expand a `/skill:<name> [args]` submit into the skill's prompt
@@ -285,6 +293,16 @@ impl SessionScreen {
             }
             KeyCode::Up => Some(SessionMessage::Chat(ChatMessage::ScrollUp)),
             KeyCode::Down => Some(SessionMessage::Chat(ChatMessage::ScrollDown)),
+            KeyCode::Escape if key.kind == KeyEventKind::Press => {
+                if self.chat.is_streaming()
+                    && self
+                        .last_escape
+                        .is_some_and(|at| at.elapsed() <= DOUBLE_ESCAPE_WINDOW)
+                {
+                    return Some(SessionMessage::CancelRequested);
+                }
+                Some(SessionMessage::EscapePressed)
+            }
             _ => self.input.map_event(key).map(SessionMessage::Text),
         }
     }
@@ -406,7 +424,14 @@ impl SessionScreen {
             },
             SessionMessage::CancelRequested => {
                 if self.chat.is_streaming() {
+                    self.last_escape = None;
                     return Some(SessionEffect::CancelStream);
+                }
+                None
+            }
+            SessionMessage::EscapePressed => {
+                if self.chat.is_streaming() {
+                    self.last_escape = Some(Instant::now());
                 }
                 None
             }
@@ -508,6 +533,7 @@ impl SessionScreen {
                 self.busy_kind = BusyKind::Idle;
                 self.status = None;
                 self.retry = None;
+                self.last_escape = None;
                 self.session_id = None;
                 self.session_title = None;
                 self.sidebar.update(SidebarMessage::SetUsage {
@@ -526,6 +552,7 @@ impl SessionScreen {
                 self.session_title = Some(title);
                 self.status = None;
                 self.retry = None;
+                self.last_escape = None;
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
                 self.sidebar.update(SidebarMessage::SetContextRequest {
@@ -539,6 +566,7 @@ impl SessionScreen {
                 let usage = session.usage();
                 let cost = session.cost;
                 self.retry = None;
+                self.last_escape = None;
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
                 self.sidebar.update(SidebarMessage::SetContextRequest {
@@ -552,6 +580,7 @@ impl SessionScreen {
                 let usage = session.usage();
                 let cost = session.cost;
                 self.retry = None;
+                self.last_escape = None;
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
                 self.sidebar.update(SidebarMessage::SetContextRequest {
@@ -569,6 +598,7 @@ impl SessionScreen {
                 self.busy_kind = BusyKind::Generating;
                 self.status = Some("Thinking...".to_string());
                 self.retry = None;
+                self.last_escape = None;
                 self.sync_slash();
                 None
             }
@@ -634,16 +664,19 @@ impl SessionScreen {
                 self.busy_kind = BusyKind::Idle;
                 self.status = None;
                 self.retry = None;
+                self.last_escape = None;
             }
             ChatMessage::StreamError { error } => {
                 self.busy_kind = BusyKind::Idle;
                 self.status = Some(format!("error: {error}"));
                 self.retry = None;
+                self.last_escape = None;
             }
             ChatMessage::StreamCancelled => {
                 self.busy_kind = BusyKind::Idle;
                 self.status = None;
                 self.retry = None;
+                self.last_escape = None;
             }
             _ => {}
         }
@@ -833,26 +866,20 @@ impl SessionScreen {
             let footer = if !self.question.open && self.slash.active() {
                 theme::help_line(&[("Tab", "complete"), ("↑↓", "select"), ("Esc", "dismiss")])
             } else if self.chat.is_streaming() {
-                let ctrl_c = if self.input.is_empty() {
-                    "stop"
-                } else {
-                    "clear"
-                };
-                let mut bindings = vec![("Ctrl+C", ctrl_c), ("Ctrl+M", "commands")];
+                let mut bindings = vec![
+                    ("Esc×2", "interrupt"),
+                    ("Ctrl+M", "commands"),
+                    ("Ctrl+C", "quit"),
+                ];
                 if bash_mode {
                     bindings.insert(0, ("Enter", "run"));
                 }
                 bindings.extend(recall);
                 theme::help_line(&bindings)
             } else {
-                let ctrl_c = if self.input.is_empty() {
-                    "quit"
-                } else {
-                    "clear"
-                };
                 let enter = if bash_mode { "run" } else { "send" };
                 let mut bindings =
-                    vec![("Enter", enter), ("Ctrl+M", "commands"), ("Ctrl+C", ctrl_c)];
+                    vec![("Enter", enter), ("Ctrl+M", "commands"), ("Ctrl+C", "quit")];
                 bindings.extend(recall);
                 theme::help_line(&bindings)
             };
@@ -1644,6 +1671,102 @@ mod tests {
             screen.map_event(&KeyCode::Escape.into()),
             Some(SessionMessage::Bash(BashMessage::Dismiss))
         ));
+    }
+
+    fn streaming_screen() -> SessionScreen {
+        let mut screen = SessionScreen::new();
+        screen.update(SessionMessage::TurnStarted {
+            content: "hi".into(),
+            steered: false,
+        });
+        screen.update(SessionMessage::Chat(ChatMessage::TokenReceived {
+            content: "answer".into(),
+        }));
+        screen
+    }
+
+    #[test]
+    fn double_escape_while_streaming_requests_cancel() {
+        let mut screen = streaming_screen();
+        assert!(matches!(
+            screen.map_event(&KeyCode::Escape.into()),
+            Some(SessionMessage::EscapePressed)
+        ));
+        screen.update(SessionMessage::EscapePressed);
+        assert!(matches!(
+            screen.map_event(&KeyCode::Escape.into()),
+            Some(SessionMessage::CancelRequested)
+        ));
+        assert!(matches!(
+            screen.update(SessionMessage::CancelRequested),
+            Some(SessionEffect::CancelStream)
+        ));
+        assert!(screen.last_escape.is_none(), "window closes after a cancel");
+    }
+
+    #[test]
+    fn single_escape_while_streaming_does_not_cancel() {
+        let screen = streaming_screen();
+        assert!(matches!(
+            screen.map_event(&KeyCode::Escape.into()),
+            Some(SessionMessage::EscapePressed)
+        ));
+    }
+
+    #[test]
+    fn escape_window_closes_when_the_turn_ends() {
+        let mut screen = streaming_screen();
+        assert!(matches!(
+            screen.map_event(&KeyCode::Escape.into()),
+            Some(SessionMessage::EscapePressed)
+        ));
+        screen.update(SessionMessage::EscapePressed);
+        screen.update(SessionMessage::Chat(ChatMessage::StreamDone));
+        assert!(matches!(
+            screen.map_event(&KeyCode::Escape.into()),
+            Some(SessionMessage::EscapePressed)
+        ));
+    }
+
+    #[test]
+    fn escape_window_resets_when_a_new_turn_starts() {
+        let mut screen = streaming_screen();
+        assert!(matches!(
+            screen.map_event(&KeyCode::Escape.into()),
+            Some(SessionMessage::EscapePressed)
+        ));
+        screen.update(SessionMessage::EscapePressed);
+        screen.update(SessionMessage::Chat(ChatMessage::StreamDone));
+        screen.update(SessionMessage::TurnStarted {
+            content: "next".into(),
+            steered: false,
+        });
+        screen.update(SessionMessage::Chat(ChatMessage::TokenReceived {
+            content: "a".into(),
+        }));
+        assert!(matches!(
+            screen.map_event(&KeyCode::Escape.into()),
+            Some(SessionMessage::EscapePressed)
+        ));
+    }
+
+    #[test]
+    fn streaming_footer_hints_double_escape_interrupt() {
+        let screen = streaming_screen();
+        let buf = draw(&screen, 100, 24);
+        let (_, footer) = find_row(&buf, "Esc×2");
+        assert!(footer.contains("interrupt"), "footer: {footer:?}");
+        assert!(footer.contains("Ctrl+C quit"), "footer: {footer:?}");
+    }
+
+    #[test]
+    fn idle_footer_hints_ctrl_c_quit_without_clear() {
+        let mut screen = SessionScreen::new();
+        screen.input.buffer.set("draft");
+        let buf = draw(&screen, 100, 24);
+        let (_, footer) = find_row(&buf, "Ctrl+C");
+        assert!(footer.contains("quit"), "footer: {footer:?}");
+        assert!(!footer.contains("clear"), "footer: {footer:?}");
     }
 
     fn info_screen() -> SessionScreen {

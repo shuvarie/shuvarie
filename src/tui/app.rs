@@ -12,7 +12,6 @@ use crate::tui::utils::ctrl;
 use super::add_provider::{AddProviderForm, AddProviderMessage, AddProviderOutcome};
 use super::command_menu::{CommandMenu, CommandMenuMessage};
 use super::commands::CommandAction;
-use super::components::TextAreaMessage;
 use super::confirm_quit::{ConfirmQuit, ConfirmQuitEffect, ConfirmQuitMessage};
 use super::context::UpdateCtx;
 use super::history_search::{HistorySearch, HistorySearchEffect, HistorySearchMessage};
@@ -317,16 +316,6 @@ impl App {
                     match key.kind {
                         KeyEventKind::Press => match key.code {
                             KeyCode::Char('c') if ctrl(&key) => {
-                                if !self.session.input.is_empty() {
-                                    return Some(AppMessage::Session(SessionMessage::Text(
-                                        TextAreaMessage::Clear,
-                                    )));
-                                }
-                                if self.session.is_streaming() {
-                                    return Some(AppMessage::Session(
-                                        SessionMessage::CancelRequested,
-                                    ));
-                                }
                                 return Some(AppMessage::RequestQuit);
                             }
                             KeyCode::Char('m') if ctrl(&key) => {
@@ -1316,6 +1305,31 @@ mod tests {
             app.window_title(),
             "Shuvarie — claude-sonnet-4-5 · Anthropic"
         );
+    }
+
+    #[test]
+    fn ctrl_c_opens_the_quit_prompt_even_while_streaming() {
+        let mut app = app_with(connected());
+        app.welcome.close();
+        app.overlay = Overlay::None;
+        app.session.update(SessionMessage::TurnStarted {
+            content: "hi".into(),
+            steered: false,
+        });
+        app.session
+            .update(SessionMessage::Chat(ChatMessage::TokenReceived {
+                content: "answer".into(),
+            }));
+        app.session.input.buffer.set("draft");
+        let key =
+            termina::event::KeyEvent::new(KeyCode::Char('c'), termina::event::Modifiers::CONTROL);
+        assert!(matches!(
+            app.map_event(Event::Terminal(TermEvent::Key(key))),
+            Some(AppMessage::RequestQuit)
+        ));
+        app.update(AppMessage::RequestQuit);
+        assert!(app.confirm_quit.open, "quit prompt opens");
+        assert!(matches!(app.overlay, Overlay::ConfirmQuit));
     }
 
     #[test]

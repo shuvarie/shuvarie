@@ -551,7 +551,6 @@ pub enum TextAreaMessage {
     CursorUp,
     CursorDown,
     Submit,
-    Clear,
 }
 
 pub enum TextAreaEffect {
@@ -693,10 +692,6 @@ impl TextArea {
                 }
                 self.buffer.clear();
                 Some(TextAreaEffect::Submit { content })
-            }
-            TextAreaMessage::Clear => {
-                self.buffer.clear();
-                None
             }
         }
     }
