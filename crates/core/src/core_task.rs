@@ -39,11 +39,6 @@ enum StreamOutcome {
     ConnectionLost { reason: String, message: String },
 }
 
-/// Silence window after which an active model stream is dropped and treated
-/// as a connection loss: no stream item (token, tool, worker, usage) for
-/// this long means the provider stalled and the turn cannot make progress.
-const STREAM_INACTIVITY: std::time::Duration = std::time::Duration::from_secs(180);
-
 /// A scheduled connection retry: when it fires plus the original error
 /// message (re-emitted as `StreamError` if the user cancels the wait).
 struct PendingRetry {
@@ -1485,7 +1480,6 @@ impl CoreCtx {
                     turn_state_shared,
                     stream_done,
                     steer_shared,
-                    STREAM_INACTIVITY,
                 )
                 .await;
             })
@@ -1660,7 +1654,6 @@ async fn stream_stream_to_events(
     turn_state: Arc<Mutex<TurnState>>,
     stream_done_tx: Sender<StreamOutcome>,
     steer: SteerSignal,
-    inactivity: std::time::Duration,
 ) {
     use futures_util::StreamExt;
 
@@ -1686,31 +1679,7 @@ async fn stream_stream_to_events(
     // between the agent's own actions.
     let mut action = ActionPhase::Fresh;
 
-    loop {
-        let next = match tokio::time::timeout(inactivity, stream.next()).await {
-            Ok(next) => next,
-            Err(_) => {
-                // A complete main reply already in hand must not be discarded
-                // because a straggler worker went silent.
-                if done.is_some() {
-                    break;
-                }
-                persist_stream_error(
-                    assistant_message_id,
-                    &pending_text,
-                    &pending_reasoning,
-                    &session,
-                    &mut store,
-                )
-                .await;
-                outcome = StreamOutcome::ConnectionLost {
-                    reason: "stream stalled".into(),
-                    message: format!("no model activity for {}s", inactivity.as_secs()),
-                };
-                break;
-            }
-        };
-        let Some(item) = next else { break };
+    while let Some(item) = stream.next().await {
         if starts_action_after_boundary(&item, &action) && steer.is_armed() && steer.begin_preempt()
         {
             let session_opt = Some(session.clone());
@@ -2470,7 +2439,6 @@ mod tests {
                 turn_state,
                 stream_done_tx,
                 SteerSignal::default(),
-                STREAM_INACTIVITY,
             )
             .await;
         });
@@ -2550,7 +2518,6 @@ mod tests {
                 turn_state,
                 stream_done_tx,
                 SteerSignal::default(),
-                STREAM_INACTIVITY,
             )
             .await;
         });
@@ -2649,7 +2616,6 @@ mod tests {
                 turn_state,
                 stream_done_tx,
                 SteerSignal::default(),
-                STREAM_INACTIVITY,
             )
             .await;
         });
@@ -2767,7 +2733,6 @@ mod tests {
                 turn_state,
                 stream_done_tx,
                 SteerSignal::default(),
-                STREAM_INACTIVITY,
             )
             .await;
         });
@@ -2861,7 +2826,6 @@ mod tests {
                 turn_state,
                 stream_done_tx,
                 SteerSignal::default(),
-                STREAM_INACTIVITY,
             )
             .await;
         });
@@ -2930,7 +2894,6 @@ mod tests {
                 turn_state,
                 stream_done_tx,
                 steer,
-                STREAM_INACTIVITY,
             )
             .await;
         });
@@ -3322,7 +3285,6 @@ mod tests {
                 turn_state,
                 stream_done_tx,
                 steer_shared,
-                STREAM_INACTIVITY,
             )
             .await;
         });
@@ -3365,100 +3327,5 @@ mod tests {
         assert_eq!(guard.messages[0].content, "working");
         assert_eq!(guard.interrupted.get(&0), Some(&true));
         assert_eq!(guard.tool_records.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn stream_silence_beyond_the_window_reports_connection_lost() {
-        let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
-        let session = Arc::new(Mutex::new(Session::new()));
-        let store = Store::open_in_memory().await.unwrap();
-        let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
-        let turn_state = Arc::new(Mutex::new(TurnState::default()));
-        let (stream_done_tx, mut stream_done_rx) = tokio::sync::mpsc::channel(1);
-        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(16);
-        let stream: shuvarie_llm::StreamStream =
-            Box::pin(futures_util::stream::pending::<StreamItem>());
-        let session_shared = session.clone();
-        tokio::spawn(async move {
-            stream_stream_to_events(
-                stream,
-                session_shared,
-                client,
-                None,
-                store,
-                "ollama-model".into(),
-                20_000,
-                worker_usage,
-                None,
-                event_tx,
-                turn_state,
-                stream_done_tx,
-                SteerSignal::default(),
-                std::time::Duration::from_millis(50),
-            )
-            .await;
-        });
-        assert_eq!(
-            stream_done_rx.recv().await,
-            Some(StreamOutcome::ConnectionLost {
-                reason: "stream stalled".into(),
-                message: "no model activity for 0s".into(),
-            })
-        );
-        assert!(
-            event_rx.recv().await.is_none(),
-            "a silent stream emits no events before the timeout"
-        );
-    }
-
-    #[tokio::test]
-    async fn stream_silence_after_done_still_completes_the_turn() {
-        use futures_util::StreamExt;
-
-        // The main reply is complete; a hung worker receiver must not discard
-        // it — the drain timeout falls through to normal completion.
-        let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
-        let session = Arc::new(Mutex::new(Session::new()));
-        let store = Store::open_in_memory().await.unwrap();
-        let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
-        let turn_state = Arc::new(Mutex::new(TurnState::default()));
-        let (stream_done_tx, mut stream_done_rx) = tokio::sync::mpsc::channel(1);
-        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(16);
-        let stream: shuvarie_llm::StreamStream = Box::pin(
-            futures_util::stream::iter(vec![StreamItem::Done {
-                text: "final".into(),
-                usage: TokenUsage::default(),
-            }])
-            .chain(futures_util::stream::pending::<StreamItem>()),
-        );
-        let session_shared = session.clone();
-        tokio::spawn(async move {
-            stream_stream_to_events(
-                stream,
-                session_shared,
-                client,
-                None,
-                store,
-                "ollama-model".into(),
-                20_000,
-                worker_usage,
-                None,
-                event_tx,
-                turn_state,
-                stream_done_tx,
-                SteerSignal::default(),
-                std::time::Duration::from_millis(50),
-            )
-            .await;
-        });
-        let mut saw_done = false;
-        while let Some(event) = event_rx.recv().await {
-            if matches!(event, Event::StreamDone { ref text, .. } if text == "final") {
-                saw_done = true;
-                break;
-            }
-        }
-        assert!(saw_done, "the completed reply must still be committed");
-        assert_eq!(stream_done_rx.recv().await, Some(StreamOutcome::Finished));
     }
 }

@@ -1,8 +1,5 @@
-use std::cell::RefCell;
-
 use ratatui::prelude::*;
 
-use crate::tui::session::blocks::{BodyCache, BodyKey, cached_body};
 use crate::tui::session::segment::Segment;
 use crate::tui::session::virtualizer::TurnEst;
 use crate::tui::theme;
@@ -12,44 +9,28 @@ use crate::tui::theme;
 /// to the agent preamble).
 pub struct ContextBlock {
     paths: Vec<String>,
-    cache: RefCell<Option<BodyCache>>,
 }
 
 impl ContextBlock {
     pub fn new(paths: Vec<String>) -> Self {
-        Self {
-            paths,
-            cache: RefCell::new(None),
-        }
+        Self { paths }
     }
 
-    pub fn view(&self, width: u16) -> Option<(Segment, u32)> {
-        let (lines, height) = cached_body(
-            &self.cache,
-            BodyKey {
-                width,
-                rev: 0,
-                expanded: false,
-                env_rev: 0,
-            },
-            width.max(1),
-            true,
-            || {
-                self.paths
-                    .iter()
-                    .map(|path| {
-                        Line::from(vec![
-                            Span::raw("◈").fg(theme::ACCENT).bold(),
-                            Span::raw(format!(" Loaded {path}")).fg(theme::TEXT),
-                        ])
-                    })
-                    .collect()
-            },
-        );
-        if lines.is_empty() {
-            return None;
+    pub fn view(&self) -> Vec<Segment> {
+        if self.paths.is_empty() {
+            return Vec::new();
         }
-        Some((Segment::plain(lines), height))
+        let lines = self
+            .paths
+            .iter()
+            .map(|path| {
+                Line::from(vec![
+                    Span::raw("◈").fg(theme::ACCENT).bold(),
+                    Span::raw(format!(" Loaded {path}")).fg(theme::TEXT),
+                ])
+            })
+            .collect();
+        vec![Segment::plain(lines)]
     }
 
     pub(super) fn est(&self) -> TurnEst {

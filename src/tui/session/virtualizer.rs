@@ -410,22 +410,6 @@ impl TurnData {
     pub fn cache(&self) -> Option<&TurnCache> {
         self.cache.as_ref()
     }
-
-    /// Whether any part of the turn animates on the wall clock: a running
-    /// tool header (spinner + elapsed) or a thinking header, or the
-    /// text-less in-flight working placeholder. Only such turns need their
-    /// render revision bumped on a spinner wake; quiet turns keep their
-    /// caches and skip the rebuild entirely.
-    pub fn needs_animation(&self, in_flight: bool) -> bool {
-        let Some(blocks) = self.blocks.as_deref() else {
-            return false;
-        };
-        let animated = blocks
-            .iter()
-            .any(|block| block.tool_is_running() || block.is_thinking());
-        animated
-            || (in_flight && self.role == Role::Assistant && !blocks.iter().any(Block::is_text))
-    }
 }
 
 /// Render the turn's blocks into segments with per-segment layout: spacer
@@ -448,20 +432,20 @@ pub fn render_turn_cache(
     let mut prev_bg = false;
     for (block_idx, block) in blocks.iter().enumerate() {
         if block.is_tool() && prev_bg {
-            let spacer = Segment::spacer();
-            let height = spacer.measure(width);
-            y = push_segment(&mut segs, spacer, y, width, height);
+            y = push_segment(&mut segs, Segment::spacer(), y, width);
             prev_bg = false;
         }
         let addr = BlockAddr {
             turn: turn_idx,
             block: block_idx,
         };
-        if let Some((mut segment, height)) = block.view(width, env, env_rev) {
+        for (i, mut segment) in block.view(width, env).into_iter().enumerate() {
             match block {
-                Block::Tool(_) | Block::Reasoning(_) => segment.hit = Some(addr.clone()),
+                Block::Tool(_) => segment.hit = Some(addr.clone()),
+                Block::Reasoning(_) if i == 0 => segment.hit = Some(addr.clone()),
                 _ => {}
             }
+            let height = segment.measure(width);
             if segment.hit.is_some() {
                 hits.push(HitRegion {
                     start: y,
@@ -470,7 +454,7 @@ pub fn render_turn_cache(
                 });
             }
             prev_bg = segment.bg.is_some();
-            y = push_segment(&mut segs, segment, y, width, height);
+            y = push_segment(&mut segs, segment, y, width);
         }
     }
     let has_text = blocks.iter().any(Block::is_text);
@@ -481,19 +465,16 @@ pub fn render_turn_cache(
         } else {
             Block::ToolOnlyNote
         };
-        if let Some((segment, height)) = placeholder.view(width, env, env_rev) {
-            y = push_segment(&mut segs, segment, y, width, height);
+        for segment in placeholder.view(width, env) {
+            y = push_segment(&mut segs, segment, y, width);
         }
     }
-    if flags.interrupted_marker
-        && turn.role == Role::Assistant
-        && let Some((segment, height)) = Block::Interrupted.view(width, env, env_rev)
-    {
-        y = push_segment(&mut segs, segment, y, width, height);
+    if flags.interrupted_marker && turn.role == Role::Assistant {
+        for segment in Block::Interrupted.view(width, env) {
+            y = push_segment(&mut segs, segment, y, width);
+        }
     }
-    let spacer = Segment::spacer();
-    let height = spacer.measure(width);
-    y = push_segment(&mut segs, spacer, y, width, height);
+    y = push_segment(&mut segs, Segment::spacer(), y, width);
     Some(TurnCache {
         width,
         rev: turn.rev,
@@ -504,8 +485,8 @@ pub fn render_turn_cache(
     })
 }
 
-fn push_segment(segs: &mut Vec<TurnSeg>, segment: Segment, y: u32, width: u16, height: u32) -> u32 {
-    let _ = width;
+fn push_segment(segs: &mut Vec<TurnSeg>, segment: Segment, y: u32, width: u16) -> u32 {
+    let height = segment.measure(width);
     segs.push(TurnSeg {
         segment,
         start: y,

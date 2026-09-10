@@ -190,9 +190,7 @@ impl Chat {
     /// `ToolFinished` straggler) is bumped too so its spinner and elapsed
     /// time keep ticking.
     pub fn mark_spinner_dirty(&self) {
-        if let Some(turn) = self.in_flight.borrow_mut().as_mut()
-            && turn.needs_animation(true)
-        {
+        if let Some(turn) = self.in_flight.borrow_mut().as_mut() {
             turn.rev += 1;
         }
         let mut turns = self.turns.borrow_mut();
@@ -719,11 +717,6 @@ impl Chat {
     fn commit_done(&mut self) {
         if let Some(mut turn) = self.in_flight.borrow_mut().take() {
             turn.finish_thinking();
-            if let Some(blocks) = turn.blocks.as_mut() {
-                for block in blocks.iter_mut() {
-                    block.finalize_running();
-                }
-            }
             turn.rev += 1;
             turn.refresh_est(false);
             self.turns.borrow_mut().push(turn);
@@ -1106,10 +1099,10 @@ mod tests {
         let Block::Reasoning(reasoning) = block else {
             panic!("not a reasoning block");
         };
-        let (segment, _) = reasoning.view(100);
-        segment
-            .lines
+        reasoning
+            .view()
             .first()
+            .and_then(|segment| segment.lines.first())
             .map(|line| {
                 line.spans
                     .iter()
@@ -1351,7 +1344,7 @@ mod tests {
     }
 
     #[test]
-    fn commit_done_finalizes_running_tool_blocks() {
+    fn commit_done_keeps_running_worker_tool_block() {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "go".into(),
@@ -1371,15 +1364,19 @@ mod tests {
         assert!(chat.in_flight.borrow().is_none());
         let turns = chat.turns.borrow();
         let blocks = turns.last().unwrap().blocks.as_deref().unwrap();
+        let running: Vec<_> = blocks
+            .iter()
+            .filter(|block| {
+                let Block::Tool(tool) = block else {
+                    return false;
+                };
+                tool.is_running()
+            })
+            .collect();
         assert_eq!(
-            blocks.iter().filter(|block| block.is_tool()).count(),
+            running.len(),
             2,
-            "tool blocks are kept in the committed turn"
-        );
-        drop(turns);
-        assert!(
-            !chat.has_running_tool_blocks(),
-            "finalized blocks must not keep the spinner wake armed"
+            "running blocks leaked into a committed turn"
         );
     }
 
@@ -1404,10 +1401,9 @@ mod tests {
     }
 
     #[test]
-    fn late_tool_finished_after_commit_is_a_no_op() {
-        // Finishes are drained before `StreamDone`, so a finish arriving
-        // after commit is a protocol anomaly: the block was finalized there
-        // and the late finish must be dropped without a rebuild.
+    fn late_tool_finished_finishes_committed_block() {
+        // A worker straggler drained after `StreamDone`: the running block
+        // lives in the committed turn and must still be finished there.
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "go".into(),
@@ -1424,6 +1420,8 @@ mod tests {
             call_id: None,
         });
         chat.update(ChatMessage::StreamDone);
+        assert!(chat.has_running_tool_blocks());
+
         let turns = chat.turns.borrow();
         let rev_before = turns.last().unwrap().rev;
         drop(turns);
@@ -1438,20 +1436,27 @@ mod tests {
             duration_ms: 120,
             call_id: None,
         });
-        assert!(!chat.has_running_tool_blocks());
-        let turns = chat.turns.borrow();
-        assert_eq!(
-            turns.last().unwrap().rev,
-            rev_before,
-            "no rebuild for a dropped late finish"
+        assert!(
+            chat.has_running_tool_blocks(),
+            "the worker call itself is still running"
         );
+        let turns = chat.turns.borrow();
+        let turn = turns.last().unwrap();
+        assert!(
+            turn.rev > rev_before,
+            "committed turn cache must rebuild after a late finish"
+        );
+        let blocks = turn.blocks.as_deref().unwrap();
+        let Block::Tool(tool) = blocks.last().unwrap() else {
+            panic!("expected tool block")
+        };
+        assert!(!tool.is_running());
     }
 
     #[test]
-    fn committed_turn_releases_the_wake() {
+    fn running_committed_block_keeps_wake_armed() {
         // The render loop's spinner wake comes from `has_running_tool_blocks`
-        // when `busy` is false, so a straggler running past `Done` must be
-        // finalized at commit or the wake stays armed forever.
+        // when `busy` is false, so a committed straggler keeps animating.
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "go".into(),
@@ -1464,10 +1469,7 @@ mod tests {
         });
         assert!(chat.has_running_tool_blocks());
         chat.update(ChatMessage::StreamDone);
-        assert!(
-            !chat.has_running_tool_blocks(),
-            "straggler released at commit"
-        );
+        assert!(chat.has_running_tool_blocks(), "straggler stays armed");
         chat.update(ChatMessage::ToolFinished {
             name: "grep".into(),
             ok: true,
@@ -2088,45 +2090,6 @@ mod tests {
     }
 
     #[test]
-    fn spinner_wake_bumps_only_animating_turns() {
-        let mut chat = Chat::new();
-        chat.update(ChatMessage::TokenReceived {
-            content: "plain text streaming".into(),
-        });
-        let rev_before = {
-            let in_flight = chat.in_flight.borrow();
-            assert!(
-                in_flight.as_ref().is_some(),
-                "token opens the in-flight turn"
-            );
-            in_flight.as_ref().map_or(0, |turn| turn.rev)
-        };
-        chat.mark_spinner_dirty();
-        assert_eq!(
-            chat.in_flight.borrow().as_ref().map_or(0, |turn| turn.rev),
-            rev_before,
-            "a quiet turn must keep its cache on a spinner wake"
-        );
-
-        chat.update(ChatMessage::ToolStarted {
-            name: "grep".into(),
-            args: serde_json::json!({}),
-            worker: None,
-            call_id: None,
-        });
-        let rev_before = chat
-            .in_flight
-            .borrow()
-            .as_ref()
-            .map_or(u64::MAX, |turn| turn.rev);
-        chat.mark_spinner_dirty();
-        assert!(
-            chat.in_flight.borrow().as_ref().map_or(0, |turn| turn.rev) > rev_before,
-            "a running tool header animates on every wake"
-        );
-    }
-
-    #[test]
     fn bench_spinner_frame_rebuild_cost() {
         let mut chat = Chat::new();
         chat.update(ChatMessage::TokenReceived {
@@ -2203,8 +2166,7 @@ mod tests {
                     panic!("not a steered block");
                 };
                 block
-                    .view(100)
-                    .map(|(segment, _)| segment)
+                    .view()
                     .into_iter()
                     .flat_map(|segment| segment.lines)
                     .skip(1)
