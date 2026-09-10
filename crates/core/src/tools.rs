@@ -169,6 +169,10 @@ pub fn all_tools(
             WriteFile::new(read_cache.clone(), Some(lsp.clone()), locks.clone()),
         ),
         shuvarie_llm::into_dynamic("edit_file", EditFile::new(Some(lsp.clone()), locks.clone())),
+        shuvarie_llm::into_dynamic(
+            "apply_patch",
+            crate::apply_patch::ApplyPatch::new(Some(lsp.clone()), locks.clone()),
+        ),
         shuvarie_llm::into_dynamic("run_shell", RunShell::new(shell_tx.clone(), shell.clone())),
         shuvarie_llm::into_dynamic("list_dir", ListDir),
         shuvarie_llm::into_dynamic("grep", Grep),

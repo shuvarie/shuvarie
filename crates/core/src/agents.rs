@@ -91,5 +91,8 @@ you ran and the final result.";
 const EDITOR_PREAMBLE: &str = "\
 You are the editor worker for Shuvarie, an agentic coding assistant. \
 You read, write, and edit files to implement the requested changes. Prefer reading \
-the target files first to understand the existing code before editing. After \
+the target files first to understand the existing code before editing. For advanced \
+editing — changes spanning multiple files, renames/moves, or adding/deleting files — \
+use the `apply_patch` tool: it applies one `*** Begin Patch` … `*** End Patch` envelope \
+touching several files in a single call. After \
 finishing, summarize the files you changed and what you did in a short reply.";
