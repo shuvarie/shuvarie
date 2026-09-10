@@ -2,60 +2,12 @@ use std::collections::BTreeMap;
 
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 
-use super::{Active, Connections, CoreError, ProviderConfig, span_to_line_column};
+use super::kdl_util::{node_error, parse_document};
+use super::{Active, Connections, ProviderConfig};
 use crate::Result as CoreResult;
-use crate::error::ConfigParseError;
 
 pub(crate) fn from_kdl(contents: &str) -> CoreResult<Connections> {
     from_document(&parse_document(contents)?, contents)
-}
-
-fn parse_document(contents: &str) -> CoreResult<KdlDocument> {
-    KdlDocument::parse(contents).map_err(|e| {
-        let input: &str = &e.input;
-        match e.diagnostics.first() {
-            Some(d) => at(
-                input,
-                d.span.offset(),
-                d.span.len(),
-                d.message.clone().unwrap_or_else(|| e.to_string()),
-                d.help.clone(),
-            ),
-            None => at(contents, 0, 0, e.to_string(), None),
-        }
-    })
-}
-
-fn at(
-    input: &str,
-    offset: usize,
-    length: usize,
-    message: impl Into<String>,
-    help: Option<String>,
-) -> CoreError {
-    let (line, column, length) = span_to_line_column(input, offset, length);
-    CoreError::ConfigParse(ConfigParseError {
-        message: message.into(),
-        line,
-        column,
-        length,
-        help,
-    })
-}
-
-fn node_error(
-    input: &str,
-    node: &KdlNode,
-    message: impl Into<String>,
-    help: Option<String>,
-) -> CoreError {
-    at(
-        input,
-        node.span().offset(),
-        node.span().len(),
-        message,
-        help,
-    )
 }
 
 fn from_document(doc: &KdlDocument, input: &str) -> CoreResult<Connections> {

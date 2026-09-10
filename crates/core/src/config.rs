@@ -1,16 +1,14 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
-
 use crate::{CoreError, Result};
 
+mod config_kdl;
 mod connections;
 mod connections_kdl;
-mod kdlserde;
+mod kdl_util;
 
 pub use self::connections::{Active, Connections, ProviderConfig};
-pub(crate) use self::kdlserde::span_to_line_column;
 
 const CONFIG_DIR_NAME: &str = if cfg!(debug_assertions) {
     "shuvarie-dev"
@@ -26,8 +24,8 @@ const LOCAL_CONFIG_FILE_NAME: &str = if cfg!(debug_assertions) {
 pub const LOCAL_CONFIG_DIR_NAME: &str = shuvarie_db::WORKSPACE_DIR_NAME;
 
 /// One parsed config file, plus the top-level section names its file
-/// actually defines — kdlserde fills absent sections with defaults, so the
-/// node list is what tells the merge step apart "absent" from "defined".
+/// actually defines — absent sections keep their defaults, so the node
+/// list is what tells the merge step apart "absent" from "defined".
 #[derive(Debug)]
 struct ConfigLayer {
     config: Config,
@@ -35,9 +33,10 @@ struct ConfigLayer {
 }
 
 fn parse_layer(contents: &str) -> Result<ConfigLayer> {
+    let (config, sections) = config_kdl::from_kdl_with_sections(contents)?;
     Ok(ConfigLayer {
-        config: kdlserde::from_str(contents)?,
-        sections: kdlserde::sections(contents)?.into_iter().collect(),
+        config,
+        sections: sections.into_iter().collect(),
     })
 }
 
@@ -74,31 +73,22 @@ fn merge_layer(config: &mut Config, layer: &ConfigLayer) {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Config {
-    #[serde(default)]
     pub ui: UiPrefs,
 
-    #[serde(default)]
     pub embedding: EmbeddingConfig,
 
-    #[serde(default)]
     pub agent: AgentConfig,
 
-    #[serde(default)]
     pub lsp: LspConfigRepr,
 
-    #[serde(default)]
     pub skills: SkillsConfig,
 
-    #[serde(default)]
     pub context: ContextConfig,
 
-    #[serde(default)]
     pub shell: ShellConfig,
 
-    #[serde(default)]
     pub retry: RetryConfig,
 }
 
@@ -110,37 +100,30 @@ fn default_max_turns() -> usize {
 /// forecast (anchored on the last call's real request size) drives three
 /// layers — the per-call mechanical trim, the stop-before-call overflow
 /// guard, and the pre-send LLM compaction — all sharing this budget.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case", default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ContextConfig {
     /// Stored inverted in the file as `disabled`; defaults to enabled.
-    #[serde(deserialize_with = "kdlserde::de_default")]
     pub disabled: bool,
 
     /// Tokens reserved for the model's reply and a safety buffer. The input
     /// budget is `context_length - reserved`.
-    #[serde(deserialize_with = "kdlserde::de_reserved")]
     pub reserved: u64,
 
     /// Tokens kept verbatim as the "tail" when trimming older messages (both
     /// the in-run hook trim and compaction's cut point use this budget).
-    #[serde(deserialize_with = "kdlserde::de_keep_recent_tokens")]
     pub keep_recent_tokens: u64,
 
     /// Maximum chars of a tool result's text sent to the model. Larger outputs
     /// are truncated with a marker hinting the model to read ranges. `0`
     /// disables the cap.
-    #[serde(deserialize_with = "kdlserde::de_tool_output_max_chars")]
     pub tool_output_max_chars: usize,
 
     /// Maximum bytes of a tool result's text sent to the model. Applies on
     /// top of `tool_output_max_chars` (whichever caps first). `0` disables.
-    #[serde(deserialize_with = "kdlserde::de_tool_output_max_bytes")]
     pub tool_output_max_bytes: usize,
 
     /// Default context length used when the catalog has no entry for the
     /// active model.
-    #[serde(deserialize_with = "kdlserde::de_fallback_context")]
     pub fallback_context_length: u64,
 }
 
@@ -166,37 +149,26 @@ impl ContextConfig {
 
 /// The shell `run_shell` executes through. `path` accepts an absolute or
 /// relative executable path, or a bare command name looked up in `PATH`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ShellConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SkillsConfig {
-    #[serde(deserialize_with = "kdlserde::de_default")]
     pub disabled: bool,
-    #[serde(default, deserialize_with = "kdlserde::de_default")]
     pub dirs: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct EmbeddingConfig {
-    #[serde(deserialize_with = "kdlserde::de_default")]
     pub disabled: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub dimensions: Option<u32>,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SidebarPref {
     /// Follow the terminal width: expanded at 80+ columns, collapsed below.
     #[default]
@@ -205,26 +177,15 @@ pub enum SidebarPref {
     Collapsed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UiPrefs {
     /// Target frames per second for the TUI render loop. `0` disables the cap
     /// (one draw per event, the original behavior). Defaults to 60.
-    #[serde(deserialize_with = "kdlserde::de_frame_rate")]
     pub frame_rate: u32,
 
     /// Default sidebar expansion: `auto` (width-based), `expanded`, or
     /// `collapsed`. `auto` is omitted from the saved file.
-    #[serde(
-        default,
-        deserialize_with = "kdlserde::de_default",
-        skip_serializing_if = "sidebar_pref_is_auto"
-    )]
     pub sidebar: SidebarPref,
-}
-
-fn sidebar_pref_is_auto(pref: &SidebarPref) -> bool {
-    *pref == SidebarPref::Auto
 }
 
 impl Default for UiPrefs {
@@ -236,45 +197,22 @@ impl Default for UiPrefs {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AgentConfig {
     /// `0` = unlimited.
-    #[serde(
-        rename = "max-turns",
-        default,
-        deserialize_with = "kdlserde::de_default",
-        skip_serializing_if = "is_zero_usize"
-    )]
     pub max_turns: usize,
 
     /// `0` = unlimited.
-    #[serde(
-        rename = "worker-max-turns",
-        default,
-        deserialize_with = "kdlserde::de_default",
-        skip_serializing_if = "is_zero_usize"
-    )]
     pub worker_max_turns: usize,
-}
-
-fn is_zero_usize(value: &usize) -> bool {
-    *value == 0
 }
 
 /// Auto-retry for provider connection failures (timeout, reset, HTTP
 /// 408/429/5xx). The interval ladder is fixed: 3s, 5s, 10s, 20s, 30s, then
 /// 60s for every further attempt.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RetryConfig {
     /// Maximum auto-retry attempts per connection failure. `0` disables
     /// retrying (a connection failure errors out immediately).
-    #[serde(
-        rename = "max-retries",
-        default,
-        deserialize_with = "kdlserde::de_default"
-    )]
     pub max_retries: usize,
 }
 
@@ -313,14 +251,11 @@ fn effective(value: usize) -> usize {
     if value == 0 { usize::MAX } else { value }
 }
 
-/// Serde mirror of [`shuvarie_lsp::LspConfig`] for the KDL file layout; the
-/// `shuvarie-lsp` crate itself stays config-format-free.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
+/// Config-file mirror of [`shuvarie_lsp::LspConfig`]; the `shuvarie-lsp`
+/// crate itself stays config-format-free.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct LspConfigRepr {
-    #[serde(deserialize_with = "kdlserde::de_default")]
     pub disabled: bool,
-    #[serde(default, deserialize_with = "kdlserde::de_default")]
     pub servers: BTreeRepr,
 }
 
@@ -352,16 +287,11 @@ impl From<&LspConfigRepr> for shuvarie_lsp::LspConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct LspServerSpecRepr {
-    #[serde(default, deserialize_with = "kdlserde::de_default")]
     pub command: Vec<String>,
-    #[serde(default, deserialize_with = "kdlserde::de_default")]
     pub extensions: Vec<String>,
-    #[serde(deserialize_with = "kdlserde::de_default")]
     pub no_auto_start: bool,
-    #[serde(default, deserialize_with = "kdlserde::de_default")]
     pub root_markers: Vec<String>,
 }
 
@@ -440,7 +370,7 @@ impl Config {
     /// explicitly (`--config`).
     pub fn load_explicit(path: &std::path::Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
-            Ok(contents) => kdlserde::from_str(&contents),
+            Ok(contents) => config_kdl::from_kdl(&contents),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 Err(CoreError::ConfigIo(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
@@ -453,7 +383,7 @@ impl Config {
 
     pub fn load_from(path: &std::path::Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
-            Ok(contents) => Ok(kdlserde::from_str(&contents)?),
+            Ok(contents) => config_kdl::from_kdl(&contents),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(CoreError::ConfigIo(e)),
         }
@@ -468,7 +398,7 @@ impl Config {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, kdlserde::to_string(self)?)?;
+        std::fs::write(path, config_kdl::to_kdl(self)?)?;
         Ok(())
     }
 }
@@ -480,20 +410,20 @@ mod tests {
     #[test]
     fn defaults_round_trip() {
         let config = Config::default();
-        let text = kdlserde::to_string(&config).unwrap();
-        let parsed: Config = kdlserde::from_str(&text).unwrap();
+        let text = config_kdl::to_kdl(&config).unwrap();
+        let parsed = config_kdl::from_kdl(&text).unwrap();
         assert_eq!(config, parsed);
     }
 
     #[test]
     fn empty_file_is_all_defaults() {
-        let parsed: Config = kdlserde::from_str("").unwrap();
+        let parsed = config_kdl::from_kdl("").unwrap();
         assert_eq!(parsed, Config::default());
     }
 
     #[test]
     fn retry_config_defaults_to_ten() {
-        let parsed: Config = kdlserde::from_str("").unwrap();
+        let parsed = config_kdl::from_kdl("").unwrap();
         assert_eq!(parsed.retry.max_retries, 10);
     }
 
@@ -504,7 +434,7 @@ mod tests {
                 max-retries 3
             }
         "#;
-        let parsed: Config = kdlserde::from_str(text).unwrap();
+        let parsed = config_kdl::from_kdl(text).unwrap();
         assert_eq!(parsed.retry.max_retries, 3);
     }
 
@@ -512,9 +442,9 @@ mod tests {
     fn retry_config_zero_round_trips() {
         let mut config = Config::default();
         config.retry.max_retries = 0;
-        let text = kdlserde::to_string(&config).unwrap();
+        let text = config_kdl::to_kdl(&config).unwrap();
         assert!(text.contains("max-retries 0"), "0 must serialize: {text}");
-        let parsed: Config = kdlserde::from_str(&text).unwrap();
+        let parsed = config_kdl::from_kdl(&text).unwrap();
         assert_eq!(parsed, config);
     }
 
@@ -529,7 +459,7 @@ mod tests {
                 dirs "a" "b"
             }
         "#;
-        let parsed: Config = kdlserde::from_str(text).unwrap();
+        let parsed = config_kdl::from_kdl(text).unwrap();
         assert_eq!(parsed.ui.frame_rate, 30);
         assert!(parsed.skills.disabled);
         assert_eq!(parsed.skills.dirs, vec!["a".to_string(), "b".to_string()]);
@@ -545,17 +475,17 @@ mod tests {
                 path "/usr/bin/zsh"
             }
         "#;
-        let parsed: Config = kdlserde::from_str(text).unwrap();
+        let parsed = config_kdl::from_kdl(text).unwrap();
         assert_eq!(parsed.shell.path.as_deref(), Some("/usr/bin/zsh"));
 
-        let text = kdlserde::to_string(&parsed).unwrap();
-        let reparsed: Config = kdlserde::from_str(&text).unwrap();
+        let text = config_kdl::to_kdl(&parsed).unwrap();
+        let reparsed = config_kdl::from_kdl(&text).unwrap();
         assert_eq!(parsed, reparsed);
     }
 
     #[test]
     fn shell_section_absent_is_none() {
-        let parsed: Config = kdlserde::from_str("ui { frame-rate 30 }").unwrap();
+        let parsed = config_kdl::from_kdl("ui { frame-rate 30 }").unwrap();
         assert_eq!(parsed.shell, ShellConfig::default());
         assert_eq!(parsed.shell.path, None);
     }
@@ -576,7 +506,7 @@ mod tests {
                                 fallback-context-length 64000
                         }
                 "#;
-        let parsed: Config = kdlserde::from_str(text).unwrap();
+        let parsed = config_kdl::from_kdl(text).unwrap();
         assert!(parsed.embedding.disabled);
         assert_eq!(parsed.embedding.provider.as_deref(), Some("openai"));
         assert_eq!(parsed.embedding.dimensions, Some(1536));
@@ -586,8 +516,8 @@ mod tests {
         assert_eq!(parsed.context.tool_output_max_chars, 1000);
         assert_eq!(parsed.context.fallback_context_length, 64_000);
 
-        let text = kdlserde::to_string(&parsed).unwrap();
-        let reparsed: Config = kdlserde::from_str(&text).unwrap();
+        let text = config_kdl::to_kdl(&parsed).unwrap();
+        let reparsed = config_kdl::from_kdl(&text).unwrap();
         assert_eq!(parsed, reparsed);
     }
 
@@ -609,7 +539,7 @@ mod tests {
                 }
             }
         "#;
-        let parsed: Config = kdlserde::from_str(text).unwrap();
+        let parsed = config_kdl::from_kdl(text).unwrap();
         assert!(parsed.lsp.disabled);
         let rust = parsed.lsp.servers.get("rust").expect("rust server");
         assert_eq!(rust.command, vec!["rust-analyzer".to_string()]);
@@ -620,8 +550,8 @@ mod tests {
         assert_eq!(zig.command, vec!["zls".to_string()]);
         assert!(!zig.no_auto_start);
 
-        let text = kdlserde::to_string(&parsed).unwrap();
-        let reparsed: Config = kdlserde::from_str(&text).unwrap();
+        let text = config_kdl::to_kdl(&parsed).unwrap();
+        let reparsed = config_kdl::from_kdl(&text).unwrap();
         assert_eq!(parsed, reparsed);
     }
 
@@ -649,6 +579,59 @@ mod tests {
     }
 
     #[test]
+    fn bare_disabled_nodes_parse_as_defaults() {
+        let text = r#"
+            embedding {
+                disabled
+            }
+            agent
+            shell
+        "#;
+        let parsed = config_kdl::from_kdl(text).unwrap();
+        assert!(!parsed.embedding.disabled);
+        assert_eq!(parsed.embedding, EmbeddingConfig::default());
+        assert_eq!(parsed.agent, AgentConfig::default());
+        assert_eq!(parsed.shell, ShellConfig::default());
+    }
+
+    #[test]
+    fn duplicate_field_is_an_error() {
+        let text = r#"
+            ui {
+                frame-rate 30
+                frame-rate 60
+            }
+        "#;
+        let err = config_kdl::from_kdl(text).unwrap_err();
+        let CoreError::ConfigParse(parse_err) = err else {
+            panic!("expected config parse error");
+        };
+        assert!(parse_err.message.contains("duplicate"), "{parse_err}");
+    }
+
+    #[test]
+    fn out_of_range_integer_is_an_error() {
+        let text = "ui {\n    frame-rate 99999999999\n}";
+        let err = config_kdl::from_kdl(text).unwrap_err();
+        let CoreError::ConfigParse(parse_err) = err else {
+            panic!("expected config parse error");
+        };
+        assert_eq!(parse_err.line, 2);
+        assert!(parse_err.message.contains("out of range"), "{parse_err}");
+    }
+
+    #[test]
+    fn invalid_sidebar_value_is_an_error() {
+        let text = "ui {\n    sidebar sideways\n}";
+        let err = config_kdl::from_kdl(text).unwrap_err();
+        let CoreError::ConfigParse(parse_err) = err else {
+            panic!("expected config parse error");
+        };
+        assert_eq!(parse_err.line, 2);
+        assert!(parse_err.message.contains("`sidebar`"), "{parse_err}");
+    }
+
+    #[test]
     fn unknown_fields_ignored() {
         let text = r#"
             ui {
@@ -659,7 +642,7 @@ mod tests {
                 whatever #true
             }
         "#;
-        let parsed: Config = kdlserde::from_str(text).unwrap();
+        let parsed = config_kdl::from_kdl(text).unwrap();
         assert_eq!(parsed.ui.frame_rate, 30);
         assert_eq!(parsed.agent, AgentConfig::default());
     }
@@ -667,7 +650,7 @@ mod tests {
     #[test]
     fn type_error_surfaced_with_location() {
         let text = "ui {\n    frame-rate \"sixty\"\n}";
-        let err = kdlserde::from_str::<Config>(text).unwrap_err();
+        let err = config_kdl::from_kdl(text).unwrap_err();
         let CoreError::ConfigParse(parse_err) = err else {
             panic!("expected config parse error");
         };
@@ -681,21 +664,21 @@ mod tests {
             ("ui { sidebar expanded }", SidebarPref::Expanded),
             ("ui { sidebar collapsed }", SidebarPref::Collapsed),
         ] {
-            let parsed: Config = kdlserde::from_str(text).unwrap();
+            let parsed = config_kdl::from_kdl(text).unwrap();
             assert_eq!(parsed.ui.sidebar, expected, "text: {text:?}");
         }
 
         let mut config = Config::default();
         config.ui.sidebar = SidebarPref::Expanded;
-        let text = kdlserde::to_string(&config).unwrap();
+        let text = config_kdl::to_kdl(&config).unwrap();
         assert!(text.contains("sidebar expanded"), "body: {text}");
-        let parsed: Config = kdlserde::from_str(&text).unwrap();
+        let parsed = config_kdl::from_kdl(&text).unwrap();
         assert_eq!(parsed, config);
 
         let config = Config::default();
-        let text = kdlserde::to_string(&config).unwrap();
+        let text = config_kdl::to_kdl(&config).unwrap();
         assert!(!text.contains("sidebar"), "auto must be omitted: {text}");
-        let parsed: Config = kdlserde::from_str(&text).unwrap();
+        let parsed = config_kdl::from_kdl(&text).unwrap();
         assert_eq!(parsed, config);
     }
 
