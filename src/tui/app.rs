@@ -259,6 +259,7 @@ impl App {
                     ))),
                     _ => None,
                 },
+                TermEvent::Paste(text) => self.map_paste(&text),
                 TermEvent::Key(key) => {
                     // Transient warning popup: swallows one key press and
                     // dismisses, leaving the underlying overlay untouched.
@@ -574,6 +575,29 @@ impl App {
                 }
                 CoreEvent::ShellWarning { message } => Some(AppMessage::ShellWarning { message }),
             },
+        }
+    }
+
+    /// Bracketed-paste payload routing. Text-entry surfaces accept the paste;
+    /// navigation-only overlays and the transient warning popup drop it.
+    fn map_paste(&self, text: &str) -> Option<AppMessage> {
+        if self.warning.open {
+            return None;
+        }
+        match self.overlay {
+            Overlay::None => self.session.map_paste(text).map(AppMessage::Session),
+            Overlay::HistorySearch => Some(AppMessage::HistorySearch(HistorySearchMessage::Paste(
+                text.to_string(),
+            ))),
+            Overlay::AddProvider => self
+                .add_provider_form
+                .as_ref()
+                .map(|_| AppMessage::AddProvider(AddProviderMessage::Paste(text.to_string()))),
+            Overlay::Welcome
+            | Overlay::ModelPicker
+            | Overlay::CommandMenu
+            | Overlay::ConfirmQuit
+            | Overlay::SessionPicker => None,
         }
     }
 

@@ -16,6 +16,7 @@ pub enum QuestionMessage {
     Toggle,
     Escape,
     CustomInput(char),
+    CustomPaste(String),
     CustomBackspace,
     CustomDelete,
     CustomLeft,
@@ -197,6 +198,13 @@ impl QuestionUI {
             QuestionMessage::CustomInput(c) => {
                 if self.typing_custom {
                     self.typing_buffer.push(c);
+                }
+                None
+            }
+            QuestionMessage::CustomPaste(text) => {
+                if self.typing_custom {
+                    self.typing_buffer
+                        .insert_str(&super::components::flatten_newlines(&text));
                 }
                 None
             }

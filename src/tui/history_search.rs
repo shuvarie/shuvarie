@@ -13,6 +13,7 @@ use super::theme;
 pub enum HistorySearchMessage {
     Open,
     Input(char),
+    Paste(String),
     Backspace,
     Next,
     Prev,
@@ -143,6 +144,14 @@ impl HistorySearch {
             }
             HistorySearchMessage::Input(c) => {
                 self.query.push(c);
+                self.loading = true;
+                Some(HistorySearchEffect::Search {
+                    query: self.query.value.clone(),
+                })
+            }
+            HistorySearchMessage::Paste(text) => {
+                self.query
+                    .insert_str(&super::components::flatten_newlines(&text));
                 self.loading = true;
                 Some(HistorySearchEffect::Search {
                     query: self.query.value.clone(),

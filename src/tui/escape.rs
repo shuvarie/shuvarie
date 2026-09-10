@@ -44,6 +44,18 @@ pub const DISABLE_SGR_MOUSE: Csi = Csi::Mode(Mode::ResetDecPrivateMode(DecPrivat
     DecPrivateModeCode::SGRMouse,
 )));
 
+// Bracketed paste (mode 2004): pastes arrive as a single `Event::Paste`
+// payload instead of a burst of keystrokes, so line feeds stay text rather
+// than triggering key bindings like Enter. Terminals without the mode ignore
+// the sequence and keep the legacy keystroke behavior.
+pub const ENABLE_BRACKETED_PASTE: Csi = Csi::Mode(Mode::SetDecPrivateMode(DecPrivateMode::Code(
+    DecPrivateModeCode::BracketedPaste,
+)));
+
+pub const DISABLE_BRACKETED_PASTE: Csi = Csi::Mode(Mode::ResetDecPrivateMode(
+    DecPrivateMode::Code(DecPrivateModeCode::BracketedPaste),
+));
+
 // Push/pop the window title on the title stack (CSI 22;2t / 23;2t) so the
 // pre-existing tab title is restored on exit. Terminals without a title stack
 // ignore these sequences.

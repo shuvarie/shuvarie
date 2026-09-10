@@ -295,6 +295,20 @@ impl SessionScreen {
         self.input.buffer.row_count(inner_w) > 1
     }
 
+    /// Bracketed-paste routing, mirroring `map_event`'s popup priority. A
+    /// question popup captures the paste for its custom-answer field; the
+    /// bash popup and slash menu leave the paste to the input area.
+    pub fn map_paste(&self, text: &str) -> Option<SessionMessage> {
+        if self.question.open {
+            return Some(SessionMessage::Question(QuestionMessage::CustomPaste(
+                text.to_string(),
+            )));
+        }
+        Some(SessionMessage::Text(TextAreaMessage::Paste(
+            text.to_string(),
+        )))
+    }
+
     fn sync_slash(&mut self) {
         let has_messages = self.chat.has_messages();
         self.slash

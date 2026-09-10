@@ -31,6 +31,7 @@ pub enum AddProviderMessage {
     SelectKind,
     Search(SearchMessage),
     Input(char),
+    Paste(String),
     Backspace,
     Delete,
     KillToEnd,
@@ -271,6 +272,23 @@ impl AddProviderForm {
                     FormField::Name => self.name.push(c),
                     FormField::BaseUrl => self.base_url.push(c),
                     FormField::ApiKey => self.api_key.push(c),
+                }
+                AddProviderOutcome::None
+            }
+            AddProviderMessage::Paste(text) => {
+                let flat = super::components::flatten_newlines(&text);
+                match self.stage {
+                    AddProviderStage::SelectKind => {
+                        for c in flat.chars() {
+                            self.search.update(SearchMessage::Input(c));
+                        }
+                        self.refilter();
+                    }
+                    AddProviderStage::Details => match self.field {
+                        FormField::Name => self.name.insert_str(&flat),
+                        FormField::BaseUrl => self.base_url.insert_str(&flat),
+                        FormField::ApiKey => self.api_key.insert_str(&flat),
+                    },
                 }
                 AddProviderOutcome::None
             }

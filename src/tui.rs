@@ -232,11 +232,12 @@ fn sync_window_title<W: io::Write>(
 fn init_terminal(terminal: &mut PlatformTerminal) -> io::Result<()> {
     write!(
         terminal,
-        "{}{}{}{}{}",
+        "{}{}{}{}{}{}",
         escape::ENTER_ALTERNATE_SCREEN,
         escape::ENABLE_MOUSE,
         escape::ENABLE_SGR_MOUSE,
         escape::ENABLE_KITTY_KEYBOARD,
+        escape::ENABLE_BRACKETED_PASTE,
         escape::push_window_title()
     )?;
     terminal.flush()?;
@@ -246,10 +247,11 @@ fn init_terminal(terminal: &mut PlatformTerminal) -> io::Result<()> {
 fn deinit_terminal(terminal: &mut PlatformTerminal) -> io::Result<()> {
     write!(
         terminal,
-        "{}{}{}{}{}",
+        "{}{}{}{}{}{}",
         escape::DISABLE_KITTY_KEYBOARD,
         escape::DISABLE_SGR_MOUSE,
         escape::DISABLE_MOUSE,
+        escape::DISABLE_BRACKETED_PASTE,
         escape::EXIT_ALTERNATE_SCREEN,
         escape::pop_window_title()
     )?;

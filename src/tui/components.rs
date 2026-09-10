@@ -5,12 +5,47 @@ use ratatui::prelude::*;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Paragraph};
 use termina::event::{KeyCode, KeyEvent, Modifiers};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::tui::theme;
 use crate::tui::utils::{alt, ctrl};
 
 pub use version_bar::VersionBar;
 
 mod version_bar;
+
+/// Pastes longer than this many lines collapse into an inline
+/// `[pasted N lines]` chip; shorter pastes insert verbatim.
+const COMPACT_PASTE_LINES: usize = 2;
+
+// A compacted paste is stored as one marker char in `value` from the BMP
+// private use area (U+E000..=U+F8FF); `marker_id` (the offset from the base)
+// indexes the `pastes` slots holding the real payload.
+const PASTE_MARKER_BASE: u32 = 0xE000;
+const PASTE_MARKER_LAST: u32 = 0xF8FF;
+
+fn paste_marker(id: usize) -> Option<char> {
+    let code = PASTE_MARKER_BASE + id as u32;
+    char::from_u32(code).filter(|c| (*c as u32) <= PASTE_MARKER_LAST)
+}
+
+fn marker_id(c: char) -> Option<usize> {
+    let code = c as u32;
+    (PASTE_MARKER_BASE..=PASTE_MARKER_LAST)
+        .contains(&code)
+        .then(|| (code - PASTE_MARKER_BASE) as usize)
+}
+
+/// Normalize a terminal paste payload: CR/CRLF become `\n` so pasted line
+/// breaks stay line breaks in the buffer.
+pub fn normalize_newlines(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// Flatten a paste payload to a single line (for single-line inputs).
+pub fn flatten_newlines(text: &str) -> String {
+    text.replace("\r\n", " ").replace(['\r', '\n'], " ")
+}
 
 /// One visual row of the input buffer after char-level wrapping and newline splitting.
 struct Row {
@@ -25,6 +60,7 @@ pub struct InputBuffer {
     pub value: String,
     pub cursor: usize,
     pub scroll_offset: Cell<usize>,
+    pastes: Vec<String>,
 }
 
 impl InputBuffer {
@@ -33,6 +69,7 @@ impl InputBuffer {
             value: String::new(),
             cursor: 0,
             scroll_offset: Cell::new(0),
+            pastes: Vec::new(),
         }
     }
 
@@ -40,25 +77,96 @@ impl InputBuffer {
         self.value.clear();
         self.cursor = 0;
         self.scroll_offset.set(0);
+        self.pastes.clear();
     }
 
     pub fn push(&mut self, c: char) {
+        self.insert_char(c);
+    }
+
+    pub fn push_newline(&mut self) {
+        self.insert_char('\n');
+    }
+
+    fn insert_char(&mut self, c: char) {
         self.value.insert(self.cursor, c);
         self.cursor += c.len_utf8();
     }
 
-    pub fn push_newline(&mut self) {
-        self.value.insert(self.cursor, '\n');
-        self.cursor += 1;
+    pub fn insert_str(&mut self, s: &str) {
+        self.value.insert_str(self.cursor, s);
+        self.cursor += s.len();
+    }
+
+    /// Insert pasted text: payloads of more than `COMPACT_PASTE_LINES` lines
+    /// collapse into an inline `[pasted N lines]` chip that expands back to
+    /// the full text on submit (`expanded`) and is deleted as one unit.
+    pub fn paste(&mut self, text: &str) {
+        let text = normalize_newlines(text);
+        if text.lines().count() > COMPACT_PASTE_LINES
+            && let Some(marker) = paste_marker(self.pastes.len())
+        {
+            self.pastes.push(text);
+            self.insert_char(marker);
+            return;
+        }
+        self.insert_str(&text);
+    }
+
+    /// The buffer content with compacted pastes expanded back to their text.
+    pub fn expanded(&self) -> String {
+        if self.pastes.iter().all(String::is_empty) {
+            return self.value.clone();
+        }
+        let mut out = String::with_capacity(self.value.len());
+        for c in self.value.chars() {
+            match marker_id(c) {
+                Some(id) => out.push_str(self.pastes.get(id).map(String::as_str).unwrap_or("")),
+                None => out.push(c),
+            }
+        }
+        out
+    }
+
+    fn drop_paste(&mut self, marker: char) {
+        if let Some(slot) = marker_id(marker).and_then(|id| self.pastes.get_mut(id)) {
+            slot.clear();
+        }
+    }
+
+    fn paste_label(&self, id: usize) -> String {
+        let lines = self
+            .pastes
+            .get(id)
+            .map(|content| content.lines().count())
+            .unwrap_or(0);
+        format!("[pasted {lines} lines]")
+    }
+
+    /// The paste marker starting at byte `bi`, when `value[bi..]` holds one.
+    fn marker_id_at(&self, bi: usize) -> Option<usize> {
+        self.value[bi..].chars().next().and_then(marker_id)
+    }
+
+    /// Remove `range` from `value`, clearing the paste slot of every marker
+    /// the range swallowed so removed payloads are not retained.
+    fn cut_range(&mut self, range: std::ops::Range<usize>) {
+        let markers: Vec<char> = self.value[range.clone()]
+            .chars()
+            .filter(|c| marker_id(*c).is_some())
+            .collect();
+        self.value.replace_range(range, "");
+        for marker in markers {
+            self.drop_paste(marker);
+        }
     }
 
     pub fn backspace(&mut self) {
         if self.cursor > 0 {
             let prev = self.value[..self.cursor].chars().last().unwrap();
-            let prev_len = prev.len_utf8();
-            self.cursor -= prev_len;
-            self.value
-                .replace_range(self.cursor..self.cursor + prev_len, "");
+            let start = self.cursor - prev.len_utf8();
+            self.cut_range(start..self.cursor);
+            self.cursor = start;
         }
     }
 
@@ -94,9 +202,8 @@ impl InputBuffer {
     pub fn delete(&mut self) {
         if self.cursor < self.value.len() {
             let next = self.value[self.cursor..].chars().next().unwrap();
-            let next_len = next.len_utf8();
-            self.value
-                .replace_range(self.cursor..self.cursor + next_len, "");
+            let end = self.cursor + next.len_utf8();
+            self.cut_range(self.cursor..end);
         }
     }
 
@@ -108,13 +215,13 @@ impl InputBuffer {
             return;
         }
         if self.value[self.cursor..].starts_with('\n') {
-            self.value.replace_range(self.cursor..self.cursor + 1, "");
+            self.cut_range(self.cursor..self.cursor + 1);
         } else {
             let line_end = self.value[self.cursor..]
                 .find('\n')
                 .map(|i| self.cursor + i)
                 .unwrap_or(self.value.len());
-            self.value.replace_range(self.cursor..line_end, "");
+            self.cut_range(self.cursor..line_end);
         }
     }
 
@@ -125,7 +232,7 @@ impl InputBuffer {
             .rfind('\n')
             .map(|i| i + 1)
             .unwrap_or(0);
-        self.value.replace_range(line_start..self.cursor, "");
+        self.cut_range(line_start..self.cursor);
         self.cursor = line_start;
     }
 
@@ -135,10 +242,10 @@ impl InputBuffer {
             return;
         }
         let mut i = chars.len();
-        while i > 0 && chars[i - 1].1.is_whitespace() {
+        while i > 0 && self.is_word_break(chars[i - 1].1) {
             i -= 1;
         }
-        while i > 0 && !chars[i - 1].1.is_whitespace() {
+        while i > 0 && !self.is_word_break(chars[i - 1].1) {
             i -= 1;
         }
         self.cursor = if i < chars.len() {
@@ -154,10 +261,10 @@ impl InputBuffer {
             .map(|(i, c)| (self.cursor + i, c))
             .collect();
         let mut i = 0;
-        while i < rest.len() && rest[i].1.is_whitespace() {
+        while i < rest.len() && self.is_word_break(rest[i].1) {
             i += 1;
         }
-        while i < rest.len() && !rest[i].1.is_whitespace() {
+        while i < rest.len() && !self.is_word_break(rest[i].1) {
             i += 1;
         }
         if i < rest.len() {
@@ -165,6 +272,12 @@ impl InputBuffer {
         } else {
             self.cursor = self.value.len();
         }
+    }
+
+    /// Word-boundary predicate: whitespace and paste markers both end a word,
+    /// so word jumps land next to a paste placeholder instead of inside it.
+    fn is_word_break(&self, c: char) -> bool {
+        c.is_whitespace() || marker_id(c).is_some()
     }
 
     /// Move the cursor up one visual row, preserving the visual column.
@@ -196,6 +309,7 @@ impl InputBuffer {
         self.value = s.to_string();
         self.cursor = self.value.len();
         self.scroll_offset.set(0);
+        self.pastes.clear();
     }
 
     pub fn cursor_char_index(&self) -> usize {
@@ -208,36 +322,60 @@ impl InputBuffer {
     }
 
     /// Compute the visual rows of the buffer at the given width, splitting on
-    /// `\n` and wrapping char-by-char using `unicode-width`.
+    /// `\n` and wrapping char-by-char using `unicode-width`. Compacted pastes
+    /// expand to their inline label; a label that fits on an empty row breaks
+    /// the row before it so it never splits needlessly.
     fn rows(&self, width: usize) -> Vec<Row> {
         let width = width.max(1);
         let mut rows: Vec<Row> = Vec::new();
         let mut chars: Vec<(char, usize)> = Vec::new();
         let mut col = 0usize;
+        let push_row = |rows: &mut Vec<Row>, chars: &mut Vec<(char, usize)>, end_byte: usize| {
+            rows.push(Row {
+                chars: std::mem::take(chars),
+                end_byte,
+            });
+        };
         for (bi, c) in self.value.char_indices() {
             if c == '\n' {
-                rows.push(Row {
-                    chars: std::mem::take(&mut chars),
-                    end_byte: bi,
-                });
+                push_row(&mut rows, &mut chars, bi);
                 col = 0;
+                continue;
+            }
+            if let Some(id) = marker_id(c) {
+                let label = self.paste_label(id);
+                let label_w = label.width();
+                if label_w > width {
+                    for lc in label.chars() {
+                        let w = UnicodeWidthChar::width(lc).unwrap_or(0);
+                        if col + w > width && !chars.is_empty() {
+                            push_row(&mut rows, &mut chars, bi);
+                            col = 0;
+                        }
+                        chars.push((lc, bi));
+                        col += w;
+                    }
+                    continue;
+                }
+                if col + label_w > width && !chars.is_empty() {
+                    push_row(&mut rows, &mut chars, bi);
+                    col = 0;
+                }
+                for lc in label.chars() {
+                    chars.push((lc, bi));
+                }
+                col += label_w;
                 continue;
             }
             let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
             if col + w > width && !chars.is_empty() {
-                rows.push(Row {
-                    chars: std::mem::take(&mut chars),
-                    end_byte: bi,
-                });
+                push_row(&mut rows, &mut chars, bi);
                 col = 0;
             }
             chars.push((c, bi));
             col += w;
         }
-        rows.push(Row {
-            chars,
-            end_byte: self.value.len(),
-        });
+        push_row(&mut rows, &mut chars, self.value.len());
         rows
     }
 
@@ -301,7 +439,13 @@ impl InputBuffer {
                 if is_cursor {
                     found_cursor = true;
                 }
-                let style = if is_cursor { cursor_style } else { text_style };
+                let style = if is_cursor {
+                    cursor_style
+                } else if self.marker_id_at(*bi).is_some() {
+                    paste_label_style()
+                } else {
+                    text_style
+                };
                 spans.push(Span::styled(c.to_string(), style));
             }
             if !found_cursor && self.cursor == r.end_byte {
@@ -341,11 +485,19 @@ impl InputBuffer {
         }
 
         for (i, c) in chars.iter().enumerate() {
-            let style = if i == cursor_idx {
-                cursor_style
-            } else {
-                text_style
-            };
+            let is_cursor = i == cursor_idx;
+            if let Some(id) = marker_id(*c) {
+                for (li, lc) in self.paste_label(id).chars().enumerate() {
+                    let style = if is_cursor && li == 0 {
+                        cursor_style
+                    } else {
+                        paste_label_style()
+                    };
+                    spans.push(Span::styled(lc.to_string(), style));
+                }
+                continue;
+            }
+            let style = if is_cursor { cursor_style } else { text_style };
             spans.push(Span::styled(c.to_string(), style));
         }
 
@@ -369,6 +521,13 @@ fn row_col_to_byte(row: &Row, col: usize) -> usize {
     row.end_byte
 }
 
+fn paste_label_style() -> Style {
+    Style::new()
+        .fg(theme::ACCENT)
+        .bg(theme::ACCENT_BG)
+        .add_modifier(Modifier::BOLD)
+}
+
 impl Default for InputBuffer {
     fn default() -> Self {
         Self::new()
@@ -377,6 +536,7 @@ impl Default for InputBuffer {
 
 pub enum TextAreaMessage {
     Input(char),
+    Paste(String),
     Backspace,
     Delete,
     KillToEnd,
@@ -470,6 +630,10 @@ impl TextArea {
                 self.buffer.push(c);
                 None
             }
+            TextAreaMessage::Paste(text) => {
+                self.buffer.paste(&text);
+                None
+            }
             TextAreaMessage::Newline => {
                 self.buffer.push_newline();
                 None
@@ -523,7 +687,7 @@ impl TextArea {
                 None
             }
             TextAreaMessage::Submit => {
-                let content = self.buffer.value.trim().to_string();
+                let content = self.buffer.expanded().trim().to_string();
                 if content.is_empty() {
                     return None;
                 }
@@ -877,5 +1041,207 @@ mod tests {
             assert_eq!(cell.symbol(), "h");
             assert_eq!(cell.style().fg, Some(text_color));
         }
+    }
+
+    #[test]
+    fn paste_short_inserts_verbatim() {
+        let mut b = InputBuffer::new();
+        b.paste("hello");
+        assert_eq!(b.value, "hello");
+        assert_eq!(b.cursor, "hello".len());
+    }
+
+    #[test]
+    fn paste_two_lines_inserts_verbatim() {
+        let mut b = InputBuffer::new();
+        b.paste("a\nb");
+        assert_eq!(b.value, "a\nb");
+        assert_eq!(b.expanded(), "a\nb");
+    }
+
+    #[test]
+    fn paste_normalizes_crlf() {
+        let mut b = InputBuffer::new();
+        b.paste("a\r\nb");
+        assert_eq!(b.value, "a\nb");
+        b.clear();
+        b.paste("a\r\nb\rc\nd");
+        assert_eq!(b.value.chars().count(), 1);
+        assert_eq!(b.expanded(), "a\nb\nc\nd");
+    }
+
+    #[test]
+    fn paste_many_lines_compacts_to_marker() {
+        let mut b = InputBuffer::new();
+        b.paste("l1\nl2\nl3");
+        assert_eq!(b.value.chars().count(), 1);
+        assert_eq!(b.expanded(), "l1\nl2\nl3");
+        assert_eq!(b.cursor, b.value.len());
+        assert_eq!(b.row_count(60), 1);
+    }
+
+    #[test]
+    fn paste_label_renders_inline_without_content() {
+        let mut b = InputBuffer::new();
+        b.paste("l1\nl2\nl3");
+        let lines = b.cursor_lines(crate::tui::theme::TEXT, crate::tui::theme::ACCENT, 60, 8);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(text.contains("[pasted 3 lines]"), "text={text}");
+        assert!(!text.contains("l1"), "content must stay hidden: {text}");
+        let chip = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.style.bg == Some(crate::tui::theme::ACCENT_BG))
+            .expect("chip background");
+        assert_eq!(chip.style.fg, Some(crate::tui::theme::ACCENT));
+    }
+
+    #[test]
+    fn paste_label_breaks_row_when_it_does_not_fit() {
+        let mut b = InputBuffer::new();
+        b.push('x');
+        b.paste("l1\nl2\nl3");
+        assert_eq!(b.row_count(17), 1);
+        assert_eq!(b.row_count(16), 2);
+    }
+
+    #[test]
+    fn backspace_deletes_whole_paste() {
+        let mut b = InputBuffer::new();
+        b.set("ab");
+        b.paste("l1\nl2\nl3");
+        assert_eq!(b.value.chars().count(), 3);
+        b.backspace();
+        assert_eq!(b.value, "ab");
+        assert_eq!(b.expanded(), "ab");
+        assert_eq!(b.cursor, "ab".len());
+    }
+
+    #[test]
+    fn delete_removes_whole_paste() {
+        let mut b = InputBuffer::new();
+        b.paste("l1\nl2\nl3");
+        b.push('x');
+        b.home();
+        b.delete();
+        assert_eq!(b.value, "x");
+        assert_eq!(b.expanded(), "x");
+        assert_eq!(b.cursor, 0);
+    }
+
+    #[test]
+    fn left_right_treat_marker_as_single_unit() {
+        let mut b = InputBuffer::new();
+        b.set("ab");
+        b.paste("l1\nl2\nl3");
+        let marker_bi = "ab".len();
+        b.left();
+        assert_eq!(b.cursor, marker_bi);
+        b.left();
+        assert_eq!(b.cursor, "a".len());
+        b.right();
+        assert_eq!(b.cursor, marker_bi);
+        b.right();
+        assert_eq!(b.cursor, b.value.len());
+    }
+
+    #[test]
+    fn word_movement_treats_paste_marker_as_boundary() {
+        let mut b = InputBuffer::new();
+        b.paste("l1\nl2\nl3");
+        b.insert_str("world");
+        let marker_len = b.value.chars().next().unwrap().len_utf8();
+        b.home();
+        b.right_word();
+        assert_eq!(b.cursor, b.value.len());
+        b.left_word();
+        assert_eq!(b.cursor, marker_len);
+        b.left_word();
+        assert_eq!(b.cursor, 0);
+    }
+
+    #[test]
+    fn multiple_pastes_expand_in_order() {
+        let mut b = InputBuffer::new();
+        b.paste("a1\na2\na3");
+        b.push(' ');
+        b.paste("b1\nb2\nb3");
+        assert_eq!(b.expanded(), "a1\na2\na3 b1\nb2\nb3");
+    }
+
+    #[test]
+    fn deleting_one_paste_keeps_the_other() {
+        let mut b = InputBuffer::new();
+        b.paste("a1\na2\na3");
+        b.push(' ');
+        b.paste("b1\nb2\nb3");
+        b.backspace();
+        assert_eq!(b.expanded(), "a1\na2\na3 ");
+    }
+
+    #[test]
+    fn clear_and_set_drop_pastes() {
+        let mut b = InputBuffer::new();
+        b.paste("l1\nl2\nl3");
+        b.clear();
+        assert_eq!(b.expanded(), "");
+        b.paste("l1\nl2\nl3");
+        b.set("fresh");
+        assert_eq!(b.expanded(), "fresh");
+    }
+
+    #[test]
+    fn kill_to_end_drops_swallowed_paste() {
+        let mut b = InputBuffer::new();
+        b.set("ab");
+        b.paste("l1\nl2\nl3");
+        b.insert_str("more");
+        b.home();
+        b.right();
+        b.right();
+        b.kill_to_end();
+        assert_eq!(b.value, "ab");
+        assert_eq!(b.expanded(), "ab");
+        assert!(b.pastes.iter().all(String::is_empty));
+    }
+
+    #[test]
+    fn kill_to_line_start_drops_swallowed_paste() {
+        let mut b = InputBuffer::new();
+        b.set("ab");
+        b.paste("l1\nl2\nl3");
+        b.insert_str("more");
+        b.kill_to_line_start();
+        assert_eq!(b.value, "");
+        assert_eq!(b.expanded(), "");
+        assert!(b.pastes.iter().all(String::is_empty));
+    }
+
+    #[test]
+    fn submit_expands_compacted_paste() {
+        let mut area = TextArea::with_max_height("p", 8);
+        area.buffer.paste("l1\nl2\nl3");
+        assert!(!area.is_empty());
+        let effect = area.update(TextAreaMessage::Submit);
+        match effect {
+            Some(TextAreaEffect::Submit { content }) => {
+                assert_eq!(content, "l1\nl2\nl3");
+            }
+            _ => panic!("expected submit effect"),
+        }
+        assert!(area.is_empty());
+    }
+
+    #[test]
+    fn paste_message_routes_through_text_area_update() {
+        let mut area = TextArea::with_max_height("p", 8);
+        area.update(TextAreaMessage::Paste("a\nb\nc\nd".to_string()));
+        assert_eq!(area.buffer.expanded(), "a\nb\nc\nd");
+        assert_eq!(area.buffer.value.chars().count(), 1);
+        area.update(TextAreaMessage::Paste("one line".to_string()));
+        assert!(area.buffer.value.contains("one line"));
     }
 }
