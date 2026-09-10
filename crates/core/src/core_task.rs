@@ -120,7 +120,7 @@ impl SteerSignal {
 }
 
 /// Which turn action the main stream is currently in, tracked so a steered
-/// prompt can cut in at the next action boundary.
+/// prompt can cut in when the running action completes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActionPhase {
     /// Nothing streamed yet this turn: the first action cannot be preempted.
@@ -131,9 +131,9 @@ enum ActionPhase {
     Text,
     /// A tool batch is running (some calls started, results pending).
     Tools,
-    /// The last action completed — a thinking or text segment finished, or
-    /// the whole tool batch settled and surfaced its results. The next
-    /// main-stream item starts a new action.
+    /// The last action completed — the whole tool batch settled and surfaced
+    /// its results. The next main-stream item starting any action is the
+    /// boundary at which a queued steered prompt dispatches.
     Between,
 }
 
@@ -955,13 +955,16 @@ pub async fn run(
                         overflow_retries = 0;
                         conn_retries = 0;
                         ctx.active_stream = None;
-                        // Steer in the next queued prompt, if any. A steered
-                        // prompt only ever preempts the stream it was queued
-                        // during, so disarming here keeps later queue entries
-                        // waiting for this turn to complete naturally.
+                        // Steer in the next queued prompt, if any. The queue
+                        // keeps preempting: the fresh turn is armed again so
+                        // the next queued prompt cuts in at its next action
+                        // boundary instead of waiting for the whole turn.
                         if !steered.is_empty() {
                             let content = steered.remove(0);
                             ctx.start_user_turn(content, true).await;
+                            if !steered.is_empty() {
+                                ctx.steer.arm();
+                            }
                         } else {
                             ctx.steer.reset();
                         }
@@ -1627,18 +1630,34 @@ fn client_for<'a>(
 
 /// Whether `item` opens the next turn action while `action` has just
 /// completed one — the boundary at which a queued steered prompt cuts in.
-/// The first action of a turn (Fresh) cannot be preempted and a running tool
-/// batch (Tools) must settle first; bookkeeping items (usage, worker
-/// activity, empty deltas) never start an action.
+/// A boundary is a completed action followed by a different action starting:
+/// mid-segment deltas (thinking streaming into more thinking, text into more
+/// text) continue the running action and never cut, so a steered prompt is
+/// sent after each completed action rather than mid-action. The first action
+/// of a turn (Fresh) cannot be preempted and a running tool batch (Tools)
+/// must settle first; bookkeeping items (usage, worker activity, empty
+/// deltas) never start an action.
 fn starts_action_after_boundary(item: &shuvarie_llm::StreamItem, action: &ActionPhase) -> bool {
     if matches!(action, ActionPhase::Fresh | ActionPhase::Tools) {
         return false;
     }
-    match item {
-        shuvarie_llm::StreamItem::Delta { text } if !text.is_empty() => true,
-        shuvarie_llm::StreamItem::Reasoning { text } if !text.is_empty() => true,
-        shuvarie_llm::StreamItem::ToolStart { worker: None, .. } => true,
-        shuvarie_llm::StreamItem::WorkerStart { .. } => true,
+    let starting = match item {
+        shuvarie_llm::StreamItem::Delta { text } if !text.is_empty() => Some(ActionPhase::Text),
+        shuvarie_llm::StreamItem::Reasoning { text } if !text.is_empty() => {
+            Some(ActionPhase::Thinking)
+        }
+        shuvarie_llm::StreamItem::ToolStart { worker: None, .. } => Some(ActionPhase::Tools),
+        shuvarie_llm::StreamItem::WorkerStart { .. } => Some(ActionPhase::Tools),
+        _ => None,
+    };
+    match (action, starting) {
+        // Between actions any next main-stream action starting is the
+        // boundary (the settle check below dispatches on completion alone).
+        (ActionPhase::Between, Some(_)) => true,
+        // Mid-segment deltas continue the running action; only an item
+        // starting a different action means the running one completed.
+        (ActionPhase::Thinking, Some(started)) => started != ActionPhase::Thinking,
+        (ActionPhase::Text, Some(started)) => started != ActionPhase::Text,
         _ => false,
     }
 }
@@ -1670,6 +1689,12 @@ async fn stream_stream_to_events(
     let mut turn_tool_records: Vec<crate::tool_record::ToolRecord> = Vec::new();
     let mut pending_tool_args: std::collections::HashMap<String, PendingTool> =
         std::collections::HashMap::new();
+    // Worker-internal tool calls tracked apart from the main agent's batch:
+    // a worker's rig run can wedge its own pair (erroring mid-tool) or a
+    // result can straggle past the worker's `WorkerResult` on the merged
+    // stream, and neither may keep the main batch from settling.
+    let mut pending_worker_tools: std::collections::HashMap<String, PendingTool> =
+        std::collections::HashMap::new();
     let mut pending_worker_starts: std::collections::HashMap<String, std::time::Instant> =
         std::collections::HashMap::new();
     let mut outcome = StreamOutcome::Finished;
@@ -1686,17 +1711,8 @@ async fn stream_stream_to_events(
     while let Some(item) = stream.next().await {
         if starts_action_after_boundary(&item, &action) && steer.is_armed() && steer.begin_preempt()
         {
-            let session_opt = Some(session.clone());
-            persist_interrupted_turn(
-                Some(turn_state.clone()),
-                &mut store,
-                &session_opt,
-                &event_tx,
-            )
-            .await;
-            let _ = event_tx.send(Event::StreamCancelled).await;
             done = None;
-            outcome = StreamOutcome::Preempted;
+            outcome = cut_turn_for_steer(&turn_state, &mut store, &session, &event_tx).await;
             break;
         }
         match item {
@@ -1748,14 +1764,24 @@ async fn stream_stream_to_events(
                 call_id,
             } => {
                 let is_main = worker.is_none();
-                let args_json = args.to_string();
-                pending_tool_args.insert(
-                    call_id.clone(),
-                    PendingTool {
-                        args_json,
-                        started: std::time::Instant::now(),
-                    },
-                );
+                let started = std::time::Instant::now();
+                if is_main {
+                    pending_tool_args.insert(
+                        call_id.clone(),
+                        PendingTool {
+                            args_json: args.to_string(),
+                            started,
+                        },
+                    );
+                } else {
+                    pending_worker_tools.insert(
+                        call_id.clone(),
+                        PendingTool {
+                            args_json: args.to_string(),
+                            started,
+                        },
+                    );
+                }
                 ensure_assistant_row(
                     &mut assistant_message_id,
                     &mut assistant_seq,
@@ -1796,12 +1822,22 @@ async fn stream_stream_to_events(
                     Some(s) => (s.stdout.clone(), s.stderr.clone()),
                     None => (output.clone(), String::new()),
                 };
-                let (args_json, duration_ms) = match pending_tool_args.remove(&call_id) {
-                    Some(pending) => (
-                        pending.args_json,
-                        pending.started.elapsed().as_millis() as u64,
-                    ),
-                    None => (String::new(), 0),
+                let (args_json, duration_ms) = if worker.is_none() {
+                    match pending_tool_args.remove(&call_id) {
+                        Some(pending) => (
+                            pending.args_json,
+                            pending.started.elapsed().as_millis() as u64,
+                        ),
+                        None => (String::new(), 0),
+                    }
+                } else {
+                    match pending_worker_tools.remove(&call_id) {
+                        Some(pending) => (
+                            pending.args_json,
+                            pending.started.elapsed().as_millis() as u64,
+                        ),
+                        None => (String::new(), 0),
+                    }
                 };
                 let worker_name = worker.as_deref();
                 let is_main = worker.is_none();
@@ -2014,6 +2050,23 @@ async fn stream_stream_to_events(
                 break;
             }
         }
+        // A settled tool batch is itself a completed action: dispatch the
+        // queued prompt right here instead of waiting for the next request's
+        // first item (provider latency can silence the stream for seconds).
+        // Skipped once the final `Done` was seen so a finished turn still
+        // commits cleanly, and while a worker-internal result is still
+        // straggling so it surfaces before the cut (a leaked one never
+        // settles and must not wedge the phase).
+        if done.is_none()
+            && matches!(action, ActionPhase::Between)
+            && pending_worker_tools.is_empty()
+            && steer.is_armed()
+            && steer.begin_preempt()
+        {
+            done = None;
+            outcome = cut_turn_for_steer(&turn_state, &mut store, &session, &event_tx).await;
+            break;
+        }
     }
 
     if let Some((text, usage)) = done {
@@ -2181,6 +2234,26 @@ fn parse_file_change(json: &str) -> Option<FileChange> {
         return None;
     }
     serde_json::from_str::<FileChange>(json).ok()
+}
+
+/// Cut the stream for a queued steered prompt: persist the partial turn as
+/// interrupted, surface the cancellation, and report `Preempted` back to the
+/// run loop so it dispatches the queued prompt.
+async fn cut_turn_for_steer(
+    turn_state: &Arc<Mutex<TurnState>>,
+    store: &mut Store,
+    session: &Arc<Mutex<Session>>,
+    event_tx: &Sender<Event>,
+) -> StreamOutcome {
+    persist_interrupted_turn(
+        Some(turn_state.clone()),
+        store,
+        &Some(session.clone()),
+        event_tx,
+    )
+    .await;
+    let _ = event_tx.send(Event::StreamCancelled).await;
+    StreamOutcome::Preempted
 }
 
 async fn persist_interrupted_turn(
@@ -3223,6 +3296,148 @@ mod tests {
         assert!(saw_cancel, "cut fires once the whole batch settled");
         assert_eq!(stream_done_rx.recv().await, Some(StreamOutcome::Preempted));
         assert_eq!(session.lock().await.tool_records.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn steered_prompt_waits_for_thinking_to_complete() {
+        // Mid-segment deltas continue the running thinking action: the cut
+        // fires only once the segment completed (the text action starting),
+        // and the text delta is consumed without streaming.
+        let steer = SteerSignal::default();
+        steer.arm();
+        let (session, mut event_rx, mut stream_done_rx) = spawn_preempt_stream(
+            vec![
+                StreamItem::Reasoning {
+                    text: "first burst".into(),
+                },
+                StreamItem::Reasoning {
+                    text: " — second burst".into(),
+                },
+                StreamItem::Delta {
+                    text: "the answer".into(),
+                },
+                StreamItem::Done {
+                    text: "the answer".into(),
+                    usage: TokenUsage::default(),
+                },
+            ],
+            steer,
+        )
+        .await;
+
+        let mut reasoning_chunks = 0;
+        let mut saw_token = false;
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                Event::ReasoningReceived { .. } => reasoning_chunks += 1,
+                Event::StreamCancelled => break,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            reasoning_chunks, 2,
+            "both thinking deltas stream before the cut"
+        );
+        assert!(!saw_token, "the text action never streams once steered");
+        assert_eq!(stream_done_rx.recv().await, Some(StreamOutcome::Preempted));
+        let guard = session.lock().await;
+        assert_eq!(guard.interrupted.get(&0), Some(&true));
+        let reasoning = guard.reasoning.get(&0).expect("reasoning persisted");
+        assert_eq!(reasoning.len(), 1, "both bursts append into one segment");
+        assert_eq!(reasoning[0].text, "first burst — second burst");
+    }
+
+    #[tokio::test]
+    async fn steered_prompt_waits_for_text_to_complete() {
+        // Steering while the model writes its answer waits for that segment to
+        // complete; with no further action the turn finishes normally and the
+        // prompt is dispatched at turn end (committed cleanly).
+        let steer = SteerSignal::default();
+        steer.arm();
+        let (session, mut event_rx, mut stream_done_rx) = spawn_preempt_stream(
+            vec![
+                StreamItem::Delta { text: "one".into() },
+                StreamItem::Delta {
+                    text: " two".into(),
+                },
+                StreamItem::Done {
+                    text: "one two".into(),
+                    usage: TokenUsage::default(),
+                },
+            ],
+            steer,
+        )
+        .await;
+
+        let mut tokens = 0;
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                Event::TokenReceived { .. } => tokens += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(tokens, 2, "the whole text segment streams");
+        assert_eq!(stream_done_rx.recv().await, Some(StreamOutcome::Finished));
+        let guard = session.lock().await;
+        assert!(guard.interrupted.is_empty(), "turn committed cleanly");
+    }
+
+    #[tokio::test]
+    async fn steered_prompt_cuts_when_worker_straggler_result_lags() {
+        // A worker's internal tool result may straggle past its
+        // `WorkerResult` on the merged stream; the lagging pair must not
+        // keep the main batch from settling, so the cut still fires.
+        let steer = SteerSignal::default();
+        steer.arm();
+        let (session, mut event_rx, mut stream_done_rx) = spawn_preempt_stream(
+            vec![
+                StreamItem::WorkerStart {
+                    name: "explore_workspace".into(),
+                    args: serde_json::json!({}),
+                    call_id: "w1".into(),
+                },
+                StreamItem::ToolStart {
+                    name: "grep".into(),
+                    args: serde_json::json!({}),
+                    worker: Some("explore_workspace".into()),
+                    call_id: "t1".into(),
+                },
+                StreamItem::WorkerResult {
+                    name: "explore_workspace".into(),
+                    output: "summary".into(),
+                    ok: true,
+                    call_id: "w1".into(),
+                },
+                worker_tool_result("t1"),
+                StreamItem::Delta {
+                    text: "next round".into(),
+                },
+                StreamItem::Done {
+                    text: "next round".into(),
+                    usage: TokenUsage::default(),
+                },
+            ],
+            steer,
+        )
+        .await;
+
+        let mut saw_straggler = false;
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                Event::ToolFinished { name, .. } if name == "grep" => {
+                    saw_straggler = true;
+                }
+                Event::StreamCancelled => break,
+                _ => {}
+            }
+        }
+        assert!(
+            saw_straggler,
+            "the lagging worker-internal result still surfaces"
+        );
+        assert_eq!(stream_done_rx.recv().await, Some(StreamOutcome::Preempted));
+        let guard = session.lock().await;
+        assert_eq!(guard.tool_records.len(), 1);
     }
 
     #[tokio::test]
