@@ -131,7 +131,9 @@ pub fn load_context_dir(root: &Path, budget: usize) -> LoadedContext {
     let mut content = String::new();
     let mut remaining = budget;
 
-    let context_dir = root.join(".shuvarie").join("context");
+    let context_dir = root
+        .join(crate::config::LOCAL_CONFIG_DIR_NAME)
+        .join("context");
     if context_dir.is_dir() && remaining > 0 {
         let mut paths: Vec<PathBuf> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&context_dir) {
@@ -450,21 +452,28 @@ mod tests {
     #[test]
     fn loads_agents_md_and_context_dir_sorted() {
         let (dir, _guard) = tempdir();
+        let app_dir = crate::config::LOCAL_CONFIG_DIR_NAME;
         std::fs::write("AGENTS.md", "project rules").unwrap();
-        std::fs::create_dir_all(".shuvarie/context").unwrap();
-        std::fs::write(".shuvarie/context/b.md", "bee").unwrap();
-        std::fs::write(".shuvarie/context/a.md", "aye").unwrap();
-        std::fs::write(".shuvarie/context/skip.bin", "\0binary").unwrap();
+        std::fs::create_dir_all(format!("{app_dir}/context")).unwrap();
+        std::fs::write(format!("{app_dir}/context/b.md"), "bee").unwrap();
+        std::fs::write(format!("{app_dir}/context/a.md"), "aye").unwrap();
+        std::fs::write(format!("{app_dir}/context/skip.bin"), "\0binary").unwrap();
 
         let ctx = load_from_cwd();
         assert!(ctx.files.ends_with(&[
             "AGENTS.md".to_string(),
-            ".shuvarie/context/a.md".to_string(),
-            ".shuvarie/context/b.md".to_string(),
+            format!("{app_dir}/context/a.md"),
+            format!("{app_dir}/context/b.md"),
         ]));
         assert!(ctx.content.contains("=== AGENTS.md ===\nproject rules"));
-        assert!(ctx.content.contains("=== .shuvarie/context/a.md ===\naye"));
-        assert!(ctx.content.contains("=== .shuvarie/context/b.md ===\nbee"));
+        assert!(
+            ctx.content
+                .contains(&format!("=== {app_dir}/context/a.md ===\naye"))
+        );
+        assert!(
+            ctx.content
+                .contains(&format!("=== {app_dir}/context/b.md ===\nbee"))
+        );
         assert!(!ctx.content.contains("binary"));
         drop(dir);
     }
@@ -472,12 +481,13 @@ mod tests {
     #[test]
     fn missing_agents_only_context_dir() {
         let (dir, _guard) = tempdir();
-        std::fs::create_dir_all(".shuvarie/context").unwrap();
-        std::fs::write(".shuvarie/context/notes.md", "notes").unwrap();
+        let app_dir = crate::config::LOCAL_CONFIG_DIR_NAME;
+        std::fs::create_dir_all(format!("{app_dir}/context")).unwrap();
+        std::fs::write(format!("{app_dir}/context/notes.md"), "notes").unwrap();
         let ctx = load_from_cwd();
         assert!(
             ctx.files
-                .ends_with(&[".shuvarie/context/notes.md".to_string()])
+                .ends_with(&[format!("{app_dir}/context/notes.md")])
         );
         assert!(ctx.content.contains("notes"));
         drop(dir);
@@ -486,8 +496,9 @@ mod tests {
     #[test]
     fn loads_agents_md_separately_from_context_dir() {
         let dir = TempDir::new().unwrap();
+        let app_dir = crate::config::LOCAL_CONFIG_DIR_NAME;
         write(&dir.path().join("AGENTS.md"), "project rules");
-        write(&dir.path().join(".shuvarie/context/a.md"), "aye");
+        write(&dir.path().join(app_dir).join("context/a.md"), "aye");
 
         let agents = load_from_dirs(&[dir.path().to_path_buf()], dir.path());
         assert_eq!(agents.files, vec!["AGENTS.md"]);
@@ -495,11 +506,14 @@ mod tests {
         assert!(!agents.content.contains("aye"));
 
         let dir_ctx = load_context_dir(dir.path(), agents.remaining_budget());
-        assert_eq!(dir_ctx.files, vec![".shuvarie/context/a.md"]);
+        assert_eq!(dir_ctx.files, vec![format!("{app_dir}/context/a.md")]);
         assert!(dir_ctx.content.contains("aye"));
 
         let merged = agents.merged(dir_ctx);
-        assert_eq!(merged.files, vec!["AGENTS.md", ".shuvarie/context/a.md"]);
+        assert_eq!(
+            merged.files,
+            vec!["AGENTS.md".to_string(), format!("{app_dir}/context/a.md")]
+        );
         assert!(merged.content.contains("project rules"));
         assert!(merged.content.contains("aye"));
     }

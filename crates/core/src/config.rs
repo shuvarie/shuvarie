@@ -12,10 +12,18 @@ mod kdlserde;
 pub use self::connections::{Active, Connections, ProviderConfig};
 pub(crate) use self::kdlserde::span_to_line_column;
 
-const CONFIG_DIR_NAME: &str = "shuvarie";
+const CONFIG_DIR_NAME: &str = if cfg!(debug_assertions) {
+    "shuvarie-dev"
+} else {
+    "shuvarie"
+};
 const CONFIG_FILE_NAME: &str = "config.kdl";
-const LOCAL_CONFIG_FILE_NAME: &str = "shuvarie.kdl";
-const LOCAL_CONFIG_DIR_NAME: &str = ".shuvarie";
+const LOCAL_CONFIG_FILE_NAME: &str = if cfg!(debug_assertions) {
+    "shuvarie-dev.kdl"
+} else {
+    "shuvarie.kdl"
+};
+pub const LOCAL_CONFIG_DIR_NAME: &str = shuvarie_db::WORKSPACE_DIR_NAME;
 
 /// One parsed config file, plus the top-level section names its file
 /// actually defines — kdlserde fills absent sections with defaults, so the
@@ -394,8 +402,8 @@ impl Config {
         Ok(config_dir()?.join(CONFIG_FILE_NAME))
     }
 
-    /// `$cwd/shuvarie.kdl` and `$cwd/.shuvarie/config.kdl`, in priority
-    /// order above the global config.
+    /// `$cwd/shuvarie.kdl` and `$cwd/.shuvarie/config.kdl` (`-dev` suffixed
+    /// in debug builds), in priority order above the global config.
     pub fn local_config_candidates(cwd: &std::path::Path) -> [PathBuf; 2] {
         [
             cwd.join(LOCAL_CONFIG_FILE_NAME),
@@ -408,7 +416,8 @@ impl Config {
     /// file is merged layer by layer: per top-level section the
     /// highest-priority file defining it wins wholesale (except
     /// `lsp.servers`, which merges key-by-key). With no file present this
-    /// returns `Default`.
+    /// returns `Default`. Debug builds read the `-dev` suffixed names
+    /// (`shuvarie-dev.kdl`, `.shuvarie-dev`, `~/.config/shuvarie-dev`).
     pub fn load() -> Result<Self> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let mut paths = Self::local_config_candidates(&cwd).to_vec();
@@ -707,8 +716,27 @@ mod tests {
     #[test]
     fn local_config_candidates_paths() {
         let candidates = Config::local_config_candidates(std::path::Path::new("/proj"));
-        assert_eq!(candidates[0], PathBuf::from("/proj/shuvarie.kdl"));
-        assert_eq!(candidates[1], PathBuf::from("/proj/.shuvarie/config.kdl"));
+        assert_eq!(
+            candidates[0],
+            PathBuf::from(format!("/proj/{LOCAL_CONFIG_FILE_NAME}"))
+        );
+        assert_eq!(
+            candidates[1],
+            PathBuf::from(format!("/proj/{LOCAL_CONFIG_DIR_NAME}/config.kdl"))
+        );
+    }
+
+    #[test]
+    fn profile_names_split_dev_and_release() {
+        if cfg!(debug_assertions) {
+            assert_eq!(CONFIG_DIR_NAME, "shuvarie-dev");
+            assert_eq!(LOCAL_CONFIG_FILE_NAME, "shuvarie-dev.kdl");
+            assert_eq!(LOCAL_CONFIG_DIR_NAME, ".shuvarie-dev");
+        } else {
+            assert_eq!(CONFIG_DIR_NAME, "shuvarie");
+            assert_eq!(LOCAL_CONFIG_FILE_NAME, "shuvarie.kdl");
+            assert_eq!(LOCAL_CONFIG_DIR_NAME, ".shuvarie");
+        }
     }
 
     #[test]

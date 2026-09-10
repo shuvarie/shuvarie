@@ -8,5 +8,5 @@ pub use model::{
 };
 pub use store::{
     EmbeddableMessage, SearchHit, SearchSource, SessionSummary, Store, StoredMessage,
-    StoredSession, StoredToolCall, UndoEntry,
+    StoredSession, StoredToolCall, UndoEntry, WORKSPACE_DIR_NAME,
 };

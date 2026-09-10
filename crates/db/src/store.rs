@@ -14,6 +14,12 @@ use crate::model::{
 
 static MIGRATIONS: toasty::migration::MigrationSet = toasty::embed_migrations!();
 
+pub const WORKSPACE_DIR_NAME: &str = if cfg!(debug_assertions) {
+    ".shuvarie-dev"
+} else {
+    ".shuvarie"
+};
+
 #[derive(Debug, Clone)]
 pub struct SessionSummary {
     pub id: uuid::Uuid,
@@ -156,7 +162,7 @@ pub struct Store {
 
 impl Store {
     pub fn default_path() -> PathBuf {
-        PathBuf::from(".shuvarie").join("data.db")
+        PathBuf::from(WORKSPACE_DIR_NAME).join("data.db")
     }
 
     pub async fn open(path: &Path) -> Result<Self> {
@@ -164,7 +170,7 @@ impl Store {
             let created = !parent.exists();
             std::fs::create_dir_all(parent)
                 .map_err(|e| DbError::Open(format!("create dir {}: {e}", parent.display())))?;
-            if created && parent.file_name() == Some(std::ffi::OsStr::new(".shuvarie")) {
+            if created && parent.file_name() == Some(std::ffi::OsStr::new(WORKSPACE_DIR_NAME)) {
                 let gitignore = parent.join(".gitignore");
                 std::fs::write(&gitignore, "*\n")
                     .map_err(|e| DbError::Open(format!("write {}: {e}", gitignore.display())))?;

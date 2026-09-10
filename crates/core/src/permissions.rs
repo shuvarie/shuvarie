@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-const HIDDEN_ROOT_EXEMPT: [&str; 2] = [".agents", ".shuvarie"];
+const HIDDEN_ROOT_EXEMPT: [&str; 2] = [".agents", crate::config::LOCAL_CONFIG_DIR_NAME];
 
 pub(crate) fn workspace_root() -> Result<PathBuf, String> {
     std::env::current_dir().map_err(|e| format!("cwd: {e}"))
@@ -191,16 +191,17 @@ mod tests {
     }
 
     #[test]
-    fn dot_agents_and_dot_shuvarie_are_exempt() {
+    fn dot_agents_and_app_dir_are_exempt() {
         let (dir, _guard) = tempdir();
+        let app_dir = crate::config::LOCAL_CONFIG_DIR_NAME;
         std::fs::create_dir_all(".agents").unwrap();
         std::fs::write(".agents/NOTE.md", "x").unwrap();
-        std::fs::create_dir_all(".shuvarie").unwrap();
-        std::fs::write(".shuvarie/notes.md", "x").unwrap();
+        std::fs::create_dir_all(app_dir).unwrap();
+        std::fs::write(format!("{app_dir}/notes.md"), "x").unwrap();
         assert!(resolve_read("./.agents/NOTE.md").is_ok());
-        assert!(resolve_read("./.shuvarie/notes.md").is_ok());
+        assert!(resolve_read(&format!("./{app_dir}/notes.md")).is_ok());
         assert!(resolve_write(".agents/skills/new/SKILL.md").is_ok());
-        assert!(resolve_write(".shuvarie/context/extra.md").is_ok());
+        assert!(resolve_write(&format!("{app_dir}/context/extra.md")).is_ok());
         std::fs::create_dir_all(".agents/.secrets").unwrap();
         std::fs::write(".agents/.secrets/key", "x").unwrap();
         assert!(

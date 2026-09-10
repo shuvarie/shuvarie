@@ -24,3 +24,4 @@ target
 
 # Local shuvarie data (working-directory session database)
 .shuvarie/
+.shuvarie-dev/

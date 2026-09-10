@@ -35,6 +35,7 @@ Startup loads config + connections and the working-directory store (`.shuvarie/d
 
 ### Storage: hybrid
 
+- **Build-profile name split** — every app-owned file/dir name differs by profile: release keeps `shuvarie.kdl`, `.shuvarie`, `~/.config/shuvarie`; debug builds use the `shuvarie-dev` variants (`shuvarie-dev.kdl`, `.shuvarie-dev`, `~/.config/shuvarie-dev`) so dev and release state never mix. Canonical constants: `shuvarie_db::WORKSPACE_DIR_NAME` (the per-project `.shuvarie*` dir) and the `config.rs` consts — never hardcode the names.
 - **Config** (`shuvarie-core::config`) — layered chain `$cwd/shuvarie.kdl` → `$cwd/.shuvarie/config.kdl` → global `~/.config/shuvarie/config.kdl`, merged per top-level section (except `lsp.servers`, key-by-key); KDL via kdl-serde. UI/agent/context/lsp/skills/retry/shell preferences live here; no secrets. `shell.path` selects the executable `run_shell` uses (absolute/relative path or a `PATH` name); when it is not found at startup the platform default is used and a `ShellWarning` popup is shown.
 - **Connections** (`connections.kdl`, same module) — providers keyed by `id` plus the active provider/model; hand-rolled KDL in `connections_kdl`. `kind` is the rig transport (a `selune::ProviderType` in kebab-case, e.g. `openai`, `ollama`); the optional `catalog` child carries the Selune catalog id used for pricing/context/key-requirement lookups (legacy configs put the catalog id in `kind` — still resolved). Secrets live here — never in the database or `config.kdl`.
 - **Database** (`.shuvarie/data.db`) — Turso embedded SQLite via the Toasty ORM: sessions (UUID v7), messages (positioned reasoning segments + interrupted flag, per-message usage plus the turn's last main-request usage as `request_json`), tool calls (file-change JSON + original/new content for undo), undo log, message embeddings. Schema is managed with toasty migrations embedded in the binary — regenerate with `cargo run -p shuvarie-db --bin migrate -- migration generate --name <change>` (see the `toasty` skill).
@@ -63,7 +64,7 @@ The visual style lives in `src/tui/theme.rs` (true-color `Color::Rgb`, medieval/
 - The chat history pane (`session/chat.rs` + `session/virtualizer.rs`) is the one stateful exception: turn-based virtualization with `RefCell` render caches, painting only the visible viewport plus overscan.
 - Format tokens/cost via the `utils/num.rs` helpers; render help rows via `theme::help_line` — never flat unstyled strings.
 
-**Permission rules** (`crates/core/src/permissions.rs`) — there is no interactive permission popup: tool calls either run or fail deterministically. Reads are permitted anywhere except under hidden paths (any `.` component; workspace-root `.agents`/`.shuvarie` are exempt), writes only inside the working directory and never under hidden paths; `run_shell`/`webfetch` are not path-gated.
+**Permission rules** (`crates/core/src/permissions.rs`) — there is no interactive permission popup: tool calls either run or fail deterministically. Reads are permitted anywhere except under hidden paths (any `.` component; workspace-root `.agents` and the app dir — `.shuvarie`, or `.shuvarie-dev` in debug builds — are exempt), writes only inside the working directory and never under hidden paths; `run_shell`/`webfetch` are not path-gated.
 
 ## Conventions
 

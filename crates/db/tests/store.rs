@@ -1,14 +1,14 @@
-use shuvarie_db::{ReasoningSegment, Store, StoredSession};
+use shuvarie_db::{ReasoningSegment, Store, StoredSession, WORKSPACE_DIR_NAME};
 use shuvarie_llm::Role;
 use shuvarie_llm::TokenUsage;
 
 #[tokio::test]
-async fn open_seeds_gitignore_when_creating_shuvarie_dir() {
+async fn open_seeds_gitignore_when_creating_workspace_dir() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(".shuvarie/data.db");
+    let path = dir.path().join(WORKSPACE_DIR_NAME).join("data.db");
 
     Store::open(&path).await.unwrap();
-    let gitignore = dir.path().join(".shuvarie/.gitignore");
+    let gitignore = dir.path().join(WORKSPACE_DIR_NAME).join(".gitignore");
     assert!(gitignore.exists());
     assert_eq!(std::fs::read_to_string(&gitignore).unwrap(), "*\n");
 
