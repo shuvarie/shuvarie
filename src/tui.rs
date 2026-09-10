@@ -120,7 +120,6 @@ where
 
         'event_listening: loop {
             let changed = tokio::select! {
-                biased; // cheap branches first
                 // Flush the armed frame timer: a coalesced frame is due.
                 // The `if` guard only disables polling — the future
                 // expression is still evaluated, so handle `None` here.
@@ -163,12 +162,7 @@ where
                 ev = event_rx.recv() => {
                     let Some(ev) = ev else { break 'render_loop Ok(app.session.session_id); };
                     let msg = app.map_event(Event::Core(ev));
-                    let mut changed = apply_msg(&mut app, msg);
-                    while let Ok(ev) = event_rx.try_recv() {
-                        let msg = app.map_event(Event::Core(ev));
-                        changed |= apply_msg(&mut app, msg);
-                    }
-                    changed
+                    apply_msg(&mut app, msg)
                 }
             };
 
