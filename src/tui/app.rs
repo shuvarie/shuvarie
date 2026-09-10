@@ -100,6 +100,8 @@ pub enum AppMessage {
         message: String,
     },
     Warning(WarningMessage),
+    /// The render loop's spinner wake: refresh the animated spinner renders.
+    SpinnerUpdate,
 }
 
 #[derive(Debug)]
@@ -943,6 +945,9 @@ impl App {
             AppMessage::Warning(m) => {
                 self.warning.update(m);
             }
+            AppMessage::SpinnerUpdate => {
+                self.session.update(SessionMessage::SpinnerUpdate);
+            }
         }
         None
     }
@@ -970,21 +975,6 @@ impl App {
             .busy_spinner()
             .into_iter()
             .chain(inline.then_some(SpinnerKind::Inline))
-    }
-
-    /// Mark the views that are animating dirty so the next frame re-renders them.
-    pub fn mark_spinners_dirty(&self) {
-        if self.session.is_busy() || self.session.chat.has_running_tool_blocks() {
-            self.session.mark_spinner_dirty();
-        }
-        if self.session.sidebar.lsp_servers.iter().any(|s| {
-            matches!(
-                s.status,
-                shuvarie_core::ServerStatus::Starting | shuvarie_core::ServerStatus::Stopping
-            )
-        }) {
-            self.session.sidebar.mark_dirty();
-        }
     }
 
     fn update_command_availability(&mut self) {

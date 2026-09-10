@@ -114,6 +114,9 @@ pub enum SessionMessage {
         stacked: bool,
         content: Option<String>,
     },
+    /// The render loop's spinner wake: refresh the animated spinner renders
+    /// (the chat's cached turns and the sidebar's cached lines).
+    SpinnerUpdate,
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,11 +226,6 @@ impl SessionScreen {
         self.busy_kind = BusyKind::Generating;
         self.status = Some("Thinking...".to_string());
         self.retry = None;
-    }
-
-    /// Mark the chat dirty so an animated spinner re-renders.
-    pub fn mark_spinner_dirty(&self) {
-        self.chat.mark_spinner_dirty();
     }
 
     /// Expand a `/skill:<name> [args]` submit into the skill's prompt
@@ -573,6 +571,11 @@ impl SessionScreen {
                     self.input.buffer.set(&content);
                 }
                 self.sync_slash();
+                None
+            }
+            SessionMessage::SpinnerUpdate => {
+                self.chat.update(ChatMessage::SpinnerUpdate);
+                self.sidebar.update(SidebarMessage::SpinnerUpdate);
                 None
             }
         }
@@ -1044,7 +1047,7 @@ mod tests {
             session,
         });
 
-        let rendered = text(&screen.sidebar.rendered_lines());
+        let rendered = text(screen.sidebar.rendered_lines());
         assert!(
             rendered.contains("20.2k/200k (10%)"),
             "restored request seeds the anchor: {rendered}"
@@ -1053,7 +1056,7 @@ mod tests {
         assert!(rendered.contains("CH97%"), "body: {rendered}");
 
         screen.update(SessionMessage::Reset);
-        let rendered = text(&screen.sidebar.rendered_lines());
+        let rendered = text(screen.sidebar.rendered_lines());
         assert!(
             !rendered.contains("R20k") && !rendered.contains("CH97%"),
             "reset drops the restored metrics: {rendered}"

@@ -104,6 +104,11 @@ pub enum ChatMessage {
     SteeredRecalled,
     /// The queue was wiped by a session-level transition.
     SteeredCleared,
+    /// The render loop's spinner wake: the turns that can hold animated
+    /// blocks — the in-flight turn and a committed turn with a late
+    /// still-running `ToolFinished` straggler — bump their revision so their
+    /// cached render rebuilds with the next spinner frame.
+    SpinnerUpdate,
 }
 
 /// Viewport-relative scroll position. `sticky_bottom` tracks the streaming
@@ -183,26 +188,6 @@ impl Chat {
                 .borrow()
                 .last()
                 .is_some_and(|turn| turn.role == Role::Assistant)
-    }
-
-    /// Mark the in-flight turn dirty so an animated spinner re-renders.
-    /// A still-running tool block committed into the last turn (a late
-    /// `ToolFinished` straggler) is bumped too so its spinner and elapsed
-    /// time keep ticking.
-    pub fn mark_spinner_dirty(&self) {
-        if let Some(turn) = self.in_flight.borrow_mut().as_mut() {
-            turn.rev += 1;
-        }
-        let mut turns = self.turns.borrow_mut();
-        if let Some(turn) = turns.last_mut()
-            && turn
-                .blocks
-                .as_ref()
-                .is_some_and(|blocks| blocks.iter().any(|block| block.tool_is_running()))
-        {
-            turn.rev += 1;
-        }
-        drop(turns);
     }
 
     /// Whether any tool block is still animating: live blocks in the
@@ -407,6 +392,19 @@ impl Chat {
             }
             ChatMessage::SteeredCleared => {
                 self.steered.borrow_mut().clear();
+            }
+            ChatMessage::SpinnerUpdate => {
+                if let Some(turn) = self.in_flight.get_mut() {
+                    turn.rev += 1;
+                }
+                if let Some(turn) = self.turns.get_mut().last_mut()
+                    && turn
+                        .blocks
+                        .as_ref()
+                        .is_some_and(|blocks| blocks.iter().any(|block| block.tool_is_running()))
+                {
+                    turn.rev += 1;
+                }
             }
         }
     }
@@ -1332,7 +1330,7 @@ mod tests {
             let mut worst = std::time::Duration::ZERO;
             for _ in 0..5 {
                 let t1 = std::time::Instant::now();
-                chat.mark_spinner_dirty();
+                chat.update(ChatMessage::SpinnerUpdate);
                 draw(&chat, 100, 40);
                 worst = worst.max(t1.elapsed());
             }
@@ -1808,7 +1806,7 @@ mod tests {
             chat.update(ChatMessage::TokenReceived {
                 content: format!("word{i} "),
             });
-            chat.mark_spinner_dirty();
+            chat.update(ChatMessage::SpinnerUpdate);
             if i % 3 == 0 {
                 chat.update(ChatMessage::LspDiagnostics {
                     path: "src/main.rs".into(),
@@ -2131,7 +2129,7 @@ mod tests {
         let started = std::time::Instant::now();
         let frames = 20;
         for _ in 0..frames {
-            chat.mark_spinner_dirty();
+            chat.update(ChatMessage::SpinnerUpdate);
             let turn = chat.in_flight.borrow();
             let turn = turn.as_ref().expect("in-flight turn");
             let cache = render_turn_cache(

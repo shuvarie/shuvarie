@@ -1,5 +1,3 @@
-use std::cell::{Cell, RefCell};
-
 use ratatui::layout::{Alignment, Rect};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph};
@@ -34,8 +32,11 @@ pub struct Sidebar {
     manual: Option<bool>,
     /// Last known viewport width, so a toggle can flip the effective state.
     width: u16,
-    dirty: Cell<bool>,
-    lines_cache: RefCell<Vec<Line<'static>>>,
+    lines_cache: Vec<Line<'static>>,
+    /// The animated spinner span, captured in `update` and refreshed by the
+    /// render loop's spinner wake (`SpinnerUpdate`) so `view` renders cached
+    /// state only.
+    spinner_span: Span<'static>,
 }
 
 pub enum SidebarMessage {
@@ -82,6 +83,8 @@ pub enum SidebarMessage {
     /// Manual collapse/expand override (Ctrl+W): flips the current effective
     /// state and sticks until `SetPref` arrives again.
     Toggle,
+    /// The render loop's spinner wake: recapture the animated spinner span.
+    SpinnerUpdate,
 }
 
 impl Sidebar {
@@ -98,13 +101,12 @@ impl Sidebar {
             pref: SidebarPref::Auto,
             manual: None,
             width: 0,
-            dirty: Cell::new(true),
-            lines_cache: RefCell::new(Vec::new()),
+            lines_cache: Vec::new(),
+            spinner_span: super::spinner::spinner(),
         }
     }
 
     pub fn update(&mut self, msg: SidebarMessage) {
-        self.dirty.set(true);
         match msg {
             SidebarMessage::UpdateConfig { context_length } => {
                 self.context.set_context_length(context_length);
@@ -143,7 +145,12 @@ impl Sidebar {
             SidebarMessage::Toggle => {
                 self.manual = Some(!self.collapsed_at(self.width));
             }
+            SidebarMessage::SpinnerUpdate => {
+                self.spinner_span = super::spinner::spinner();
+            }
         }
+
+        self.lines_cache = self.build_lines();
     }
 
     /// Whether the sidebar renders collapsed at the given viewport width: the
@@ -166,11 +173,6 @@ impl Sidebar {
         None
     }
 
-    /// Mark the cached lines dirty so an animated spinner re-renders.
-    pub fn mark_dirty(&self) {
-        self.dirty.set(true);
-    }
-
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
         let block = Block::new()
             .bg(theme::SURFACE)
@@ -185,23 +187,14 @@ impl Sidebar {
 
         self.version_bar.view(frame, version_area);
 
-        if self.dirty.replace(false) {
-            let lines = self.build_lines();
-            *self.lines_cache.borrow_mut() = lines;
-        }
-
-        let lines = self.lines_cache.borrow().clone();
+        let lines = self.lines_cache.as_slice();
         let para = Paragraph::new(lines).alignment(Alignment::Left);
         frame.render_widget(para, lines_area);
     }
 
     #[cfg(test)]
-    pub(crate) fn rendered_lines(&self) -> Vec<Line<'static>> {
-        if self.dirty.get() {
-            *self.lines_cache.borrow_mut() = self.build_lines();
-            self.dirty.set(false);
-        }
-        self.lines_cache.borrow().clone()
+    pub(crate) fn rendered_lines(&self) -> &[Line<'static>] {
+        &self.lines_cache
     }
 
     /// The one-line stand-in for the collapsed sidebar, shown between the
@@ -218,7 +211,7 @@ impl Sidebar {
                 }
                 match server_marker(s.status) {
                     Some((marker, color)) => spans.push(Span::raw(marker.to_string()).fg(color)),
-                    None => spans.push(super::spinner::spinner()),
+                    None => spans.push(self.spinner_span.clone()),
                 }
                 spans.push(Span::raw(" ").fg(theme::TEXT_MUTED));
                 spans.push(Span::raw(s.name.clone()).fg(theme::TEXT));
@@ -263,7 +256,7 @@ impl Sidebar {
                     Span::raw("  ").fg(theme::TEXT_MUTED),
                     match server_marker(s.status) {
                         Some((marker, color)) => Span::raw(marker.to_string()).fg(color),
-                        None => super::spinner::spinner(),
+                        None => self.spinner_span.clone(),
                     },
                     Span::raw(" ").fg(theme::TEXT_MUTED),
                     Span::raw(s.name.clone()).fg(theme::TEXT),
@@ -363,14 +356,14 @@ mod tests {
     #[test]
     fn todos_section_hidden_when_empty() {
         let sidebar = Sidebar::new();
-        assert!(!text(&sidebar.rendered_lines()).contains("Todos"));
+        assert!(!text(sidebar.rendered_lines()).contains("Todos"));
     }
 
     #[test]
     fn todos_section_shows_done_and_total() {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::SetTodos { done: 2, total: 5 });
-        let rendered = text(&sidebar.rendered_lines());
+        let rendered = text(sidebar.rendered_lines());
         assert!(rendered.contains("Todos"), "body: {rendered}");
         assert!(rendered.contains("2/5 done"), "body: {rendered}");
     }
@@ -380,7 +373,7 @@ mod tests {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::SetTodos { done: 3, total: 3 });
         sidebar.update(SidebarMessage::SetTodos { done: 0, total: 0 });
-        assert!(!text(&sidebar.rendered_lines()).contains("Todos"));
+        assert!(!text(sidebar.rendered_lines()).contains("Todos"));
     }
 
     #[test]
@@ -396,7 +389,7 @@ mod tests {
             cost: 0.125,
             context_tokens: None,
         });
-        let rendered = text(&sidebar.rendered_lines());
+        let rendered = text(sidebar.rendered_lines());
         assert!(rendered.contains("↑10.1k"), "body: {rendered}");
         assert!(rendered.contains("↓12.3k"), "body: {rendered}");
         assert!(rendered.contains("Cost $0.12"), "body: {rendered}");
@@ -420,7 +413,7 @@ mod tests {
             cost: 0.0,
             context_tokens: None,
         });
-        let rendered = text(&sidebar.rendered_lines());
+        let rendered = text(sidebar.rendered_lines());
         assert!(rendered.contains("Think 12k"), "body: {rendered}");
         assert!(rendered.contains("Cache 456"), "body: {rendered}");
     }
@@ -439,7 +432,7 @@ mod tests {
             cost: 0.0,
             context_tokens: Some(84_000),
         });
-        let rendered = text(&sidebar.rendered_lines());
+        let rendered = text(sidebar.rendered_lines());
         assert!(rendered.contains("↑0 ↓12.3k"), "body: {rendered}");
         assert!(rendered.contains("84k/200k (42%)"), "body: {rendered}");
     }
@@ -458,7 +451,7 @@ mod tests {
             cost: 0.0,
             context_tokens: Some(20_200),
         });
-        let rendered = text(&sidebar.rendered_lines());
+        let rendered = text(sidebar.rendered_lines());
         assert!(rendered.contains("R20k CH97%"), "body: {rendered}");
     }
 
@@ -488,10 +481,10 @@ mod tests {
         let window = pos("20.2k/200k (10%)");
         let read = pos("R20k CH97%");
         let cost = pos("Cost $0.50");
-        assert!(window.is_some(), "body: {}", text(&lines));
-        assert!(read.is_some(), "body: {}", text(&lines));
-        assert!(cost.is_some(), "body: {}", text(&lines));
-        assert!(read > window && cost > read, "order: {}", text(&lines));
+        assert!(window.is_some(), "body: {}", text(lines));
+        assert!(read.is_some(), "body: {}", text(lines));
+        assert!(cost.is_some(), "body: {}", text(lines));
+        assert!(read > window && cost > read, "order: {}", text(lines));
     }
 
     #[test]
@@ -507,7 +500,7 @@ mod tests {
             cost: 0.0,
             context_tokens: Some(20_200),
         });
-        let rendered = text(&sidebar.rendered_lines());
+        let rendered = text(sidebar.rendered_lines());
         assert!(rendered.contains("R20k"), "body: {rendered}");
         assert!(!rendered.contains("CH"), "body: {rendered}");
     }
@@ -524,7 +517,7 @@ mod tests {
             cost: 0.0,
             context_tokens: None,
         });
-        let rendered = text(&sidebar.rendered_lines());
+        let rendered = text(sidebar.rendered_lines());
         assert!(!rendered.contains("R10.1k"), "body: {rendered}");
         assert!(!rendered.contains("CH"), "body: {rendered}");
     }
@@ -543,7 +536,7 @@ mod tests {
             cost: 0.0,
             context_tokens: Some(20_200),
         });
-        let rendered = text(&sidebar.rendered_lines());
+        let rendered = text(sidebar.rendered_lines());
         assert!(rendered.contains("R20k CH100%"), "body: {rendered}");
     }
 
@@ -570,12 +563,12 @@ mod tests {
         };
         let tokens = pos("↑10.1k");
         let window = pos("84k/200k (42%)");
-        assert!(tokens.is_some(), "body: {}", text(&lines));
-        assert!(window.is_some(), "body: {}", text(&lines));
+        assert!(tokens.is_some(), "body: {}", text(lines));
+        assert!(window.is_some(), "body: {}", text(lines));
         assert!(
             window > tokens,
             "window line must come after tokens: {}",
-            text(&lines)
+            text(lines)
         );
         let tokens_line = text(std::slice::from_ref(&lines[tokens.unwrap()]));
         assert!(
@@ -598,7 +591,7 @@ mod tests {
             cost: 0.0,
             context_tokens: Some(5_000_000),
         });
-        let rendered = text(&sidebar.rendered_lines());
+        let rendered = text(sidebar.rendered_lines());
         assert!(rendered.contains("(100%)"), "body: {rendered}");
         assert!(rendered.contains("5M/1M"), "body: {rendered}");
     }
@@ -624,7 +617,7 @@ mod tests {
             cost: 0.02,
             context_tokens: None,
         });
-        let rendered = text(&sidebar.rendered_lines());
+        let rendered = text(sidebar.rendered_lines());
         assert!(rendered.contains("↑3k ↓1.5k"), "body: {rendered}");
         assert!(rendered.contains("Cost $0.03"), "body: {rendered}");
         sidebar.update(SidebarMessage::SetUsage {
@@ -635,7 +628,7 @@ mod tests {
             },
             cost: 0.5,
         });
-        let rendered = text(&sidebar.rendered_lines());
+        let rendered = text(sidebar.rendered_lines());
         assert!(rendered.contains("↑10 ↓20"), "body: {rendered}");
         assert!(rendered.contains("Cost $0.50"), "body: {rendered}");
     }
@@ -660,7 +653,7 @@ mod tests {
             },
             cost: 0.2,
         });
-        let rendered = text(&sidebar.rendered_lines());
+        let rendered = text(sidebar.rendered_lines());
         assert!(rendered.contains("↑10k"), "body: {rendered}");
         assert!(rendered.contains("$0.20"), "body: {rendered}");
         assert!(!rendered.contains("↑50k"), "body: {rendered}");
@@ -692,7 +685,7 @@ mod tests {
             cost: 0.0,
             context_tokens: None,
         });
-        let rendered = text(&sidebar.rendered_lines());
+        let rendered = text(sidebar.rendered_lines());
         assert!(
             rendered.contains("84k/200k (42%)"),
             "worker usage must not replace the anchor: {rendered}"
@@ -718,7 +711,7 @@ mod tests {
             context_tokens: Some(84_000),
         });
         sidebar.update(SidebarMessage::SetContextRequest { usage: None });
-        let rendered = text(&sidebar.rendered_lines());
+        let rendered = text(sidebar.rendered_lines());
         assert!(rendered.contains("200k"), "body: {rendered}");
         assert!(!rendered.contains('%'), "body: {rendered}");
         assert!(!rendered.contains("R84k"), "body: {rendered}");
@@ -743,7 +736,7 @@ mod tests {
                 ..Default::default()
             }),
         });
-        let rendered = text(&sidebar.rendered_lines());
+        let rendered = text(sidebar.rendered_lines());
         assert!(
             rendered.contains("20.2k/200k (10%)"),
             "restored request seeds the anchor: {rendered}"
@@ -752,7 +745,7 @@ mod tests {
         assert!(rendered.contains("CH97%"), "body: {rendered}");
 
         sidebar.update(SidebarMessage::SetContextRequest { usage: None });
-        let rendered = text(&sidebar.rendered_lines());
+        let rendered = text(sidebar.rendered_lines());
         assert!(
             !rendered.contains("R20k") && !rendered.contains("CH97%"),
             "clearing drops the restored metrics: {rendered}"
@@ -776,7 +769,7 @@ mod tests {
         sidebar.update(SidebarMessage::SetContextRequest {
             usage: Some(TokenUsage::default()),
         });
-        let rendered = text(&sidebar.rendered_lines());
+        let rendered = text(sidebar.rendered_lines());
         assert!(!rendered.contains('%'), "body: {rendered}");
         assert!(!rendered.contains("R84k"), "body: {rendered}");
     }

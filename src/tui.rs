@@ -145,10 +145,10 @@ where
                     }
                 }, if spinner_wake.is_some() => {
                     // Consumed; re-armed from the current state after the
-                    // next draw.
+                    // next draw. The wake becomes a message so the animated
+                    // models refresh through their `update` paths.
                     spinner_wake = None;
-                    app.mark_spinners_dirty();
-                    true
+                    apply_msg(&mut app, Some(AppMessage::SpinnerUpdate))
                 }
                 // Terminal event — draws under the same frame budget as core
                 // events; when idle the budget has already elapsed, so keys
