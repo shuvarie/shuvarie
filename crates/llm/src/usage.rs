@@ -22,6 +22,15 @@ pub fn context_footprint(usage: &TokenUsage) -> u64 {
     }
 }
 
+/// The prompt tokens one completed provider request read: its context
+/// footprint minus the completion. Providers either fold cached input into
+/// `input_tokens` (OpenAI-style) or report it separately (Anthropic-style);
+/// `context_footprint` covers both, so a request's cache-hit ratio is its
+/// `cached_input_tokens` over this value.
+pub fn read_tokens(usage: &TokenUsage) -> u64 {
+    context_footprint(usage).saturating_sub(usage.output_tokens)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,5 +64,34 @@ mod tests {
     #[test]
     fn footprint_of_empty_usage_is_zero() {
         assert_eq!(context_footprint(&TokenUsage::default()), 0);
+    }
+
+    #[test]
+    fn read_tokens_excludes_the_completion() {
+        let usage = TokenUsage {
+            input_tokens: 1_000,
+            output_tokens: 200,
+            total_tokens: 1_500,
+            cached_input_tokens: 300,
+            ..TokenUsage::default()
+        };
+        assert_eq!(read_tokens(&usage), 1_300);
+    }
+
+    #[test]
+    fn read_tokens_sums_split_cache_without_total() {
+        let usage = TokenUsage {
+            input_tokens: 1_000,
+            output_tokens: 200,
+            cached_input_tokens: 300,
+            cache_creation_input_tokens: 50,
+            ..TokenUsage::default()
+        };
+        assert_eq!(read_tokens(&usage), 1_350);
+    }
+
+    #[test]
+    fn read_tokens_of_empty_usage_is_zero() {
+        assert_eq!(read_tokens(&TokenUsage::default()), 0);
     }
 }

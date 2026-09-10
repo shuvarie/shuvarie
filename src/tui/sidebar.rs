@@ -204,8 +204,8 @@ impl Sidebar {
 
     /// The one-line stand-in for the collapsed sidebar, shown between the
     /// status row and the key hint: context info (token totals, window
-    /// fraction, cost) and LSP server states — no skills, no todos. Truncated
-    /// to `max_width` display columns.
+    /// fraction, read tokens, cache hit, cost) and LSP server states — no
+    /// skills, no todos. Truncated to `max_width` display columns.
     pub fn collapsed_line(&self, max_width: usize) -> Line<'static> {
         let mut spans = self.context.compact_spans();
         if self.lsp_enabled && !self.lsp_servers.is_empty() {
@@ -443,6 +443,109 @@ mod tests {
     }
 
     #[test]
+    fn context_section_shows_read_and_cache_hit() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage {
+                total_tokens: 20_200,
+                input_tokens: 600,
+                output_tokens: 200,
+                cached_input_tokens: 19_400,
+                ..Default::default()
+            },
+            cost: 0.0,
+            context_tokens: Some(20_200),
+        });
+        let rendered = text(&sidebar.rendered_lines());
+        assert!(rendered.contains("R20k CH97%"), "body: {rendered}");
+    }
+
+    #[test]
+    fn context_section_read_line_between_window_and_cost() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateConfig {
+            context_length: Some(200_000),
+        });
+        sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage {
+                total_tokens: 20_200,
+                input_tokens: 600,
+                output_tokens: 200,
+                cached_input_tokens: 19_400,
+                ..Default::default()
+            },
+            cost: 0.5,
+            context_tokens: Some(20_200),
+        });
+        let lines = sidebar.rendered_lines();
+        let pos = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| text(std::slice::from_ref(l)).contains(needle))
+        };
+        let window = pos("20.2k/200k (10%)");
+        let read = pos("R20k CH97%");
+        let cost = pos("Cost $0.50");
+        assert!(window.is_some(), "body: {}", text(&lines));
+        assert!(read.is_some(), "body: {}", text(&lines));
+        assert!(cost.is_some(), "body: {}", text(&lines));
+        assert!(read > window && cost > read, "order: {}", text(&lines));
+    }
+
+    #[test]
+    fn context_section_hides_cache_hit_without_cached_tokens() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage {
+                total_tokens: 20_200,
+                input_tokens: 20_000,
+                output_tokens: 200,
+                ..Default::default()
+            },
+            cost: 0.0,
+            context_tokens: Some(20_200),
+        });
+        let rendered = text(&sidebar.rendered_lines());
+        assert!(rendered.contains("R20k"), "body: {rendered}");
+        assert!(!rendered.contains("CH"), "body: {rendered}");
+    }
+
+    #[test]
+    fn context_section_hides_read_and_cache_when_worker_only() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage {
+                input_tokens: 10_100,
+                output_tokens: 200,
+                ..Default::default()
+            },
+            cost: 0.0,
+            context_tokens: None,
+        });
+        let rendered = text(&sidebar.rendered_lines());
+        assert!(!rendered.contains("R10.1k"), "body: {rendered}");
+        assert!(!rendered.contains("CH"), "body: {rendered}");
+    }
+
+    #[test]
+    fn context_section_cache_hit_caps_at_100_percent() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage {
+                total_tokens: 20_200,
+                input_tokens: 20_000,
+                output_tokens: 200,
+                cached_input_tokens: 21_000,
+                ..Default::default()
+            },
+            cost: 0.0,
+            context_tokens: Some(20_200),
+        });
+        let rendered = text(&sidebar.rendered_lines());
+        assert!(rendered.contains("R20k CH100%"), "body: {rendered}");
+    }
+
+    #[test]
     fn context_section_window_line_below_token_line() {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateConfig {
@@ -556,9 +659,13 @@ mod tests {
             cost: 0.2,
         });
         let rendered = text(&sidebar.rendered_lines());
-        assert!(rendered.contains("10k"), "body: {rendered}");
+        assert!(rendered.contains("↑10k"), "body: {rendered}");
         assert!(rendered.contains("$0.20"), "body: {rendered}");
-        assert!(!rendered.contains("50k"), "body: {rendered}");
+        assert!(!rendered.contains("↑50k"), "body: {rendered}");
+        assert!(
+            rendered.contains("R50k"),
+            "snapshot keeps the latest-request read tokens: {rendered}"
+        );
     }
 
     #[test]
@@ -588,6 +695,10 @@ mod tests {
             rendered.contains("84k/200k (42%)"),
             "worker usage must not replace the anchor: {rendered}"
         );
+        assert!(
+            rendered.contains("R84k"),
+            "worker usage must not replace the read tokens: {rendered}"
+        );
     }
 
     #[test]
@@ -608,6 +719,7 @@ mod tests {
         let rendered = text(&sidebar.rendered_lines());
         assert!(rendered.contains("200k"), "body: {rendered}");
         assert!(!rendered.contains('%'), "body: {rendered}");
+        assert!(!rendered.contains("R84k"), "body: {rendered}");
     }
 
     fn lsp_status(name: &str, status: ServerStatus, diagnostics: usize) -> LspStatus {
@@ -725,11 +837,38 @@ mod tests {
         let rendered: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(rendered.contains("↑10.1k ↓12.3k"), "body: {rendered}");
         assert!(rendered.contains("84k/200k (42%)"), "body: {rendered}");
+        assert!(rendered.contains("R10.1k"), "body: {rendered}");
+        assert!(!rendered.contains("CH"), "body: {rendered}");
         assert!(rendered.contains("$0.12"), "body: {rendered}");
         assert!(rendered.contains("✓ rust-analyzer ⚑3"), "body: {rendered}");
         assert!(rendered.contains("○ gopls"), "body: {rendered}");
         assert!(!rendered.contains("Skills"), "body: {rendered}");
         assert!(!rendered.contains("Todos"), "body: {rendered}");
+    }
+
+    #[test]
+    fn collapsed_line_shows_read_and_cache_hit_between_window_and_cost() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateConfig {
+            context_length: Some(200_000),
+        });
+        sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage {
+                total_tokens: 20_200,
+                input_tokens: 600,
+                output_tokens: 200,
+                cached_input_tokens: 19_400,
+                ..Default::default()
+            },
+            cost: 0.125,
+            context_tokens: Some(84_000),
+        });
+        let line = sidebar.collapsed_line(200);
+        let rendered: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(
+            rendered.contains("84k/200k (42%) R20k CH97% $0.12"),
+            "body: {rendered}"
+        );
     }
 
     #[test]

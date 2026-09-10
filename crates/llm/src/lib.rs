@@ -28,4 +28,4 @@ pub use tool::{
     DynamicTool, FileChangeHook, PortableDynamicTool, Tool, ToolContext, ToolDefinition,
     ToolErrorKind, ToolExecutionError, ToolOutput, ToolSet, into_dynamic,
 };
-pub use usage::{TokenUsage, context_footprint};
+pub use usage::{TokenUsage, context_footprint, read_tokens};
