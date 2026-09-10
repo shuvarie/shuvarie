@@ -481,7 +481,7 @@ impl SessionScreen {
                 // next response; the stale pre-compaction footprint would
                 // overstate occupancy.
                 self.sidebar
-                    .update(SidebarMessage::SetContextTokens { tokens: None });
+                    .update(SidebarMessage::SetContextRequest { usage: None });
                 None
             }
             SessionMessage::CompactionFinished => {
@@ -504,7 +504,7 @@ impl SessionScreen {
                     cost: 0.0,
                 });
                 self.sidebar
-                    .update(SidebarMessage::SetContextTokens { tokens: None });
+                    .update(SidebarMessage::SetContextRequest { usage: None });
                 self.sync_todos(Vec::new());
                 None
             }
@@ -517,8 +517,9 @@ impl SessionScreen {
                 self.retry = None;
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
-                self.sidebar
-                    .update(SidebarMessage::SetContextTokens { tokens: None });
+                self.sidebar.update(SidebarMessage::SetContextRequest {
+                    usage: session.last_usage,
+                });
                 self.sync_todos(shuvarie_core::tools::todos::replay(&session.tool_records));
                 self.chat.update(ChatMessage::Load { session });
                 None
@@ -529,8 +530,9 @@ impl SessionScreen {
                 self.retry = None;
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
-                self.sidebar
-                    .update(SidebarMessage::SetContextTokens { tokens: None });
+                self.sidebar.update(SidebarMessage::SetContextRequest {
+                    usage: session.last_usage,
+                });
                 self.sync_todos(shuvarie_core::tools::todos::replay(&session.tool_records));
                 self.chat.update(ChatMessage::TurnReverted { session });
                 None
@@ -541,8 +543,9 @@ impl SessionScreen {
                 self.retry = None;
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
-                self.sidebar
-                    .update(SidebarMessage::SetContextTokens { tokens: None });
+                self.sidebar.update(SidebarMessage::SetContextRequest {
+                    usage: session.last_usage,
+                });
                 self.sync_todos(shuvarie_core::tools::todos::replay(&session.tool_records));
                 self.chat.update(ChatMessage::TurnRestored { session });
                 None
@@ -979,6 +982,19 @@ mod tests {
             .collect()
     }
 
+    fn text(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.clone())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// Row text of the content pane only (sidebar is 30 cols + 1 gutter).
     fn content_row_text(buf: &ratatui::buffer::Buffer, y: u16) -> String {
         (31..buf.area().width)
@@ -1006,6 +1022,44 @@ mod tests {
         assert_eq!(
             (screen.sidebar.todos_done, screen.sidebar.todos_total),
             (0, 0)
+        );
+    }
+
+    #[test]
+    fn loaded_session_restores_context_metrics_in_sidebar() {
+        let mut screen = SessionScreen::new();
+        screen.sidebar.update(SidebarMessage::UpdateConfig {
+            context_length: Some(200_000),
+        });
+        let mut session = shuvarie_core::Session::new();
+        session.push_user("go");
+        session.push_assistant("ok");
+        session.last_usage = Some(TokenUsage {
+            input_tokens: 500,
+            output_tokens: 200,
+            total_tokens: 20_200,
+            cached_input_tokens: 19_400,
+            ..Default::default()
+        });
+        screen.update(SessionMessage::Loaded {
+            id: uuid::Uuid::new_v4(),
+            title: "t".into(),
+            session,
+        });
+
+        let rendered = text(&screen.sidebar.rendered_lines());
+        assert!(
+            rendered.contains("20.2k/200k (10%)"),
+            "restored request seeds the anchor: {rendered}"
+        );
+        assert!(rendered.contains("R20k"), "body: {rendered}");
+        assert!(rendered.contains("CH97%"), "body: {rendered}");
+
+        screen.update(SessionMessage::Reset);
+        let rendered = text(&screen.sidebar.rendered_lines());
+        assert!(
+            !rendered.contains("R20k") && !rendered.contains("CH97%"),
+            "reset drops the restored metrics: {rendered}"
         );
     }
 

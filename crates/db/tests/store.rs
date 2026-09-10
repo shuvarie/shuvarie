@@ -81,6 +81,13 @@ async fn append_and_load_messages_in_order() {
                 ..Default::default()
             },
             0.0012,
+            &TokenUsage {
+                input_tokens: 12_000,
+                output_tokens: 20,
+                total_tokens: 12_020,
+                cached_input_tokens: 11_500,
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -98,6 +105,9 @@ async fn append_and_load_messages_in_order() {
     assert_eq!(loaded.messages[1].cached_input_tokens, 4);
     assert_eq!(loaded.messages[1].reasoning_tokens, 5);
     assert_eq!(loaded.messages[1].cost, 0.0012);
+    assert_eq!(loaded.messages[1].request.input_tokens, 12_000);
+    assert_eq!(loaded.messages[1].request.total_tokens, 12_020);
+    assert_eq!(loaded.messages[1].request.cached_input_tokens, 11_500);
     assert_eq!(loaded.messages[2].content, "again");
     assert_eq!(loaded.messages[2].seq, 2);
 }
@@ -161,7 +171,15 @@ async fn reasoning_segments_round_trip_with_positions() {
         },
     ];
     let msg = store
-        .append_assistant_message(id, "done", &segments, false, TokenUsage::default(), 0.0)
+        .append_assistant_message(
+            id,
+            "done",
+            &segments,
+            false,
+            TokenUsage::default(),
+            0.0,
+            &TokenUsage::default(),
+        )
         .await
         .unwrap();
     assert_eq!(msg.reasoning, segments);
@@ -177,6 +195,7 @@ async fn reasoning_segments_round_trip_with_positions() {
             false,
             TokenUsage::default(),
             0.0,
+            &TokenUsage::default(),
         )
         .await
         .unwrap();
@@ -245,6 +264,7 @@ async fn search_finds_messages_across_sessions_ranked() {
             false,
             TokenUsage::default(),
             0.0,
+            &TokenUsage::default(),
         )
         .await
         .unwrap();

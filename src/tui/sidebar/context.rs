@@ -8,10 +8,10 @@ use crate::tui::utils::num::{fmt_cost, fmt_tokens};
 /// active model's context window (from the Selune catalog, mapped through the
 /// connection's `catalog` field and model id). The window line (below the
 /// token totals) shows the context occupancy — the latest main-request
-/// footprint
-/// (`Event::UsageUpdate.context_tokens`, workers excluded) against the
-/// window — and falls back to the bare window size while no footprint is
-/// known (fresh or loaded session, during compaction). Directly below it,
+/// footprint (from `Event::UsageUpdate`, workers excluded; also restored from
+/// a loaded session's persisted request usage) against the window — and falls
+/// back to the bare window size while no footprint is known (fresh session,
+/// during compaction). Directly below it,
 /// the latest main-request read tokens (`R…`, `shuvarie_llm::read_tokens`)
 /// and cache-hit percentage (`CH…%`, `cached_input_tokens` over the read
 /// tokens) show how the last exchange was served; each half is hidden while
@@ -26,7 +26,8 @@ pub struct ContextDisplay {
     context_length: Option<u64>,
     context_tokens: Option<u64>,
     /// Prompt tokens the latest main request read (`read_tokens` of its
-    /// usage); `None` until a main request reports usage.
+    /// usage); `None` until a main request reports usage (live or restored
+    /// from the session's persisted request usage).
     read_tokens: Option<u64>,
     /// Cache-hit percentage of that request (rounded, capped at 100); only
     /// when the provider reported cached tokens.
@@ -62,16 +63,9 @@ impl ContextDisplay {
         self.reasoning_tokens = self.reasoning_tokens.saturating_add(usage.reasoning_tokens);
         self.cached_tokens = self.cached_tokens.saturating_add(usage.cached_input_tokens);
         self.cost += cost;
-        if let Some(tokens) = context_tokens.filter(|&t| t > 0) {
-            self.context_tokens = Some(tokens);
-            let read = shuvarie_llm::read_tokens(usage);
-            self.read_tokens = (read > 0).then_some(read);
-            self.cached_pct = match usage.cached_input_tokens {
-                cached if cached > 0 && read > 0 => {
-                    Some((cached as f64 / read as f64 * 100.0).round().min(100.0) as u64)
-                }
-                _ => None,
-            };
+        if context_tokens.is_some_and(|t| t > 0) {
+            self.context_tokens = Some(context_tokens.unwrap());
+            self.set_request_metrics(usage);
         }
     }
 
@@ -83,15 +77,38 @@ impl ContextDisplay {
         self.cost = cost;
     }
 
-    /// Replace (or clear, when `None`) the context-occupancy anchor.
-    /// Clearing (session transitions, compaction) also drops the
-    /// latest-request read/cache-hit metrics — stale from then on.
-    pub fn set_context_tokens(&mut self, tokens: Option<u64>) {
-        self.context_tokens = tokens.filter(|&t| t > 0);
-        if self.context_tokens.is_none() {
-            self.read_tokens = None;
-            self.cached_pct = None;
+    /// Seed (or clear, when `None`) the latest main-request context block:
+    /// the occupancy anchor plus the read/cache-hit metrics, all derived from
+    /// one request's usage. Used to restore the metrics from a loaded
+    /// session's persisted request usage; a zero footprint (or `None`) clears
+    /// instead.
+    pub fn set_request(&mut self, usage: Option<&TokenUsage>) {
+        let usage = usage.filter(|u| shuvarie_llm::context_footprint(u) > 0);
+        match usage {
+            Some(usage) => {
+                self.context_tokens = Some(shuvarie_llm::context_footprint(usage));
+                self.set_request_metrics(usage);
+            }
+            None => {
+                self.context_tokens = None;
+                self.read_tokens = None;
+                self.cached_pct = None;
+            }
         }
+    }
+
+    /// Refresh the latest-request read/cache-hit metrics from one request's
+    /// usage; the anchor is owned by the caller (`add_usage` keeps the event's
+    /// precomputed footprint, `set_request` derives it from the usage).
+    fn set_request_metrics(&mut self, usage: &TokenUsage) {
+        let read = shuvarie_llm::read_tokens(usage);
+        self.read_tokens = (read > 0).then_some(read);
+        self.cached_pct = match usage.cached_input_tokens {
+            cached if cached > 0 && read > 0 => {
+                Some((cached as f64 / read as f64 * 100.0).round().min(100.0) as u64)
+            }
+            _ => None,
+        };
     }
 
     pub fn view(&self, lines: &mut Vec<Line<'static>>) {

@@ -264,6 +264,7 @@ pub async fn summarize(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shuvarie_llm::TokenUsage;
 
     fn msg(role: MsgRole, content: &str) -> StoredMessage {
         StoredMessage {
@@ -280,6 +281,7 @@ mod tests {
             reasoning_tokens: 0,
             cost: 0.0,
             summary: false,
+            request: TokenUsage::default(),
         }
     }
 

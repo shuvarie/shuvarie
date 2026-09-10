@@ -1176,6 +1176,7 @@ async fn redo_turn(store: &mut Store, session_id: uuid::Uuid) -> Result<bool, St
             false,
             entry.usage,
             entry.cost,
+            &TokenUsage::default(),
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -2035,7 +2036,7 @@ async fn stream_stream_to_events(
         if let Some(id) = id {
             if let Some(msg_id) = assistant_message_id {
                 let _ = store
-                    .update_message(msg_id, &text, &reasoning, false, combined, cost)
+                    .update_message(msg_id, &text, &reasoning, false, combined, cost, &usage)
                     .await;
                 let _ = store.truncate_undo_log(id).await;
                 if let Some(setup) = &embedding_setup {
@@ -2056,7 +2057,7 @@ async fn stream_stream_to_events(
                 }
             } else {
                 match store
-                    .append_assistant_message(id, &text, &reasoning, false, combined, cost)
+                    .append_assistant_message(id, &text, &reasoning, false, combined, cost, &usage)
                     .await
                 {
                     Ok(msg) => {
@@ -2153,6 +2154,7 @@ async fn ensure_assistant_row(
             false,
             shuvarie_llm::TokenUsage::default(),
             0.0,
+            &shuvarie_llm::TokenUsage::default(),
         )
         .await
     {
@@ -2215,6 +2217,7 @@ async fn persist_interrupted_turn(
                 true,
                 shuvarie_llm::TokenUsage::default(),
                 0.0,
+                &shuvarie_llm::TokenUsage::default(),
             )
             .await;
         {
@@ -2234,6 +2237,7 @@ async fn persist_interrupted_turn(
                 true,
                 shuvarie_llm::TokenUsage::default(),
                 0.0,
+                &shuvarie_llm::TokenUsage::default(),
             )
             .await
             .is_ok()
@@ -2280,6 +2284,7 @@ async fn persist_stream_error(
                 true,
                 shuvarie_llm::TokenUsage::default(),
                 0.0,
+                &shuvarie_llm::TokenUsage::default(),
             )
             .await;
     } else if !pending_text.is_empty() {
@@ -2291,6 +2296,7 @@ async fn persist_stream_error(
                 true,
                 shuvarie_llm::TokenUsage::default(),
                 0.0,
+                &shuvarie_llm::TokenUsage::default(),
             )
             .await;
     }

@@ -47,6 +47,9 @@ pub struct StoredMessage {
     pub reasoning_tokens: u64,
     pub cost: f64,
     pub summary: bool,
+    /// Usage of the turn's last main-stream request, parsed from
+    /// `request_json`; all-zero when the row has none.
+    pub request: TokenUsage,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +123,7 @@ impl From<Message> for StoredMessage {
             reasoning_tokens: m.reasoning_tokens,
             cost: m.cost,
             summary: m.summary,
+            request: serde_json::from_str(&m.request_json).unwrap_or_default(),
         }
     }
 }
@@ -323,6 +327,7 @@ impl Store {
             reasoning_tokens: 0,
             cost: 0.0,
             summary: false,
+            request_json: String::new(),
         })
         .exec(&mut self.db)
         .await
@@ -331,6 +336,7 @@ impl Store {
         Ok(StoredMessage::from(msg))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn append_assistant_message(
         &mut self,
         session_id: uuid::Uuid,
@@ -339,6 +345,7 @@ impl Store {
         interrupted: bool,
         usage: TokenUsage,
         cost: f64,
+        request: &TokenUsage,
     ) -> Result<StoredMessage> {
         let seq = self.next_seq(session_id).await?;
         let msg = toasty::create!(Message {
@@ -355,6 +362,7 @@ impl Store {
             reasoning_tokens: usage.reasoning_tokens,
             cost,
             summary: false,
+            request_json: serde_json::to_string(request).unwrap_or_default(),
         })
         .exec(&mut self.db)
         .await
@@ -363,6 +371,7 @@ impl Store {
         Ok(StoredMessage::from(msg))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_message(
         &mut self,
         message_id: u64,
@@ -371,6 +380,7 @@ impl Store {
         interrupted: bool,
         usage: TokenUsage,
         cost: f64,
+        request: &TokenUsage,
     ) -> Result<()> {
         Message::update_by_id(message_id)
             .content(content.to_string())
@@ -382,6 +392,7 @@ impl Store {
             .cached_input_tokens(usage.cached_input_tokens)
             .reasoning_tokens(usage.reasoning_tokens)
             .cost(cost)
+            .request_json(serde_json::to_string(request).unwrap_or_default())
             .exec(&mut self.db)
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
@@ -408,6 +419,7 @@ impl Store {
             reasoning_tokens: 0,
             cost: 0.0,
             summary: true,
+            request_json: String::new(),
         })
         .exec(&mut self.db)
         .await

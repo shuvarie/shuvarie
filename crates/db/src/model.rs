@@ -161,6 +161,10 @@ pub struct Message {
     pub reasoning_tokens: u64,
     pub cost: f64,
     pub summary: bool,
+    /// Usage of the turn's last main-stream request (JSON), kept apart from
+    /// the combined per-row totals so a loaded session can restore the
+    /// main-request context footprint and cache metrics.
+    pub request_json: String,
     #[has_many]
     pub embeddings: toasty::Deferred<Vec<MessageEmbedding>>,
     #[has_many]

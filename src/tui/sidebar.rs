@@ -53,10 +53,12 @@ pub enum SidebarMessage {
         usage: TokenUsage,
         cost: f64,
     },
-    /// Replaces (or clears, when `None`) the context-occupancy anchor — the
-    /// latest main-request footprint the window percentage is taken against.
-    SetContextTokens {
-        tokens: Option<u64>,
+    /// Seeds (or clears, when `None`) the latest main-request context block:
+    /// the occupancy anchor the window percentage is taken against, plus the
+    /// read tokens and cache-hit percentage. Restored from the loaded
+    /// session's persisted request usage; also used to drop stale metrics.
+    SetContextRequest {
+        usage: Option<TokenUsage>,
     },
     UpdateLsp {
         servers: Vec<LspStatus>,
@@ -117,8 +119,8 @@ impl Sidebar {
             SidebarMessage::SetUsage { usage, cost } => {
                 self.context.set_usage(&usage, cost);
             }
-            SidebarMessage::SetContextTokens { tokens } => {
-                self.context.set_context_tokens(tokens);
+            SidebarMessage::SetContextRequest { usage } => {
+                self.context.set_request(usage.as_ref());
             }
             SidebarMessage::UpdateLsp { servers } => {
                 self.lsp_servers = servers;
@@ -194,7 +196,7 @@ impl Sidebar {
     }
 
     #[cfg(test)]
-    fn rendered_lines(&self) -> Vec<Line<'static>> {
+    pub(crate) fn rendered_lines(&self) -> Vec<Line<'static>> {
         if self.dirty.get() {
             *self.lines_cache.borrow_mut() = self.build_lines();
             self.dirty.set(false);
@@ -702,7 +704,7 @@ mod tests {
     }
 
     #[test]
-    fn context_section_set_context_tokens_clears_anchor() {
+    fn context_section_set_context_request_clears_anchor() {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateConfig {
             context_length: Some(200_000),
@@ -715,9 +717,66 @@ mod tests {
             cost: 0.0,
             context_tokens: Some(84_000),
         });
-        sidebar.update(SidebarMessage::SetContextTokens { tokens: None });
+        sidebar.update(SidebarMessage::SetContextRequest { usage: None });
         let rendered = text(&sidebar.rendered_lines());
         assert!(rendered.contains("200k"), "body: {rendered}");
+        assert!(!rendered.contains('%'), "body: {rendered}");
+        assert!(!rendered.contains("R84k"), "body: {rendered}");
+    }
+
+    #[test]
+    fn context_section_set_context_request_seeds_anchor_and_cache_metrics() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateConfig {
+            context_length: Some(200_000),
+        });
+        sidebar.update(SidebarMessage::SetUsage {
+            usage: TokenUsage::default(),
+            cost: 0.0,
+        });
+        sidebar.update(SidebarMessage::SetContextRequest {
+            usage: Some(TokenUsage {
+                input_tokens: 500,
+                output_tokens: 200,
+                total_tokens: 20_200,
+                cached_input_tokens: 19_400,
+                ..Default::default()
+            }),
+        });
+        let rendered = text(&sidebar.rendered_lines());
+        assert!(
+            rendered.contains("20.2k/200k (10%)"),
+            "restored request seeds the anchor: {rendered}"
+        );
+        assert!(rendered.contains("R20k"), "body: {rendered}");
+        assert!(rendered.contains("CH97%"), "body: {rendered}");
+
+        sidebar.update(SidebarMessage::SetContextRequest { usage: None });
+        let rendered = text(&sidebar.rendered_lines());
+        assert!(
+            !rendered.contains("R20k") && !rendered.contains("CH97%"),
+            "clearing drops the restored metrics: {rendered}"
+        );
+    }
+
+    #[test]
+    fn context_section_set_context_request_zero_footprint_is_a_clear() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateConfig {
+            context_length: Some(200_000),
+        });
+        sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage {
+                total_tokens: 84_000,
+                ..Default::default()
+            },
+            cost: 0.0,
+            context_tokens: Some(84_000),
+        });
+        sidebar.update(SidebarMessage::SetContextRequest {
+            usage: Some(TokenUsage::default()),
+        });
+        let rendered = text(&sidebar.rendered_lines());
         assert!(!rendered.contains('%'), "body: {rendered}");
         assert!(!rendered.contains("R84k"), "body: {rendered}");
     }

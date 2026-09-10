@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use shuvarie_db::{ReasoningSegment, StoredSession};
+use shuvarie_db::{ReasoningSegment, StoredMessage, StoredSession};
 use shuvarie_llm::ChatMsg;
 use shuvarie_llm::TokenUsage;
 
@@ -8,6 +8,25 @@ use crate::tool_record::ToolRecord;
 
 pub const CONTINUE_PROMPT: &str =
     "Continue from where you left off; do not repeat what you already wrote.";
+
+/// A stored message's main-request usage: the persisted `request` payload when
+/// the turn carried one, else the row's usage columns (older sessions and
+/// redone turns persisted only the combined per-row totals). Rows without any
+/// reported usage yield `None`.
+fn request_usage_of(m: &StoredMessage) -> Option<TokenUsage> {
+    if m.request.total_tokens > 0 {
+        return Some(m.request);
+    }
+    let usage = TokenUsage {
+        input_tokens: m.input_tokens,
+        output_tokens: m.output_tokens,
+        total_tokens: m.total_tokens,
+        cached_input_tokens: m.cached_input_tokens,
+        reasoning_tokens: m.reasoning_tokens,
+        ..TokenUsage::default()
+    };
+    (usage.total_tokens > 0).then_some(usage)
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct Session {
@@ -27,6 +46,11 @@ pub struct Session {
     /// Messages before this seq are replaced by the summary when building the
     /// history sent to the LLM.
     pub summary_seq: Option<u64>,
+    /// Usage of the most recent main-stream request, restored from storage so
+    /// a loaded session can re-seed the sidebar's context anchor and read/
+    /// cache-hit metrics. Not maintained by the live turn loop (which reports
+    /// per-request usage through events).
+    pub last_usage: Option<TokenUsage>,
 }
 
 impl Session {
@@ -84,6 +108,11 @@ impl Session {
             if m.summary {
                 s.summary_seq = Some(idx as u64);
             }
+            if !m.summary
+                && let Some(usage) = request_usage_of(m)
+            {
+                s.last_usage = Some(usage);
+            }
         }
         s.tool_records = stored
             .tool_calls
@@ -112,6 +141,7 @@ impl Session {
         self.output_tokens = 0;
         self.reasoning_tokens = 0;
         self.cached_tokens = 0;
+        self.last_usage = None;
     }
 
     pub fn push_user(&mut self, content: impl Into<String>) {
@@ -185,5 +215,108 @@ impl Session {
         }
         let begin = self.summary_seq.map(|s| (s as usize).min(end)).unwrap_or(0);
         self.messages[begin..end].to_vec()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shuvarie_db::MsgRole;
+
+    fn stored_message(seq: u64, role: MsgRole, content: &str) -> shuvarie_db::StoredMessage {
+        shuvarie_db::StoredMessage {
+            id: seq,
+            role,
+            content: content.to_string(),
+            reasoning: Vec::new(),
+            interrupted: false,
+            seq,
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            cached_input_tokens: 0,
+            reasoning_tokens: 0,
+            cost: 0.0,
+            summary: false,
+            request: TokenUsage::default(),
+        }
+    }
+
+    fn stored_session(messages: Vec<shuvarie_db::StoredMessage>) -> shuvarie_db::StoredSession {
+        shuvarie_db::StoredSession {
+            id: uuid::Uuid::now_v7(),
+            title: "t".into(),
+            provider: None,
+            model: None,
+            messages,
+            tool_calls: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn from_stored_seeds_last_usage_from_the_request_payload() {
+        let mut stored = stored_session(vec![
+            stored_message(0, MsgRole::User, "hi"),
+            stored_message(1, MsgRole::Assistant, "ok"),
+        ]);
+        stored.messages[1].input_tokens = 12_000;
+        stored.messages[1].output_tokens = 200;
+        stored.messages[1].total_tokens = 12_200;
+        stored.messages[1].cached_input_tokens = 11_000;
+        stored.messages[1].request = TokenUsage {
+            input_tokens: 20_000,
+            output_tokens: 200,
+            total_tokens: 20_200,
+            cached_input_tokens: 19_400,
+            ..TokenUsage::default()
+        };
+
+        let session = Session::from_stored(stored);
+        let last = session.last_usage.expect("request usage restored");
+        assert_eq!(last.total_tokens, 20_200);
+        assert_eq!(last.cached_input_tokens, 19_400);
+    }
+
+    #[test]
+    fn from_stored_falls_back_to_row_usage_without_a_request_payload() {
+        let mut stored = stored_session(vec![stored_message(0, MsgRole::Assistant, "ok")]);
+        stored.messages[0].input_tokens = 500;
+        stored.messages[0].output_tokens = 100;
+        stored.messages[0].total_tokens = 600;
+
+        let session = Session::from_stored(stored);
+        let last = session.last_usage.expect("row usage restored");
+        assert_eq!(last.total_tokens, 600);
+    }
+
+    #[test]
+    fn from_stored_skips_zero_and_summary_rows_for_last_usage() {
+        let mut stored = stored_session(vec![
+            stored_message(0, MsgRole::Assistant, "ok"),
+            stored_message(1, MsgRole::Assistant, "ok"),
+            stored_message(2, MsgRole::User, "again"),
+        ]);
+        stored.messages[0].total_tokens = 30;
+        stored.messages[0].request = TokenUsage {
+            total_tokens: 30,
+            ..TokenUsage::default()
+        };
+        stored.messages[1].summary = true;
+        stored.messages[1].total_tokens = 9_999;
+        stored.messages[1].request = TokenUsage {
+            total_tokens: 9_999,
+            ..TokenUsage::default()
+        };
+
+        let session = Session::from_stored(stored);
+        let last = session.last_usage.expect("main request restored");
+        assert_eq!(last.total_tokens, 30, "summary rows are not main requests");
+    }
+
+    #[test]
+    fn from_stored_without_reported_usage_leaves_last_usage_none() {
+        let stored = stored_session(vec![stored_message(0, MsgRole::User, "hi")]);
+        let session = Session::from_stored(stored);
+        assert!(session.last_usage.is_none());
     }
 }
