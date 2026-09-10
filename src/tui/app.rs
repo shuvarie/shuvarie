@@ -602,7 +602,7 @@ impl App {
                 if let Some(effect) = self.session.update(m) {
                     match effect {
                         SessionEffect::SendMessage { content } => {
-                            if !self.session.busy && self.session.session_id.is_none() {
+                            if !self.session.is_busy() && self.session.session_id.is_none() {
                                 self.ctx.send(shuvarie_core::Command::StartSession);
                             }
                             self.ctx
@@ -955,7 +955,7 @@ impl App {
     /// The spinners currently animating, so the render loop can wake at the
     /// earliest next frame change.
     pub fn active_spinners(&self) -> impl Iterator<Item = SpinnerKind> + '_ {
-        let inline = self.session.busy
+        let inline = self.session.is_busy()
             || self.session.chat.has_running_tool_blocks()
             || self.session.bash.running()
             || self.history_search.loading
@@ -974,7 +974,7 @@ impl App {
 
     /// Mark the views that are animating dirty so the next frame re-renders them.
     pub fn mark_spinners_dirty(&self) {
-        if self.session.busy || self.session.chat.has_running_tool_blocks() {
+        if self.session.is_busy() || self.session.chat.has_running_tool_blocks() {
             self.session.mark_spinner_dirty();
         }
         if self.session.sidebar.lsp_servers.iter().any(|s| {

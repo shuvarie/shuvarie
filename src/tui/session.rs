@@ -116,8 +116,10 @@ pub enum SessionMessage {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 enum BusyKind {
+    #[default]
+    Idle,
     Generating,
     Tool,
     Waiting,
@@ -147,7 +149,6 @@ pub struct SessionScreen {
     pub chat: chat::Chat,
     /// Floating display-only window for the latest bash-mode run.
     pub bash: bash::BashPopup,
-    pub busy: bool,
     busy_kind: BusyKind,
     pub status: Option<String>,
     pub sidebar: Sidebar,
@@ -169,8 +170,7 @@ impl SessionScreen {
             slash: SlashMenu::new(),
             chat: chat::Chat::new(),
             bash: bash::BashPopup::new(),
-            busy: false,
-            busy_kind: BusyKind::Generating,
+            busy_kind: BusyKind::Idle,
             status: None,
             sidebar: Sidebar::new(),
             provider: None,
@@ -188,13 +188,18 @@ impl SessionScreen {
         self.chat.is_streaming()
     }
 
+    pub fn is_busy(&self) -> bool {
+        self.busy_kind != BusyKind::Idle
+    }
+
     /// The wide status-row spinner currently animating, if any.
     pub(crate) fn busy_spinner(&self) -> Option<SpinnerKind> {
-        self.busy.then_some(match self.busy_kind {
-            BusyKind::Generating => SpinnerKind::Generating,
-            BusyKind::Tool => SpinnerKind::Tool,
-            BusyKind::Waiting => SpinnerKind::Waiting,
-        })
+        match self.busy_kind {
+            BusyKind::Idle => None,
+            BusyKind::Generating => Some(SpinnerKind::Generating),
+            BusyKind::Tool => Some(SpinnerKind::Tool),
+            BusyKind::Waiting => Some(SpinnerKind::Waiting),
+        }
     }
 
     pub fn has_messages(&self) -> bool {
@@ -215,7 +220,6 @@ impl SessionScreen {
         self.chat.update(ChatMessage::BeginUserTurn {
             content: shuvarie_core::session::CONTINUE_PROMPT.to_string(),
         });
-        self.busy = true;
         self.busy_kind = BusyKind::Generating;
         self.status = Some("Thinking...".to_string());
         self.retry = None;
@@ -436,7 +440,6 @@ impl SessionScreen {
             }
             SessionMessage::QuestionAsked { id, questions } => {
                 self.question.open(id, questions);
-                self.busy = true;
                 self.busy_kind = BusyKind::Waiting;
                 self.status = Some("Waiting for answer...".to_string());
                 None
@@ -467,13 +470,11 @@ impl SessionScreen {
                     deadline: std::time::Instant::now()
                         + std::time::Duration::from_millis(delay_ms),
                 });
-                self.busy = true;
                 self.busy_kind = BusyKind::Waiting;
                 self.status = None;
                 None
             }
             SessionMessage::CompactionStarted => {
-                self.busy = true;
                 self.busy_kind = BusyKind::Waiting;
                 self.status = Some("Compacting context...".to_string());
                 self.retry = None;
@@ -485,7 +486,6 @@ impl SessionScreen {
                 None
             }
             SessionMessage::CompactionFinished => {
-                self.busy = true;
                 self.busy_kind = BusyKind::Generating;
                 self.status = Some("Resuming after compaction...".to_string());
                 self.retry = None;
@@ -493,8 +493,7 @@ impl SessionScreen {
             }
             SessionMessage::Reset => {
                 self.chat.update(ChatMessage::Reset);
-                self.busy = false;
-                self.busy_kind = BusyKind::Generating;
+                self.busy_kind = BusyKind::Idle;
                 self.status = None;
                 self.retry = None;
                 self.session_id = None;
@@ -555,7 +554,6 @@ impl SessionScreen {
                     self.chat.update(ChatMessage::SteeredDispatched);
                 }
                 self.chat.update(ChatMessage::BeginUserTurn { content });
-                self.busy = true;
                 self.busy_kind = BusyKind::Generating;
                 self.status = Some("Thinking...".to_string());
                 self.retry = None;
@@ -585,25 +583,21 @@ impl SessionScreen {
     fn observe_chat(&mut self, msg: &ChatMessage) {
         match msg {
             ChatMessage::TokenReceived { .. } => {
-                self.busy = true;
                 self.busy_kind = BusyKind::Generating;
                 self.status = Some("Yappin'...".to_string());
                 self.retry = None;
             }
             ChatMessage::ReasoningReceived { .. } => {
-                self.busy = true;
                 self.busy_kind = BusyKind::Generating;
                 self.status = Some("Thinking...".to_string());
                 self.retry = None;
             }
             ChatMessage::ToolStarted { name, .. } => {
-                self.busy = true;
                 self.busy_kind = BusyKind::Tool;
                 self.status = Some(format!("Calling tool: {name}"));
                 self.retry = None;
             }
             ChatMessage::WorkerStarted { name, .. } => {
-                self.busy = true;
                 self.busy_kind = BusyKind::Tool;
                 self.status = Some(format!("Spawned worker: {name}"));
                 self.retry = None;
@@ -620,17 +614,17 @@ impl SessionScreen {
                 self.status = None;
             }
             ChatMessage::StreamDone => {
-                self.busy = false;
+                self.busy_kind = BusyKind::Idle;
                 self.status = None;
                 self.retry = None;
             }
             ChatMessage::StreamError { error } => {
-                self.busy = false;
+                self.busy_kind = BusyKind::Idle;
                 self.status = Some(format!("error: {error}"));
                 self.retry = None;
             }
             ChatMessage::StreamCancelled => {
-                self.busy = false;
+                self.busy_kind = BusyKind::Idle;
                 self.status = None;
                 self.retry = None;
             }
@@ -772,7 +766,7 @@ impl SessionScreen {
 
         let status = match self.status.as_deref() {
             Some(status) => Some((status, self.busy_kind)),
-            None if self.busy => Some(("Working...", BusyKind::Tool)),
+            None if self.is_busy() => Some(("Working...", BusyKind::Tool)),
             None => None,
         };
         if let Some(retry) = &self.retry {
@@ -792,12 +786,15 @@ impl SessionScreen {
             frame.render_widget(Paragraph::new(Line::from(spans)), status_area);
         } else if let Some((status, kind)) = status {
             let mut spans = Vec::new();
-            if self.busy {
-                spans.push(match kind {
-                    BusyKind::Generating => super::spinner::generating_spinner(),
-                    BusyKind::Tool => super::spinner::tool_spinner(),
-                    BusyKind::Waiting => super::spinner::wait_spinner(),
-                });
+            let spinner_span = match kind {
+                BusyKind::Idle => None,
+                BusyKind::Generating => Some(super::spinner::generating_spinner()),
+                BusyKind::Tool => Some(super::spinner::tool_spinner()),
+                BusyKind::Waiting => Some(super::spinner::wait_spinner()),
+            };
+
+            if let Some(spinner_span) = spinner_span {
+                spans.push(spinner_span);
                 spans.push(Span::raw(" "));
             }
             spans.push(Span::raw(status).fg(theme::TEXT_MUTED));
@@ -1257,7 +1254,7 @@ mod tests {
         assert_eq!(retry.reason, "Connection timed out");
         assert_eq!(retry.attempt, 3);
         assert_eq!(retry.max_attempts, 10);
-        assert!(screen.busy);
+        assert!(screen.is_busy());
         assert_eq!(screen.busy_kind, BusyKind::Waiting);
     }
 
@@ -1267,15 +1264,15 @@ mod tests {
         screen.update(SessionMessage::Chat(ChatMessage::StreamError {
             error: "context budget exceeded — compacting session history and continuing".into(),
         }));
-        assert!(!screen.busy);
+        assert!(!screen.is_busy());
 
         screen.update(SessionMessage::CompactionStarted);
-        assert!(screen.busy);
+        assert!(screen.is_busy());
         assert_eq!(screen.busy_kind, BusyKind::Waiting);
         assert_eq!(screen.status.as_deref(), Some("Compacting context..."));
 
         screen.update(SessionMessage::CompactionFinished);
-        assert!(screen.busy);
+        assert!(screen.is_busy());
         assert_eq!(screen.busy_kind, BusyKind::Generating);
         assert_eq!(
             screen.status.as_deref(),
@@ -1292,7 +1289,7 @@ mod tests {
         screen.update(SessionMessage::TurnReverted {
             session: shuvarie_core::Session::new(),
         });
-        assert!(screen.busy);
+        assert!(screen.is_busy());
         assert_eq!(
             screen.status.as_deref(),
             Some("Resuming after compaction...")
@@ -1311,7 +1308,7 @@ mod tests {
             worker: None,
             call_id: None,
         }));
-        assert!(screen.busy);
+        assert!(screen.is_busy());
         assert_eq!(screen.busy_kind, BusyKind::Tool);
         assert_eq!(screen.status.as_deref(), Some("Calling tool: read_file"));
     }
@@ -1321,12 +1318,12 @@ mod tests {
         let mut screen = SessionScreen::new();
         screen.update(SessionMessage::CompactionStarted);
         screen.update(SessionMessage::CompactionFinished);
-        assert!(screen.busy);
+        assert!(screen.is_busy());
 
         screen.update(SessionMessage::Chat(ChatMessage::StreamError {
             error: "provider unreachable".into(),
         }));
-        assert!(!screen.busy);
+        assert!(!screen.is_busy());
         assert_eq!(
             screen.status.as_deref(),
             Some("error: provider unreachable")
@@ -1346,7 +1343,7 @@ mod tests {
             error: "Connection reset".into(),
         }));
         assert!(screen.retry.is_none());
-        assert!(!screen.busy);
+        assert!(!screen.is_busy());
         assert_eq!(screen.status.as_deref(), Some("error: Connection reset"));
     }
 
@@ -1468,7 +1465,7 @@ mod tests {
             content: "hello".into(),
             steered: false,
         });
-        assert!(screen.busy);
+        assert!(screen.is_busy());
         assert_eq!(screen.busy_kind, BusyKind::Generating);
         assert_eq!(screen.status.as_deref(), Some("Thinking..."));
         assert!(screen.chat.has_messages());
@@ -1484,7 +1481,7 @@ mod tests {
             steered: true,
         });
         assert!(screen.chat.has_steered(), "one entry should remain");
-        assert!(screen.busy);
+        assert!(screen.is_busy());
     }
 
     #[test]
