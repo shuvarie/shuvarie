@@ -8,6 +8,7 @@ use termina::event::{KeyCode, KeyEvent};
 use crate::tui::components::VersionBar;
 use crate::tui::sidebar::context::ContextDisplay;
 use crate::tui::utils::{ctrl, text::truncate_spans};
+use crate::tui::workspace::WorkspaceInfo;
 
 use super::theme;
 
@@ -17,8 +18,13 @@ mod context;
 /// `auto`. At 80+ columns today's layout is unchanged.
 pub const COLLAPSE_BELOW_COLS: u16 = 80;
 
+/// Inner columns of the fixed sidebar body (30-col column minus the 2+2
+/// block padding), the budget the workspace path line is formatted against.
+const PATH_LINE_COLS: usize = 26;
+
 pub struct Sidebar {
     pub version_bar: VersionBar,
+    workspace: WorkspaceInfo,
     context: ContextDisplay,
     pub lsp_servers: Vec<LspStatus>,
     pub lsp_enabled: bool,
@@ -72,6 +78,11 @@ pub enum SidebarMessage {
         done: usize,
         total: usize,
     },
+    /// Installs the startup workspace (cwd + git branch) shown above the
+    /// Context section and on the collapsed footer line.
+    SetWorkspace {
+        workspace: WorkspaceInfo,
+    },
     /// Applies the `[ui] sidebar` pref and clears any manual override.
     SetPref {
         pref: SidebarPref,
@@ -91,6 +102,7 @@ impl Sidebar {
     pub fn new() -> Self {
         Self {
             version_bar: VersionBar::new(HorizontalAlignment::Left),
+            workspace: WorkspaceInfo::default(),
             context: ContextDisplay::new(),
             lsp_servers: Vec::new(),
             lsp_enabled: true,
@@ -134,6 +146,9 @@ impl Sidebar {
             SidebarMessage::SetTodos { done, total } => {
                 self.todos_done = done;
                 self.todos_total = total;
+            }
+            SidebarMessage::SetWorkspace { workspace } => {
+                self.workspace = workspace;
             }
             SidebarMessage::SetPref { pref } => {
                 self.pref = pref;
@@ -223,8 +238,20 @@ impl Sidebar {
         Line::from(truncate_spans(spans, max_width))
     }
 
+    /// Path and branch on one line for the collapsed mode's footer, in the
+    /// style of [`WorkspaceInfo::compact_spans`], truncated to `max_width`.
+    pub fn workspace_line(&self, max_width: usize) -> Line<'static> {
+        Line::from(self.workspace.compact_spans(max_width))
+    }
+
     fn build_lines(&self) -> Vec<Line<'static>> {
         let mut lines: Vec<Line> = Vec::new();
+
+        let workspace_lines = self.workspace.section_lines(PATH_LINE_COLS);
+        if !workspace_lines.is_empty() {
+            lines.extend(workspace_lines);
+            lines.push(Line::from(""));
+        }
 
         self.context.view(&mut lines);
 
@@ -955,5 +982,77 @@ mod tests {
         let rendered: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(rendered.chars().count() == 30, "body: {rendered}");
         assert!(rendered.ends_with('…'), "body: {rendered}");
+    }
+
+    #[test]
+    fn workspace_section_renders_path_branch_above_context() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::SetWorkspace {
+            workspace: WorkspaceInfo {
+                path: "/home/user/repos/shuvarie".into(),
+                home: Some("/home/user".into()),
+                branch: Some("main".into()),
+            },
+        });
+        let lines = sidebar.rendered_lines();
+        let pos = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| text(std::slice::from_ref(l)).contains(needle))
+        };
+        let path = pos("~/repos/shuvarie");
+        let branch = pos("⎇ main");
+        let context = pos("Context");
+        assert!(context.is_some(), "body: {}", text(lines));
+        let (path, branch, context) = (
+            path.expect("path line"),
+            branch.expect("branch line"),
+            context.expect("context header"),
+        );
+        assert!(path < branch && branch < context, "order: {}", text(lines));
+        assert_eq!(
+            lines[path].spans.last().map(|s| s.style.fg),
+            Some(Some(theme::TEXT)),
+            "current dir renders bright: {:?}",
+            lines[path]
+        );
+        assert_eq!(
+            lines[path].spans.first().map(|s| s.style.fg),
+            Some(Some(theme::TEXT_DIM)),
+            "ancestors are dimmed: {:?}",
+            lines[path]
+        );
+    }
+
+    #[test]
+    fn workspace_section_hidden_when_unset() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::SpinnerUpdate);
+        let rendered = text(sidebar.rendered_lines());
+        assert!(!rendered.contains('~'), "body: {rendered}");
+        assert!(!rendered.contains("⎇"), "body: {rendered}");
+        assert!(rendered.starts_with("Context"), "body: {rendered}");
+    }
+
+    #[test]
+    fn workspace_line_joins_path_and_branch_for_the_footer() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::SetWorkspace {
+            workspace: WorkspaceInfo {
+                path: "/home/user/repos/shuvarie".into(),
+                home: Some("/home/user".into()),
+                branch: Some("main".into()),
+            },
+        });
+        let line = sidebar.workspace_line(200);
+        let rendered: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(rendered, "~/repos/shuvarie ⎇ main");
+
+        let line = sidebar.workspace_line(12);
+        let rendered: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(rendered, "~/sh… ⎇ main");
+
+        let sidebar = Sidebar::new();
+        assert!(sidebar.workspace_line(80).spans.is_empty());
     }
 }

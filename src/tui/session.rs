@@ -147,6 +147,18 @@ const MAX_WORKING_ROWS: usize = 3;
 
 const DOUBLE_ESCAPE_WINDOW: Duration = Duration::from_millis(500);
 
+/// Minimum columns left for the workspace path+branch on the collapsed
+/// footer line; below it the hints keep the whole row.
+const MIN_WORKSPACE_COLS: usize = 12;
+
+/// Columns left for the workspace path+branch on the collapsed footer line,
+/// after the key hints and a two-column gap; `None` when that leaves less
+/// than [`MIN_WORKSPACE_COLS`].
+fn workspace_footer_budget(footer_width: u16, hints_width: usize) -> Option<usize> {
+    let budget = usize::from(footer_width).saturating_sub(hints_width + 2);
+    (budget >= MIN_WORKSPACE_COLS).then_some(budget)
+}
+
 /// The session screen: sidebar, title bar with the working-todos strip, chat
 /// history pane (a [`chat::Chat`] TEA model), input, question prompt, slash
 /// menu, status row, and footer.
@@ -883,7 +895,25 @@ impl SessionScreen {
                 bindings.extend(recall);
                 theme::help_line(&bindings)
             };
-            frame.render_widget(Paragraph::new(footer).fg(theme::TEXT_MUTED), footer_area);
+            let workspace = if collapsed {
+                workspace_footer_budget(footer_area.width, footer.width())
+                    .map(|budget| self.sidebar.workspace_line(budget))
+            } else {
+                None
+            }
+            .filter(|line| line.width() > 0);
+            if let Some(workspace) = workspace {
+                let [hints_area, _, workspace_area] =
+                    Layout::horizontal([Length(footer.width() as u16), Length(2), Min(0)])
+                        .areas(footer_area);
+                frame.render_widget(Paragraph::new(footer).fg(theme::TEXT_MUTED), hints_area);
+                frame.render_widget(
+                    Paragraph::new(workspace).alignment(Alignment::Right),
+                    workspace_area,
+                );
+            } else {
+                frame.render_widget(Paragraph::new(footer).fg(theme::TEXT_MUTED), footer_area);
+            }
         }
     }
 }
@@ -977,6 +1007,8 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
     use shuvarie_core::tool_record::ToolRecord;
     use termina::event::Modifiers;
+
+    use crate::tui::workspace::WorkspaceInfo;
 
     fn todo_record(args_json: &str) -> ToolRecord {
         ToolRecord {
@@ -1828,6 +1860,48 @@ mod tests {
             find_row(&buf, "Context").1.contains("Context"),
             "sidebar Context panel renders"
         );
+    }
+
+    #[test]
+    fn collapsed_footer_shows_workspace_path_and_branch_on_the_right() {
+        let mut screen = info_screen();
+        screen.sidebar.update(SidebarMessage::SetWorkspace {
+            workspace: WorkspaceInfo {
+                path: "/home/user/repos/shuvarie".into(),
+                home: Some("/home/user".into()),
+                branch: Some("main".into()),
+            },
+        });
+        let buf = draw(&screen, 79, 24);
+        let (footer_y, footer) = find_row(&buf, "Ctrl+M");
+        assert_eq!(footer_y, buf.area().height - 1, "footer is the last row");
+        assert!(footer.contains("Ctrl+C quit"), "hints render: {footer:?}");
+        assert!(
+            footer.contains("~/repos/shuvarie ⎇ main"),
+            "path and branch render right-aligned: {footer:?}"
+        );
+        assert!(
+            footer.trim_end().ends_with("⎇ main"),
+            "path sits at the right edge: {footer:?}"
+        );
+    }
+
+    #[test]
+    fn wide_footer_leaves_workspace_to_the_sidebar() {
+        let mut screen = info_screen();
+        screen.sidebar.update(SidebarMessage::SetWorkspace {
+            workspace: WorkspaceInfo {
+                path: "/home/user/repos/shuvarie".into(),
+                home: Some("/home/user".into()),
+                branch: Some("main".into()),
+            },
+        });
+        let buf = draw(&screen, 80, 24);
+        let (footer_y, footer) = find_row(&buf, "Ctrl+M");
+        assert_eq!(footer_y, buf.area().height - 1, "footer is the last row");
+        assert!(!footer.contains("⎇"), "footer stays hint-only: {footer:?}");
+        let (path_y, path) = find_row(&buf, "~/repos/shuvarie");
+        assert!(path_y < footer_y, "sidebar shows the path: {path:?}");
     }
 
     #[test]

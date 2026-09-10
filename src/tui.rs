@@ -35,6 +35,7 @@ mod theme;
 mod utils;
 mod warning;
 mod welcome;
+mod workspace;
 
 pub async fn run_tui(
     config: Config,
@@ -51,7 +52,8 @@ pub async fn run_tui(
     let frame_budget = frame_budget(config.ui.frame_rate);
     let mut rat = ratatui::Terminal::new(TerminaBackend::new(term))?;
     let connections = Connections::load().map_err(|e| io::Error::other(e.to_string()))?;
-    let app = App::new(config.ui, connections, cmd_tx, initial_cols);
+    let workspace = workspace::WorkspaceInfo::detect();
+    let app = App::new(config.ui, connections, cmd_tx, initial_cols, workspace);
 
     init_terminal(rat.backend_mut().terminal_mut())?;
 

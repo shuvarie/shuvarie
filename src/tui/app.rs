@@ -22,6 +22,7 @@ use super::sidebar::SidebarMessage;
 use super::spinner::SpinnerKind;
 use super::warning::{WarningMessage, WarningPopup};
 use super::welcome::{Welcome, WelcomeEffect, WelcomeMessage};
+use super::workspace::WorkspaceInfo;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Overlay {
@@ -145,6 +146,7 @@ impl App {
         connections: Connections,
         cmd_tx: Sender<shuvarie_core::Command>,
         viewport_cols: u16,
+        workspace: WorkspaceInfo,
     ) -> Self {
         let mut welcome = Welcome::new();
         if !connections.has_connected_providers() {
@@ -175,6 +177,7 @@ impl App {
                 s.sidebar.update(SidebarMessage::SetWidth {
                     cols: viewport_cols,
                 });
+                s.sidebar.update(SidebarMessage::SetWorkspace { workspace });
                 s
             },
             command_menu: CommandMenu::new(),
@@ -1204,7 +1207,13 @@ mod tests {
 
     fn app_with(connections: Connections) -> App {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        App::new(UiPrefs::default(), connections, tx, 120)
+        App::new(
+            UiPrefs::default(),
+            connections,
+            tx,
+            120,
+            WorkspaceInfo::default(),
+        )
     }
 
     fn connected() -> Connections {
