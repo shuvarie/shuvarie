@@ -1,8 +1,8 @@
 use ratatui::prelude::{Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 
 use crate::md::{plain, render, render_pass};
-use crate::{diff, syntax, theme};
+use crate::{code, diff, syntax, theme};
 
 fn styles_of(line: &Line<'static>) -> Vec<Style> {
     line.spans.iter().map(|s| s.style).collect()
@@ -18,6 +18,10 @@ fn joined(line: &Line<'static>) -> String {
 
 fn is_blank(line: &Line<'static>) -> bool {
     line.spans.iter().all(|s| s.content.is_empty())
+}
+
+fn rows(lines: &[Line<'static>]) -> Vec<String> {
+    lines.iter().map(|l| joined(l)).collect()
 }
 
 #[test]
@@ -117,13 +121,15 @@ fn heading_styles() {
 }
 
 #[test]
-fn code_block_highlighted() {
+fn code_block_fences_and_highlight() {
     let lines = render("```rust\nfn main() {}\n```");
-    assert!(!lines.is_empty());
-    let code_line = &lines[0];
-    assert!(joined(code_line).contains("fn main"));
-    assert_eq!(code_line.style.bg, Some(theme::SURFACE));
-    let has_keyword = styles_of(code_line)
+    assert_eq!(rows(&lines)[0], "```rust");
+    assert_eq!(rows(&lines).last().unwrap(), "```");
+    assert_eq!(lines.len(), 3);
+    assert!(joined(&lines[1]).contains("fn main"));
+    assert_eq!(lines[1].style.bg, None);
+    assert_eq!(lines[0].spans[0].style.fg, Some(theme::TEXT_MUTED));
+    let has_keyword = styles_of(&lines[1])
         .iter()
         .any(|s| s.fg == Some(theme::ACCENT));
     assert!(has_keyword, "expected a keyword-colored span");
@@ -132,26 +138,46 @@ fn code_block_highlighted() {
 #[test]
 fn code_block_plain_fallback() {
     let lines = render("```nosuchlang123\narbitrary text\n```");
-    assert_eq!(lines.len(), 1);
-    assert_eq!(texts(&lines[0]), ["arbitrary text"]);
-    assert_eq!(lines[0].spans[0].style.fg, Some(theme::TEXT));
+    let text = rows(&lines);
+    assert_eq!(text, vec!["```nosuchlang123", "arbitrary text", "```"]);
+    assert_eq!(lines[1].spans[0].style.fg, Some(theme::TEXT));
 }
 
 #[test]
-fn diff_block_colors() {
+fn code_block_keeps_indentation() {
+    let lines = render("```rust\nfn main() {\n    let x = 1;\n}\n```");
+    let text = rows(&lines);
+    assert!(text[2].starts_with("\u{a0}\u{a0}\u{a0}\u{a0}"));
+    assert!(text[2].contains("let x = 1;"));
+}
+
+#[test]
+fn code_block_tabs_render_four_wide() {
+    let lines = render("```\n\tlet x = 1;\n\t\tlet y = 2;\n```");
+    let text = rows(&lines);
+    assert!(text[1].starts_with("\u{a0}\u{a0}\u{a0}\u{a0}"));
+    assert!(text[2].starts_with("\u{a0}".repeat(8).as_str()));
+}
+
+#[test]
+fn code_block_diff_still_colored() {
     let lines = render("```diff\n+ added\n- removed\n@@ hunk @@\ncontext\n```");
-    assert_eq!(lines.len(), 4);
-    assert_eq!(lines[0].spans[0].style.fg, Some(theme::SUCCESS));
-    assert_eq!(lines[1].spans[0].style.fg, Some(theme::ERROR));
-    assert_eq!(lines[2].spans[0].style.fg, Some(theme::ACCENT));
-    assert_eq!(lines[3].spans[0].style.fg, Some(theme::TEXT_DIM));
+    let text = rows(&lines);
+    assert_eq!(text.len(), 6);
+    assert_eq!(lines[1].spans[0].style.fg, Some(theme::SUCCESS));
+    assert_eq!(lines[2].spans[0].style.fg, Some(theme::ERROR));
+    assert_eq!(lines[3].spans[0].style.fg, Some(theme::ACCENT));
+    assert_eq!(lines[4].spans[0].style.fg, Some(theme::TEXT_DIM));
+    assert_eq!(text[0], "```diff");
+    assert_eq!(text[5], "```");
 }
 
 #[test]
 fn unterminated_fence_does_not_panic() {
     let lines = render("```rust\nfn main() {");
-    assert_eq!(lines.len(), 1);
-    assert!(joined(&lines[0]).contains("fn main()"));
+    let text = rows(&lines);
+    assert_eq!(text[0], "```rust");
+    assert!(joined(&lines[1]).contains("fn main()"));
 }
 
 #[test]
@@ -194,16 +220,94 @@ fn rule_renders_divider() {
 }
 
 #[test]
-fn table_renders_rows() {
+fn table_renders_box_drawing() {
     let lines = render("| a | b |\n|---|---|\n| c | d |");
-    assert_eq!(lines.len(), 2);
-    let header = joined(&lines[0]);
-    assert!(header.contains("a"));
-    assert!(header.contains("b"));
-    assert!(header.contains("┃"));
-    let body = joined(&lines[1]);
-    assert!(body.contains("c"));
-    assert!(body.contains("d"));
+    assert_eq!(
+        rows(&lines),
+        vec![
+            "┌───┬───┐",
+            "│ a │ b │",
+            "├───┼───┤",
+            "│ c │ d │",
+            "└───┴───┘",
+        ]
+    );
+    let border = lines[0].spans[0].style.fg;
+    assert_eq!(border, Some(theme::TEXT_MUTED));
+    let header_bold = lines[1]
+        .spans
+        .iter()
+        .any(|s| s.content == "a" && s.style.add_modifier.contains(Modifier::BOLD));
+    assert!(header_bold, "header cells are bold");
+    let body_plain = lines[3]
+        .spans
+        .iter()
+        .all(|s| !s.style.add_modifier.contains(Modifier::BOLD));
+    assert!(body_plain, "body cells are not bold");
+}
+
+#[test]
+fn table_unifies_column_widths() {
+    let lines = render("| one | two |\n|-----|-----|\n| x | a very long cell value |");
+    let text = rows(&lines);
+    assert_eq!(
+        text,
+        vec![
+            "┌─────┬────────────────────────┐",
+            "│ one │ two                    │",
+            "├─────┼────────────────────────┤",
+            "│ x   │ a very long cell value │",
+            "└─────┴────────────────────────┘",
+        ]
+    );
+}
+
+#[test]
+fn table_respects_alignment() {
+    let lines = render("| left | right | center |\n|:--|--:|:-:|\n| L | R | C |");
+    assert_eq!(
+        rows(&lines),
+        vec![
+            "┌──────┬───────┬────────┐",
+            "│ left │ right │ center │",
+            "├──────┼───────┼────────┤",
+            "│ L    │     R │   C    │",
+            "└──────┴───────┴────────┘",
+        ]
+    );
+}
+
+#[test]
+fn table_pads_missing_cells() {
+    let lines = render("| a | b |\n|---|---|\n| x |\n| y | z | w | extra |");
+    let text = rows(&lines);
+    assert_eq!(
+        text,
+        vec![
+            "┌───┬───┐",
+            "│ a │ b │",
+            "├───┼───┤",
+            "│ x │   │",
+            "│ y │ z │",
+            "└───┴───┘",
+        ]
+    );
+}
+
+#[test]
+fn table_wide_cells_count_columns() {
+    let lines = render("| 日本語 | b |\n|------|---|\n| x | y |");
+    let text = rows(&lines);
+    assert_eq!(
+        text,
+        vec![
+            "┌────────┬───┐",
+            "│ 日本語 │ b │",
+            "├────────┼───┤",
+            "│ x      │ y │",
+            "└────────┴───┘",
+        ]
+    );
 }
 
 #[test]
@@ -222,7 +326,7 @@ fn links_underline() {
 #[test]
 fn wide_chars_do_not_panic() {
     let lines = render("```rust\n// 日本語コメント\nlet 変数 = 1;\n```");
-    assert_eq!(lines.len(), 2);
+    assert_eq!(lines.len(), 4);
 }
 
 #[test]
@@ -231,8 +335,37 @@ fn diff_module_marks_lines() {
     assert_eq!(lines[0].spans[0].style.fg, Some(theme::SUCCESS));
     assert_eq!(lines[1].spans[0].style.fg, Some(theme::ERROR));
     assert_eq!(lines[2].spans[0].style.fg, Some(theme::ACCENT));
-    assert_eq!(lines[3].spans[0].style.fg, Some(theme::TEXT_DIM));
+    assert_eq!(
+        lines[3].spans.last().unwrap().style.fg,
+        Some(theme::TEXT_DIM)
+    );
     assert_eq!(lines[4].spans[0].style.fg, Some(theme::TEXT_MUTED));
+    assert_eq!(
+        lines[3].spans[0].content.to_string(),
+        "\u{a0}",
+        "the context line's leading space stays a visible-width no-break space"
+    );
+}
+
+#[test]
+fn expand_tabs_on_tab_stops() {
+    assert_eq!(code::expand_tabs("\ta"), "    a");
+    assert_eq!(code::expand_tabs("a\tb"), "a   b");
+    assert_eq!(code::expand_tabs("ab\t"), "ab  ");
+    assert_eq!(code::expand_tabs("no tabs"), "no tabs");
+}
+
+#[test]
+fn keep_indent_converts_leading_whitespace() {
+    let line = Line::from(Span::raw("  code".to_string()));
+    let kept = code::keep_indent(line);
+    assert_eq!(kept_text(&kept), "\u{a0}\u{a0}code");
+    let untouched = code::keep_indent(Line::from(Span::raw("code".to_string())));
+    assert_eq!(kept_text(&untouched), "code");
+}
+
+fn kept_text(line: &Line<'static>) -> String {
+    line.spans.iter().map(|s| s.content.to_string()).collect()
 }
 
 #[test]

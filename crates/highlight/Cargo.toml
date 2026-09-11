@@ -10,3 +10,4 @@ repository.workspace = true
 pulldown-cmark = { version = "0.13", default-features = false }
 ratatui = { version = "0.30.2", default-features = false, features = ["std"] }
 syntect = { version = "5.3", default-features = false, features = ["parsing", "default-syntaxes", "regex-fancy"] }
+unicode-width.workspace = true

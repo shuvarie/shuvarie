@@ -5745,6 +5745,7 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "syntect",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]

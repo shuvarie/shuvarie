@@ -1,7 +1,7 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use crate::theme;
+use crate::{code, theme};
 
 fn line_style(line: &str) -> Style {
     let c = line.chars().next().unwrap_or(' ');
@@ -16,13 +16,13 @@ fn line_style(line: &str) -> Style {
     }
 }
 
-pub fn highlight_diff(code: &str) -> Vec<Line<'static>> {
-    let block_bg = theme::SURFACE;
-    code.lines()
+pub fn highlight_diff(code_text: &str) -> Vec<Line<'static>> {
+    code_text
+        .lines()
         .map(|line| {
-            let text = if line.is_empty() { " " } else { line };
-            Line::from(Span::raw(text.to_string()).style(line_style(line)))
-                .style(Style::new().bg(block_bg))
+            code::keep_indent(Line::from(
+                Span::raw(code::expand_tabs(line)).style(line_style(line)),
+            ))
         })
         .collect()
 }

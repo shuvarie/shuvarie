@@ -10,7 +10,7 @@ use syntect::highlighting::{
 };
 use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
 
-use crate::theme;
+use crate::{code, theme};
 
 fn to_syntect_color(c: Color) -> SyntectColor {
     match c {
@@ -199,7 +199,7 @@ pub fn is_supported(lang: &str) -> bool {
     syntax_set().find_syntax_by_token(lang).is_some()
 }
 
-pub fn highlight_code(lang: &str, code: &str) -> Vec<Line<'static>> {
+pub fn highlight_code(lang: &str, code_text: &str) -> Vec<Line<'static>> {
     let set = syntax_set();
     let highlighter = highlighter();
     let syntax = set
@@ -209,21 +209,22 @@ pub fn highlight_code(lang: &str, code: &str) -> Vec<Line<'static>> {
 
     let mut highlight_state = HighlightState::new(highlighter, ScopeStack::new());
     let mut parse_state = ParseState::new(syntax);
-    let block_bg = theme::SURFACE;
 
     let mut lines = Vec::new();
-    for line in code.lines() {
-        let line = if line.is_empty() { " " } else { line };
+    for line in code_text.lines() {
+        let line = code::expand_tabs(line);
         let range = match highlight_line(
             &mut highlight_state,
             &mut parse_state,
             set,
             highlighter,
-            line,
+            &line,
         ) {
             Some(r) => r,
             None => {
-                lines.push(Line::from(Span::raw(line.to_string()).style(theme::PLAIN)));
+                lines.push(code::keep_indent(Line::from(
+                    Span::raw(line).style(theme::PLAIN),
+                )));
                 continue;
             }
         };
@@ -232,10 +233,7 @@ pub fn highlight_code(lang: &str, code: &str) -> Vec<Line<'static>> {
             let style = to_ratatui_style(to_ratatui_color(style.foreground), style.font_style);
             spans.push(Span::styled(text.to_string(), style));
         }
-        if spans.is_empty() {
-            spans.push(Span::raw(" "));
-        }
-        lines.push(Line::from(spans).style(Style::new().bg(block_bg)));
+        lines.push(code::keep_indent(Line::from(spans)));
     }
 
     lines

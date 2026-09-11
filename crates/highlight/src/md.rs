@@ -1,8 +1,8 @@
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::prelude::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 
-use crate::{diff, syntax, theme};
+use crate::{diff, syntax, table, theme};
 
 pub const OPTIONS: Options = Options::all()
     .difference(Options::ENABLE_SMART_PUNCTUATION)
@@ -205,9 +205,16 @@ enum ItemKind {
 
 #[derive(Default)]
 struct TableCtx {
+    alignments: Vec<Alignment>,
     rows: Vec<Vec<Vec<Span<'static>>>>,
     row: Vec<Vec<Span<'static>>>,
     cell: Vec<Span<'static>>,
+}
+
+struct CodeCtx {
+    lang: String,
+    buf: String,
+    fenced: bool,
 }
 
 #[derive(Default)]
@@ -221,7 +228,7 @@ struct Ctx {
     strike: u32,
     link: u32,
     skip: u32,
-    code: Option<(String, String)>,
+    code: Option<CodeCtx>,
     item_marker: Option<(String, Style)>,
     lists: Vec<ItemKind>,
     table: Option<TableCtx>,
@@ -237,11 +244,23 @@ impl Ctx {
             Tag::Heading { level, .. } => self.heading = Some(level),
             Tag::BlockQuote(_) => self.in_quote = true,
             Tag::CodeBlock(kind) => {
+                let fenced = matches!(kind, CodeBlockKind::Fenced(_));
                 let lang = match kind {
                     CodeBlockKind::Fenced(l) => l.as_ref().to_string(),
                     CodeBlockKind::Indented => String::new(),
                 };
-                self.code = Some((lang, String::new()));
+                if fenced {
+                    let mut fence = Line::from(Span::raw("```").style(theme::FENCE));
+                    if !lang.is_empty() {
+                        fence.push_span(Span::raw(lang.clone()).style(theme::FENCE_LANG));
+                    }
+                    self.lines.push(fence);
+                }
+                self.code = Some(CodeCtx {
+                    lang,
+                    buf: String::new(),
+                    fenced,
+                });
             }
             Tag::List(start) => {
                 let kind = match start {
@@ -268,7 +287,12 @@ impl Ctx {
                 };
                 self.item_marker = Some((text, style));
             }
-            Tag::Table(_) => self.table = Some(TableCtx::default()),
+            Tag::Table(alignments) => {
+                self.table = Some(TableCtx {
+                    alignments,
+                    ..TableCtx::default()
+                });
+            }
             Tag::TableHead => {
                 if let Some(t) = &mut self.table {
                     t.row = Vec::new();
@@ -306,13 +330,17 @@ impl Ctx {
     fn end(&mut self, tag: TagEnd) {
         match tag {
             TagEnd::CodeBlock => {
-                if let Some((lang, code)) = self.code.take() {
-                    let mut block = if syntax::is_diff_lang(&lang) {
-                        diff::highlight_diff(&code)
+                if let Some(code) = self.code.take() {
+                    let mut block = if syntax::is_diff_lang(&code.lang) {
+                        diff::highlight_diff(&code.buf)
                     } else {
-                        syntax::highlight_code(&lang, &code)
+                        syntax::highlight_code(&code.lang, &code.buf)
                     };
                     self.lines.append(&mut block);
+                    if code.fenced {
+                        self.lines
+                            .push(Line::from(Span::raw("```").style(theme::FENCE)));
+                    }
                     self.lines.push(Line::from(""));
                 }
             }
@@ -347,25 +375,9 @@ impl Ctx {
                 }
             }
             TagEnd::Table => {
-                let t = self.table.take();
-                if let Some(t) = t {
-                    for (ri, row) in t.rows.iter().enumerate() {
-                        let mut spans: Vec<Span<'static>> = Vec::new();
-                        for (ci, cell) in row.iter().enumerate() {
-                            if ci > 0 {
-                                spans.push(Span::raw(" ┃ ").fg(theme::TEXT_MUTED));
-                            }
-                            let cell = if ri == 0 {
-                                cell.iter().map(|s| s.clone().bold()).collect::<Vec<_>>()
-                            } else {
-                                cell.clone()
-                            };
-                            spans.extend(cell);
-                        }
-                        if !spans.is_empty() {
-                            self.lines.push(Line::from(spans));
-                        }
-                    }
+                if let Some(t) = self.table.take() {
+                    self.lines
+                        .append(&mut table::render(&t.alignments, &t.rows));
                     self.lines.push(Line::from(""));
                 }
             }
@@ -391,8 +403,8 @@ impl Ctx {
         if self.skip > 0 {
             return;
         }
-        if let Some((_, buf)) = &mut self.code {
-            buf.push_str(&text);
+        if let Some(code) = &mut self.code {
+            code.buf.push_str(&text);
             return;
         }
         self.spans.push(Span::raw(text).style(self.inline_style()));
