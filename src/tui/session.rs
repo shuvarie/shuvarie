@@ -875,13 +875,18 @@ impl SessionScreen {
                 .chat
                 .has_steered()
                 .then_some(("Alt+↑", "recall steered"));
+            let ctrl_c = if self.input.is_empty() {
+                "quit"
+            } else {
+                "clear"
+            };
             let footer = if !self.question.open && self.slash.active() {
                 theme::help_line(&[("Tab", "complete"), ("↑↓", "select"), ("Esc", "dismiss")])
             } else if self.chat.is_streaming() {
                 let mut bindings = vec![
                     ("Esc×2", "interrupt"),
                     ("Ctrl+M", "commands"),
-                    ("Ctrl+C", "quit"),
+                    ("Ctrl+C", ctrl_c),
                 ];
                 if bash_mode {
                     bindings.insert(0, ("Enter", "run"));
@@ -891,7 +896,7 @@ impl SessionScreen {
             } else {
                 let enter = if bash_mode { "run" } else { "send" };
                 let mut bindings =
-                    vec![("Enter", enter), ("Ctrl+M", "commands"), ("Ctrl+C", "quit")];
+                    vec![("Enter", enter), ("Ctrl+M", "commands"), ("Ctrl+C", ctrl_c)];
                 bindings.extend(recall);
                 theme::help_line(&bindings)
             };
@@ -1792,13 +1797,23 @@ mod tests {
     }
 
     #[test]
-    fn idle_footer_hints_ctrl_c_quit_without_clear() {
+    fn idle_footer_hints_ctrl_c_clear_with_draft() {
         let mut screen = SessionScreen::new();
         screen.input.buffer.set("draft");
         let buf = draw(&screen, 100, 24);
         let (_, footer) = find_row(&buf, "Ctrl+C");
-        assert!(footer.contains("quit"), "footer: {footer:?}");
-        assert!(!footer.contains("clear"), "footer: {footer:?}");
+        assert!(footer.contains("clear"), "footer: {footer:?}");
+        assert!(!footer.contains("quit"), "footer: {footer:?}");
+    }
+
+    #[test]
+    fn streaming_footer_hints_ctrl_c_clear_with_draft() {
+        let mut screen = streaming_screen();
+        screen.input.buffer.set("draft");
+        let buf = draw(&screen, 100, 24);
+        let (_, footer) = find_row(&buf, "Ctrl+C");
+        assert!(footer.contains("clear"), "footer: {footer:?}");
+        assert!(!footer.contains("quit"), "footer: {footer:?}");
     }
 
     fn info_screen() -> SessionScreen {

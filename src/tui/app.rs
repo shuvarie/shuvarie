@@ -12,6 +12,7 @@ use crate::tui::utils::ctrl;
 use super::add_provider::{AddProviderForm, AddProviderMessage, AddProviderOutcome};
 use super::command_menu::{CommandMenu, CommandMenuMessage};
 use super::commands::CommandAction;
+use super::components::TextAreaMessage;
 use super::confirm_quit::{ConfirmQuit, ConfirmQuitEffect, ConfirmQuitMessage};
 use super::context::UpdateCtx;
 use super::history_search::{HistorySearch, HistorySearchEffect, HistorySearchMessage};
@@ -319,6 +320,11 @@ impl App {
                     match key.kind {
                         KeyEventKind::Press => match key.code {
                             KeyCode::Char('c') if ctrl(&key) => {
+                                if !self.session.input.is_empty() {
+                                    return Some(AppMessage::Session(SessionMessage::Text(
+                                        TextAreaMessage::Clear,
+                                    )));
+                                }
                                 return Some(AppMessage::RequestQuit);
                             }
                             KeyCode::Char('m') if ctrl(&key) => {
@@ -1317,7 +1323,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_opens_the_quit_prompt_even_while_streaming() {
+    fn ctrl_c_clears_the_draft_then_quits_even_while_streaming() {
         let mut app = app_with(connected());
         app.welcome.close();
         app.overlay = Overlay::None;
@@ -1332,6 +1338,16 @@ mod tests {
         app.session.input.buffer.set("draft");
         let key =
             termina::event::KeyEvent::new(KeyCode::Char('c'), termina::event::Modifiers::CONTROL);
+        assert!(matches!(
+            app.map_event(Event::Terminal(TermEvent::Key(key))),
+            Some(AppMessage::Session(SessionMessage::Text(
+                TextAreaMessage::Clear
+            )))
+        ));
+        app.update(AppMessage::Session(SessionMessage::Text(
+            TextAreaMessage::Clear,
+        )));
+        assert!(app.session.input.is_empty(), "draft is cleared");
         assert!(matches!(
             app.map_event(Event::Terminal(TermEvent::Key(key))),
             Some(AppMessage::RequestQuit)
