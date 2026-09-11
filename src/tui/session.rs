@@ -21,6 +21,7 @@ use shuvarie_core::Skill;
 pub mod bash;
 pub mod blocks;
 pub mod chat;
+pub mod md_cache;
 pub mod segment;
 pub mod virtualizer;
 

@@ -21,23 +21,162 @@ pub fn plain(text: &str) -> Vec<Line<'static>> {
 }
 
 pub fn render(text: &str) -> Vec<Line<'static>> {
+    let mut lines = render_pass(text).lines;
+    while lines.last().is_some_and(is_blank_line) {
+        lines.pop();
+    }
+    lines
+}
+
+/// A resumable markdown render: the rendered lines plus, for every safe
+/// top-level block boundary, the byte offset in the input where the block
+/// ends and the line count reached at that point. A boundary is safe when a
+/// fresh parse of `text[boundary..]` renders the remaining text identically
+/// to the whole-input parse — guaranteed once a blank line (or an atomic
+/// block such as a heading or rule) separates the boundary from whatever
+/// follows. Streaming blocks commit at the last boundary and re-render only
+/// the open region after it on each append.
+pub struct MdPass {
+    pub lines: Vec<Line<'static>>,
+    pub boundaries: Vec<(usize, usize)>,
+}
+
+pub fn render_pass(text: &str) -> MdPass {
     let mut ctx = Ctx::default();
-    for event in Parser::new_ext(text, OPTIONS) {
+    let mut boundaries: Vec<(usize, usize)> = Vec::new();
+    let mut depth = 0usize;
+    for (event, range) in Parser::new_ext(text, OPTIONS).into_offset_iter() {
         match event {
-            Event::Start(tag) => ctx.start(tag),
-            Event::End(tag_end) => ctx.end(tag_end),
+            Event::Start(tag) => {
+                ctx.start(tag);
+                depth += 1;
+            }
+            Event::End(tag_end) => {
+                ctx.end(tag_end);
+                depth -= 1;
+                if depth == 0 && boundary_is_stable(text, tag_end, range.end) {
+                    boundaries.push((range.end, ctx.lines.len()));
+                }
+            }
             Event::Text(t) => ctx.text(t.as_ref().to_string()),
             Event::Code(c) => ctx.inline_code(c.as_ref().to_string()),
             Event::InlineHtml(h) | Event::Html(h) => ctx.inline_html(h.as_ref().to_string()),
             Event::InlineMath(m) | Event::DisplayMath(m) => ctx.text(m.as_ref().to_string()),
             Event::SoftBreak => ctx.soft_break(),
             Event::HardBreak => ctx.hard_break(),
-            Event::Rule => ctx.rule(),
+            Event::Rule => {
+                ctx.rule();
+                if depth == 0 {
+                    boundaries.push((range.end, ctx.lines.len()));
+                }
+            }
             Event::TaskListMarker(checked) => ctx.task_marker(checked),
             Event::FootnoteReference(_) => {}
         }
     }
-    ctx.finish()
+    ctx.flush_final();
+    MdPass {
+        lines: ctx.lines,
+        boundaries,
+    }
+}
+
+/// Whether a top-level block ending at `end` cannot be changed retroactively
+/// by more text: atomic blocks (headings, rules) never, every other block
+/// only once a blank line follows — an unterminated paragraph can still grow
+/// a setext underline or a table separator, a list or quote can lazily
+/// continue, an unclosed fence closes only at EOF. A genuinely closed fence
+/// is stable even without a blank line.
+fn boundary_is_stable(text: &str, tag: TagEnd, end: usize) -> bool {
+    match tag {
+        TagEnd::Heading(_) => true,
+        TagEnd::CodeBlock => fence_closed(&text[..end]) || followed_by_blank(text, end),
+        _ => followed_by_blank(text, end),
+    }
+}
+
+/// Whether `head` ends with a genuinely closed code fence: walking its
+/// lines, the last fence opener must have been closed by a line carrying at
+/// least as many of the opener's fence character. This mirrors CommonMark's
+/// fence rules (up to three spaces of indent, a closing line may not be
+/// shorter, info strings open, an unclosed fence closes only at EOF).
+fn fence_closed(head: &str) -> bool {
+    let mut opener: Option<(u8, usize)> = None;
+    for line in head.lines() {
+        let bytes = line.as_bytes();
+        let mut indent = 0usize;
+        while indent < bytes.len() && matches!(bytes[indent], b' ' | b'\t') {
+            indent += 1;
+        }
+        if indent > 3 {
+            continue;
+        }
+        let mut end = bytes.len();
+        while end > indent && matches!(bytes[end - 1], b' ' | b'\t' | b'\r') {
+            end -= 1;
+        }
+        let body = &bytes[indent..end];
+        let Some(&first) = body.first() else {
+            continue;
+        };
+        if first != b'`' && first != b'~' {
+            continue;
+        }
+        let count = body.iter().take_while(|&&c| c == first).count();
+        if count < 3 {
+            continue;
+        }
+        let rest_ws_only = body[count..].iter().all(|&c| c == b' ' || c == b'\t');
+        opener = match opener {
+            None => {
+                if first == b'`' && !rest_ws_only && body[count..].contains(&b'`') {
+                    continue;
+                }
+                Some((first, count))
+            }
+            Some((oc, ocount)) if first == oc && count >= ocount && rest_ws_only => None,
+            Some(open) => Some(open),
+        };
+    }
+    opener.is_none()
+}
+
+/// Whether a complete blank line (ws-only, with its own line break) follows
+/// the byte offset `end`: either right after it, or inside the trailing gap
+/// the block's range already swallowed.
+fn followed_by_blank(text: &str, end: usize) -> bool {
+    blank_ahead(&text[end..]) || blank_behind(&text[..end])
+}
+
+/// Whether the first line of `rest` (everything after the block's range,
+/// which already includes the block's own line break) is blank and carries
+/// its own line break: a ws-only line before the next `\n`.
+fn blank_ahead(rest: &str) -> bool {
+    match rest.find('\n') {
+        Some(k) => rest[..k].bytes().all(|b| matches!(b, b' ' | b'\t' | b'\r')),
+        None => false,
+    }
+}
+
+/// Whether the whitespace tail of `head` (between the last non-ws byte and
+/// the end) contains a complete blank line: a `\n`, then only whitespace,
+/// then another `\n`.
+fn blank_behind(head: &str) -> bool {
+    let gap = &head[head.trim_end().len()..];
+    let bytes = gap.as_bytes();
+    for (i, &byte) in bytes.iter().enumerate() {
+        if byte != b'\n' {
+            continue;
+        }
+        let mut j = i + 1;
+        while j < bytes.len() && matches!(bytes[j], b' ' | b'\t' | b'\r') {
+            j += 1;
+        }
+        if bytes.get(j) == Some(&b'\n') {
+            return true;
+        }
+    }
+    false
 }
 
 #[derive(Clone)]
@@ -332,15 +471,11 @@ impl Ctx {
         }
     }
 
-    fn finish(mut self) -> Vec<Line<'static>> {
+    fn flush_final(&mut self) {
         self.flush_line(true);
-        while self.lines.last().is_some_and(is_blank_line) {
-            self.lines.pop();
-        }
-        self.lines
     }
 }
 
-fn is_blank_line(line: &Line<'static>) -> bool {
+fn is_blank_line(line: &Line<'_>) -> bool {
     line.spans.iter().all(|span| span.content.is_empty())
 }

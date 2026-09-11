@@ -70,6 +70,9 @@ pub enum BlockMessage {
 /// Read-only view context handed to block `view` calls.
 pub struct ChatEnv<'a> {
     pub lsp_diagnostics: &'a BTreeMap<String, Vec<DiagnosticInfo>>,
+    /// Revision of the environment the diagnostics come from, so blocks can
+    /// key environment-dependent caches (e.g. cached tool bodies) on it.
+    pub rev: u64,
 }
 
 impl Block {
@@ -124,12 +127,12 @@ impl Block {
     /// the chat engine stamps those by turn/block position).
     pub fn view(&self, width: u16, env: &ChatEnv) -> Vec<Segment> {
         match self {
-            Block::User(block) => block.view(),
-            Block::Steered(block) => block.view(),
-            Block::Text(block) => block.view(),
-            Block::System(block) => block.view(),
+            Block::User(block) => block.view(width),
+            Block::Steered(block) => block.view(width),
+            Block::Text(block) => block.view(width),
+            Block::System(block) => block.view(width),
             Block::Tool(block) => vec![block.view(width, env)],
-            Block::Reasoning(block) => block.view(),
+            Block::Reasoning(block) => block.view(width),
             Block::Context(block) => block.view(),
             Block::Summary => vec![Segment::plain(vec![Line::from(
                 Span::raw("◈ summary of earlier conversation")
@@ -171,6 +174,16 @@ impl Block {
 
     pub fn tool_is_running(&self) -> bool {
         matches!(self, Block::Tool(tool) if tool.is_running())
+    }
+
+    /// Whether the block's first segment animates per spinner frame: a
+    /// thinking reasoning header or a running tool header.
+    pub fn spinner_bearing(&self) -> bool {
+        match self {
+            Block::Reasoning(reasoning) => reasoning.is_thinking(),
+            Block::Tool(tool) => tool.is_running(),
+            _ => false,
+        }
     }
 
     pub fn is_thinking(&self) -> bool {

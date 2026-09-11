@@ -16,7 +16,7 @@ use super::segment::{BLOCK_PADDING, BlockAddr, HitRegion, Segment, TEXT_PADDING}
 /// Estimated row counters of one turn. Collected once (from stored session
 /// data at load, or from block state at materialization/mutation) so heights
 /// re-estimate in O(1) per width change without touching markdown rendering.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TurnEst {
     pub text_lines: u32,
     pub text_width: u32,
@@ -199,6 +199,29 @@ pub struct TurnCache {
     pub segs: Vec<TurnSeg>,
     pub height: u32,
     pub hits: Vec<HitRegion>,
+    /// Segments whose content animates per spinner frame (a thinking header,
+    /// a running tool header, the working placeholder): re-rendered in place
+    /// by [`TurnData::refresh_spinners`] without invalidating the cache.
+    pub spinners: Vec<SpinnerSlot>,
+}
+
+/// Where a spinner-bearing segment's content comes from at repaint time.
+#[derive(Clone)]
+pub enum SpinnerSource {
+    /// Re-render `blocks[i]`'s `sub`-th segment.
+    Block(usize),
+    /// Re-render the synthesized working placeholder.
+    Working,
+}
+
+#[derive(Clone)]
+pub struct SpinnerSlot {
+    /// Index of the segment in [`TurnCache::segs`].
+    pub seg: usize,
+    /// Index of the segment within the source block's view (0 for the
+    /// single-segment tool/reasoning/working segments).
+    sub: usize,
+    source: SpinnerSource,
 }
 
 impl TurnCache {
@@ -218,7 +241,8 @@ pub struct TurnFlags {
 /// list (`blocks`), a lazy slot backed by the stored session (`blocks: None`,
 /// height estimated from `est`), or anything in between (materialized but not
 /// currently rendered). Block mutations bump `rev`, which invalidates the
-/// rendered cache.
+/// rendered cache; spinner ticks do not — they repaint only the segments the
+/// [`SpinnerSlot`]s address.
 pub struct TurnData {
     pub role: Role,
     pub blocks: Option<Vec<Block>>,
@@ -410,6 +434,70 @@ impl TurnData {
     pub fn cache(&self) -> Option<&TurnCache> {
         self.cache.as_ref()
     }
+
+    /// Whether any tool block in this turn is still running (drives spinner
+    /// repaints of a committed turn's straggler).
+    pub fn has_running_tool(&self) -> bool {
+        self.blocks
+            .as_deref()
+            .is_some_and(|blocks| blocks.iter().any(Block::tool_is_running))
+    }
+
+    /// Repaint the spinner-bearing segments in place: re-render only their
+    /// segments from the blocks and swap them into the cache. Layout is
+    /// untouched — a spinner segment is a single row — and a mismatch falls
+    /// back to a full rebuild via `rev`.
+    pub fn refresh_spinners(&mut self, env: &ChatEnv) {
+        let Some(cache) = self.cache.as_ref() else {
+            return;
+        };
+        if cache.spinners.is_empty() {
+            return;
+        }
+        let slots = cache.spinners.clone();
+        let width = cache.width;
+        let mut replacements: Vec<(usize, Segment)> = Vec::with_capacity(slots.len());
+        let mut stale = self.blocks.is_none();
+        if !stale {
+            let blocks = self.blocks.as_deref().expect("checked above");
+            for slot in slots {
+                let view = match &slot.source {
+                    SpinnerSource::Working => Block::Working.view(width, env),
+                    SpinnerSource::Block(block_idx) => match blocks.get(*block_idx) {
+                        Some(block) => block.view(width, env),
+                        None => {
+                            stale = true;
+                            break;
+                        }
+                    },
+                };
+                let Some(segment) = view.into_iter().nth(slot.sub) else {
+                    stale = true;
+                    break;
+                };
+                let height = segment.measure(width);
+                match cache.segs.get(slot.seg) {
+                    Some(existing) if existing.height == height => {}
+                    _ => {
+                        stale = true;
+                        break;
+                    }
+                }
+                replacements.push((slot.seg, segment));
+            }
+        }
+        if stale {
+            self.rev += 1;
+            if let Some(cache) = self.cache.as_mut() {
+                cache.spinners.clear();
+            }
+            return;
+        }
+        let cache = self.cache.as_mut().expect("checked above");
+        for (seg, segment) in replacements {
+            cache.segs[seg].segment = segment;
+        }
+    }
 }
 
 /// Render the turn's blocks into segments with per-segment layout: spacer
@@ -428,17 +516,20 @@ pub fn render_turn_cache(
     let blocks = turn.blocks.as_deref()?;
     let mut segs: Vec<TurnSeg> = Vec::new();
     let mut hits: Vec<HitRegion> = Vec::new();
+    let mut spinners: Vec<SpinnerSlot> = Vec::new();
     let mut y = 0u32;
     let mut prev_bg = false;
     for (block_idx, block) in blocks.iter().enumerate() {
         if block.is_tool() && prev_bg {
-            y = push_segment(&mut segs, Segment::spacer(), y, width);
+            y = push_measured(&mut segs, Segment::spacer(), y, width);
             prev_bg = false;
         }
         let addr = BlockAddr {
             turn: turn_idx,
             block: block_idx,
         };
+        let spinner = block.spinner_bearing();
+        let first_seg = segs.len();
         for (i, mut segment) in block.view(width, env).into_iter().enumerate() {
             match block {
                 Block::Tool(_) => segment.hit = Some(addr.clone()),
@@ -454,7 +545,14 @@ pub fn render_turn_cache(
                 });
             }
             prev_bg = segment.bg.is_some();
-            y = push_segment(&mut segs, segment, y, width);
+            y = push_segment(&mut segs, segment, y, height);
+        }
+        if spinner && first_seg < segs.len() {
+            spinners.push(SpinnerSlot {
+                seg: first_seg,
+                sub: 0,
+                source: SpinnerSource::Block(block_idx),
+            });
         }
     }
     let has_text = blocks.iter().any(Block::is_text);
@@ -466,15 +564,23 @@ pub fn render_turn_cache(
             Block::ToolOnlyNote
         };
         for segment in placeholder.view(width, env) {
-            y = push_segment(&mut segs, segment, y, width);
+            let seg_idx = segs.len();
+            y = push_measured(&mut segs, segment, y, width);
+            if matches!(placeholder, Block::Working) && seg_idx < segs.len() {
+                spinners.push(SpinnerSlot {
+                    seg: seg_idx,
+                    sub: 0,
+                    source: SpinnerSource::Working,
+                });
+            }
         }
     }
     if flags.interrupted_marker && turn.role == Role::Assistant {
         for segment in Block::Interrupted.view(width, env) {
-            y = push_segment(&mut segs, segment, y, width);
+            y = push_measured(&mut segs, segment, y, width);
         }
     }
-    y = push_segment(&mut segs, Segment::spacer(), y, width);
+    y = push_measured(&mut segs, Segment::spacer(), y, width);
     Some(TurnCache {
         width,
         rev: turn.rev,
@@ -482,17 +588,22 @@ pub fn render_turn_cache(
         segs,
         height: y,
         hits,
+        spinners,
     })
 }
 
-fn push_segment(segs: &mut Vec<TurnSeg>, segment: Segment, y: u32, width: u16) -> u32 {
-    let height = segment.measure(width);
+fn push_segment(segs: &mut Vec<TurnSeg>, segment: Segment, y: u32, height: u32) -> u32 {
     segs.push(TurnSeg {
         segment,
         start: y,
         height,
     });
     y + height
+}
+
+fn push_measured(segs: &mut Vec<TurnSeg>, segment: Segment, y: u32, width: u16) -> u32 {
+    let height = segment.measure(width);
+    push_segment(segs, segment, y, height)
 }
 
 /// Paint the visible rows of a rendered turn: `turn_y` is the turn's content
@@ -533,4 +644,99 @@ pub fn locate(heights: &[u32], y: u32) -> (usize, u32) {
         heights.len().saturating_sub(1),
         heights.last().copied().unwrap_or(0),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use shuvarie_core::DiagnosticInfo;
+
+    use super::*;
+    use crate::tui::session::blocks::ToolBlock;
+
+    fn env() -> ChatEnv<'static> {
+        ChatEnv {
+            lsp_diagnostics: &DIAGS,
+            rev: 0,
+        }
+    }
+
+    static DIAGS: BTreeMap<String, Vec<DiagnosticInfo>> = BTreeMap::new();
+
+    fn seg_contents(cache: &TurnCache, index: usize) -> Vec<String> {
+        cache.segs[index]
+            .segment
+            .flattened()
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.clone())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn refresh_spinners_swaps_only_spinner_segments() {
+        let mut turn = TurnData::new(Role::Assistant);
+        turn.set_blocks(
+            vec![
+                Block::Text(crate::tui::session::blocks::TextBlock::new("body line")),
+                Block::Tool(Box::new(ToolBlock::new(
+                    "run_shell",
+                    r#"{"command":"ls"}"#.to_string(),
+                    None,
+                    None,
+                ))),
+                Block::Reasoning(ReasoningBlock::new("thinking hard")),
+            ],
+            false,
+        );
+        turn.ensure_cache(
+            0,
+            80,
+            &env(),
+            0,
+            TurnFlags {
+                in_flight: true,
+                interrupted_marker: false,
+            },
+        );
+        let cache = turn.cache().expect("cache");
+        assert_eq!(
+            cache.spinners.len(),
+            2,
+            "running tool + thinking header must hold slots"
+        );
+        let rev_before = turn.rev;
+        let before: Vec<Vec<String>> = (0..cache.segs.len())
+            .map(|i| seg_contents(cache, i))
+            .collect();
+        let heights: Vec<u32> = cache.segs.iter().map(|seg| seg.height).collect();
+        turn.refresh_spinners(&env());
+        assert_eq!(turn.rev, rev_before, "refresh must not bump rev");
+        let cache = turn.cache().expect("cache");
+        let heights_after: Vec<u32> = cache.segs.iter().map(|seg| seg.height).collect();
+        assert_eq!(heights, heights_after, "layout must be untouched");
+        let spinner_segs: Vec<usize> = cache.spinners.iter().map(|slot| slot.seg).collect();
+        for (i, content) in before.iter().enumerate() {
+            let after = seg_contents(cache, i);
+            if spinner_segs.contains(&i) {
+                // the header re-rendered at the same wall-clock frame; same
+                // glyph, same text (or the elapsed second advanced).
+                assert_eq!(content.first(), after.first(), "header rows stay single");
+            } else {
+                assert_eq!(*content, after, "segment {i} must be untouched");
+            }
+        }
+    }
+
+    #[test]
+    fn refresh_spinners_without_cache_is_a_noop() {
+        let mut turn = TurnData::lazy(Role::User, TurnEst::default());
+        turn.refresh_spinners(&env());
+        assert!(turn.cache().is_none());
+    }
 }

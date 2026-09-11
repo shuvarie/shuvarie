@@ -1,14 +1,17 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use ratatui::prelude::*;
 use serde_json::Value;
 use shuvarie_core::tools::todos::{TodoStatus, done_total, parse_items};
-use shuvarie_llm::{DiffLine, DiffLineKind, FileChange, PatchFileKind};
+use shuvarie_llm::{FileChange, PatchFileKind};
 use unicode_width::UnicodeWidthStr;
 
 use super::{format_duration_ms, hides_output_when_collapsed, shows_elapsed};
 use crate::tui::session::blocks::{ChatEnv, Segment};
-use crate::tui::session::segment::BLOCK_PADDING;
+use crate::tui::session::segment::{BLOCK_PADDING, BodyChunk, BodySource, TextRows};
 use crate::tui::session::virtualizer::{TurnEst, collapsed_rows, file_change_row_est};
 use crate::tui::{spinner, theme};
 use shuvarie_core::tool_record::ToolRecord;
@@ -44,6 +47,7 @@ pub enum ToolMessage {
 pub struct ToolBlock {
     name: String,
     args: String,
+    parsed_args: OnceLock<Value>,
     call_id: String,
     status: ToolStatus,
     output: String,
@@ -53,6 +57,23 @@ pub struct ToolBlock {
     file_change: Option<FileChange>,
     started_at: Option<Instant>,
     duration_ms: u64,
+    /// Bumped whenever output, stderr, status, or expansion change: the key
+    /// for the cached body chunks and estimate.
+    body_rev: u64,
+    /// Body chunks (everything between the header and the elapsed row) keyed
+    /// by `(width, env_rev, body_rev)`: the header and the elapsed row change
+    /// per spinner frame, the body only on content/expansion/diagnostic
+    /// changes.
+    body: RefCell<Option<CachedBody>>,
+    est_cache: RefCell<Option<(u64, TurnEst)>>,
+}
+
+#[derive(Clone)]
+struct CachedBody {
+    width: u16,
+    env_rev: u64,
+    body_rev: u64,
+    chunks: Rc<[BodyChunk]>,
 }
 
 impl ToolBlock {
@@ -65,6 +86,7 @@ impl ToolBlock {
         Self {
             name: name.into(),
             args,
+            parsed_args: OnceLock::new(),
             call_id: call_id.unwrap_or_default(),
             status: ToolStatus::Running,
             output: String::new(),
@@ -74,6 +96,9 @@ impl ToolBlock {
             file_change: None,
             started_at: Some(Instant::now()),
             duration_ms: 0,
+            body_rev: 0,
+            body: RefCell::new(None),
+            est_cache: RefCell::new(None),
         }
     }
 
@@ -81,6 +106,7 @@ impl ToolBlock {
         Self {
             name: record.name.clone(),
             args: record.args_json.clone(),
+            parsed_args: OnceLock::new(),
             call_id: String::new(),
             status: if record.ok {
                 ToolStatus::Ok
@@ -94,7 +120,16 @@ impl ToolBlock {
             file_change: record.file_change.clone(),
             started_at: None,
             duration_ms: record.duration_ms,
+            body_rev: 0,
+            body: RefCell::new(None),
+            est_cache: RefCell::new(None),
         }
+    }
+
+    /// The call args parsed once: `args` never changes after construction.
+    fn args_value(&self) -> &Value {
+        self.parsed_args
+            .get_or_init(|| serde_json::from_str(&self.args).unwrap_or(Value::Null))
     }
 
     pub fn matches(&self, name: &str, worker: &Option<String>) -> bool {
@@ -113,10 +148,14 @@ impl ToolBlock {
     /// Flip the collapse state of the output rows.
     pub(super) fn toggle(&mut self) {
         self.expanded = !self.expanded;
+        self.body_rev += 1;
     }
 
     pub(super) fn set_expanded(&mut self, expanded: bool) {
-        self.expanded = expanded;
+        if self.expanded != expanded {
+            self.expanded = expanded;
+            self.body_rev += 1;
+        }
     }
 
     pub(super) fn is_expanded(&self) -> bool {
@@ -126,8 +165,20 @@ impl ToolBlock {
     /// Estimated row counters mirroring [`Self::view`]: header, collapse state
     /// (which follows `expanded` — `question`/`todo` flip it on finish), file
     /// change rows, and the elapsed meta row for `shows_elapsed` tools. LSP
-    /// diagnostics rows are environment-dependent and not estimated.
+    /// diagnostics rows are environment-dependent and not estimated. Cached
+    /// per `body_rev` — streaming output updates are the only frequent bumps.
     pub(super) fn est(&self) -> TurnEst {
+        if let Some((rev, est)) = self.est_cache.borrow().as_ref()
+            && *rev == self.body_rev
+        {
+            return *est;
+        }
+        let est = self.compute_est();
+        *self.est_cache.borrow_mut() = Some((self.body_rev, est));
+        est
+    }
+
+    fn compute_est(&self) -> TurnEst {
         let mut est = TurnEst {
             tool_count: 1,
             padding_rows: 2 * u32::from(BLOCK_PADDING.1),
@@ -159,15 +210,21 @@ impl ToolBlock {
                     est.tool_rows += output_rows
                         .saturating_add(stderr_rows)
                         .saturating_add(u32::from(output_rows > 0 && stderr_rows > 0));
+                } else if stderr_rows > 0 {
+                    est.tool_rows += collapsed_rows(stderr_rows);
                 } else {
-                    collapsed_rows(stderr_rows);
+                    est.tool_rows += collapsed_rows(output_rows);
                 }
             }
             _ if self.expanded => {
                 est.tool_rows += output_rows;
             }
             _ => {
-                collapsed_rows(output_rows);
+                let hidden =
+                    self.status == ToolStatus::Ok && hides_output_when_collapsed(&self.name);
+                if !hidden {
+                    est.tool_rows += collapsed_rows(output_rows);
+                }
             }
         }
         if let Some(change) = &self.file_change {
@@ -192,6 +249,7 @@ impl ToolBlock {
                 }
                 self.output = stdout;
                 self.stderr = stderr;
+                self.body_rev += 1;
                 true
             }
             ToolMessage::Finish {
@@ -215,14 +273,23 @@ impl ToolBlock {
                 self.started_at = None;
                 self.duration_ms = duration_ms;
                 self.expanded = self.name == "question" || self.name == "todo";
+                self.body_rev += 1;
                 true
             }
         }
     }
 
     pub(super) fn view(&self, width: u16, env: &ChatEnv) -> Segment {
+        let body = self.cached_body(width, env);
+        let inner_w = width.saturating_sub(2 * BLOCK_PADDING.0).max(8) as usize;
+        let mut chunks = Vec::with_capacity(body.len() + 2);
+        chunks.push(BodyChunk::fixed(vec![self.header_line(inner_w)]));
+        chunks.extend(body.iter().cloned());
+        if shows_elapsed(&self.name) {
+            chunks.push(BodyChunk::fixed(vec![elapsed_line(self)]));
+        }
         Segment {
-            lines: self.block_lines(width, env),
+            chunks,
             bg: Some(self.bg()),
             padding: BLOCK_PADDING,
             hit: None,
@@ -230,27 +297,46 @@ impl ToolBlock {
         }
     }
 
-    fn block_lines(&self, width: u16, env: &ChatEnv) -> Vec<Line<'static>> {
-        let inner_w = width.saturating_sub(2 * BLOCK_PADDING.0).max(8) as usize;
+    /// The body chunks between the header and the elapsed row, keyed by
+    /// `(width, env_rev, body_rev)` so spinner frames reuse them unchanged.
+    fn cached_body(&self, width: u16, env: &ChatEnv) -> Rc<[BodyChunk]> {
+        if let Some(cached) = self.body.borrow().as_ref()
+            && cached.width == width
+            && cached.env_rev == env.rev
+            && cached.body_rev == self.body_rev
+        {
+            return cached.chunks.clone();
+        }
+        let chunks: Rc<[BodyChunk]> = self.build_body(width, env).into();
+        *self.body.borrow_mut() = Some(CachedBody {
+            width,
+            env_rev: env.rev,
+            body_rev: self.body_rev,
+            chunks: chunks.clone(),
+        });
+        chunks
+    }
+
+    fn build_body(&self, width: u16, env: &ChatEnv) -> Vec<BodyChunk> {
+        let count_width = width.saturating_sub(2 * BLOCK_PADDING.0).max(1);
         let is_shell = self.name == "run_shell";
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        lines.push(self.header_line(inner_w));
+        let mut body = BodyBuilder::new(count_width);
         if self.name == "question" {
-            push_question_block_lines(&mut lines, self);
+            push_question_block_lines(&mut body, self);
         } else if self.name == "todo" {
             match parse_items(&self.output) {
-                Some(items) => push_todo_rows(&mut lines, &items, self.expanded),
-                None => push_output_rows(&mut lines, self, false),
+                Some(items) => push_todo_rows(&mut body, &items, self.expanded),
+                None => {
+                    push_output_rows(self, &mut body, false);
+                }
             }
         } else {
-            let before = lines.len();
-            push_output_rows(&mut lines, self, is_shell);
-            let has_output = lines.len() > before;
+            let has_output = push_output_rows(self, &mut body, is_shell);
             if let Some(change) = &self.file_change {
                 if has_output {
-                    lines.push(Line::from(""));
+                    body.fixed(Line::from(""));
                 }
-                push_file_change_lines(&mut lines, change);
+                push_file_change_rows(&mut body, change);
                 let path = match change {
                     FileChange::Edit { path, .. } | FileChange::Write { path, .. } => {
                         Some(path.as_str())
@@ -260,14 +346,11 @@ impl ToolBlock {
                     }
                 };
                 if let Some(path) = path {
-                    push_diagnostics_lines(&mut lines, env, path);
+                    push_diagnostics_lines(&mut body, env, path);
                 }
             }
         }
-        if shows_elapsed(&self.name) {
-            lines.push(elapsed_line(self));
-        }
-        lines
+        body.chunks
     }
 
     fn header_line(&self, inner_w: usize) -> Line<'static> {
@@ -296,7 +379,7 @@ impl ToolBlock {
         }
         header.push(Span::raw(" "));
 
-        let args: Value = serde_json::from_str(&self.args).unwrap_or(Value::Null);
+        let args = self.args_value();
 
         if is_worker_call {
             header.push(Span::raw(self.name.clone()).fg(theme::TEXT).bold());
@@ -343,7 +426,7 @@ impl ToolBlock {
             "read_file" => {
                 let path = args.get("path").and_then(Value::as_str).unwrap_or("");
                 let range = (self.status == ToolStatus::Ok)
-                    .then(|| read_file_range(&args, &self.output))
+                    .then(|| read_file_range(args, &self.output))
                     .flatten();
                 let avail = inner_w
                     .saturating_sub(self.name.chars().count() + 1)
@@ -364,7 +447,7 @@ impl ToolBlock {
             }
             "todo" => {
                 header.push(Span::raw("todo").fg(theme::TEXT).bold());
-                if let Some(summary) = todo_op_summary(&args) {
+                if let Some(summary) = todo_op_summary(args) {
                     header.push(Span::raw(format!(" {summary}")).fg(theme::TEXT_MUTED));
                 }
                 if let Some(items) = parse_items(&self.output) {
@@ -398,52 +481,102 @@ impl ToolBlock {
     }
 }
 
-fn push_output_rows(lines: &mut Vec<Line<'static>>, tool: &ToolBlock, is_shell: bool) {
-    let (stdout_body, stderr_body): (String, String) = if is_shell {
+/// Accumulates a tool body as chunks: structural lines merge into a running
+/// fixed chunk, long source runs render as sliced chunks.
+struct BodyBuilder {
+    width: u16,
+    chunks: Vec<BodyChunk>,
+}
+
+impl BodyBuilder {
+    fn new(width: u16) -> Self {
+        Self {
+            width,
+            chunks: Vec::new(),
+        }
+    }
+
+    fn fixed(&mut self, line: Line<'static>) {
+        if let Some(BodyChunk::Fixed(chunk)) = self.chunks.last_mut() {
+            chunk.lines.push(line);
+        } else {
+            self.chunks.push(BodyChunk::fixed(vec![line]));
+        }
+    }
+
+    fn rows(&mut self, source: BodySource) {
+        if source.row_count() == 0 {
+            return;
+        }
+        self.chunks
+            .push(BodyChunk::rows(source, 0, self.width, false));
+    }
+}
+
+fn push_output_rows(tool: &ToolBlock, body: &mut BodyBuilder, is_shell: bool) -> bool {
+    let (stdout_body, stderr_body): (&str, &str) = if is_shell {
         let (_, body) = split_status_line(&tool.output);
-        (body.to_string(), tool.stderr.clone())
+        (body, tool.stderr.as_str())
     } else {
-        (tool.output.clone(), String::new())
+        (tool.output.as_str(), "")
     };
-    let stdout_rows: Vec<&str> = stdout_body.lines().collect();
-    let stderr_rows: Vec<&str> = stderr_body.lines().collect();
+    let stdout_count = stdout_body.lines().count() as u32;
+    let stderr_count = stderr_body.lines().count() as u32;
 
     if tool.expanded {
-        for row in &stdout_rows {
-            lines.push(Line::from(
-                Span::raw((*row).to_string()).fg(theme::TEXT_DIM),
-            ));
+        let mut has_output = false;
+        if stdout_count > 0 {
+            body.rows(BodySource::Text {
+                rows: TextRows::new(stdout_body),
+                prefix: "",
+                style: Style::new().fg(theme::TEXT_DIM),
+            });
+            has_output = true;
         }
-        if !stderr_rows.is_empty() {
-            if !stdout_rows.is_empty() {
-                lines.push(Line::from(""));
+        if stderr_count > 0 {
+            if has_output {
+                body.fixed(Line::from(""));
             }
-            for row in &stderr_rows {
-                lines.push(Line::from(Span::raw((*row).to_string()).fg(theme::ERROR)));
-            }
+            body.rows(BodySource::Text {
+                rows: TextRows::new(stderr_body),
+                prefix: "",
+                style: Style::new().fg(theme::ERROR),
+            });
+            has_output = true;
         }
-        return;
+        return has_output;
     }
 
-    let (rows, fg) = if is_shell && !stderr_rows.is_empty() {
-        (stderr_rows.as_slice(), theme::ERROR)
+    let (display, fg) = if is_shell && stderr_count > 0 {
+        (stderr_body, theme::ERROR)
     } else {
-        (stdout_rows.as_slice(), theme::TEXT_DIM)
+        (stdout_body, theme::TEXT_DIM)
     };
     if tool.status == ToolStatus::Ok && hides_output_when_collapsed(&tool.name) {
-        return;
+        return false;
     }
-    let hidden = rows.len().saturating_sub(COLLAPSED_OUTPUT_LINES);
-    for row in &rows[hidden..] {
-        lines.push(Line::from(Span::raw((*row).to_string()).fg(fg)));
+    push_tail_rows(body, display, fg)
+}
+
+/// The collapsed preview: the last [`COLLAPSED_OUTPUT_LINES`] rows plus a
+/// `… +N more lines` hint when rows are hidden.
+fn push_tail_rows(body: &mut BodyBuilder, text: &str, fg: Color) -> bool {
+    let count = text.lines().count() as u32;
+    let hidden = count.saturating_sub(COLLAPSED_OUTPUT_LINES as u32);
+    let mut pushed = false;
+    for row in text.lines().skip(hidden as usize) {
+        body.fixed(Line::from(Span::raw(row.to_string()).fg(fg)));
+        pushed = true;
     }
     if hidden > 0 {
-        lines.push(Line::from(
+        body.fixed(Line::from(
             Span::raw(format!("… +{hidden} more lines"))
                 .fg(theme::TEXT_MUTED)
                 .italic(),
         ));
+        pushed = true;
     }
+    pushed
 }
 
 /// A short human summary of the todo operation for the block header, parsed
@@ -474,11 +607,8 @@ fn todo_op_summary(args: &Value) -> Option<String> {
     }
 }
 
-/// The styled todo list rows: done items dimmed + struck through, the single
-/// in-progress item highlighted, pending items dim. Collapsed like tool
-/// output (last few rows + a hint), expanded shows everything.
 fn push_todo_rows(
-    lines: &mut Vec<Line<'static>>,
+    body: &mut BodyBuilder,
     items: &[shuvarie_core::tools::todos::TodoItem],
     expanded: bool,
 ) {
@@ -499,7 +629,7 @@ fn push_todo_rows(
             TodoStatus::InProgress => ("◐", theme::ACCENT, Style::new().fg(theme::TEXT).bold()),
             TodoStatus::Pending => ("○", theme::TEXT_MUTED, Style::new().fg(theme::TEXT_DIM)),
         };
-        lines.push(Line::from(vec![
+        body.fixed(Line::from(vec![
             Span::raw("  ").fg(theme::TEXT_MUTED),
             Span::raw(marker).fg(marker_fg).bold(),
             Span::raw(" ").fg(theme::TEXT_MUTED),
@@ -507,7 +637,7 @@ fn push_todo_rows(
         ]));
     }
     if hidden > 0 {
-        lines.push(Line::from(
+        body.fixed(Line::from(
             Span::raw(format!("… +{hidden} more items"))
                 .fg(theme::TEXT_MUTED)
                 .italic(),
@@ -542,11 +672,14 @@ fn elapsed_line(tool: &ToolBlock) -> Line<'static> {
     }
 }
 
-fn push_question_block_lines(lines: &mut Vec<Line<'static>>, tool: &ToolBlock) {
+fn push_question_block_lines(body: &mut BodyBuilder, tool: &ToolBlock) {
     if tool.status == ToolStatus::Running {
-        lines.push(Line::from(
-            Span::raw("  Asking...").fg(theme::TEXT_MUTED).italic(),
-        ));
+        body.fixed(
+            Span::raw("  Asking...")
+                .fg(theme::TEXT_MUTED)
+                .italic()
+                .into(),
+        );
         return;
     }
     if !tool.expanded {
@@ -571,14 +704,17 @@ fn push_question_block_lines(lines: &mut Vec<Line<'static>>, tool: &ToolBlock) {
         } else {
             first
         };
-        lines.push(Line::from(
-            Span::raw(format!("  {note}")).fg(theme::TEXT_DIM).italic(),
-        ));
+        body.fixed(
+            Span::raw(format!("  {note}"))
+                .fg(theme::TEXT_DIM)
+                .italic()
+                .into(),
+        );
         return;
     }
     for q in &questions {
         let answer = answer_for_question(&tool.output, &q.question);
-        lines.push(Line::from(vec![
+        body.fixed(Line::from(vec![
             Span::raw("  ? ").fg(theme::ACCENT),
             Span::raw(q.question.clone()).fg(theme::TEXT),
         ]));
@@ -592,19 +728,19 @@ fn push_question_block_lines(lines: &mut Vec<Line<'static>>, tool: &ToolBlock) {
         } else {
             answer
         };
-        lines.push(Line::from(Span::raw(format!("{marker}{shown}")).fg(fg)));
+        body.fixed(Line::from(Span::raw(format!("{marker}{shown}")).fg(fg)));
     }
 }
 
-fn push_diagnostics_lines(lines: &mut Vec<Line<'static>>, env: &ChatEnv, path: &str) {
+fn push_diagnostics_lines(body: &mut BodyBuilder, env: &ChatEnv, path: &str) {
     let Some(diags) = env.lsp_diagnostics.get(path) else {
         return;
     };
     if diags.is_empty() {
         return;
     }
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
+    body.fixed(Line::from(""));
+    body.fixed(Line::from(vec![
         Span::raw("  ── diagnostics: ").fg(theme::TEXT_MUTED),
         Span::raw(path.to_string()).fg(theme::ACCENT),
     ]));
@@ -617,7 +753,7 @@ fn push_diagnostics_lines(lines: &mut Vec<Line<'static>>, env: &ChatEnv, path: &
         };
         let loc = format!("{}:{}", d.line, d.col);
         let msg = d.message.chars().take(140).collect::<String>();
-        lines.push(Line::from(vec![
+        body.fixed(Line::from(vec![
             Span::raw(format!("    {loc:<10} ")).fg(theme::TEXT_MUTED),
             Span::raw(format!("{sev_label:<8} ")).fg(sev_color),
             Span::raw(msg).fg(theme::TEXT_DIM),
@@ -625,104 +761,68 @@ fn push_diagnostics_lines(lines: &mut Vec<Line<'static>>, env: &ChatEnv, path: &
     }
 }
 
-fn push_file_change_lines(lines: &mut Vec<Line<'static>>, change: &FileChange) {
+fn push_file_change_rows(body: &mut BodyBuilder, change: &FileChange) {
     match change {
         FileChange::Edit { path, diff, .. } => {
-            lines.push(Line::from(vec![
+            body.fixed(Line::from(vec![
                 Span::raw("  ── diff: ").fg(theme::TEXT_MUTED),
                 Span::raw(path.clone()).fg(theme::ACCENT),
             ]));
-            for line in diff {
-                push_diff_line(lines, line);
-            }
+            body.rows(BodySource::Diff {
+                lines: Rc::from(diff.as_slice()),
+            });
         }
         FileChange::Write { path, content, .. } => {
-            lines.push(Line::from(vec![
+            body.fixed(Line::from(vec![
                 Span::raw("  ── new file: ").fg(theme::TEXT_MUTED),
                 Span::raw(path.clone()).fg(theme::ACCENT),
             ]));
-            for (i, text) in content.lines().enumerate() {
-                let num = format!("{:>4}", i + 1);
-                lines.push(Line::from(vec![
-                    Span::raw(format!("    {num} ")).fg(theme::TEXT_MUTED),
-                    Span::raw(text.to_string()).fg(theme::TEXT_DIM),
-                ]));
-            }
+            body.rows(BodySource::Numbered {
+                rows: TextRows::new(content.as_str()),
+            });
         }
         FileChange::Patch { files, .. } => {
             for file in files {
                 match (&file.kind, &file.moved_to) {
                     (PatchFileKind::Delete, _) => {
-                        lines.push(Line::from(vec![
+                        body.fixed(Line::from(vec![
                             Span::raw("  ── deleted: ").fg(theme::TEXT_MUTED),
                             Span::raw(file.path.clone()).fg(theme::ERROR),
                         ]));
                     }
                     (PatchFileKind::Add, _) => {
-                        lines.push(Line::from(vec![
+                        body.fixed(Line::from(vec![
                             Span::raw("  ── new file: ").fg(theme::TEXT_MUTED),
                             Span::raw(file.path.clone()).fg(theme::ACCENT),
                         ]));
-                        for (i, text) in file.new.as_deref().unwrap_or_default().lines().enumerate()
-                        {
-                            let num = format!("{:>4}", i + 1);
-                            lines.push(Line::from(vec![
-                                Span::raw(format!("    {num} ")).fg(theme::TEXT_MUTED),
-                                Span::raw(text.to_string()).fg(theme::TEXT_DIM),
-                            ]));
-                        }
+                        body.rows(BodySource::Numbered {
+                            rows: TextRows::new(file.new.as_deref().unwrap_or_default()),
+                        });
                     }
                     (PatchFileKind::Update, Some(target)) => {
-                        lines.push(Line::from(vec![
+                        body.fixed(Line::from(vec![
                             Span::raw("  ── moved: ").fg(theme::TEXT_MUTED),
                             Span::raw(file.path.clone()).fg(theme::ACCENT),
                             Span::raw(" → ").fg(theme::TEXT_MUTED),
                             Span::raw(target.clone()).fg(theme::ACCENT),
                         ]));
-                        for line in &file.diff {
-                            push_diff_line(lines, line);
-                        }
+                        body.rows(BodySource::Diff {
+                            lines: Rc::from(file.diff.as_slice()),
+                        });
                     }
                     (PatchFileKind::Update, None) => {
-                        lines.push(Line::from(vec![
+                        body.fixed(Line::from(vec![
                             Span::raw("  ── diff: ").fg(theme::TEXT_MUTED),
                             Span::raw(file.path.clone()).fg(theme::ACCENT),
                         ]));
-                        for line in &file.diff {
-                            push_diff_line(lines, line);
-                        }
+                        body.rows(BodySource::Diff {
+                            lines: Rc::from(file.diff.as_slice()),
+                        });
                     }
                 }
             }
         }
     }
-}
-
-fn push_diff_line(lines: &mut Vec<Line<'static>>, line: &DiffLine) {
-    if line.kind == DiffLineKind::Ellipsis {
-        lines.push(Line::from(Span::raw("    …").fg(theme::TEXT_MUTED)));
-        return;
-    }
-    let (marker, fg) = match line.kind {
-        DiffLineKind::Add => ("+", theme::SUCCESS),
-        DiffLineKind::Remove => ("-", theme::ERROR),
-        DiffLineKind::Context => (" ", theme::TEXT_DIM),
-        DiffLineKind::Ellipsis => unreachable!(),
-    };
-    let old_num = line
-        .old_line
-        .map(|n| format!("{n:>4}"))
-        .unwrap_or_else(|| "    ".to_string());
-    let new_num = line
-        .new_line
-        .map(|n| format!("{n:>4}"))
-        .unwrap_or_else(|| "    ".to_string());
-    let text = line.text.trim_end_matches(['\r', '\n']);
-    lines.push(Line::from(vec![
-        Span::raw(format!("  {old_num} {new_num} ")).fg(theme::TEXT_MUTED),
-        Span::raw(marker).fg(fg).bold(),
-        Span::raw(text.to_string()).fg(fg),
-    ]));
 }
 
 fn spans_width(spans: &[Span<'static>]) -> usize {
@@ -824,11 +924,14 @@ fn read_file_range(args: &Value, output: &str) -> Option<(u64, u64)> {
 mod tests {
     use std::collections::BTreeMap;
 
+    use shuvarie_llm::{DiffLine, DiffLineKind};
+
     use super::*;
 
     fn block_text(block: &ToolBlock, env: &ChatEnv) -> String {
         block
-            .block_lines(80, env)
+            .view(80, env)
+            .flattened()
             .iter()
             .map(|line| {
                 line.spans
@@ -838,6 +941,79 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn body_chunks_reuse_across_spinner_frames() {
+        let env = ChatEnv {
+            rev: 0,
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let mut block = ToolBlock::new("run_shell", r#"{"command":"ls"}"#.into(), None, None);
+        let first = block.cached_body(80, &env);
+        let again = block.cached_body(80, &env);
+        assert!(
+            Rc::ptr_eq(&first, &again),
+            "unchanged state must reuse chunks"
+        );
+
+        assert!(
+            block.update(ToolMessage::Output {
+                stdout: "file one\nfile two".into(),
+                stderr: String::new(),
+            }),
+            "output update must apply"
+        );
+        let after_output = block.cached_body(80, &env);
+        assert!(!Rc::ptr_eq(&first, &after_output), "output must rebuild");
+
+        block.toggle();
+        let after_toggle = block.cached_body(80, &env);
+        assert!(
+            !Rc::ptr_eq(&after_output, &after_toggle),
+            "toggle must rebuild"
+        );
+
+        let env2 = ChatEnv {
+            rev: 1,
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let after_env = block.cached_body(80, &env2);
+        assert!(
+            !Rc::ptr_eq(&after_toggle, &after_env),
+            "env change must rebuild"
+        );
+    }
+
+    #[test]
+    fn est_is_cached_until_body_changes() {
+        let env = ChatEnv {
+            rev: 0,
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let mut block = ToolBlock::new("run_shell", r#"{"command":"ls"}"#.into(), None, None);
+        let est = block.est();
+        assert_eq!(
+            est,
+            block.est(),
+            "unchanged body_rev must reuse the estimate"
+        );
+        assert!(
+            block.update(ToolMessage::Output {
+                stdout: "row\n".repeat(30),
+                stderr: String::new(),
+            }),
+            "output update must apply"
+        );
+        let grown = block.est();
+        assert!(
+            grown.tool_rows > est.tool_rows,
+            "output growth must be reflected: {} -> {}",
+            est.tool_rows,
+            grown.tool_rows
+        );
+        assert_eq!(grown, block.est());
+        let _ = block.view(80, &env);
     }
 
     fn finished_edit_block() -> ToolBlock {
@@ -878,6 +1054,7 @@ mod tests {
     #[test]
     fn edit_diff_rows_align_and_keep_indentation() {
         let env = ChatEnv {
+            rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
         };
         let block = finished_edit_block();
@@ -911,6 +1088,7 @@ mod tests {
     #[test]
     fn running_block_shows_live_elapsed() {
         let env = ChatEnv {
+            rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
         };
         let block = ToolBlock::new("run_shell", r#"{"command":"ls"}"#.to_string(), None, None);
@@ -922,6 +1100,7 @@ mod tests {
     #[test]
     fn finished_block_shows_took_with_core_duration() {
         let env = ChatEnv {
+            rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
         };
         let mut block = ToolBlock::new("run_shell", r#"{"command":"ls"}"#.to_string(), None, None);
@@ -940,6 +1119,7 @@ mod tests {
     #[test]
     fn reloaded_block_shows_persisted_duration() {
         let env = ChatEnv {
+            rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
         };
         let block = ToolBlock::from_record(&ToolRecord {
@@ -964,6 +1144,7 @@ mod tests {
     #[test]
     fn other_tool_blocks_omit_elapsed_row() {
         let env = ChatEnv {
+            rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
         };
         let mut block = ToolBlock::new("grep", r#"{"pattern":"x"}"#.to_string(), None, None);
@@ -992,6 +1173,7 @@ mod tests {
     #[test]
     fn worker_block_shows_elapsed_and_took() {
         let env = ChatEnv {
+            rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
         };
         let mut block = ToolBlock::new(
@@ -1028,6 +1210,7 @@ mod tests {
     #[test]
     fn finished_todo_block_renders_status_list() {
         let env = ChatEnv {
+            rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
         };
         let mut block = ToolBlock::new(
@@ -1059,6 +1242,7 @@ mod tests {
     #[test]
     fn reloaded_todo_block_renders_from_persisted_output() {
         let env = ChatEnv {
+            rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
         };
         let block = ToolBlock::from_record(&ToolRecord {
@@ -1085,6 +1269,7 @@ mod tests {
     #[test]
     fn failed_todo_call_falls_back_to_output_rows() {
         let env = ChatEnv {
+            rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
         };
         let mut block = ToolBlock::new(
@@ -1107,6 +1292,7 @@ mod tests {
     #[test]
     fn collapsed_read_file_hides_successful_output() {
         let env = ChatEnv {
+            rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
         };
         let mut block = ToolBlock::new(
@@ -1136,6 +1322,7 @@ mod tests {
     #[test]
     fn read_file_toggle_reveals_output() {
         let env = ChatEnv {
+            rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
         };
         let mut block = ToolBlock::new(
@@ -1160,6 +1347,7 @@ mod tests {
     #[test]
     fn collapsed_list_dir_hides_successful_output() {
         let env = ChatEnv {
+            rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
         };
         let mut block = ToolBlock::new("list_dir", r#"{"path":"crates"}"#.to_string(), None, None);
@@ -1180,6 +1368,7 @@ mod tests {
     #[test]
     fn failed_read_file_keeps_error_visible() {
         let env = ChatEnv {
+            rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
         };
         let mut block = ToolBlock::new(
@@ -1197,5 +1386,211 @@ mod tests {
         });
         let text = block_text(&block, &env);
         assert!(text.contains("is a directory"), "header/body: {text}");
+    }
+
+    fn big_output(count: usize) -> String {
+        (0..count)
+            .map(|i| {
+                if i % 9 == 0 {
+                    format!("out {i}: a long tail that will certainly wrap past the pane edge {i}")
+                } else {
+                    format!("out {i}: payload {i} with filler text")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn finished_block(name: &str, args: &str, output: String) -> ToolBlock {
+        let mut block = ToolBlock::new(name, args.to_string(), None, None);
+        block.update(ToolMessage::Finish {
+            ok: true,
+            output,
+            stderr: String::new(),
+            file_change: None,
+            duration_ms: 5,
+        });
+        block
+    }
+
+    #[test]
+    fn expanded_big_output_renders_sliced_and_matches_materialized() {
+        let env = ChatEnv {
+            rev: 0,
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let mut block = finished_block("grep", r#"{"pattern":"x"}"#, big_output(300));
+        block.toggle();
+        let width = 80u16;
+        let seg = block.view(width, &env);
+        assert_eq!(block.est().tool_rows, 300);
+        let count_width = width.saturating_sub(2 * BLOCK_PADDING.0);
+        assert!(matches!(
+            seg.chunks.as_slice(),
+            [BodyChunk::Fixed(_), BodyChunk::Sliced(_)]
+        ));
+        let materialized_lines: Vec<Line<'static>> = big_output(300)
+            .lines()
+            .map(|row| Line::from(Span::raw(row.to_string()).fg(theme::TEXT_DIM)))
+            .collect();
+        let materialized = Segment::materialized(
+            std::iter::once(block.header_line(count_width as usize))
+                .chain(materialized_lines)
+                .collect(),
+            Some(theme::SUCCESS_BG),
+            BLOCK_PADDING,
+            false,
+        );
+        assert_eq!(seg.measure(width), materialized.measure(width));
+        let full = crate::tui::session::segment::tests::full_render(&materialized, width);
+        crate::tui::session::segment::tests::assert_windows_match(
+            &seg,
+            width,
+            &full,
+            &[0, 13, 60, 155, 299, u32::from(full.area().height) - 1],
+        );
+    }
+
+    #[test]
+    fn collapsed_big_output_stays_cheap_and_windows_correctly() {
+        let env = ChatEnv {
+            rev: 0,
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let block = finished_block("grep", r#"{"pattern":"x"}"#, big_output(300));
+        let width = 80u16;
+        let seg = block.view(width, &env);
+        assert!(
+            !seg.chunks
+                .iter()
+                .any(|chunk| matches!(chunk, BodyChunk::Sliced(_))),
+            "collapsed preview must stay materialized"
+        );
+        let text = block_text(&block, &env);
+        assert!(text.contains("out 299:"), "tail: {text}");
+        assert!(text.contains("… +295 more lines"), "hint: {text}");
+        assert_eq!(block.est().tool_rows, collapsed_rows(300));
+    }
+
+    #[test]
+    fn big_write_content_renders_windowed() {
+        let env = ChatEnv {
+            rev: 0,
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let content: String = (0..200)
+            .map(|i| format!("fn generated_{i}() {{}}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut block =
+            ToolBlock::new("write_file", r#"{"path":"gen.rs"}"#.to_string(), None, None);
+        block.update(ToolMessage::Finish {
+            ok: true,
+            output: String::new(),
+            stderr: String::new(),
+            file_change: Some(FileChange::Write {
+                path: "gen.rs".to_string(),
+                content,
+                original: None,
+            }),
+            duration_ms: 5,
+        });
+        let width = 80u16;
+        let seg = block.view(width, &env);
+        assert!(
+            seg.chunks
+                .iter()
+                .any(|chunk| matches!(chunk, BodyChunk::Sliced(_))),
+            "200-row write content must render sliced"
+        );
+        let text = block_text(&block, &env);
+        assert!(text.contains("fn generated_199() {}"), "tail: {text}");
+        assert_eq!(block.est().tool_rows, 1 + 200);
+        let full = crate::tui::session::segment::tests::full_render(&seg, width);
+        crate::tui::session::segment::tests::assert_windows_match(
+            &seg,
+            width,
+            &full,
+            &[0, 7, 90, 190, u32::from(full.area().height) - 1],
+        );
+    }
+
+    #[test]
+    fn big_diff_renders_windowed() {
+        let env = ChatEnv {
+            rev: 0,
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let diff = (0..200)
+            .map(|i| DiffLine {
+                kind: if i % 2 == 0 {
+                    DiffLineKind::Remove
+                } else {
+                    DiffLineKind::Add
+                },
+                old_line: (i % 2 == 0).then_some(i as u64),
+                new_line: (i % 2 == 1).then_some(i as u64),
+                text: format!("        let value_{i} = compute({i});"),
+            })
+            .collect();
+        let mut block = ToolBlock::new("edit_file", r#"{"path":"a.rs"}"#.to_string(), None, None);
+        block.update(ToolMessage::Finish {
+            ok: true,
+            output: String::new(),
+            stderr: String::new(),
+            file_change: Some(FileChange::Edit {
+                path: "a.rs".to_string(),
+                diff,
+                original: String::new(),
+                new: String::new(),
+            }),
+            duration_ms: 5,
+        });
+        let width = 80u16;
+        let seg = block.view(width, &env);
+        assert!(
+            seg.chunks
+                .iter()
+                .any(|chunk| matches!(chunk, BodyChunk::Sliced(_))),
+            "200-row diff must render sliced"
+        );
+        let full = crate::tui::session::segment::tests::full_render(&seg, width);
+        crate::tui::session::segment::tests::assert_windows_match(
+            &seg,
+            width,
+            &full,
+            &[0, 5, 70, 150, 199, u32::from(full.area().height) - 1],
+        );
+    }
+
+    #[test]
+    fn expanded_shell_output_keeps_gap_and_stderr_order() {
+        let env = ChatEnv {
+            rev: 0,
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let mut block = ToolBlock::new("run_shell", r#"{"command":"ls"}"#.to_string(), None, None);
+        block.update(ToolMessage::Finish {
+            ok: false,
+            output: "exit 1:\n".to_string() + &big_output(300),
+            stderr: "boom".to_string(),
+            file_change: None,
+            duration_ms: 5,
+        });
+        block.toggle();
+        let width = 80u16;
+        let seg = block.view(width, &env);
+        let text = block_text(&block, &env);
+        let stdout_pos = text.find("out 0:").expect("stdout rows");
+        let gap = text.find("\n\n").expect("blank gap");
+        let boom = text.find("boom").expect("stderr row");
+        assert!(stdout_pos < gap && gap < boom, "order: {text}");
+        let full = crate::tui::session::segment::tests::full_render(&seg, width);
+        crate::tui::session::segment::tests::assert_windows_match(
+            &seg,
+            width,
+            &full,
+            &[0, 300, u32::from(full.area().height) - 1],
+        );
     }
 }

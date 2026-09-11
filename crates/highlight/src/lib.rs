@@ -3,7 +3,7 @@ pub mod md;
 pub mod syntax;
 pub mod theme;
 
-pub use md::{plain, render};
+pub use md::{MdPass, plain, render, render_pass};
 
 #[cfg(test)]
 mod tests;

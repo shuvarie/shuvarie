@@ -106,8 +106,8 @@ pub enum ChatMessage {
     SteeredCleared,
     /// The render loop's spinner wake: the turns that can hold animated
     /// blocks — the in-flight turn and a committed turn with a late
-    /// still-running `ToolFinished` straggler — bump their revision so their
-    /// cached render rebuilds with the next spinner frame.
+    /// still-running `ToolFinished` straggler — repaint their spinner-bearing
+    /// segments in place without invalidating their caches.
     SpinnerUpdate,
 }
 
@@ -394,16 +394,17 @@ impl Chat {
                 self.steered.borrow_mut().clear();
             }
             ChatMessage::SpinnerUpdate => {
+                let env = ChatEnv {
+                    lsp_diagnostics: &self.lsp_diagnostics,
+                    rev: self.env_rev,
+                };
                 if let Some(turn) = self.in_flight.get_mut() {
-                    turn.rev += 1;
+                    turn.refresh_spinners(&env);
                 }
                 if let Some(turn) = self.turns.get_mut().last_mut()
-                    && turn
-                        .blocks
-                        .as_ref()
-                        .is_some_and(|blocks| blocks.iter().any(|block| block.tool_is_running()))
+                    && turn.has_running_tool()
                 {
-                    turn.rev += 1;
+                    turn.refresh_spinners(&env);
                 }
             }
         }
@@ -431,6 +432,7 @@ impl Chat {
 
         let env = ChatEnv {
             lsp_diagnostics: &self.lsp_diagnostics,
+            rev: self.env_rev,
         };
         let env_rev = self.env_rev;
         let streaming = self.streaming;
@@ -1098,9 +1100,9 @@ mod tests {
             panic!("not a reasoning block");
         };
         reasoning
-            .view()
+            .view(80)
             .first()
-            .and_then(|segment| segment.lines.first())
+            .and_then(|segment| segment.flattened().into_iter().next())
             .map(|line| {
                 line.spans
                     .iter()
@@ -1153,6 +1155,7 @@ mod tests {
         let diags = BTreeMap::new();
         let env = ChatEnv {
             lsp_diagnostics: &diags,
+            rev: 0,
         };
         let cache = match turn_idx {
             Some(idx) => {
@@ -1192,7 +1195,7 @@ mod tests {
                 .iter()
                 .flat_map(|seg| {
                     seg.segment
-                        .lines
+                        .flattened()
                         .iter()
                         .map(|line| {
                             line.spans
@@ -1992,6 +1995,42 @@ mod tests {
     }
 
     #[test]
+    fn big_expanded_tool_body_paints_visible_tail_when_scrolled() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::ToolStarted {
+            name: "grep".into(),
+            args: serde_json::json!({ "pattern": "x" }),
+            worker: None,
+            call_id: None,
+        });
+        let output: String = (0..500)
+            .map(|i| format!("out {i}: payload {i} with filler"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        chat.update(ChatMessage::ToolFinished {
+            name: "grep".into(),
+            ok: true,
+            output,
+            worker: None,
+            file_change: None,
+            streams: None,
+            duration_ms: 0,
+            call_id: None,
+        });
+        chat.update(ChatMessage::ToggleLastTool);
+        let buf = draw(&chat, 80, 24);
+        let row_text = |y: u16| {
+            (0..buf.area().width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        };
+        assert!(
+            (0..buf.area().height).any(|y| row_text(y).contains("out 499:")),
+            "tail rows of the sliced body must paint at sticky bottom"
+        );
+    }
+
+    #[test]
     fn toggle_expansion_survives_eviction() {
         let mut chat = Chat::new();
         chat.update(ChatMessage::Load {
@@ -2121,36 +2160,191 @@ mod tests {
         chat.update(ChatMessage::TokenReceived {
             content: "Here is what I found.".into(),
         });
+        chat.update(ChatMessage::ToolStarted {
+            name: "run_shell".into(),
+            args: serde_json::json!({ "command": "cargo test" }),
+            worker: None,
+            call_id: Some("call_running".into()),
+        });
         let diags = BTreeMap::new();
-        let env = ChatEnv {
-            lsp_diagnostics: &diags,
-        };
+        let env_rev = 0u64;
         let turns_len = chat.turns.borrow().len();
-        let started = std::time::Instant::now();
-        let frames = 20;
-        for _ in 0..frames {
-            chat.update(ChatMessage::SpinnerUpdate);
-            let turn = chat.in_flight.borrow();
-            let turn = turn.as_ref().expect("in-flight turn");
-            let cache = render_turn_cache(
-                turn,
+        {
+            let mut turn = chat.in_flight.borrow_mut();
+            let turn = turn.as_mut().expect("in-flight turn");
+            turn.ensure_cache(
                 turns_len,
+                100,
+                &ChatEnv {
+                    lsp_diagnostics: &diags,
+                    rev: env_rev,
+                },
+                env_rev,
                 TurnFlags {
                     in_flight: true,
                     interrupted_marker: false,
                 },
+            );
+        }
+        let rev_before = chat.in_flight.borrow().as_ref().expect("turn").rev;
+        let started = std::time::Instant::now();
+        let frames = 20;
+        for _ in 0..frames {
+            chat.update(ChatMessage::SpinnerUpdate);
+            let mut turn = chat.in_flight.borrow_mut();
+            let turn = turn.as_mut().expect("in-flight turn");
+            turn.ensure_cache(
+                turns_len,
                 100,
+                &ChatEnv {
+                    lsp_diagnostics: &diags,
+                    rev: env_rev,
+                },
+                env_rev,
+                TurnFlags {
+                    in_flight: true,
+                    interrupted_marker: false,
+                },
+            );
+            assert!(turn.height(100, env_rev) > 0);
+        }
+        assert_eq!(
+            chat.in_flight.borrow().as_ref().expect("turn").rev,
+            rev_before,
+            "spinner frames must not invalidate the turn cache"
+        );
+        let per_frame = started.elapsed() / frames;
+        println!("spinner-frame repaint: {per_frame:?} per frame (30 blocks x 16KB output)");
+        assert!(
+            per_frame < std::time::Duration::from_millis(5),
+            "repaint too slow: {per_frame:?}"
+        );
+    }
+
+    #[test]
+    fn bench_streaming_delta_cost() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "start".into(),
+        });
+        chat.update(ChatMessage::TokenReceived {
+            content: "Intro paragraph before the long reply.".into(),
+        });
+        let diags = BTreeMap::new();
+        let env_rev = 0u64;
+        let turns_len = 0usize;
+        let delta = "some streamed prose line that wraps a couple of times at this width\n";
+        let deltas = 400;
+        // Realistic streaming: paragraph breaks let the markdown cache commit
+        // everything before the open paragraph, so a delta re-renders only
+        // that open paragraph.
+        let started = std::time::Instant::now();
+        for i in 0..deltas {
+            let mut content = format!("line {i}: {delta}");
+            if i % 4 == 3 {
+                content.push('\n');
+            }
+            chat.update(ChatMessage::TokenReceived { content });
+            let mut turn = chat.in_flight.borrow_mut();
+            let turn = turn.as_mut().expect("in-flight turn");
+            turn.ensure_cache(
+                turns_len,
+                100,
+                &ChatEnv {
+                    lsp_diagnostics: &diags,
+                    rev: env_rev,
+                },
+                env_rev,
+                TurnFlags {
+                    in_flight: true,
+                    interrupted_marker: false,
+                },
+            );
+            assert!(turn.height(100, env_rev) > 0);
+        }
+        let per_delta = started.elapsed() / deltas;
+        println!("streaming delta: {per_delta:?} per delta (appended + ensured cache)");
+        assert!(
+            per_delta < std::time::Duration::from_millis(2),
+            "delta too slow: {per_delta:?}"
+        );
+    }
+
+    #[test]
+    fn spinner_tick_repaints_without_invalidation() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::TokenReceived {
+            content: "Working on it.".into(),
+        });
+        chat.update(ChatMessage::ToolStarted {
+            name: "run_shell".into(),
+            args: serde_json::json!({ "command": "ls" }),
+            worker: None,
+            call_id: Some("call_1".into()),
+        });
+        let diags = BTreeMap::new();
+        let env = ChatEnv {
+            lsp_diagnostics: &diags,
+            rev: 0,
+        };
+        {
+            let mut turn = chat.in_flight.borrow_mut();
+            let turn = turn.as_mut().expect("in-flight turn");
+            turn.ensure_cache(
+                0,
+                80,
                 &env,
                 0,
-            )
-            .expect("cache");
-            assert!(cache.height > 0);
+                TurnFlags {
+                    in_flight: true,
+                    interrupted_marker: false,
+                },
+            );
         }
-        let per_frame = started.elapsed() / frames;
-        println!("spinner-frame rebuild: {per_frame:?} per frame (30 blocks x 16KB output)");
+        let rev_before;
+        let other_lines;
+        let tool_line_before;
+        {
+            let turn = chat.in_flight.borrow();
+            let turn = turn.as_ref().expect("in-flight turn");
+            let cache = turn.cache().expect("cache");
+            assert!(!cache.spinners.is_empty(), "running tool must hold a slot");
+            rev_before = turn.rev;
+            let slot = cache.spinners[0].seg;
+            tool_line_before = cache.segs[slot].segment.flattened()[0]
+                .spans
+                .iter()
+                .map(|span| span.content.clone())
+                .collect::<String>();
+            other_lines = (0..cache.segs.len())
+                .filter(|i| *i != slot)
+                .map(|i| cache.segs[i].segment.flattened().len())
+                .collect::<Vec<_>>();
+        }
+        chat.update(ChatMessage::SpinnerUpdate);
+        let turn = chat.in_flight.borrow();
+        let turn = turn.as_ref().expect("in-flight turn");
+        assert_eq!(turn.rev, rev_before, "spinner tick must not bump rev");
+        let cache = turn.cache().expect("cache");
+        let slot = cache.spinners[0].seg;
+        let tool_line = cache.segs[slot].segment.flattened()[0]
+            .spans
+            .iter()
+            .map(|span| span.content.clone())
+            .collect::<String>();
+        assert_eq!(
+            tool_line, tool_line_before,
+            "same wall-clock frame: same glyph"
+        );
+        let other_lines_after: Vec<usize> = (0..cache.segs.len())
+            .filter(|i| *i != slot)
+            .map(|i| cache.segs[i].segment.flattened().len())
+            .collect();
+        assert_eq!(other_lines, other_lines_after, "non-spinner segs untouched");
+        let glyph = crate::tui::spinner::spinner();
         assert!(
-            per_frame < std::time::Duration::from_millis(50),
-            "rebuild too slow: {per_frame:?}"
+            tool_line.starts_with(glyph.content.as_ref()),
+            "tool segment must still render the current spinner glyph: {tool_line:?}"
         );
     }
 
@@ -2164,9 +2358,9 @@ mod tests {
                     panic!("not a steered block");
                 };
                 block
-                    .view()
+                    .view(80)
                     .into_iter()
-                    .flat_map(|segment| segment.lines)
+                    .flat_map(|segment| segment.flattened())
                     .skip(1)
                     .map(|line| {
                         line.spans
