@@ -537,9 +537,10 @@ impl App {
                 }
                 CoreEvent::SessionDeleted { id } => Some(AppMessage::SessionDeleted { id }),
                 CoreEvent::SessionError { error } => Some(AppMessage::SessionError { error }),
-                CoreEvent::TurnReverted { session } => {
+                CoreEvent::TurnReverted { session, prompt } => {
                     Some(AppMessage::Session(SessionMessage::TurnReverted {
                         session,
+                        prompt,
                     }))
                 }
                 CoreEvent::TurnRestored { session } => {

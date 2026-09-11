@@ -173,6 +173,9 @@ pub enum Event {
     },
     TurnReverted {
         session: crate::Session,
+        /// The undone user prompt, recalled into the input area; `None` when
+        /// the turn re-sends automatically (replay / interrupted resume).
+        prompt: Option<String>,
     },
     TurnRestored {
         session: crate::Session,

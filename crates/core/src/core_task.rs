@@ -720,13 +720,19 @@ pub async fn run(
                         let Some(s) = &ctx.session else { continue; };
                         let session_id = s.lock().await.id;
                         let Some(sid) = session_id else { continue; };
+                        let last_user_content = s.lock().await.messages.iter().rev()
+                            .find(|m| m.role == shuvarie_llm::Role::User)
+                            .map(|m| m.content.clone());
                         match undo_last_turn(&mut ctx.store, sid).await {
                             Ok(true) => {
                                 if let Ok(stored) = ctx.store.load_session(sid).await {
                                     let loaded = Session::from_stored(stored);
                                     *s.lock().await = loaded.clone();
                                     let _ = ctx.event_tx
-                                        .send(Event::TurnReverted { session: loaded })
+                                        .send(Event::TurnReverted {
+                                            session: loaded,
+                                            prompt: last_user_content,
+                                        })
                                         .await;
                                 }
                             }
@@ -800,7 +806,10 @@ pub async fn run(
                                     let loaded = Session::from_stored(stored);
                                     *s.lock().await = loaded.clone();
                                     let _ = ctx.event_tx
-                                        .send(Event::TurnReverted { session: loaded })
+                                        .send(Event::TurnReverted {
+                                            session: loaded,
+                                            prompt: None,
+                                        })
                                         .await;
                                 }
                                 if let Some(content) = last_user_content {
@@ -1530,7 +1539,10 @@ impl CoreCtx {
             *s.lock().await = loaded.clone();
             let _ = self
                 .event_tx
-                .send(Event::TurnReverted { session: loaded })
+                .send(Event::TurnReverted {
+                    session: loaded,
+                    prompt: None,
+                })
                 .await;
         }
         self.self_replay_send(content, false).await;

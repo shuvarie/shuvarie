@@ -96,6 +96,9 @@ pub enum SessionMessage {
     },
     TurnReverted {
         session: shuvarie_core::Session,
+        /// The undone user prompt, recalled into the input area; `None` when
+        /// the turn re-sends automatically (replay / interrupted resume).
+        prompt: Option<String>,
     },
     TurnRestored {
         session: shuvarie_core::Session,
@@ -286,8 +289,20 @@ impl SessionScreen {
                 return Some(SessionMessage::Sidebar(m));
             }
             return match key.code {
-                KeyCode::Char('n') => Some(SessionMessage::Chat(ChatMessage::ScrollDown)),
-                KeyCode::Char('p') => Some(SessionMessage::Chat(ChatMessage::ScrollUp)),
+                KeyCode::Char('n') => {
+                    if self.input.wants_recall_down() {
+                        Some(SessionMessage::Text(TextAreaMessage::CursorDown))
+                    } else {
+                        Some(SessionMessage::Chat(ChatMessage::ScrollDown))
+                    }
+                }
+                KeyCode::Char('p') => {
+                    if self.input.wants_recall_up() {
+                        Some(SessionMessage::Text(TextAreaMessage::CursorUp))
+                    } else {
+                        Some(SessionMessage::Chat(ChatMessage::ScrollUp))
+                    }
+                }
                 KeyCode::Char('o') => Some(SessionMessage::Chat(ChatMessage::ToggleLastTool)),
                 _ => self.input.map_event(key).map(SessionMessage::Text),
             };
@@ -301,7 +316,10 @@ impl SessionScreen {
             return self.input.map_event(key).map(SessionMessage::Text);
         }
         match key.code {
-            KeyCode::Up | KeyCode::Down if self.input_is_multiline() => {
+            KeyCode::Up if self.input_is_multiline() || self.input.wants_recall_up() => {
+                self.input.map_event(key).map(SessionMessage::Text)
+            }
+            KeyCode::Down if self.input_is_multiline() || self.input.wants_recall_down() => {
                 self.input.map_event(key).map(SessionMessage::Text)
             }
             KeyCode::Up => Some(SessionMessage::Chat(ChatMessage::ScrollUp)),
@@ -373,7 +391,7 @@ impl SessionScreen {
                                 self.sync_slash();
                                 return Some(SessionEffect::RunCommand(action));
                             }
-                            let content = match self.expand_skill(&content) {
+                            let expanded = match self.expand_skill(&content) {
                                 Ok(Some(expanded)) => expanded,
                                 Ok(None) => commands::unescape(&content).to_string(),
                                 Err(error) => {
@@ -384,8 +402,9 @@ impl SessionScreen {
                             // Display of the user prompt is event-driven: the
                             // core's `TurnStarted` decides whether this begins a
                             // turn or gets steered behind a busy agent.
+                            self.input.remember_sent(&content);
                             self.sync_slash();
-                            return Some(SessionEffect::SendMessage { content });
+                            return Some(SessionEffect::SendMessage { content: expanded });
                         }
                     }
                 }
@@ -575,7 +594,7 @@ impl SessionScreen {
                 self.chat.update(ChatMessage::Load { session });
                 None
             }
-            SessionMessage::TurnReverted { session } => {
+            SessionMessage::TurnReverted { session, prompt } => {
                 let usage = session.usage();
                 let cost = session.cost;
                 self.retry = None;
@@ -587,6 +606,11 @@ impl SessionScreen {
                 });
                 self.sync_todos(shuvarie_core::tools::todos::replay(&session.tool_records));
                 self.chat.update(ChatMessage::TurnReverted { session });
+                if let Some(prompt) = prompt {
+                    self.input.stash_draft();
+                    self.input.buffer.set(&prompt);
+                    self.sync_slash();
+                }
                 None
             }
             SessionMessage::TurnRestored { session } => {
@@ -625,6 +649,7 @@ impl SessionScreen {
                     let existing = self.input.buffer.value.clone();
                     self.input.buffer.set(&format!("{content}\n\n{existing}"));
                 } else {
+                    self.input.stash_draft();
                     self.input.buffer.set(&content);
                 }
                 self.sync_slash();
@@ -1370,6 +1395,7 @@ mod tests {
 
         screen.update(SessionMessage::TurnReverted {
             session: shuvarie_core::Session::new(),
+            prompt: None,
         });
         assert!(screen.is_busy());
         assert_eq!(
@@ -1449,6 +1475,7 @@ mod tests {
         });
         screen.update(SessionMessage::TurnReverted {
             session: shuvarie_core::Session::new(),
+            prompt: None,
         });
         assert!(screen.retry.is_none());
     }
@@ -1538,6 +1565,133 @@ mod tests {
             content: None,
         });
         assert_eq!(screen.input.buffer.value, "draft text");
+    }
+
+    #[test]
+    fn steered_recall_stashes_displaced_draft() {
+        let mut screen = SessionScreen::new();
+        screen.input.width.set(40);
+        screen.input.buffer.set("draft text");
+        screen.update(queued("steered one"));
+        screen.update(SessionMessage::SteeredRecalled {
+            stacked: false,
+            content: Some("steered one".into()),
+        });
+        assert_eq!(screen.input.buffer.value, "steered one");
+        screen.input.update(TextAreaMessage::CursorUp);
+        assert_eq!(screen.input.buffer.value, "draft text");
+    }
+
+    #[test]
+    fn turn_reverted_recalls_undone_prompt_into_input() {
+        let mut screen = SessionScreen::new();
+        screen.input.width.set(40);
+        screen.input.buffer.set("in-progress draft");
+        screen.update(SessionMessage::TurnReverted {
+            session: shuvarie_core::Session::new(),
+            prompt: Some("undone prompt".into()),
+        });
+        assert_eq!(screen.input.buffer.value, "undone prompt");
+        screen.input.update(TextAreaMessage::CursorUp);
+        assert_eq!(screen.input.buffer.value, "in-progress draft");
+
+        screen.input.buffer.set("other draft");
+        screen.update(SessionMessage::TurnReverted {
+            session: shuvarie_core::Session::new(),
+            prompt: None,
+        });
+        assert_eq!(screen.input.buffer.value, "other draft");
+    }
+
+    #[test]
+    fn plain_submit_records_prompt_history() {
+        let mut screen = SessionScreen::new();
+        screen.input.width.set(40);
+        screen.input.buffer.set("first");
+        screen.update(SessionMessage::Text(TextAreaMessage::Submit));
+        screen.input.buffer.set("second");
+        screen.update(SessionMessage::Text(TextAreaMessage::Submit));
+        screen.input.buffer.set("draft");
+        screen.input.update(TextAreaMessage::CursorUp);
+        assert_eq!(screen.input.buffer.value, "second");
+        screen.input.update(TextAreaMessage::CursorUp);
+        assert_eq!(screen.input.buffer.value, "first");
+        screen.input.update(TextAreaMessage::CursorDown);
+        assert_eq!(screen.input.buffer.value, "second");
+        screen.input.update(TextAreaMessage::CursorDown);
+        assert_eq!(screen.input.buffer.value, "draft");
+    }
+
+    #[test]
+    fn bash_and_slash_submits_skip_prompt_history() {
+        let mut screen = SessionScreen::new();
+        screen.input.width.set(40);
+        screen.input.buffer.set("!ls");
+        screen.update(SessionMessage::Text(TextAreaMessage::Submit));
+        screen.input.buffer.set("/quit");
+        screen.update(SessionMessage::Text(TextAreaMessage::Submit));
+        assert!(
+            !screen.input.wants_recall_up(),
+            "bash and slash submits skip prompt history"
+        );
+    }
+
+    #[test]
+    fn ctrl_p_n_recall_only_when_stacks_hold_entries() {
+        let mut screen = SessionScreen::new();
+        assert!(matches!(
+            screen.map_event(&KeyEvent::new(KeyCode::Char('p'), Modifiers::CONTROL)),
+            Some(SessionMessage::Chat(ChatMessage::ScrollUp))
+        ));
+        assert!(matches!(
+            screen.map_event(&KeyEvent::new(KeyCode::Char('n'), Modifiers::CONTROL)),
+            Some(SessionMessage::Chat(ChatMessage::ScrollDown))
+        ));
+
+        screen.input.width.set(40);
+        screen.input.remember_sent("sent");
+        screen.input.buffer.set("draft");
+        assert!(matches!(
+            screen.map_event(&KeyEvent::new(KeyCode::Char('p'), Modifiers::CONTROL)),
+            Some(SessionMessage::Text(TextAreaMessage::CursorUp))
+        ));
+        assert!(matches!(
+            screen.map_event(&KeyEvent::new(KeyCode::Char('n'), Modifiers::CONTROL)),
+            Some(SessionMessage::Chat(ChatMessage::ScrollDown))
+        ));
+        screen.input.update(TextAreaMessage::CursorUp);
+        assert!(matches!(
+            screen.map_event(&KeyEvent::new(KeyCode::Char('n'), Modifiers::CONTROL)),
+            Some(SessionMessage::Text(TextAreaMessage::CursorDown))
+        ));
+    }
+
+    #[test]
+    fn plain_up_down_route_to_input_when_stacks_hold_entries() {
+        let mut screen = SessionScreen::new();
+        assert!(matches!(
+            screen.map_event(&KeyEvent::new(KeyCode::Up, Modifiers::empty())),
+            Some(SessionMessage::Chat(ChatMessage::ScrollUp))
+        ));
+        assert!(matches!(
+            screen.map_event(&KeyEvent::new(KeyCode::Down, Modifiers::empty())),
+            Some(SessionMessage::Chat(ChatMessage::ScrollDown))
+        ));
+
+        screen.input.remember_sent("sent");
+        assert!(matches!(
+            screen.map_event(&KeyEvent::new(KeyCode::Up, Modifiers::empty())),
+            Some(SessionMessage::Text(TextAreaMessage::CursorUp))
+        ));
+        assert!(matches!(
+            screen.map_event(&KeyEvent::new(KeyCode::Down, Modifiers::empty())),
+            Some(SessionMessage::Chat(ChatMessage::ScrollDown))
+        ));
+        screen.input.update(TextAreaMessage::CursorUp);
+        assert!(matches!(
+            screen.map_event(&KeyEvent::new(KeyCode::Down, Modifiers::empty())),
+            Some(SessionMessage::Text(TextAreaMessage::CursorDown))
+        ));
     }
 
     #[test]

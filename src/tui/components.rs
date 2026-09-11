@@ -300,6 +300,16 @@ impl InputBuffer {
         self.cursor = row_col_to_byte(&rows[row + 1], col);
     }
 
+    /// Whether the cursor sits on the first visual row.
+    pub fn cursor_on_first_row(&self, width: usize) -> bool {
+        self.cursor_row_col(width).0 == 0
+    }
+
+    /// Whether the cursor sits on the last visual row.
+    pub fn cursor_on_last_row(&self, width: usize) -> bool {
+        self.cursor_row_col(width).0 == self.rows(width).len() - 1
+    }
+
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.value.is_empty()
@@ -563,6 +573,10 @@ pub struct TextArea {
     pub placeholder: &'static str,
     pub max_height: u16,
     pub width: Cell<usize>,
+    /// Prompt drafts recalled with Up/Ctrl+P; most recent last.
+    up_stack: Vec<String>,
+    /// Drafts displaced by an up-recall, recallable with Down/Ctrl+N.
+    down_stack: Vec<String>,
 }
 
 impl TextArea {
@@ -573,6 +587,8 @@ impl TextArea {
             placeholder,
             max_height: 8,
             width: Cell::new(0),
+            up_stack: Vec::new(),
+            down_stack: Vec::new(),
         }
     }
 
@@ -582,6 +598,8 @@ impl TextArea {
             placeholder,
             max_height,
             width: Cell::new(0),
+            up_stack: Vec::new(),
+            down_stack: Vec::new(),
         }
     }
 
@@ -679,11 +697,15 @@ impl TextArea {
                 None
             }
             TextAreaMessage::CursorUp => {
-                self.buffer.up(width);
+                if !self.recall_up() {
+                    self.buffer.up(width);
+                }
                 None
             }
             TextAreaMessage::CursorDown => {
-                self.buffer.down(width);
+                if !self.recall_down() {
+                    self.buffer.down(width);
+                }
                 None
             }
             TextAreaMessage::Submit => {
@@ -695,10 +717,71 @@ impl TextArea {
                 Some(TextAreaEffect::Submit { content })
             }
             TextAreaMessage::Clear => {
+                self.stash_draft();
                 self.buffer.clear();
                 None
             }
         }
+    }
+
+    fn buffer_width(&self) -> usize {
+        self.width.get().max(1)
+    }
+
+    /// Whether an up-recall (`Up`/`Ctrl+P`) should swap in a stashed draft:
+    /// the up stack holds something and the cursor sits on the first row.
+    pub fn wants_recall_up(&self) -> bool {
+        !self.up_stack.is_empty() && self.buffer.cursor_on_first_row(self.buffer_width())
+    }
+
+    /// Mirror of [`Self::wants_recall_up`] for the down stack.
+    pub fn wants_recall_down(&self) -> bool {
+        !self.down_stack.is_empty() && self.buffer.cursor_on_last_row(self.buffer_width())
+    }
+
+    /// Push non-empty text onto a stack, skipping a duplicate of its top.
+    fn push_stack(stack: &mut Vec<String>, text: String) {
+        if !text.is_empty() && stack.last() != Some(&text) {
+            stack.push(text);
+        }
+    }
+
+    /// Stash the current draft onto the up stack (a displaced draft stays
+    /// recallable with `Up`); empty and duplicate drafts are skipped.
+    pub fn stash_draft(&mut self) {
+        let current = self.buffer.expanded();
+        Self::push_stack(&mut self.up_stack, current);
+    }
+
+    /// Record a sent prompt on the up stack and reset the down stack.
+    pub fn remember_sent(&mut self, content: &str) {
+        Self::push_stack(&mut self.up_stack, content.to_string());
+        self.down_stack.clear();
+    }
+
+    /// Swap the current text onto the down stack and recall the previous
+    /// draft; `false` when the recall gate ([`Self::wants_recall_up`]) fails.
+    fn recall_up(&mut self) -> bool {
+        if !self.wants_recall_up() {
+            return false;
+        }
+        let next = self.up_stack.pop().expect("non-empty up stack");
+        let current = self.buffer.expanded();
+        Self::push_stack(&mut self.down_stack, current);
+        self.buffer.set(&next);
+        true
+    }
+
+    /// Mirror of [`Self::recall_up`] walking back down the down stack.
+    fn recall_down(&mut self) -> bool {
+        if !self.wants_recall_down() {
+            return false;
+        }
+        let next = self.down_stack.pop().expect("non-empty down stack");
+        let current = self.buffer.expanded();
+        Self::push_stack(&mut self.up_stack, current);
+        self.buffer.set(&next);
+        true
     }
 
     /// The height (in rows, including the block padding) the input wants at
@@ -1243,5 +1326,109 @@ mod tests {
         assert_eq!(area.buffer.value.chars().count(), 1);
         area.update(TextAreaMessage::Paste("one line".to_string()));
         assert!(area.buffer.value.contains("one line"));
+    }
+
+    #[test]
+    fn sent_history_round_trips_through_up_and_down() {
+        let mut area = TextArea::with_max_height("p", 8);
+        area.width.set(40);
+        area.remember_sent("one");
+        area.remember_sent("two");
+        area.buffer.set("draft");
+        area.update(TextAreaMessage::CursorUp);
+        assert_eq!(area.buffer.value, "two");
+        area.update(TextAreaMessage::CursorUp);
+        assert_eq!(area.buffer.value, "one");
+        area.update(TextAreaMessage::CursorUp);
+        assert_eq!(area.buffer.value, "one", "empty up stack moves the cursor");
+        area.update(TextAreaMessage::CursorDown);
+        assert_eq!(area.buffer.value, "two");
+        area.update(TextAreaMessage::CursorDown);
+        assert_eq!(area.buffer.value, "draft");
+        area.update(TextAreaMessage::CursorDown);
+        assert_eq!(area.buffer.value, "draft", "empty down stack is a no-op");
+    }
+
+    #[test]
+    fn recall_requires_cursor_on_boundary_row() {
+        let mut area = TextArea::with_max_height("p", 8);
+        area.width.set(40);
+        area.remember_sent("old");
+        area.buffer.set("one\ntwo");
+        assert!(!area.wants_recall_up(), "cursor on the last row");
+        area.update(TextAreaMessage::CursorUp);
+        assert_eq!(
+            area.buffer.value, "one\ntwo",
+            "cursor moved instead of recalling"
+        );
+        assert!(!area.wants_recall_down(), "down stack is empty");
+        area.update(TextAreaMessage::CursorDown);
+        assert_eq!(area.buffer.value, "one\ntwo");
+        area.buffer.up(40);
+        assert!(area.wants_recall_up());
+        area.update(TextAreaMessage::CursorUp);
+        assert_eq!(area.buffer.value, "old");
+    }
+
+    #[test]
+    fn empty_stack_leaves_cursor_movement_untouched() {
+        let mut area = TextArea::with_max_height("p", 8);
+        area.width.set(40);
+        area.buffer.set("hello\nworld");
+        area.update(TextAreaMessage::CursorUp);
+        assert_eq!(area.buffer.cursor, "hello".len());
+        area.update(TextAreaMessage::CursorDown);
+        assert_eq!(area.buffer.cursor, area.buffer.value.len());
+    }
+
+    #[test]
+    fn stashes_skip_duplicate_of_stack_top() {
+        let mut area = TextArea::with_max_height("p", 8);
+        area.remember_sent("same");
+        area.buffer.set("same");
+        area.stash_draft();
+        assert_eq!(area.up_stack, vec!["same".to_string()]);
+        area.remember_sent("");
+        assert_eq!(area.up_stack, vec!["same".to_string()]);
+    }
+
+    #[test]
+    fn remember_sent_clears_down_stack() {
+        let mut area = TextArea::with_max_height("p", 8);
+        area.width.set(40);
+        area.buffer.set("draft");
+        area.remember_sent("sent");
+        area.buffer.set("chip");
+        area.update(TextAreaMessage::CursorUp);
+        assert_eq!(area.buffer.value, "sent");
+        assert_eq!(area.down_stack, vec!["chip".to_string()]);
+        area.remember_sent("newer");
+        assert!(area.down_stack.is_empty(), "a fresh send resets the walk");
+    }
+
+    #[test]
+    fn clear_stashes_draft_into_up_stack() {
+        let mut area = TextArea::with_max_height("p", 8);
+        area.width.set(40);
+        area.buffer.set("draft");
+        area.update(TextAreaMessage::Clear);
+        assert!(area.is_empty());
+        assert_eq!(area.up_stack, vec!["draft".to_string()]);
+        area.update(TextAreaMessage::CursorUp);
+        assert_eq!(area.buffer.value, "draft");
+    }
+
+    #[test]
+    fn recall_expands_paste_chips() {
+        let mut area = TextArea::with_max_height("p", 8);
+        area.width.set(40);
+        area.remember_sent("previous");
+        area.buffer.set("ab");
+        area.buffer.paste("l1\nl2\nl3");
+        area.buffer.home();
+        area.update(TextAreaMessage::CursorUp);
+        assert_eq!(area.buffer.value, "previous");
+        area.update(TextAreaMessage::CursorDown);
+        assert_eq!(area.buffer.expanded(), "abl1\nl2\nl3");
     }
 }
