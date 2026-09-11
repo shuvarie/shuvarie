@@ -298,6 +298,7 @@ mod tests {
             output: format!("contents of {path}"),
             stderr: String::new(),
             ok: true,
+            killed: false,
             worker: None,
             message_id: 0,
             message_seq,

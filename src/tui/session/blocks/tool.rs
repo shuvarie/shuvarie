@@ -23,6 +23,10 @@ pub enum ToolStatus {
     Running,
     Ok,
     Failed,
+    /// The call never finished: killed by the shell timeout or cut off when
+    /// its turn was interrupted. Shown as a stop, not a failure — the tool
+    /// did not get the chance to succeed or fail.
+    Killed,
 }
 
 pub enum ToolMessage {
@@ -37,6 +41,9 @@ pub enum ToolMessage {
         file_change: Option<FileChange>,
         duration_ms: u64,
     },
+    /// The turn was cut while this call was still running: stop the spinner
+    /// and mark the block killed, keeping whatever output streamed so far.
+    Kill,
 }
 
 /// One agent tool call: status, human-readable header, collapsible output
@@ -108,10 +115,10 @@ impl ToolBlock {
             args: record.args_json.clone(),
             parsed_args: OnceLock::new(),
             call_id: String::new(),
-            status: if record.ok {
-                ToolStatus::Ok
+            status: if record.killed {
+                ToolStatus::Killed
             } else {
-                ToolStatus::Failed
+                finish_status(record.ok, &record.name, &record.output)
             },
             output: record.output.clone(),
             stderr: record.stderr.clone(),
@@ -237,6 +244,7 @@ impl ToolBlock {
         match self.status {
             ToolStatus::Running => theme::RUNNING_BG,
             ToolStatus::Ok => theme::SUCCESS_BG,
+            ToolStatus::Killed => theme::WARNING_BG,
             ToolStatus::Failed => theme::ERROR_BG,
         }
     }
@@ -262,17 +270,27 @@ impl ToolBlock {
                 if self.status != ToolStatus::Running {
                     return false;
                 }
-                self.status = if ok {
-                    ToolStatus::Ok
-                } else {
-                    ToolStatus::Failed
-                };
+                self.status = finish_status(ok, &self.name, &output);
                 self.output = output;
                 self.stderr = stderr;
                 self.file_change = file_change;
                 self.started_at = None;
                 self.duration_ms = duration_ms;
-                self.expanded = self.name == "question" || self.name == "todo";
+                self.expanded = self.status != ToolStatus::Killed
+                    && (self.name == "question" || self.name == "todo");
+                self.body_rev += 1;
+                true
+            }
+            ToolMessage::Kill => {
+                if self.status != ToolStatus::Running {
+                    return false;
+                }
+                self.status = ToolStatus::Killed;
+                self.duration_ms = self
+                    .started_at
+                    .take()
+                    .map(|started| started.elapsed().as_millis() as u64)
+                    .unwrap_or(self.duration_ms);
                 self.body_rev += 1;
                 true
             }
@@ -376,6 +394,11 @@ impl ToolBlock {
                     })
                     .bold(),
             ),
+            ToolStatus::Killed => header.push(
+                Span::raw(if is_worker_call { "❖" } else { "⏹" })
+                    .fg(theme::WARNING)
+                    .bold(),
+            ),
         }
         header.push(Span::raw(" "));
 
@@ -407,10 +430,10 @@ impl ToolBlock {
                 if let Some(t) = timeout {
                     right.push(format!("timeout={t}s"));
                 }
-                if let Some(label) = status_label
-                    && label != "exit 0"
-                {
-                    right.push(label);
+                match status_label {
+                    Some(label) if label != "exit 0" => right.push(label),
+                    None if self.status == ToolStatus::Killed => right.push("killed".into()),
+                    _ => {}
                 }
                 let right_text = right.join(" · ");
                 let right_w = UnicodeWidthStr::width(right_text.as_str());
@@ -859,9 +882,27 @@ fn answer_for_question(output: &str, question: &str) -> String {
     String::new()
 }
 
+/// The terminal status of a tool result: `ok` succeeds; a `run_shell` call
+/// whose stdout leads with a `timeout Ns:` status line was killed by the
+/// shell timeout rather than failing on its own merits.
+fn finish_status(ok: bool, name: &str, output: &str) -> ToolStatus {
+    if ok {
+        return ToolStatus::Ok;
+    }
+    if name == "run_shell"
+        && split_status_line(output)
+            .0
+            .is_some_and(|label| label.starts_with("timeout"))
+    {
+        return ToolStatus::Killed;
+    }
+    ToolStatus::Failed
+}
+
 /// Split a leading shell status line (`exit N:`, `timeout Ns:` or the legacy
 /// `shell exited with ...:`) off the persisted stdout text, returning the
-/// normalized label and the remaining body.
+/// normalized label and the remaining body. Text whose first line does not
+/// parse as a status line — e.g. a streamed tail — is all body.
 fn split_status_line(text: &str) -> (Option<String>, &str) {
     let (first, rest) = match text.split_once('\n') {
         Some((first, rest)) => (first, rest),
@@ -885,7 +926,10 @@ fn split_status_line(text: &str) -> (Option<String>, &str) {
             .and_then(|s| s.strip_suffix(':'))
             .map(|s| s.to_string())
     };
-    (label, rest)
+    match label {
+        Some(label) => (Some(label), rest),
+        None => (None, text),
+    }
 }
 
 /// The line range a `read_file` call showed: exact from the tool's footer
@@ -1128,6 +1172,7 @@ mod tests {
             output: String::new(),
             stderr: String::new(),
             ok: true,
+            killed: false,
             worker: None,
             message_id: 1,
             message_seq: 1,
@@ -1139,6 +1184,67 @@ mod tests {
         let text = block_text(&block, &env);
         assert!(text.contains("Took 1m 05s"), "header/body: {text}");
         assert_eq!(block.est().tool_rows, 1);
+    }
+
+    #[test]
+    fn reloaded_killed_record_shows_killed() {
+        let env = ChatEnv {
+            rev: 0,
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let record = ToolRecord {
+            name: "run_shell".to_string(),
+            args_json: r#"{"command":"sleep 30"}"#.to_string(),
+            output: String::new(),
+            stderr: String::new(),
+            ok: false,
+            killed: true,
+            worker: None,
+            message_id: 1,
+            message_seq: 1,
+            file_change: None,
+            original_content: None,
+            new_content: None,
+            duration_ms: 4_200,
+        };
+        let block = ToolBlock::from_record(&record);
+        assert!(!block.is_running(), "a killed record does not animate");
+        let text = block_text(&block, &env);
+        assert!(text.contains("⏹"), "killed marker: {text}");
+        assert!(text.contains("killed"), "killed label: {text}");
+        assert!(text.contains("Took 4.2s"), "killed duration: {text}");
+        assert!(!text.contains("✗"), "killed is not failed: {text}");
+    }
+
+    #[test]
+    fn reloaded_timeout_record_shows_killed() {
+        // A timeout kill persists as a finished-but-killed run: the record is
+        // not flagged, so the status comes from the shell status line.
+        let env = ChatEnv {
+            rev: 0,
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let record = ToolRecord {
+            name: "run_shell".to_string(),
+            args_json: r#"{"command":"cargo build"}"#.to_string(),
+            output: "timeout 30s:\npartial".to_string(),
+            stderr: String::new(),
+            ok: false,
+            killed: false,
+            worker: None,
+            message_id: 1,
+            message_seq: 1,
+            file_change: None,
+            original_content: None,
+            new_content: None,
+            duration_ms: 30_100,
+        };
+        let block = ToolBlock::from_record(&record);
+        assert!(!block.is_running());
+        let text = block_text(&block, &env);
+        assert!(text.contains("⏹"), "header/body: {text}");
+        assert!(text.contains("timeout 30s"), "header/body: {text}");
+        assert!(!text.contains("✗"), "header/body: {text}");
     }
 
     #[test]
@@ -1251,6 +1357,7 @@ mod tests {
             output: "Todos (1/3 done)\n  #1 [x] set up schema\n  #2 [~] write migration\n  #3 [ ] update UI".to_string(),
             stderr: String::new(),
             ok: true,
+            killed: false,
             worker: None,
             message_id: 1,
             message_seq: 1,

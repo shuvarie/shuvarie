@@ -728,9 +728,7 @@ impl Chat {
     fn commit_interrupted(&mut self) {
         if let Some(mut turn) = self.in_flight.borrow_mut().take() {
             turn.finish_thinking();
-            if let Some(blocks) = turn.blocks.as_mut() {
-                blocks.retain(|block| !(block.is_tool() && block.tool_is_running()));
-            }
+            turn.kill_running_tools();
             let has_content = turn.blocks.as_ref().is_some_and(|blocks| {
                 blocks.iter().any(|block| {
                     block.is_text() || matches!(block, Block::Reasoning(_) | Block::Tool(_))
@@ -738,6 +736,7 @@ impl Chat {
             });
             if has_content {
                 self.interrupted = true;
+                turn.rev += 1;
                 turn.refresh_est(true);
                 self.turns.borrow_mut().push(turn);
             }
@@ -1132,6 +1131,7 @@ mod tests {
             output: String::new(),
             stderr: String::new(),
             ok: true,
+            killed: false,
             worker: None,
             message_id: 1,
             message_seq: seq,
@@ -1741,6 +1741,7 @@ mod tests {
                 output: "x".repeat(1200),
                 stderr: String::new(),
                 ok: true,
+                killed: false,
                 worker: None,
                 message_id: i as u64,
                 message_seq: idx,
@@ -1861,6 +1862,7 @@ mod tests {
                     .join("\n"),
                 stderr: String::new(),
                 ok: true,
+                killed: false,
                 worker: None,
                 message_id: i as u64,
                 message_seq: (2 * i + 1) as u64,
@@ -2437,5 +2439,143 @@ mod tests {
             body > stream,
             "steered entry renders below the in-flight turn"
         );
+    }
+
+    #[test]
+    fn interrupted_turn_kills_running_tool_blocks() {
+        // The interrupt lands mid-tool: the block must reach a terminal state
+        // (killed, keeping its streamed output) instead of vanishing, and the
+        // committed turn must stop animating.
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "go".into(),
+        });
+        chat.update(ChatMessage::ToolStarted {
+            name: "run_shell".into(),
+            args: serde_json::json!({"command": "sleep 30"}),
+            worker: None,
+            call_id: None,
+        });
+        chat.update(ChatMessage::ToolOutput {
+            tool: "run_shell".into(),
+            worker: None,
+            stdout: "partial output".into(),
+            stderr: String::new(),
+        });
+        chat.update(ChatMessage::StreamCancelled);
+
+        assert!(chat.in_flight.borrow().is_none());
+        assert!(
+            chat.last_turn_interrupted(),
+            "turn committed as interrupted"
+        );
+        assert!(!chat.has_running_tool_blocks(), "no block animates anymore");
+        let turns = chat.turns.borrow();
+        let turn = turns.last().unwrap();
+        let blocks = turn.blocks.as_deref().unwrap();
+        let Block::Tool(tool) = &blocks[0] else {
+            panic!("expected the killed tool block");
+        };
+        assert!(!tool.is_running());
+        drop(turns);
+
+        let text = render_turn_lines(&chat, Some(1), 80).unwrap();
+        assert!(text.contains("⏹"), "killed marker in the header: {text}");
+        assert!(text.contains("killed"), "killed label: {text}");
+        assert!(text.contains("partial"), "streamed output kept: {text}");
+        assert!(
+            text.contains("Took"),
+            "killed block shows its duration: {text}"
+        );
+        assert!(!text.contains("Elapsed "), "the run is over: {text}");
+    }
+
+    #[test]
+    fn interrupted_text_turn_keeps_thinking_and_text() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "go".into(),
+        });
+        chat.update(ChatMessage::ReasoningReceived {
+            content: "thinking".into(),
+        });
+        chat.update(ChatMessage::TokenReceived {
+            content: "partial reply".into(),
+        });
+        chat.update(ChatMessage::StreamError {
+            error: "boom".into(),
+        });
+        let text = render_turn_lines(&chat, Some(1), 80).unwrap();
+        assert!(text.contains("Thought"), "thinking finalized: {text}");
+        assert!(text.contains("partial reply"));
+        assert!(!text.contains("Thinking..."), "no frozen thinking header");
+        assert!(chat.last_turn_interrupted());
+    }
+
+    #[test]
+    fn timeout_killed_shell_finishes_as_killed() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "go".into(),
+        });
+        chat.update(ChatMessage::ToolStarted {
+            name: "run_shell".into(),
+            args: serde_json::json!({"command": "cargo build", "timeout_secs": 30}),
+            worker: None,
+            call_id: None,
+        });
+        chat.update(ChatMessage::ToolFinished {
+            name: "run_shell".into(),
+            ok: false,
+            output: "timeout 30s:\nsome partial output".into(),
+            worker: None,
+            file_change: None,
+            streams: None,
+            duration_ms: 30_100,
+            call_id: None,
+        });
+        let text = render_turn_lines(&chat, None, 80).unwrap();
+        assert!(
+            text.contains("⏹"),
+            "timeout kill shows the stop marker: {text}"
+        );
+        assert!(
+            !text.contains("✗"),
+            "a timeout kill is not a failure: {text}"
+        );
+        assert!(
+            text.contains("timeout 30s"),
+            "the timeout label stays: {text}"
+        );
+    }
+
+    #[test]
+    fn shell_exit_failure_stays_failed() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "go".into(),
+        });
+        chat.update(ChatMessage::ToolStarted {
+            name: "run_shell".into(),
+            args: serde_json::json!({"command": "false"}),
+            worker: None,
+            call_id: None,
+        });
+        chat.update(ChatMessage::ToolFinished {
+            name: "run_shell".into(),
+            ok: false,
+            output: "exit 1:\nboom".into(),
+            worker: None,
+            file_change: None,
+            streams: None,
+            duration_ms: 12,
+            call_id: None,
+        });
+        let text = render_turn_lines(&chat, None, 80).unwrap();
+        assert!(
+            text.contains("✗"),
+            "real failure keeps the error marker: {text}"
+        );
+        assert!(!text.contains("⏹"), "no stop marker on a failure: {text}");
     }
 }

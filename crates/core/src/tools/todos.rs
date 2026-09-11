@@ -602,6 +602,7 @@ mod tests {
             output: String::new(),
             stderr: String::new(),
             ok,
+            killed: false,
             worker,
             message_id: 1,
             message_seq: 0,

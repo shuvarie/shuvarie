@@ -187,6 +187,8 @@ pub struct ToolCall {
     pub args_json: String,
     pub output: String,
     pub ok: bool,
+    /// The call was cut off before it could finish (turn interrupted).
+    pub killed: bool,
     pub worker: Option<String>,
     pub file_change_json: String,
     pub original_content: Option<String>,

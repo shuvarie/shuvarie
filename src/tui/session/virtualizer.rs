@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::blocks::{
     Block, BlockMessage, ChatEnv, ReasoningBlock, ReasoningMessage, TextBlock, TextMessage,
-    hides_output_when_collapsed, shows_elapsed,
+    ToolMessage, hides_output_when_collapsed, shows_elapsed,
 };
 use super::segment::{BLOCK_PADDING, BlockAddr, HitRegion, Segment, TEXT_PADDING};
 
@@ -382,6 +382,19 @@ impl TurnData {
             if matches!(block, Block::Reasoning(_)) {
                 block.update(BlockMessage::Reasoning(ReasoningMessage::Finish));
             }
+        }
+    }
+
+    /// Terminalize the tool calls that were still running when the turn was
+    /// cut: each becomes a killed block, keeping its streamed output. A rev
+    /// bump invalidates the cache so the spinners stop on the next paint.
+    pub fn kill_running_tools(&mut self) {
+        let mut killed = false;
+        for block in self.blocks.iter_mut().flatten() {
+            killed |= block.update(BlockMessage::Tool(ToolMessage::Kill));
+        }
+        if killed {
+            self.rev += 1;
         }
     }
 

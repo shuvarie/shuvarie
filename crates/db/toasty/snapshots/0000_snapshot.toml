@@ -337,6 +337,12 @@ name = "duration_ms"
 ty = "U64"
 storage_ty = { UnsignedInteger = 8 }
 
+[[schema.tables.columns]]
+id = { table = 3, index = 14 }
+name = "killed"
+ty = "Bool"
+storage_ty = "Boolean"
+
 [[schema.tables.indices]]
 id = { table = 3, index = 0 }
 name = "index_tool_calls_by_id"

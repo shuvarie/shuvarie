@@ -1048,6 +1048,7 @@ mod tests {
             output: String::new(),
             stderr: String::new(),
             ok: true,
+            killed: false,
             worker: None,
             message_id: 1,
             message_seq: 0,

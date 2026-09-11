@@ -8,6 +8,9 @@ pub struct ToolRecord {
     pub output: String,
     pub stderr: String,
     pub ok: bool,
+    /// The call never returned: it was cut off when its turn was interrupted.
+    /// Persisted so a reload still shows the block (as killed, not failed).
+    pub killed: bool,
     pub worker: Option<String>,
     pub message_id: u64,
     pub message_seq: u64,
@@ -30,6 +33,7 @@ impl ToolRecord {
             output: tc.output,
             stderr: tc.stderr,
             ok: tc.ok,
+            killed: tc.killed,
             worker: tc.worker,
             message_id: tc.message_id,
             message_seq: tc.seq,

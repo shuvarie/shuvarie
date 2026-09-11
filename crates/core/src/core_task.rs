@@ -1089,12 +1089,26 @@ struct TurnState {
     pending_text: String,
     pending_reasoning: Vec<shuvarie_db::ReasoningSegment>,
     tool_records: Vec<crate::tool_record::ToolRecord>,
+    /// Tool calls started but not yet finished, in start order: when the turn
+    /// is cut they persist as killed records so a reload keeps their blocks.
+    pending_tools: Vec<PendingToolCall>,
 }
 
 /// A tool call whose result has not arrived yet: the serialized args plus the
 /// moment the call started, so the finished call can record its duration.
 struct PendingTool {
     args_json: String,
+    started: std::time::Instant,
+}
+
+/// A started tool call tracked in [`TurnState`] so an interrupted turn can
+/// persist the calls that never returned as killed records.
+#[derive(Debug, Clone)]
+struct PendingToolCall {
+    call_id: String,
+    name: String,
+    args_json: String,
+    worker: Option<String>,
     started: std::time::Instant,
 }
 
@@ -1221,6 +1235,7 @@ async fn redo_turn(store: &mut Store, session_id: uuid::Uuid) -> Result<bool, St
                 &tc.output,
                 &tc.stderr,
                 tc.ok,
+                tc.killed,
                 tc.worker.as_deref(),
                 &fc_json,
                 original.as_deref(),
@@ -1807,6 +1822,13 @@ async fn stream_stream_to_events(
                     let mut ts = turn_state.lock().await;
                     ts.assistant_message_id = assistant_message_id;
                     ts.assistant_seq = assistant_seq;
+                    ts.pending_tools.push(PendingToolCall {
+                        call_id: call_id.clone(),
+                        name: name.clone(),
+                        args_json: args.to_string(),
+                        worker: worker.clone(),
+                        started,
+                    });
                 }
                 let _ = event_tx
                     .send(Event::ToolStarted {
@@ -1866,6 +1888,7 @@ async fn stream_stream_to_events(
                                 &display_output,
                                 &display_stderr,
                                 ok,
+                                false,
                                 worker_name,
                                 &fc_json,
                                 original.as_deref(),
@@ -1882,6 +1905,7 @@ async fn stream_stream_to_events(
                     output: display_output,
                     stderr: display_stderr,
                     ok,
+                    killed: false,
                     worker: worker.clone(),
                     message_id: assistant_message_id.unwrap_or_default(),
                     message_seq: assistant_seq,
@@ -1892,6 +1916,9 @@ async fn stream_stream_to_events(
                 });
                 {
                     let mut ts = turn_state.lock().await;
+                    ts.pending_tools.retain(|pending| {
+                        !(pending.call_id == call_id && pending.worker == worker)
+                    });
                     ts.tool_records = turn_tool_records.clone();
                 }
                 let _ = event_tx
@@ -2248,6 +2275,33 @@ fn parse_file_change(json: &str) -> Option<FileChange> {
     serde_json::from_str::<FileChange>(json).ok()
 }
 
+/// Killed records for the tool calls of an interrupted turn that never
+/// returned: no output, `ok: false`, flagged killed, duration up to the cut.
+fn killed_records(
+    pending: &[PendingToolCall],
+    message_id: u64,
+    message_seq: u64,
+) -> Vec<crate::tool_record::ToolRecord> {
+    pending
+        .iter()
+        .map(|pending| crate::tool_record::ToolRecord {
+            name: pending.name.clone(),
+            args_json: pending.args_json.clone(),
+            output: String::new(),
+            stderr: String::new(),
+            ok: false,
+            killed: true,
+            worker: pending.worker.clone(),
+            message_id,
+            message_seq,
+            file_change: None,
+            original_content: None,
+            new_content: None,
+            duration_ms: pending.started.elapsed().as_millis() as u64,
+        })
+        .collect()
+}
+
 /// Cut the stream for a queued steered prompt: persist the partial turn as
 /// interrupted, surface the cancellation, and report `Preempted` back to the
 /// run loop so it dispatches the queued prompt.
@@ -2274,7 +2328,7 @@ async fn persist_interrupted_turn(
     session: &Option<Arc<Mutex<Session>>>,
     _event_tx: &Sender<Event>,
 ) {
-    let (text, reasoning, msg_id, tool_records) = match turn_state {
+    let (text, reasoning, msg_id, tool_records, pending_tools, assistant_seq) = match turn_state {
         Some(ts_arc) => {
             let ts = ts_arc.lock().await;
             (
@@ -2282,6 +2336,8 @@ async fn persist_interrupted_turn(
                 ts.pending_reasoning.clone(),
                 ts.assistant_message_id,
                 ts.tool_records.clone(),
+                ts.pending_tools.clone(),
+                ts.assistant_seq,
             )
         }
         None => return,
@@ -2308,6 +2364,27 @@ async fn persist_interrupted_turn(
                 &shuvarie_llm::TokenUsage::default(),
             )
             .await;
+        let killed = killed_records(&pending_tools, msg_id, assistant_seq);
+        for (i, record) in killed.iter().enumerate() {
+            let _ = store
+                .append_tool_call(
+                    id,
+                    msg_id,
+                    tool_records.len() as u64 + i as u64,
+                    &record.name,
+                    &record.args_json,
+                    &record.output,
+                    &record.stderr,
+                    record.ok,
+                    record.killed,
+                    record.worker.as_deref(),
+                    "",
+                    None,
+                    None,
+                    record.duration_ms,
+                )
+                .await;
+        }
         {
             let mut g = s.lock().await;
             g.push_assistant(text.clone());
@@ -2315,6 +2392,7 @@ async fn persist_interrupted_turn(
             g.reasoning.insert(seq as u64, reasoning);
             g.interrupted.insert(seq as u64, true);
             g.tool_records.extend(tool_records);
+            g.tool_records.extend(killed);
         }
     } else if (!text.is_empty() || !reasoning.is_empty())
         && store
@@ -3563,5 +3641,132 @@ mod tests {
         assert_eq!(guard.messages[0].content, "working");
         assert_eq!(guard.interrupted.get(&0), Some(&true));
         assert_eq!(guard.tool_records.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn interrupted_turn_persists_pending_tools_as_killed() {
+        let session = Arc::new(Mutex::new(Session::new()));
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+        let mut store = Store::open_in_memory().await.unwrap();
+        let id = store.create_session("cut", None, None).await.unwrap();
+        {
+            let mut guard = session.lock().await;
+            guard.id = Some(id);
+            guard.push_user("go");
+        }
+        store
+            .append_message(id, shuvarie_llm::Role::User, "go")
+            .await
+            .unwrap();
+        let assistant = store
+            .append_message(id, shuvarie_llm::Role::Assistant, "")
+            .await
+            .unwrap();
+
+        let turn_state = Arc::new(Mutex::new(TurnState {
+            assistant_message_id: Some(assistant.id),
+            assistant_seq: 1,
+            pending_text: "partial".into(),
+            tool_records: vec![crate::tool_record::ToolRecord {
+                name: "read_file".into(),
+                args_json: "{}".into(),
+                output: "out".into(),
+                stderr: String::new(),
+                ok: true,
+                killed: false,
+                worker: None,
+                message_id: assistant.id,
+                message_seq: 1,
+                file_change: None,
+                original_content: None,
+                new_content: None,
+                duration_ms: 5,
+            }],
+            pending_tools: vec![PendingToolCall {
+                call_id: "c2".into(),
+                name: "run_shell".into(),
+                args_json: r#"{"command":"sleep 30"}"#.into(),
+                worker: None,
+                started: std::time::Instant::now(),
+            }],
+            ..TurnState::default()
+        }));
+
+        persist_interrupted_turn(
+            Some(turn_state.clone()),
+            &mut store,
+            &Some(session.clone()),
+            &event_tx,
+        )
+        .await;
+
+        let stored = store.load_session(id).await.unwrap();
+        let killed: Vec<_> = stored.tool_calls.iter().filter(|tc| tc.killed).collect();
+        let finished: Vec<_> = stored.tool_calls.iter().filter(|tc| !tc.killed).collect();
+        assert_eq!(killed.len(), 1, "the pending call persists as killed");
+        assert!(finished.is_empty(), "only the kill was written here");
+        assert_eq!(killed[0].name, "run_shell");
+        assert_eq!(killed[0].seq, 1, "seq continues after the finished calls");
+        assert!(!killed[0].ok);
+        assert_eq!(killed[0].message_id, assistant.id);
+
+        let guard = session.lock().await;
+        assert_eq!(guard.messages.len(), 2);
+        assert_eq!(guard.interrupted.get(&1), Some(&true));
+        assert_eq!(guard.tool_records.len(), 2);
+        assert!(!guard.tool_records[0].killed);
+        assert!(guard.tool_records[1].killed);
+        assert_eq!(guard.tool_records[1].message_seq, 1);
+        assert_eq!(guard.tool_records[1].name, "run_shell");
+    }
+
+    #[tokio::test]
+    async fn tool_result_clears_the_pending_call() {
+        let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
+        let session = Arc::new(Mutex::new(Session::new()));
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+        let mut store = Store::open_in_memory().await.unwrap();
+        let id = store.create_session("settle", None, None).await.unwrap();
+        session.lock().await.id = Some(id);
+        let stream: shuvarie_llm::StreamStream = Box::pin(futures_util::stream::iter(vec![
+            main_tool_start("edit_file", "c1"),
+            main_tool_result("edit_file", "c1"),
+            StreamItem::Done {
+                text: "done".into(),
+                usage: TokenUsage::default(),
+            },
+        ]));
+        let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
+        let turn_state = Arc::new(Mutex::new(TurnState::default()));
+        let (stream_done_tx, _stream_done_rx) = tokio::sync::mpsc::channel(1);
+        let session_shared = session.clone();
+        let turn_state_shared = turn_state.clone();
+        tokio::spawn(async move {
+            stream_stream_to_events(
+                stream,
+                session_shared,
+                client,
+                None,
+                store,
+                "ollama-model".into(),
+                20_000,
+                worker_usage,
+                None,
+                event_tx,
+                turn_state_shared,
+                stream_done_tx,
+                SteerSignal::default(),
+            )
+            .await;
+        });
+        while let Some(event) = event_rx.recv().await {
+            if matches!(event, Event::StreamDone { .. }) {
+                break;
+            }
+        }
+        assert!(turn_state.lock().await.pending_tools.is_empty());
+        let guard = session.lock().await;
+        assert_eq!(guard.tool_records.len(), 1);
+        assert!(!guard.tool_records[0].killed);
     }
 }

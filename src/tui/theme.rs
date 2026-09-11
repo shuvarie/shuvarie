@@ -18,6 +18,7 @@ pub const TEXT_MUTED: Color = Color::Rgb(92, 86, 74);
 pub const PROMPT_BG: Color = Color::Rgb(44, 38, 30);
 pub const RUNNING_BG: Color = Color::Rgb(38, 38, 46);
 pub const SUCCESS_BG: Color = Color::Rgb(26, 40, 30);
+pub const WARNING_BG: Color = Color::Rgb(45, 37, 23);
 pub const ERROR_BG: Color = Color::Rgb(46, 26, 24);
 
 #[allow(dead_code)]
