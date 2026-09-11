@@ -55,8 +55,8 @@ impl TurnText {
     }
 }
 
-fn openai_builder(key: &str, base_url: Option<&str>) -> rig::providers::openai::ClientBuilder {
-    let builder = rig::providers::openai::Client::builder().api_key(key);
+fn openai_builder(key: &str, base_url: Option<&str>) -> rig_core::providers::openai::ClientBuilder {
+    let builder = rig_core::providers::openai::Client::builder().api_key(key);
     if let Some(url) = base_url {
         builder.base_url(url)
     } else {
@@ -66,11 +66,11 @@ fn openai_builder(key: &str, base_url: Option<&str>) -> rig::providers::openai::
 
 #[derive(Debug, Clone)]
 enum ListImpl {
-    OpenAi(rig::providers::openai::Client),
-    OpenRouter(rig::providers::openrouter::Client),
-    Anthropic(rig::providers::anthropic::Client),
-    Gemini(rig::providers::gemini::Client),
-    Ollama(rig::providers::ollama::Client),
+    OpenAi(rig_core::providers::openai::Client),
+    OpenRouter(rig_core::providers::openrouter::Client),
+    Anthropic(rig_core::providers::anthropic::Client),
+    Gemini(rig_core::providers::gemini::Client),
+    Ollama(rig_core::providers::ollama::Client),
 }
 
 impl ProviderClient {
@@ -93,7 +93,7 @@ impl ProviderClient {
             }
             ProviderType::Openrouter => {
                 let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
-                let client = rig::providers::openrouter::Client::builder().api_key(key);
+                let client = rig_core::providers::openrouter::Client::builder().api_key(key);
                 let client = if let Some(url) = base_url.as_deref() {
                     client.base_url(url)
                 } else {
@@ -107,7 +107,7 @@ impl ProviderClient {
             }
             ProviderType::Anthropic => {
                 let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
-                let client = rig::providers::anthropic::Client::builder().api_key(key);
+                let client = rig_core::providers::anthropic::Client::builder().api_key(key);
                 let client = if let Some(url) = base_url.as_deref() {
                     client.base_url(url)
                 } else {
@@ -121,7 +121,7 @@ impl ProviderClient {
             }
             ProviderType::Google => {
                 let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
-                let client = rig::providers::gemini::Client::builder().api_key(key);
+                let client = rig_core::providers::gemini::Client::builder().api_key(key);
                 let client = if let Some(url) = base_url.as_deref() {
                     client.base_url(url)
                 } else {
@@ -135,7 +135,7 @@ impl ProviderClient {
             }
             ProviderType::Ollama => {
                 let client =
-                    rig::providers::ollama::Client::builder().api_key(api_key.unwrap_or(""));
+                    rig_core::providers::ollama::Client::builder().api_key(api_key.unwrap_or(""));
                 let client = if let Some(url) = base_url.as_deref() {
                     client.base_url(url)
                 } else {
@@ -185,8 +185,8 @@ impl ProviderClient {
     }
 
     pub async fn embed(&self, model: &str, dims: usize, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        use rig::client::EmbeddingsClient;
-        use rig::embeddings::EmbeddingsBuilder;
+        use rig_core::client::EmbeddingsClient;
+        use rig_core::embeddings::EmbeddingsBuilder;
 
         if texts.is_empty() {
             return Ok(Vec::new());
@@ -246,7 +246,7 @@ impl ProviderClient {
     }
 
     pub async fn list_models(&self) -> Result<Vec<crate::Model>> {
-        use rig::client::ModelListingClient;
+        use rig_core::client::ModelListingClient;
 
         let models = match &self.list {
             ListImpl::OpenAi(c) => c.list_models().await,
@@ -264,7 +264,7 @@ impl ProviderClient {
         &self,
         req: &crate::agent::WorkerRequest,
     ) -> std::result::Result<String, String> {
-        let user_msg = rig::message::Message::user(req.task.clone());
+        let user_msg = rig_core::message::Message::user(req.task.clone());
         let activity_tx = req.activity_tx.clone();
         let usage = Arc::clone(&req.usage);
         let tracker = crate::context_hook::UsageTracker::new();
@@ -391,15 +391,15 @@ impl ProviderClient {
         max_turns: usize,
         context_budget: Option<crate::context_hook::ContextBudget>,
     ) -> StreamStream {
-        use rig::streaming::StreamingChat;
+        use rig_agent::streaming::StreamingChat;
 
         let tracker = crate::context_hook::UsageTracker::new();
         let tracker_for_hook = tracker.clone();
-        let user_msg = rig::message::Message::user(prompt.to_string());
-        let rig_history: Vec<rig::message::Message> = history
+        let user_msg = rig_core::message::Message::user(prompt.to_string());
+        let rig_history: Vec<rig_core::message::Message> = history
             .iter()
             .cloned()
-            .map(rig::message::Message::from)
+            .map(rig_core::message::Message::from)
             .collect();
         let mut dynamic = tools;
         for worker in workers.iter() {
@@ -414,9 +414,9 @@ impl ProviderClient {
         let file_hook = FileChangeHook::new();
 
         async fn build(
-            agent: rig::agent::Agent,
-            prompt: rig::message::Message,
-            history: Vec<rig::message::Message>,
+            agent: rig_agent::agent::Agent,
+            prompt: rig_core::message::Message,
+            history: Vec<rig_core::message::Message>,
             receivers: Vec<tokio::sync::mpsc::Receiver<StreamItem>>,
             worker_names: std::collections::HashSet<String>,
             file_hook: FileChangeHook,
@@ -435,13 +435,13 @@ impl ProviderClient {
                 std::collections::VecDeque::new();
             let tracker_clone = tracker.clone();
             let main = stream.map(move |item| match item {
-                Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
-                    rig::streaming::StreamedAssistantContent::Text(t),
+                Ok(rig_agent::agent::MultiTurnStreamItem::StreamAssistantItem(
+                    rig_core::streaming::StreamedAssistantContent::Text(t),
                 )) => StreamItem::Delta {
                     text: turn_text.push(t.text),
                 },
-                Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
-                    rig::streaming::StreamedAssistantContent::Reasoning { reasoning, .. },
+                Ok(rig_agent::agent::MultiTurnStreamItem::StreamAssistantItem(
+                    rig_core::streaming::StreamedAssistantContent::Reasoning { reasoning, .. },
                 )) => {
                     let text = reasoning.display_text();
                     if text.is_empty() {
@@ -452,8 +452,10 @@ impl ProviderClient {
                         StreamItem::Reasoning { text }
                     }
                 }
-                Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
-                    rig::streaming::StreamedAssistantContent::ReasoningDelta { reasoning, .. },
+                Ok(rig_agent::agent::MultiTurnStreamItem::StreamAssistantItem(
+                    rig_core::streaming::StreamedAssistantContent::ReasoningDelta {
+                        reasoning, ..
+                    },
                 )) => {
                     if reasoning.is_empty() {
                         StreamItem::Delta {
@@ -463,8 +465,8 @@ impl ProviderClient {
                         StreamItem::Reasoning { text: reasoning }
                     }
                 }
-                Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
-                    rig::streaming::StreamedAssistantContent::ToolCall {
+                Ok(rig_agent::agent::MultiTurnStreamItem::StreamAssistantItem(
+                    rig_core::streaming::StreamedAssistantContent::ToolCall {
                         tool_call,
                         internal_call_id,
                     },
@@ -489,8 +491,8 @@ impl ProviderClient {
                         }
                     }
                 }
-                Ok(rig::agent::MultiTurnStreamItem::StreamUserItem(
-                    rig::streaming::StreamedUserContent::ToolResult {
+                Ok(rig_agent::agent::MultiTurnStreamItem::StreamUserItem(
+                    rig_core::streaming::StreamedUserContent::ToolResult {
                         tool_result,
                         internal_call_id,
                     },
@@ -529,7 +531,7 @@ impl ProviderClient {
                         },
                     }
                 }
-                Ok(rig::agent::MultiTurnStreamItem::FinalResponse(resp)) => {
+                Ok(rig_agent::agent::MultiTurnStreamItem::FinalResponse(resp)) => {
                     let text = if turn_text.is_empty() && tool_called {
                         String::new()
                     } else {
@@ -540,7 +542,7 @@ impl ProviderClient {
                         usage: resp.usage,
                     }
                 }
-                Ok(rig::agent::MultiTurnStreamItem::CompletionCall(call)) => {
+                Ok(rig_agent::agent::MultiTurnStreamItem::CompletionCall(call)) => {
                     tracker_clone.record(call.usage);
                     StreamItem::Usage {
                         usage: call.usage,
@@ -686,9 +688,9 @@ fn agent_with_tools<C>(
     context_budget: Option<crate::context_hook::ContextBudget>,
     tracker: std::sync::Arc<crate::context_hook::UsageTracker>,
     file_hook: FileChangeHook,
-) -> rig::agent::Agent
+) -> rig_agent::agent::Agent
 where
-    C: rig::client::CompletionClient + rig::prelude::AgentClientExt,
+    C: rig_core::client::CompletionClient + rig_agent::client::AgentClientExt,
     C::CompletionModel: 'static,
 {
     let builder = match preamble {
@@ -707,18 +709,18 @@ where
 }
 
 async fn run_worker_agent(
-    agent: rig::agent::Agent,
+    agent: rig_agent::agent::Agent,
     name: &str,
-    prompt: rig::message::Message,
+    prompt: rig_core::message::Message,
     activity_tx: tokio::sync::mpsc::Sender<StreamItem>,
     usage: std::sync::Arc<std::sync::Mutex<crate::TokenUsage>>,
     max_turns: usize,
     file_hook: FileChangeHook,
 ) -> std::result::Result<String, String> {
-    use rig::streaming::StreamingChat;
+    use rig_agent::streaming::StreamingChat;
 
     let mut stream = agent
-        .stream_chat(prompt, Vec::<rig::message::Message>::new())
+        .stream_chat(prompt, Vec::<rig_core::message::Message>::new())
         .max_turns(max_turns)
         .await;
 
@@ -728,13 +730,13 @@ async fn run_worker_agent(
         std::collections::HashMap::new();
     while let Some(item) = stream.next().await {
         match item {
-            Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
-                rig::streaming::StreamedAssistantContent::Text(t),
+            Ok(rig_agent::agent::MultiTurnStreamItem::StreamAssistantItem(
+                rig_core::streaming::StreamedAssistantContent::Text(t),
             )) => {
                 turn_text.push(t.text);
             }
-            Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
-                rig::streaming::StreamedAssistantContent::ToolCall {
+            Ok(rig_agent::agent::MultiTurnStreamItem::StreamAssistantItem(
+                rig_core::streaming::StreamedAssistantContent::ToolCall {
                     tool_call,
                     internal_call_id,
                 },
@@ -749,8 +751,8 @@ async fn run_worker_agent(
                     })
                     .await;
             }
-            Ok(rig::agent::MultiTurnStreamItem::StreamUserItem(
-                rig::streaming::StreamedUserContent::ToolResult {
+            Ok(rig_agent::agent::MultiTurnStreamItem::StreamUserItem(
+                rig_core::streaming::StreamedUserContent::ToolResult {
                     tool_result,
                     internal_call_id,
                 },
@@ -783,7 +785,7 @@ async fn run_worker_agent(
                     })
                     .await;
             }
-            Ok(rig::agent::MultiTurnStreamItem::CompletionCall(call)) => {
+            Ok(rig_agent::agent::MultiTurnStreamItem::CompletionCall(call)) => {
                 let _ = activity_tx
                     .send(StreamItem::Usage {
                         usage: call.usage,
@@ -791,7 +793,7 @@ async fn run_worker_agent(
                     })
                     .await;
             }
-            Ok(rig::agent::MultiTurnStreamItem::FinalResponse(resp)) => {
+            Ok(rig_agent::agent::MultiTurnStreamItem::FinalResponse(resp)) => {
                 usage_aggregate = resp.usage;
             }
             Ok(_) => {}

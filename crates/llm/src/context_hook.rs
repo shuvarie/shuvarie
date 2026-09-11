@@ -20,12 +20,14 @@
 //! request. Only what is *sent* changes: rig's run state and persistence are
 //! untouched (`RequestPatch.history` replaces the history for this turn only).
 
-use rig::agent::hook::{CompletionCall, ToolResultEvent};
-use rig::agent::{
+use rig_agent::agent::hook::{CompletionCall, ToolResultEvent};
+use rig_agent::agent::{
     AgentHook, CompletionCallAction, HookContext, RequestPatch, StepEventKind, ToolResultAction,
 };
-use rig::completion::Usage;
-use rig::completion::message::{AssistantContent, Message, Text, ToolResult, ToolResultContent};
+use rig_core::completion::Usage;
+use rig_core::completion::message::{
+    AssistantContent, Message, Text, ToolResult, ToolResultContent,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -62,8 +64,8 @@ fn message_text_len(msg: &Message) -> usize {
         Message::User { content } => content
             .iter()
             .map(|c| match c {
-                rig::completion::message::UserContent::Text(t) => t.text.chars().count(),
-                rig::completion::message::UserContent::ToolResult(tr) => tool_result_len(tr),
+                rig_core::completion::message::UserContent::Text(t) => t.text.chars().count(),
+                rig_core::completion::message::UserContent::ToolResult(tr) => tool_result_len(tr),
                 _ => 0,
             })
             .sum(),
@@ -78,10 +80,12 @@ fn message_text_len(msg: &Message) -> usize {
                     .content
                     .iter()
                     .map(|c| match c {
-                        rig::completion::message::ReasoningContent::Text { text, .. } => {
+                        rig_core::completion::message::ReasoningContent::Text { text, .. } => {
                             text.chars().count()
                         }
-                        rig::completion::message::ReasoningContent::Summary(s) => s.chars().count(),
+                        rig_core::completion::message::ReasoningContent::Summary(s) => {
+                            s.chars().count()
+                        }
                         _ => 0,
                     })
                     .sum(),
@@ -316,15 +320,15 @@ fn condense_message(msg: &Message) -> Message {
         Message::User { content } => {
             let has_tool_result = content
                 .iter()
-                .any(|c| matches!(c, rig::completion::message::UserContent::ToolResult(_)));
+                .any(|c| matches!(c, rig_core::completion::message::UserContent::ToolResult(_)));
             if !has_tool_result {
                 return msg.clone();
             }
-            let condensed: Vec<rig::completion::message::UserContent> = content
+            let condensed: Vec<rig_core::completion::message::UserContent> = content
                 .iter()
                 .map(|c| match c {
-                    rig::completion::message::UserContent::ToolResult(tr) => {
-                        rig::completion::message::UserContent::ToolResult(ToolResult {
+                    rig_core::completion::message::UserContent::ToolResult(tr) => {
+                        rig_core::completion::message::UserContent::ToolResult(ToolResult {
                             call: tr.call.clone(),
                             provider: tr.provider.clone(),
                             name: tr.name.clone(),
@@ -396,7 +400,7 @@ impl AgentHook for ContextHook {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig::completion::message::{Message, Text, ToolCallId, ToolResult, UserContent};
+    use rig_core::completion::message::{Message, Text, ToolCallId, ToolResult, UserContent};
 
     fn user_msg(text: &str) -> Message {
         Message::User {

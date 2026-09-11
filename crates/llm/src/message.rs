@@ -37,14 +37,14 @@ impl ChatMsg {
     }
 }
 
-impl From<ChatMsg> for rig::message::Message {
+impl From<ChatMsg> for rig_core::message::Message {
     fn from(msg: ChatMsg) -> Self {
         match msg.role {
-            Role::System => rig::message::Message::System {
+            Role::System => rig_core::message::Message::System {
                 content: msg.content,
             },
-            Role::User => rig::message::Message::user(msg.content),
-            Role::Assistant => rig::message::Message::assistant(msg.content),
+            Role::User => rig_core::message::Message::user(msg.content),
+            Role::Assistant => rig_core::message::Message::assistant(msg.content),
         }
     }
 }

@@ -11,7 +11,9 @@ futures-core = "0.3"
 futures-util.workspace = true
 http.workspace = true
 reqwest.workspace = true
-rig = "0.42.0"
+# Do NOT include `rig`. It has too many implicit dependencies.
+rig-agent = "0.42"
+rig-core = "0.42"
 serde.workspace = true
 serde_json.workspace = true
 selune.workspace = true

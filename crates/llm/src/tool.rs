@@ -1,16 +1,14 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use rig::agent::hook::{HookContext, ToolResultEvent};
-use rig::agent::{AgentHook, ToolResultAction};
+use rig_agent::agent::hook::{HookContext, ToolResultEvent};
+use rig_agent::agent::{AgentHook, ToolResultAction};
 
 use crate::file_change::{FileChange, ShellStreams};
 
-pub use rig::completion::ToolDefinition;
-pub use rig::tool::{
-    DynamicTool, PortableDynamicTool, Tool, ToolContext, ToolErrorKind, ToolExecutionError,
-    ToolOutput, ToolSet,
-};
+pub use rig_agent::tool::{DynamicTool, Tool, ToolContext, ToolSet};
+pub use rig_core::completion::ToolDefinition;
+pub use rig_core::tool::{PortableDynamicTool, ToolErrorKind, ToolExecutionError, ToolOutput};
 
 /// Wrap a typed [`Tool`] as a [`DynamicTool`]. The tool reports host-only
 /// [`FileChange`]s via [`ToolContext::insert_result`]; a [`FileChangeHook`]

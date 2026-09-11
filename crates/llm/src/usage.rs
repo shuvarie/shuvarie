@@ -1,4 +1,4 @@
-pub use rig::completion::Usage as TokenUsage;
+pub use rig_core::completion::Usage as TokenUsage;
 
 /// The approximate context footprint of one completed provider request: the
 /// tokens the provider processed for that exchange (the full prompt including

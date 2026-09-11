@@ -1,5 +1,5 @@
-use rig::agent::StreamingError;
-use rig::completion::CompletionError;
+use rig_agent::agent::StreamingError;
+use rig_core::completion::CompletionError;
 
 /// A transport-level failure worth retrying: the reason is a short,
 /// human-readable label for the status row (`Connection reset`,
@@ -22,7 +22,7 @@ pub fn classify_connection_error(err: &StreamingError) -> Option<ConnectionFailu
     let completion = match err {
         StreamingError::Completion(e) => e,
         StreamingError::Prompt(e) => match e.as_ref() {
-            rig::completion::PromptError::CompletionError(e) => e,
+            rig_agent::completion::PromptError::CompletionError(e) => e,
             _ => return None,
         },
     };
@@ -45,8 +45,8 @@ fn classify_completion_error(err: &CompletionError) -> Option<ConnectionFailure>
     }
 }
 
-fn classify_http_error(err: &rig::http_client::Error) -> Option<ConnectionFailure> {
-    use rig::http_client::Error as HttpError;
+fn classify_http_error(err: &rig_core::http_client::Error) -> Option<ConnectionFailure> {
+    use rig_core::http_client::Error as HttpError;
 
     match err {
         HttpError::InvalidStatusCode(status)
@@ -130,15 +130,19 @@ mod tests {
     }
 
     fn prompt_err(err: CompletionError) -> StreamingError {
-        StreamingError::Prompt(Box::new(rig::completion::PromptError::CompletionError(err)))
+        StreamingError::Prompt(Box::new(
+            rig_agent::completion::PromptError::CompletionError(err),
+        ))
     }
 
     fn max_turns_err() -> StreamingError {
-        StreamingError::Prompt(Box::new(rig::completion::PromptError::MaxTurnsError {
-            max_turns: 1,
-            chat_history: Box::default(),
-            prompt: Box::new(rig::message::Message::user("x")),
-        }))
+        StreamingError::Prompt(Box::new(
+            rig_agent::completion::PromptError::MaxTurnsError {
+                max_turns: 1,
+                chat_history: Box::default(),
+                prompt: Box::new(rig_core::message::Message::user("x")),
+            },
+        ))
     }
 
     /// A synthetic error whose source is an `io::Error` of `kind`, standing in
@@ -161,13 +165,13 @@ mod tests {
 
     fn status_err(status: http::StatusCode) -> StreamingError {
         completion_err(CompletionError::HttpError(
-            rig::http_client::Error::InvalidStatusCode(status),
+            rig_core::http_client::Error::InvalidStatusCode(status),
         ))
     }
 
     fn transport_err(inner: Box<dyn StdError + Send + Sync + 'static>) -> StreamingError {
         completion_err(CompletionError::HttpError(
-            rig::http_client::Error::Instance(inner),
+            rig_core::http_client::Error::Instance(inner),
         ))
     }
 

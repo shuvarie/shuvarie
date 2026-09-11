@@ -1,1 +1,1 @@
-pub use rig::model::Model;
+pub use rig_core::model::Model;
