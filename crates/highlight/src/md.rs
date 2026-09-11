@@ -32,10 +32,12 @@ pub fn render(text: &str) -> Vec<Line<'static>> {
 /// top-level block boundary, the byte offset in the input where the block
 /// ends and the line count reached at that point. A boundary is safe when a
 /// fresh parse of `text[boundary..]` renders the remaining text identically
-/// to the whole-input parse — guaranteed once a blank line (or an atomic
-/// block such as a heading or rule) separates the boundary from whatever
-/// follows. Streaming blocks commit at the last boundary and re-render only
-/// the open region after it on each append.
+/// to the whole-input parse — guaranteed once a blank line separates the
+/// boundary from whatever follows, or once a single-line block (heading,
+/// rule) has consumed its own line break; a list never commits alone, since
+/// a later item can still loosen it, and only rides along with a following
+/// block's boundary. Streaming blocks commit at the last boundary and
+/// re-render only the open region after it on each append.
 pub struct MdPass {
     pub lines: Vec<Line<'static>>,
     pub boundaries: Vec<(usize, usize)>,
@@ -66,7 +68,7 @@ pub fn render_pass(text: &str) -> MdPass {
             Event::HardBreak => ctx.hard_break(),
             Event::Rule => {
                 ctx.rule();
-                if depth == 0 {
+                if depth == 0 && line_terminated(&text[..range.end]) {
                     boundaries.push((range.end, ctx.lines.len()));
                 }
             }
@@ -82,17 +84,33 @@ pub fn render_pass(text: &str) -> MdPass {
 }
 
 /// Whether a top-level block ending at `end` cannot be changed retroactively
-/// by more text: atomic blocks (headings, rules) never, every other block
-/// only once a blank line follows — an unterminated paragraph can still grow
-/// a setext underline or a table separator, a list or quote can lazily
-/// continue, an unclosed fence closes only at EOF. A genuinely closed fence
-/// is stable even without a blank line.
+/// by more text: a heading only once its own line break has been consumed —
+/// an unterminated heading line still grows with the next delta and its
+/// frozen half would re-parse as a paragraph — every other block only once a
+/// blank line follows, for the same reason a rule must not commit before its
+/// line break (`---` can still degrade into a paragraph) and an unterminated
+/// paragraph can still grow a setext underline or a table separator, a list
+/// or quote can lazily continue, an unclosed fence closes only at EOF. A
+/// genuinely closed fence is stable even without a blank line. A list is
+/// never stable on its own: any later same-marker item or indented
+/// continuation line joins it across the blank and loosens it (items become
+/// paragraph-wrapped, gaining blank lines), so it only commits implicitly
+/// when a following block's boundary takes the prefix.
 fn boundary_is_stable(text: &str, tag: TagEnd, end: usize) -> bool {
     match tag {
-        TagEnd::Heading(_) => true,
+        TagEnd::Heading(_) => line_terminated(&text[..end]),
         TagEnd::CodeBlock => fence_closed(&text[..end]) || followed_by_blank(text, end),
+        TagEnd::List(_) => false,
         _ => followed_by_blank(text, end),
     }
+}
+
+/// Whether a block's range includes its own terminating line break:
+/// pulldown-cmark ends a heading or rule range after the line break when it
+/// has been seen and at the buffer's end when it has not, so a range that
+/// stops mid-line still grows with more input.
+fn line_terminated(head: &str) -> bool {
+    head.ends_with('\n')
 }
 
 /// Whether `head` ends with a genuinely closed code fence: walking its

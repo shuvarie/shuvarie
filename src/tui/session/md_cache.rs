@@ -287,12 +287,17 @@ mod tests {
             .collect()
     }
 
+    /// Appends the parts with a frame render between each, like the live
+    /// turn does (one view per delta), so the committed boundary advances
+    /// while the stream is still open.
     fn streamed(parts: &[&str], width: u16) -> Vec<String> {
         let mut cache = MdCache::new("");
+        let mut lines = Vec::new();
         for part in parts {
             cache.append(part);
+            lines = lines_of(&cache, width);
         }
-        lines_of(&cache, width)
+        lines
     }
 
     fn one_shot(content: &str) -> Vec<String> {
@@ -311,15 +316,93 @@ mod tests {
 
     #[test]
     fn char_by_char_streaming_matches_one_shot() {
-        let content = "Hello *world* with `code` and a list:\n\n- one\n- two\n\n```rust\nlet x = 1;\n```\n\n> quoted\n\nTail line";
+        let content = "# Header\n\nHello *world* with `code` and a list:\n\n- one\n- two\n\n```rust\nlet x = 1;\n```\n\n> quoted\n\nTail line";
         let mut cache = MdCache::new("");
         let mut last = 0usize;
         for (i, _) in content.char_indices().skip(1) {
             cache.append(&content[last..i]);
             last = i;
+            let _ = lines_of(&cache, 80);
         }
         cache.append(&content[last..]);
-        assert_eq!(lines_of(&cache, 80), one_shot(content));
+        let lines = lines_of(&cache, 80);
+        assert_eq!(lines, one_shot(content));
+    }
+
+    #[test]
+    fn mid_heading_frame_does_not_split() {
+        let mut cache = MdCache::new("");
+        cache.append("Intro\n\n# Ti");
+        let frozen = lines_of(&cache, 80);
+        let (committed, _, bytes) = cache.probe_state();
+        cache.append("tle\n\nNext");
+        let lines = lines_of(&cache, 80);
+        assert_eq!(frozen, one_shot("Intro\n\n# Ti"));
+        assert_eq!(lines, one_shot("Intro\n\n# Title\n\nNext"));
+        assert_eq!(
+            (committed, bytes),
+            (2, 6),
+            "the unterminated heading line must stay open; only the intro paragraph commits"
+        );
+    }
+
+    #[test]
+    fn terminated_heading_commits_between_frames() {
+        let mut cache = MdCache::new("");
+        cache.append("Intro\n\n# Title\n");
+        let _ = lines_of(&cache, 80);
+        let (committed, _, bytes) = cache.probe_state();
+        assert_eq!(
+            (committed, bytes),
+            (4, 15),
+            "the newline-terminated heading commits with its trailing blank"
+        );
+        cache.append("\nNext");
+        assert_eq!(lines_of(&cache, 80), one_shot("Intro\n\n# Title\n\nNext"));
+    }
+
+    #[test]
+    fn mid_rule_frame_does_not_degrade() {
+        assert_eq!(streamed(&["---", "text"], 80), one_shot("---text"));
+        assert_eq!(streamed(&["***", " done"], 80), one_shot("*** done"));
+        assert_eq!(
+            streamed(&["before", "\n\n---", " no"], 80),
+            one_shot("before\n\n--- no")
+        );
+    }
+
+    #[test]
+    fn terminated_rule_commits_between_frames() {
+        assert_eq!(streamed(&["a\n\n---\n", "b"], 80), one_shot("a\n\n---\nb"));
+    }
+
+    #[test]
+    fn loose_list_stays_uncommitted_until_a_later_block() {
+        let mut cache = MdCache::new("");
+        cache.append("- a\n\n");
+        let _ = lines_of(&cache, 80);
+        assert_eq!(
+            cache.probe_state().0,
+            0,
+            "a list boundary never commits on its own"
+        );
+        cache.append("  indented\n\nplain\n");
+        let lines = lines_of(&cache, 80);
+        assert_eq!(lines, one_shot("- a\n\n  indented\n\nplain\n"));
+        assert_eq!(
+            cache.probe_state().0,
+            0,
+            "still nothing committed: the bare paragraph is unterminated"
+        );
+        cache.append("\nmore\n");
+        let lines = lines_of(&cache, 80);
+        let (committed, _, bytes) = cache.probe_state();
+        assert_eq!(
+            (committed, bytes),
+            (6, 23),
+            "the paragraph boundary takes the loosened list along"
+        );
+        assert_eq!(lines, one_shot("- a\n\n  indented\n\nplain\n\nmore\n"));
     }
 
     #[test]

@@ -222,19 +222,47 @@ mod tests {
 
     #[test]
     fn streamed_text_matches_one_shot_render() {
-        let content =
-            "Intro paragraph.\n\n- a bullet\n- another\n\n```rust\nlet x = 1;\n```\n\nTail";
+        let content = "## Title\n\nIntro paragraph.\n\n- a bullet\n- another\n\n```rust\nlet x = 1;\n```\n\nTail";
         let mut block = TextBlock::new("");
         let mut last = 0usize;
         for (i, _) in content.char_indices().skip(1) {
             block.update(TextMessage::Append(content[last..i].to_string()));
             last = i;
+            let _ = block.view(60);
         }
         block.update(TextMessage::Append(content[last..].to_string()));
         let streamed = row_strings(&block.view(60)[0], 60);
         let one_shot =
             Segment::chunked(BodyChunk::fixed(render(content)), None, TEXT_PADDING, true);
         assert_eq!(streamed, row_strings(&one_shot, 60));
+    }
+
+    #[test]
+    fn mid_heading_frame_does_not_split_title() {
+        let mut block = TextBlock::new("");
+        block.update(TextMessage::Append("Intro\n\n# Ti".into()));
+        let frozen = row_strings(&block.view(60)[0], 60);
+        block.update(TextMessage::Append("tle\n\nNext".into()));
+        let streamed = row_strings(&block.view(60)[0], 60);
+        let expected = Segment::chunked(
+            BodyChunk::fixed(render("Intro\n\n# Title\n\nNext")),
+            None,
+            TEXT_PADDING,
+            true,
+        );
+        assert_eq!(
+            frozen,
+            row_strings(
+                &Segment::chunked(
+                    BodyChunk::fixed(render("Intro\n\n# Ti")),
+                    None,
+                    TEXT_PADDING,
+                    true
+                ),
+                60
+            )
+        );
+        assert_eq!(streamed, row_strings(&expected, 60));
     }
 
     #[test]

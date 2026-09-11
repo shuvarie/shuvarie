@@ -1,7 +1,7 @@
 use ratatui::prelude::{Modifier, Style};
 use ratatui::text::Line;
 
-use crate::md::{plain, render};
+use crate::md::{plain, render, render_pass};
 use crate::{diff, syntax, theme};
 
 fn styles_of(line: &Line<'static>) -> Vec<Style> {
@@ -18,6 +18,27 @@ fn joined(line: &Line<'static>) -> String {
 
 fn is_blank(line: &Line<'static>) -> bool {
     line.spans.iter().all(|s| s.content.is_empty())
+}
+
+#[test]
+fn unterminated_heading_and_rule_stay_uncommitted() {
+    // pulldown-cmark ends a heading or rule range at the buffer's end when
+    // the line break has not been seen: the block still grows with the next
+    // delta, so committing its frozen half would split it in two.
+    let pass = render_pass("# Ti");
+    assert!(pass.boundaries.is_empty());
+    let pass = render_pass("---");
+    assert!(pass.boundaries.is_empty());
+    let pass = render_pass("--- ");
+    assert!(pass.boundaries.is_empty());
+}
+
+#[test]
+fn terminated_heading_and_rule_commit() {
+    let pass = render_pass("# Title\n");
+    assert_eq!(pass.boundaries.last().copied(), Some((8, 2)));
+    let pass = render_pass("a\n\n---\n");
+    assert_eq!(pass.boundaries.last().copied(), Some((7, 4)));
 }
 
 #[test]
