@@ -7,33 +7,33 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-dirs = "6"
-futures-util = { version = "0.3", default-features = false, features = ["std", "alloc"] }
+dirs.workspace = true
+futures-util.workspace = true
 unicode-normalization = "0.1"
 globset = "0.4"
 grep = "0.4"
 html-to-markdown-rs = { version = "3", default-features = false }
 ignore = "0.4"
-kdl = "6.7"
+kdl.workspace = true
 miette = "7"
-reqwest = { version = "0.13", features = ["brotli", "deflate", "gzip", "zstd"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-selune = { path = "../../vendor/selune", version = "0.1" }
-shuvarie-db = { path = "../db", version = "0.1" }
-shuvarie-llm = { path = "../llm", version = "0.1" }
-shuvarie-lsp = { path = "../lsp", version = "0.1" }
+reqwest = { workspace = true, features = ["brotli", "deflate", "gzip", "zstd"] }
+serde.workspace = true
+serde_json.workspace = true
+selune.workspace = true
+shuvarie-db.workspace = true
+shuvarie-llm.workspace = true
+shuvarie-lsp.workspace = true
 similar = "3"
-thiserror = "2"
-tokio = { version = "1", features = ["fs", "sync", "rt", "macros", "process", "time"] }
-uuid = { version = "1", features = ["v4"] }
-yaml_serde = "0.10"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "time"] }
+uuid.workspace = true
+yaml_serde.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
-http = "1"
-shuvarie-lsp = { path = "../lsp", version = "0.1" }
-tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+http.workspace = true
+shuvarie-lsp.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

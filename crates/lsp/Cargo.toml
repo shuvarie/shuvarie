@@ -8,12 +8,12 @@ repository.workspace = true
 
 [dependencies]
 async-lsp = { version = "0.2", default-features = false, features = ["omni-trait", "client-monitor", "tracing"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
-tokio = { version = "1", features = ["process", "sync", "rt", "macros", "io-util", "time"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "process"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 tower = "0.5"
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true

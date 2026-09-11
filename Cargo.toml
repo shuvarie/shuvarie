@@ -10,21 +10,21 @@ repository.workspace = true
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
 color-eyre = "0.6.5"
-dirs = "7"
-frameplay = { version = "0.2" }
-futures-util = { version = "0.3", default-features = false, features = ["std", "alloc"] }
+dirs.workspace = true
+frameplay = "0.2"
+futures-util.workspace = true
 gix = { version = "0.87", default-features = false, features = ["sha1"] }
 nucleo = "0.5"
-selune = { path = "vendor/selune", version = "0.1" }
-serde_json = "1"
-shuvarie-core = { path = "crates/core", version = "0.1" }
-shuvarie-db = { path = "crates/db", version = "0.1" }
-shuvarie-highlight = { path = "crates/highlight", version = "0.1" }
-shuvarie-llm = { path = "crates/llm", version = "0.1" }
-termina = { version = "0.3.3", features = ["event-stream"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+selune.workspace = true
+serde_json.workspace = true
+shuvarie-core.workspace = true
+shuvarie-db.workspace = true
+shuvarie-highlight.workspace = true
+shuvarie-llm.workspace = true
+termina = { version = "0.3", features = ["event-stream"] }
+tokio.workspace = true
 unicode-width = "0.2"
-uuid = { version = "1", features = ["v4"] }
+uuid.workspace = true
 
 [dependencies.ratatui]
 version = "0.30.2"
@@ -50,7 +50,7 @@ strip = true
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-exclude = ["vendor/selune", "vendor/frameplay"]
+exclude = ["vendor/frameplay", "vendor/selune"]
 
 [workspace.package]
 version = "0.1.0"
@@ -58,3 +58,23 @@ edition = "2024"
 authors = ["Charles Dong <chardon_cs@proton.me>"]
 license = "MIT"
 repository = "https://github.com/chardoncs/shuvarie.git"
+
+[workspace.dependencies]
+dirs = "7"
+futures-util = { version = "0.3", default-features = false, features = ["std", "alloc"] }
+http = "1"
+kdl = "6.7"
+reqwest = "0.13"
+selune = { path = "vendor/selune", version = "0.1" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+shuvarie-core = { path = "crates/core", version = "0.1" }
+shuvarie-db = { path = "crates/db", version = "0.1" }
+shuvarie-highlight = { path = "crates/highlight", version = "0.1" }
+shuvarie-llm = { path = "crates/llm", version = "0.1" }
+shuvarie-lsp = { path = "crates/lsp", version = "0.1" }
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+uuid = { version = "1", features = ["v4"] }
+yaml_serde = "0.10"
