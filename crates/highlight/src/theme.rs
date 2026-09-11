@@ -17,6 +17,7 @@ pub const AMBER: Color = Color::Rgb(192, 152, 72);
 pub const GULES: Color = Color::Rgb(186, 88, 72);
 
 pub const PLAIN: Style = Style::new().fg(TEXT);
+pub const REASONING: Style = Style::new().fg(TEXT_DIM).add_modifier(Modifier::ITALIC);
 pub const FENCE: Style = Style::new().fg(TEXT_MUTED);
 pub const FENCE_LANG: Style = Style::new().fg(TEXT_DIM);
 pub const KEYWORD: Style = Style::new().fg(ACCENT);

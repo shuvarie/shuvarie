@@ -21,7 +21,17 @@ pub fn plain(text: &str) -> Vec<Line<'static>> {
 }
 
 pub fn render(text: &str) -> Vec<Line<'static>> {
-    let mut lines = render_pass(text).lines;
+    trim_trailing_blanks(render_pass(text).lines)
+}
+
+/// The dimmed flavor for thinking text: prose renders in the dim italic
+/// reasoning style, markers and inline code stay quiet, and code blocks keep
+/// their normal syntax colors.
+pub fn render_dim(text: &str) -> Vec<Line<'static>> {
+    trim_trailing_blanks(render_pass_dim(text).lines)
+}
+
+fn trim_trailing_blanks(mut lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
     while lines.last().is_some_and(is_blank_line) {
         lines.pop();
     }
@@ -44,7 +54,18 @@ pub struct MdPass {
 }
 
 pub fn render_pass(text: &str) -> MdPass {
-    let mut ctx = Ctx::default();
+    pass_with(text, false)
+}
+
+pub fn render_pass_dim(text: &str) -> MdPass {
+    pass_with(text, true)
+}
+
+fn pass_with(text: &str, dim: bool) -> MdPass {
+    let mut ctx = Ctx {
+        dim,
+        ..Ctx::default()
+    };
     let mut boundaries: Vec<(usize, usize)> = Vec::new();
     let mut depth = 0usize;
     for (event, range) in Parser::new_ext(text, OPTIONS).into_offset_iter() {
@@ -232,6 +253,7 @@ struct Ctx {
     item_marker: Option<(String, Style)>,
     lists: Vec<ItemKind>,
     table: Option<TableCtx>,
+    dim: bool,
 }
 
 impl Ctx {
@@ -270,20 +292,19 @@ impl Ctx {
                 self.lists.push(kind);
             }
             Tag::Item => {
-                let (text, style) = match self.lists.last_mut() {
-                    Some(ItemKind::Bullet) => (
-                        "• ".to_string(),
-                        Style::new().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
-                    ),
+                let text = match self.lists.last_mut() {
+                    Some(ItemKind::Bullet) => "• ".to_string(),
                     Some(ItemKind::Ordered { next }) => {
                         let label = format!("{next}. ");
                         *next += 1;
-                        (
-                            label,
-                            Style::new().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
-                        )
+                        label
                     }
-                    None => (String::new(), Style::new()),
+                    None => String::new(),
+                };
+                let style = if self.dim {
+                    Style::new().fg(theme::TEXT_DIM)
+                } else {
+                    Style::new().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
                 };
                 self.item_marker = Some((text, style));
             }
@@ -414,8 +435,12 @@ impl Ctx {
         if self.skip > 0 {
             return;
         }
-        self.spans
-            .push(Span::raw(code).style(Style::new().fg(theme::TEXT).bg(theme::ACCENT_BG)));
+        let style = if self.dim {
+            theme::REASONING
+        } else {
+            Style::new().fg(theme::TEXT).bg(theme::ACCENT_BG)
+        };
+        self.spans.push(Span::raw(code).style(style));
     }
 
     fn inline_html(&mut self, html: String) {
@@ -450,17 +475,33 @@ impl Ctx {
     }
 
     fn task_marker(&mut self, checked: bool) {
-        self.item_marker = Some((
-            if checked { "[x] " } else { "[ ] " }.to_string(),
+        let text = if checked { "[x] " } else { "[ ] " }.to_string();
+        let style = if self.dim {
+            Style::new().fg(theme::TEXT_DIM)
+        } else {
             Style::new().fg(if checked {
                 theme::SUCCESS
             } else {
                 theme::TEXT_MUTED
-            }),
-        ));
+            })
+        };
+        self.item_marker = Some((text, style));
     }
 
     fn inline_style(&self) -> Style {
+        if self.dim {
+            let mut style = theme::REASONING;
+            if self.heading.is_some() || self.strong > 0 {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            if self.link > 0 {
+                style = style.add_modifier(Modifier::UNDERLINED);
+            }
+            if self.strike > 0 {
+                style = style.add_modifier(Modifier::CROSSED_OUT);
+            }
+            return style;
+        }
         let mut style = Style::new().fg(theme::TEXT);
         if let Some(level) = self.heading {
             if level == HeadingLevel::H1 || level == HeadingLevel::H2 {

@@ -1,7 +1,7 @@
 use ratatui::prelude::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::md::{plain, render, render_pass};
+use crate::md::{plain, render, render_dim, render_pass};
 use crate::{code, diff, syntax, theme};
 
 fn styles_of(line: &Line<'static>) -> Vec<Style> {
@@ -397,4 +397,99 @@ fn highlight_code_rust_tokens() {
 fn highlight_code_wide_chars() {
     let lines = syntax::highlight_code("rust", "// 日本語\nfn main() {}\n");
     assert_eq!(lines.len(), 2);
+}
+
+#[test]
+fn dim_prose_keeps_reasoning_style() {
+    let lines = render_dim("plain *em* **strong** ~~gone~~");
+    assert_eq!(lines.len(), 1);
+    let styles = styles_of(&lines[0]);
+    let t = texts(&lines[0]);
+    let idx = t.iter().position(|x| x.starts_with("plain")).unwrap();
+    assert_eq!(styles[idx].fg, Some(theme::TEXT_DIM));
+    assert!(styles[idx].add_modifier.contains(Modifier::ITALIC));
+    assert_eq!(styles[idx].bg, None);
+    let strong = t.iter().position(|x| x == "strong").unwrap();
+    assert_eq!(styles[strong].fg, Some(theme::TEXT_DIM));
+    assert!(styles[strong].add_modifier.contains(Modifier::BOLD));
+    let gone = t.iter().position(|x| x == "gone").unwrap();
+    assert!(styles[gone].add_modifier.contains(Modifier::CROSSED_OUT));
+}
+
+#[test]
+fn dim_headings_and_links_stay_dim() {
+    let lines = render_dim("# Big\n\nread [docs](https://example.com)");
+    assert_eq!(texts(&lines[0]), ["Big"]);
+    assert_eq!(lines[0].spans[0].style.fg, Some(theme::TEXT_DIM));
+    assert!(
+        lines[0].spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD)
+    );
+    let link_idx = texts(&lines[2]).iter().position(|t| t == "docs").unwrap();
+    let link = &lines[2].spans[link_idx];
+    assert_eq!(link.style.fg, Some(theme::TEXT_DIM));
+    assert!(link.style.add_modifier.contains(Modifier::UNDERLINED));
+}
+
+#[test]
+fn dim_inline_code_stays_quiet() {
+    let lines = render_dim("use `foo`");
+    let idx = texts(&lines[0]).iter().position(|t| t == "foo").unwrap();
+    let span = &lines[0].spans[idx];
+    assert_eq!(span.style.fg, Some(theme::TEXT_DIM));
+    assert_eq!(span.style.bg, None);
+}
+
+#[test]
+fn dim_list_and_task_markers_stay_quiet() {
+    let lines = render_dim("- a\n\n1. b\n\n- [x] done");
+    let bullet = &lines[0].spans[0];
+    assert_eq!(bullet.content.to_string(), "• ");
+    assert_eq!(bullet.style.fg, Some(theme::TEXT_DIM));
+    assert!(!bullet.style.add_modifier.contains(Modifier::BOLD));
+    let numbered = &lines[1].spans[0];
+    assert_eq!(numbered.content.to_string(), "1. ");
+    assert_eq!(numbered.style.fg, Some(theme::TEXT_DIM));
+    let task = &lines[2].spans[0];
+    assert_eq!(task.content.to_string(), "[x] ");
+    assert_eq!(task.style.fg, Some(theme::TEXT_DIM));
+}
+
+#[test]
+fn dim_table_cells_stay_dim() {
+    let lines = render_dim("| a | b |\n|---|---|\n| c | d |");
+    let header = lines[1].spans.iter().find(|s| s.content == "a").unwrap();
+    assert_eq!(header.style.fg, Some(theme::TEXT_DIM));
+    assert!(header.style.add_modifier.contains(Modifier::BOLD));
+    let body = lines[3].spans.iter().find(|s| s.content == "c").unwrap();
+    assert_eq!(body.style.fg, Some(theme::TEXT_DIM));
+    assert!(!body.style.add_modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn dim_code_blocks_keep_normal_colors() {
+    let lines = render_dim("```rust\nlet x = 1;\n```\n\ntail");
+    assert_eq!(rows(&lines)[0], "```rust");
+    assert_eq!(
+        lines[0].spans[0].style.fg,
+        Some(theme::TEXT_MUTED),
+        "the fence keeps its normal color"
+    );
+    let has_keyword = styles_of(&lines[1])
+        .iter()
+        .any(|s| s.fg == Some(theme::ACCENT));
+    assert!(has_keyword, "code text keeps its syntax colors");
+    let prose_idx = texts(&lines[4]).iter().position(|t| t == "tail").unwrap();
+    assert_eq!(lines[4].spans[prose_idx].style.fg, Some(theme::TEXT_DIM));
+}
+
+#[test]
+fn dim_streaming_reparse_stable() {
+    let base = "thinking\n\n```rust\nlet x = 1;";
+    let a = render_dim(base);
+    let b = render_dim(&format!("{base}\nx += 1;"));
+    assert_eq!(texts(&a[0]), ["thinking"]);
+    assert_eq!(texts(&b[0]), ["thinking"]);
 }

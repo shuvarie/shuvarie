@@ -3,8 +3,9 @@ use std::time::Instant;
 
 use ratatui::prelude::*;
 
+use super::super::md_cache::MdCache;
 use super::format_duration_ms;
-use crate::tui::session::segment::{BLOCK_PADDING, BodyChunk, BodySource, Segment, TextRows};
+use crate::tui::session::segment::{BLOCK_PADDING, BodyChunk, Segment};
 use crate::tui::session::virtualizer::TurnEst;
 use crate::tui::{spinner, theme};
 
@@ -12,9 +13,12 @@ use crate::tui::{spinner, theme};
 /// position (before the reply, between tool calls). While chunks are still
 /// arriving the header shows a spinner plus a live elapsed time; once thinking
 /// ends it becomes `⌥ Thought 10.3s ▸`. Collapsed by default; clicking the
-/// header toggles expansion.
+/// header toggles expansion. The expanded body renders the markdown in the
+/// dimmed reasoning flavor (`MdCache::new_dim`): structure carries over, prose
+/// and inline code stay dim italic, code blocks keep their normal colors.
 pub struct ReasoningBlock {
     text: String,
+    cache: MdCache,
     expanded: bool,
     thinking: bool,
     started_at: Option<Instant>,
@@ -22,14 +26,16 @@ pub struct ReasoningBlock {
     /// Bumped on append/toggle/finish: keys the cached estimate so streaming
     /// appends do not rescan the whole body per token.
     rev: u64,
-    est_cache: RefCell<Option<(u64, bool, TurnEst)>>,
+    est_cache: RefCell<Option<(u64, bool, bool, TurnEst)>>,
 }
 
 impl ReasoningBlock {
     /// A block that is actively receiving streamed chunks.
     pub fn new(text: impl Into<String>) -> Self {
+        let text: String = text.into();
         Self {
-            text: text.into(),
+            cache: MdCache::new_dim(&text),
+            text,
             expanded: false,
             thinking: true,
             started_at: Some(Instant::now()),
@@ -41,8 +47,10 @@ impl ReasoningBlock {
 
     /// A block whose stream already ended (session reload/undo rebuilds).
     pub fn finished(text: impl Into<String>, duration_ms: u64) -> Self {
+        let text: String = text.into();
         Self {
-            text: text.into(),
+            cache: MdCache::new_dim(&text),
+            text,
             expanded: false,
             thinking: false,
             started_at: None,
@@ -56,6 +64,7 @@ impl ReasoningBlock {
         match msg {
             ReasoningMessage::Append(chunk) => {
                 self.text.push_str(&chunk);
+                self.cache.append(&chunk);
                 self.rev += 1;
                 true
             }
@@ -92,29 +101,37 @@ impl ReasoningBlock {
     }
 
     /// Vertical padding, one collapsed header row, plus the body rows when
-    /// expanded. Cached per `(rev, expanded)`: streaming appends and toggles
-    /// are the only bumps.
+    /// expanded. Cached per `(rev, expanded, rendered)`: streaming appends,
+    /// toggles, and the first body render are the only bumps. Rendered bodies
+    /// report their exact display-line count through the markdown cache;
+    /// before the first render the raw source lines stand in.
     pub(super) fn est(&self) -> TurnEst {
-        if let Some((rev, expanded, est)) = self.est_cache.borrow().as_ref()
+        let counters = self.cache.est_counters();
+        let rendered = counters.is_some();
+        if let Some((rev, expanded, was_rendered, est)) = self.est_cache.borrow().as_ref()
             && *rev == self.rev
             && *expanded == self.expanded
+            && *was_rendered == rendered
         {
             return *est;
         }
+        let body = match counters {
+            Some((lines, _)) => lines,
+            None => self.text.lines().count() as u32,
+        };
         let est = TurnEst {
-            reasoning_rows: 2 * u32::from(BLOCK_PADDING.1)
-                + 1
-                + u32::from(self.expanded) * self.text.lines().count() as u32,
+            reasoning_rows: 2 * u32::from(BLOCK_PADDING.1) + 1 + u32::from(self.expanded) * body,
             ..TurnEst::default()
         };
-        *self.est_cache.borrow_mut() = Some((self.rev, self.expanded, est));
+        *self.est_cache.borrow_mut() = Some((self.rev, self.expanded, rendered, est));
         est
     }
 
-    /// One padded segment: the header line, plus the body rows when
-    /// expanded (the engine stamps the hit address on the first segment, so
-    /// the whole block toggles on click). Long bodies project their rows from
-    /// the shared text so only viewport rows materialize.
+    /// One padded segment: the header line, plus the markdown body chunks
+    /// when expanded (the engine stamps the hit address on the first
+    /// segment, so the whole block toggles on click). Long bodies slice into
+    /// committed runs shared through the markdown cache; only viewport rows
+    /// materialize.
     pub fn view(&self, width: u16) -> Vec<Segment> {
         let header = if self.thinking {
             let ms = self
@@ -142,18 +159,7 @@ impl ReasoningBlock {
         };
         let mut chunks = vec![BodyChunk::fixed(vec![Line::from(header)])];
         if self.expanded {
-            chunks.push(BodyChunk::rows(
-                BodySource::Text {
-                    rows: TextRows::new(self.text.as_str()),
-                    prefix: "  ",
-                    style: Style::new()
-                        .fg(theme::TEXT_DIM)
-                        .add_modifier(Modifier::ITALIC),
-                },
-                0,
-                width,
-                true,
-            ));
+            chunks.extend(self.cache.chunks(width).unwrap_or_default());
         }
         vec![Segment {
             chunks,
@@ -177,12 +183,50 @@ pub enum ReasoningMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shuvarie_highlight::render_dim;
 
     fn body(count: usize) -> String {
         (0..count)
             .map(|i| format!("thinking line {i} with a bit of filler to make it wrap sometimes"))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn header_line(duration: &str) -> Line<'static> {
+        Line::from(vec![
+            Span::raw("  ").fg(theme::TEXT_MUTED),
+            Span::raw("Thought").fg(theme::TEXT_MUTED).italic(),
+            Span::raw(format!(" {duration}"))
+                .fg(theme::TEXT_MUTED)
+                .italic(),
+            Span::raw(" v").fg(theme::TEXT_MUTED),
+        ])
+    }
+
+    fn row_strings(seg: &Segment, width: u16) -> Vec<String> {
+        let h = seg.measure(width);
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, h as u16));
+        seg.paint(buf.area, 0, 0, h, width, &mut buf);
+        (0..h)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buf[(x, y as u16)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn materialized(content: &str, duration: &str) -> Segment {
+        Segment::materialized(
+            std::iter::once(header_line(duration))
+                .chain(render_dim(content))
+                .collect(),
+            None,
+            (0, BLOCK_PADDING.1),
+            true,
+        )
     }
 
     #[test]
@@ -192,26 +236,13 @@ mod tests {
         let width = 80u16;
         let seg = &block.view(width)[0];
         assert!(
-            matches!(seg.chunks[1], BodyChunk::Sliced(_)),
+            seg.chunks
+                .iter()
+                .skip(1)
+                .any(|chunk| matches!(chunk, BodyChunk::Sliced(_))),
             "big body must render sliced"
         );
-        let text: Vec<Line<'static>> = body(300)
-            .lines()
-            .map(|row| Line::from(Span::raw(format!("  {row}")).fg(theme::TEXT_DIM).italic()))
-            .collect();
-        let materialized = Segment::materialized(
-            std::iter::once(Line::from(vec![
-                Span::raw("  ").fg(theme::TEXT_MUTED),
-                Span::raw("Thought").fg(theme::TEXT_MUTED).italic(),
-                Span::raw(" 1.0s").fg(theme::TEXT_MUTED).italic(),
-                Span::raw(" v").fg(theme::TEXT_MUTED),
-            ]))
-            .chain(text)
-            .collect(),
-            None,
-            (0, BLOCK_PADDING.1),
-            true,
-        );
+        let materialized = materialized(&body(300), "1.0s");
         assert_eq!(seg.measure(width), materialized.measure(width));
         let full = crate::tui::session::segment::tests::full_render(&materialized, width);
         crate::tui::session::segment::tests::assert_windows_match(
@@ -223,12 +254,69 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_body_stays_materialized() {
+    fn collapsed_body_renders_header_only() {
         let block = ReasoningBlock::finished(body(300), 1_000);
         let width = 80u16;
         let seg = &block.view(width)[0];
         assert_eq!(seg.chunks.len(), 1);
         assert!(matches!(seg.chunks[0], BodyChunk::Fixed(_)));
         assert_eq!(seg.measure(width), 1 + 2 * u32::from(BLOCK_PADDING.1));
+    }
+
+    #[test]
+    fn expanded_body_matches_one_shot_dim_render() {
+        let content = "Plan **now**:\n\n1. read the file\n2. edit it\n\n```rust\nlet x = 1;\n```";
+        let mut block = ReasoningBlock::finished(content, 500);
+        block.toggle();
+        let width = 60u16;
+        let seg = &block.view(width)[0];
+        let expected = materialized(content, "0.5s");
+        assert_eq!(row_strings(seg, width), row_strings(&expected, width));
+        let rows = row_strings(seg, width);
+        assert!(
+            rows.iter().any(|row| row.contains("```rust")),
+            "the body carries the markdown fence"
+        );
+        assert!(
+            rows.iter().any(|row| row.starts_with("1. read")),
+            "the body carries the ordered marker"
+        );
+    }
+
+    #[test]
+    fn streamed_reasoning_matches_one_shot() {
+        let content = "Intro\n\n- one\n- two\n\n```rust\nlet x = 1;\n```\n\nOutro";
+        let mut block = ReasoningBlock::finished("", 0);
+        block.toggle();
+        let mut last = 0usize;
+        for (i, _) in content.char_indices().skip(1) {
+            block.update(ReasoningMessage::Append(content[last..i].to_string()));
+            last = i;
+            let _ = block.view(80);
+        }
+        block.update(ReasoningMessage::Append(content[last..].to_string()));
+        let seg = &block.view(80)[0];
+        assert_eq!(
+            row_strings(seg, 80),
+            row_strings(&materialized(content, "0.0s"), 80)
+        );
+    }
+
+    #[test]
+    fn est_uses_rendered_lines_once_viewed() {
+        let mut block = ReasoningBlock::finished("a\n\n\n\nb", 0);
+        block.toggle();
+        assert_eq!(
+            block.est().reasoning_rows,
+            2 * u32::from(BLOCK_PADDING.1) + 1 + 5,
+            "raw source lines stand in before the first render"
+        );
+        let _ = block.view(60);
+        let rendered = render_dim("a\n\n\n\nb").len() as u32;
+        assert_ne!(rendered, 5);
+        assert_eq!(
+            block.est().reasoning_rows,
+            2 * u32::from(BLOCK_PADDING.1) + 1 + rendered
+        );
     }
 }

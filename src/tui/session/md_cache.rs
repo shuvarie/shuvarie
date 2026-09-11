@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use ratatui::prelude::*;
-use shuvarie_highlight::render_pass;
+use shuvarie_highlight::{MdPass, render_pass, render_pass_dim};
 
 use super::segment::{BodyChunk, BodySource, CHUNK_ROWS, wrapped_line_count};
 
@@ -20,6 +20,7 @@ const RUN_LINES: usize = 256;
 /// width, so a resize re-counts without re-rendering.
 pub struct MdCache {
     content: String,
+    dim: bool,
     rev: u64,
     render: RefCell<Option<Render>>,
 }
@@ -46,10 +47,29 @@ struct Render {
 
 impl MdCache {
     pub fn new(content: impl Into<String>) -> Self {
+        Self::flavored(content, false)
+    }
+
+    /// The dimmed flavor for thinking text: markdown structure in the
+    /// reasoning style, with code blocks in their normal colors.
+    pub fn new_dim(content: impl Into<String>) -> Self {
+        Self::flavored(content, true)
+    }
+
+    fn flavored(content: impl Into<String>, dim: bool) -> Self {
         Self {
             content: content.into(),
+            dim,
             rev: 0,
             render: RefCell::new(None),
+        }
+    }
+
+    fn pass(&self, text: &str) -> MdPass {
+        if self.dim {
+            render_pass_dim(text)
+        } else {
+            render_pass(text)
         }
     }
 
@@ -149,7 +169,7 @@ impl MdCache {
     }
 
     fn full_render(&self, width: u16) -> Render {
-        let pass = render_pass(&self.content);
+        let pass = self.pass(&self.content);
         let (stable, committed_bytes) = pass
             .boundaries
             .last()
@@ -181,7 +201,7 @@ impl MdCache {
     /// pending until the next append re-renders it.
     fn catch_up(&self, render: &mut Render) {
         let tail = &self.content[render.committed_bytes..];
-        let pass = render_pass(tail);
+        let pass = self.pass(tail);
         let counts: Vec<u32> = pass
             .lines
             .iter()
@@ -311,6 +331,20 @@ mod tests {
         for width in [20u16, 60, 120] {
             let streamed = streamed(&[content], width);
             assert_eq!(streamed, expected, "width {width}");
+        }
+    }
+
+    #[test]
+    fn dim_streamed_render_matches_one_shot() {
+        let content = "Plan **now**:\n\n- step one\n- step two\n\n```rust\nlet x = 1;\n```\n\nTail";
+        let expected: Vec<String> = shuvarie_highlight::render_dim(content)
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        for width in [20u16, 60, 120] {
+            let mut cache = MdCache::new_dim("");
+            cache.append(content);
+            assert_eq!(lines_of(&cache, width), expected, "width {width}");
         }
     }
 
