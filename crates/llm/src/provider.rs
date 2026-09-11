@@ -14,6 +14,47 @@ pub struct ProviderClient {
     list: ListImpl,
 }
 
+/// Fused text of a multi-turn agent stream. A paragraph break is inserted
+/// where a new request's text resumes after tool activity, so the joined
+/// string keeps the separation the streaming view shows at the tool gaps
+/// (a single-request run stays byte-identical to its deltas).
+#[derive(Default)]
+struct TurnText {
+    text: String,
+    resumed: bool,
+}
+
+impl TurnText {
+    fn tool_called(&mut self) {
+        self.resumed = !self.text.is_empty();
+    }
+
+    /// Absorb one text delta; returns the text to forward downstream — the
+    /// separator travels inside the stream so every accumulator of the turn
+    /// (the TUI's blocks, the core task's interruption buffer) joins the
+    /// runs identically.
+    fn push(&mut self, delta: String) -> String {
+        let separator = std::mem::take(&mut self.resumed);
+        if separator {
+            self.text.push_str("\n\n");
+        }
+        self.text.push_str(&delta);
+        if separator {
+            format!("\n\n{delta}")
+        } else {
+            delta
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    fn take(&mut self) -> String {
+        std::mem::take(&mut self.text)
+    }
+}
+
 fn openai_builder(key: &str, base_url: Option<&str>) -> rig::providers::openai::ClientBuilder {
     let builder = rig::providers::openai::Client::builder().api_key(key);
     if let Some(url) = base_url {
@@ -387,7 +428,7 @@ impl ProviderClient {
                 .max_turns(max_turns)
                 .await;
             let mut tool_called = false;
-            let mut accumulated = String::new();
+            let mut turn_text = TurnText::default();
             let mut tool_names: std::collections::HashMap<String, String> =
                 std::collections::HashMap::new();
             let mut pending_workers: std::collections::VecDeque<String> =
@@ -396,10 +437,9 @@ impl ProviderClient {
             let main = stream.map(move |item| match item {
                 Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
                     rig::streaming::StreamedAssistantContent::Text(t),
-                )) => {
-                    accumulated.push_str(&t.text);
-                    StreamItem::Delta { text: t.text }
-                }
+                )) => StreamItem::Delta {
+                    text: turn_text.push(t.text),
+                },
                 Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
                     rig::streaming::StreamedAssistantContent::Reasoning { reasoning, .. },
                 )) => {
@@ -430,6 +470,7 @@ impl ProviderClient {
                     },
                 )) => {
                     tool_called = true;
+                    turn_text.tool_called();
                     let name = tool_call.function.name.clone();
                     if worker_names.contains(&name) {
                         pending_workers.push_back(name.clone());
@@ -489,10 +530,10 @@ impl ProviderClient {
                     }
                 }
                 Ok(rig::agent::MultiTurnStreamItem::FinalResponse(resp)) => {
-                    let text = if accumulated.is_empty() && tool_called {
+                    let text = if turn_text.is_empty() && tool_called {
                         String::new()
                     } else {
-                        std::mem::take(&mut accumulated)
+                        turn_text.take()
                     };
                     StreamItem::Done {
                         text,
@@ -681,7 +722,7 @@ async fn run_worker_agent(
         .max_turns(max_turns)
         .await;
 
-    let mut text = String::new();
+    let mut turn_text = TurnText::default();
     let mut usage_aggregate = crate::TokenUsage::default();
     let mut tool_names: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
@@ -690,7 +731,7 @@ async fn run_worker_agent(
             Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
                 rig::streaming::StreamedAssistantContent::Text(t),
             )) => {
-                text.push_str(&t.text);
+                turn_text.push(t.text);
             }
             Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
                 rig::streaming::StreamedAssistantContent::ToolCall {
@@ -773,7 +814,7 @@ async fn run_worker_agent(
         guard.cached_input_tokens += usage_aggregate.cached_input_tokens;
         guard.reasoning_tokens += usage_aggregate.reasoning_tokens;
     }
-    Ok(text)
+    Ok(turn_text.take())
 }
 
 fn merge_streams(
@@ -809,6 +850,44 @@ mod tests {
 
     fn pending_stream() -> impl futures_core::Stream<Item = StreamItem> + Send + 'static {
         futures_util::stream::pending::<StreamItem>()
+    }
+
+    #[test]
+    fn turn_text_single_request_stays_byte_identical() {
+        let mut turn = TurnText::default();
+        assert_eq!(turn.push("Hello ".into()), "Hello ");
+        assert_eq!(turn.push("world".into()), "world");
+        assert_eq!(turn.take(), "Hello world");
+    }
+
+    #[test]
+    fn turn_text_joins_runs_after_tool_with_paragraph_break() {
+        let mut turn = TurnText::default();
+        assert_eq!(turn.push("Run one.".into()), "Run one.");
+        turn.tool_called();
+        assert_eq!(turn.push("Run two.".into()), "\n\nRun two.");
+        assert_eq!(turn.take(), "Run one.\n\nRun two.");
+    }
+
+    #[test]
+    fn turn_text_tool_only_prefix_gets_no_leading_break() {
+        let mut turn = TurnText::default();
+        turn.tool_called();
+        assert_eq!(turn.push("First text.".into()), "First text.");
+        turn.tool_called();
+        assert_eq!(turn.push("Second text.".into()), "\n\nSecond text.");
+        assert_eq!(turn.take(), "First text.\n\nSecond text.");
+    }
+
+    #[test]
+    fn turn_text_rearms_between_every_run() {
+        let mut turn = TurnText::default();
+        turn.push("a".into());
+        turn.tool_called();
+        turn.push("b".into());
+        turn.tool_called();
+        turn.push("c".into());
+        assert_eq!(turn.take(), "a\n\nb\n\nc");
     }
 
     #[tokio::test]

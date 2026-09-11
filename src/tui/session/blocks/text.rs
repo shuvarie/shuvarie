@@ -210,6 +210,17 @@ mod tests {
     }
 
     #[test]
+    fn reloaded_text_keeps_paragraph_breaks() {
+        let block = TextBlock::new("First paragraph.\n\nSecond paragraph.");
+        let seg = &block.view(60)[0];
+        let rows = row_strings(seg, 60);
+        assert_eq!(
+            rows,
+            vec!["", "First paragraph.", "", "Second paragraph.", ""]
+        );
+    }
+
+    #[test]
     fn streamed_text_matches_one_shot_render() {
         let content =
             "Intro paragraph.\n\n- a bullet\n- another\n\n```rust\nlet x = 1;\n```\n\nTail";
