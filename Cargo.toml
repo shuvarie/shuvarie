@@ -43,7 +43,7 @@ features = [
 
 [profile.release]
 codegen-units = 1
-lto = true
+lto = "thin"
 opt-level = "s"
 strip = true
 
