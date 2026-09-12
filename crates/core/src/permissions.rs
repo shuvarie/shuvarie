@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-const HIDDEN_ROOT_EXEMPT: [&str; 2] = [".agents", crate::config::LOCAL_CONFIG_DIR_NAME];
+const HIDDEN_ROOT_EXEMPT: [&str; 2] = [".agents", shuvarie_config::WORKSPACE_DIR_NAME];
 
 pub(crate) fn workspace_root() -> Result<PathBuf, String> {
     std::env::current_dir().map_err(|e| format!("cwd: {e}"))
@@ -39,7 +39,7 @@ pub(crate) fn resolve_read(path: &str) -> Result<PathBuf, String> {
     let rel = canonical.strip_prefix(&root).unwrap_or(&canonical);
     let exempt_roots = crate::skills::global_skill_dirs(
         dirs::home_dir().as_deref(),
-        crate::config::config_dir().ok().as_deref(),
+        shuvarie_config::config_dir().ok().as_deref(),
     );
     if let Some(comp) = hidden_component(rel)
         && !under_global_skill_dirs(&canonical, &exempt_roots)
@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn dot_agents_and_app_dir_are_exempt() {
         let (dir, _guard) = tempdir();
-        let app_dir = crate::config::LOCAL_CONFIG_DIR_NAME;
+        let app_dir = shuvarie_config::WORKSPACE_DIR_NAME;
         std::fs::create_dir_all(".agents").unwrap();
         std::fs::write(".agents/NOTE.md", "x").unwrap();
         std::fs::create_dir_all(app_dir).unwrap();

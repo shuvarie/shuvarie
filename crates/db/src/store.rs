@@ -14,11 +14,7 @@ use crate::model::{
 
 static MIGRATIONS: toasty::migration::MigrationSet = toasty::embed_migrations!();
 
-pub const WORKSPACE_DIR_NAME: &str = if cfg!(debug_assertions) {
-    ".shuvarie-dev"
-} else {
-    ".shuvarie"
-};
+pub use shuvarie_config::WORKSPACE_DIR_NAME;
 
 #[derive(Debug, Clone)]
 pub struct SessionSummary {

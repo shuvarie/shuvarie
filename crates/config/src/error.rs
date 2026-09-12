@@ -2,15 +2,15 @@ use std::fmt;
 
 use thiserror::Error;
 
-pub type Result<T> = std::result::Result<T, CoreError>;
+pub type Result<T> = std::result::Result<T, ConfigError>;
 
 #[derive(Debug, Error)]
-pub enum CoreError {
+pub enum ConfigError {
     #[error("config I/O error: {0}")]
-    ConfigIo(#[from] std::io::Error),
+    Io(#[from] std::io::Error),
 
     #[error("config parse error: {0}")]
-    ConfigParse(ConfigParseError),
+    Parse(ConfigParseError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

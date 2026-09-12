@@ -12,6 +12,7 @@ jiff = "0.2"
 serde.workspace = true
 serde_json.workspace = true
 selune.workspace = true
+shuvarie-config.workspace = true
 shuvarie-llm.workspace = true
 thiserror.workspace = true
 toasty = { version = "0.10", features = ["turso", "jiff", "migration"] }

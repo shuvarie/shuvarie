@@ -53,7 +53,7 @@ impl LoadedContext {
 /// first. Cheap enough to re-run per request, so edits apply without a
 /// restart.
 pub fn load_agents_md(root: &Path) -> LoadedContext {
-    let global = crate::config::config_dir().ok();
+    let global = shuvarie_config::config_dir().ok();
     load_agents_md_from(root, global.as_deref())
 }
 
@@ -132,7 +132,7 @@ pub fn load_context_dir(root: &Path, budget: usize) -> LoadedContext {
     let mut remaining = budget;
 
     let context_dir = root
-        .join(crate::config::LOCAL_CONFIG_DIR_NAME)
+        .join(shuvarie_config::WORKSPACE_DIR_NAME)
         .join("context");
     if context_dir.is_dir() && remaining > 0 {
         let mut paths: Vec<PathBuf> = Vec::new();
@@ -452,7 +452,7 @@ mod tests {
     #[test]
     fn loads_agents_md_and_context_dir_sorted() {
         let (dir, _guard) = tempdir();
-        let app_dir = crate::config::LOCAL_CONFIG_DIR_NAME;
+        let app_dir = shuvarie_config::WORKSPACE_DIR_NAME;
         std::fs::write("AGENTS.md", "project rules").unwrap();
         std::fs::create_dir_all(format!("{app_dir}/context")).unwrap();
         std::fs::write(format!("{app_dir}/context/b.md"), "bee").unwrap();
@@ -481,7 +481,7 @@ mod tests {
     #[test]
     fn missing_agents_only_context_dir() {
         let (dir, _guard) = tempdir();
-        let app_dir = crate::config::LOCAL_CONFIG_DIR_NAME;
+        let app_dir = shuvarie_config::WORKSPACE_DIR_NAME;
         std::fs::create_dir_all(format!("{app_dir}/context")).unwrap();
         std::fs::write(format!("{app_dir}/context/notes.md"), "notes").unwrap();
         let ctx = load_from_cwd();
@@ -496,7 +496,7 @@ mod tests {
     #[test]
     fn loads_agents_md_separately_from_context_dir() {
         let dir = TempDir::new().unwrap();
-        let app_dir = crate::config::LOCAL_CONFIG_DIR_NAME;
+        let app_dir = shuvarie_config::WORKSPACE_DIR_NAME;
         write(&dir.path().join("AGENTS.md"), "project rules");
         write(&dir.path().join(app_dir).join("context/a.md"), "aye");
 

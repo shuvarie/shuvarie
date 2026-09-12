@@ -1,6 +1,7 @@
 use std::sync::{Mutex, OnceLock};
 
 use selune::{Client, Provider};
+use shuvarie_config::{Connections, ProviderConfig};
 use shuvarie_llm::TokenUsage;
 
 const CACHE_READ_FACTOR: f64 = 0.1;
@@ -156,6 +157,54 @@ fn default_rates(provider: &Provider) -> (f64, f64, f64) {
 /// entry's `api_key` field.
 pub fn requires_api_key(provider: &Provider) -> bool {
     provider.api_key.is_some()
+}
+
+/// Whether the provider is configured enough to open a connection. An
+/// explicit `catalog` entry governs (its `api_key` requirement); otherwise
+/// the transport decides: a key is required unless it's a local one
+/// (`ollama`). A `kind` that parses as neither is treated as a legacy
+/// catalog id.
+pub fn is_connectable(provider: &ProviderConfig) -> bool {
+    let has_key = provider
+        .api_key
+        .as_ref()
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false);
+    if let Some(catalog) = &provider.catalog {
+        return catalog_requires_key(catalog, has_key);
+    }
+    match parse_provider_type(&provider.kind) {
+        Some(selune::ProviderType::Ollama) => true,
+        Some(_) => has_key,
+        None => catalog_requires_key(&provider.kind, has_key),
+    }
+}
+
+/// Whether the active provider (if any) is configured and connectable.
+pub fn has_connected_providers(connections: &Connections) -> bool {
+    if connections.providers.is_empty() {
+        return false;
+    }
+    match &connections.active {
+        None => false,
+        Some(active) => match connections.providers.get(&active.provider) {
+            None => false,
+            Some(p) => is_connectable(p),
+        },
+    }
+}
+
+/// Whether a connection to the catalog entry `id` may proceed given whether a
+/// non-empty API key is present. Unknown catalog ids fall back to `has_key`.
+fn catalog_requires_key(id: &str, has_key: bool) -> bool {
+    let catalog = providers();
+    match catalog.iter().find(|p| p.id.0 == id) {
+        Some(p) => match &p.api_key {
+            Some(_) => has_key,
+            None => true,
+        },
+        None => has_key,
+    }
 }
 
 /// The provider's configured API endpoint, with `$ENV_VAR` placeholders
@@ -517,5 +566,35 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn is_connectable_transport_rules() {
+        let local = ProviderConfig::new("local", "ollama", None, None);
+        assert!(is_connectable(&local));
+        let remote = ProviderConfig::new("remote", "openai-compat", None, None);
+        assert!(!is_connectable(&remote));
+        let keyed = ProviderConfig::new("remote", "openai", Some("sk-x".into()), None);
+        assert!(is_connectable(&keyed));
+        let blank_key = ProviderConfig::new("remote", "anthropic", Some("  ".into()), None);
+        assert!(!is_connectable(&blank_key));
+    }
+
+    #[test]
+    fn is_connectable_legacy_catalog_kinds() {
+        let groq = ProviderConfig::new("groq", "groq", None, None);
+        assert!(!is_connectable(&groq), "catalog entry requires a key");
+        let groq = ProviderConfig::new("groq", "groq", Some("gsk-x".into()), None);
+        assert!(is_connectable(&groq));
+    }
+
+    #[test]
+    fn is_connectable_explicit_catalog_governs() {
+        let pc = ProviderConfig::new("groq-compat", "openai-compat", Some("gsk-x".into()), None)
+            .with_catalog(Some("groq"));
+        assert!(is_connectable(&pc));
+        let pc = ProviderConfig::new("copilot", "openai-compat", None, None)
+            .with_catalog(Some("copilot"));
+        assert!(is_connectable(&pc), "catalog entry needs no key");
     }
 }

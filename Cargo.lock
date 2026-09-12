@@ -5690,6 +5690,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "shuvarie-config"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "kdl",
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "shuvarie-core"
 version = "0.1.0"
 dependencies = [
@@ -5700,13 +5710,13 @@ dependencies = [
  "html-to-markdown-rs",
  "http",
  "ignore",
- "kdl",
  "libc",
  "miette",
  "reqwest",
  "selune",
  "serde",
  "serde_json",
+ "shuvarie-config",
  "shuvarie-db",
  "shuvarie-llm",
  "shuvarie-lsp",
@@ -5728,6 +5738,7 @@ dependencies = [
  "selune",
  "serde",
  "serde_json",
+ "shuvarie-config",
  "shuvarie-llm",
  "tempfile",
  "thiserror 2.0.20",

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::config::SkillsConfig;
+use shuvarie_config::SkillsConfig;
 
 const MAX_NAME_LENGTH: usize = 64;
 const MAX_DESCRIPTION_LENGTH: usize = 1024;
@@ -41,7 +41,7 @@ impl Skills {
         Self::load_from(
             workspace_root,
             dirs::home_dir().as_deref(),
-            crate::config::config_dir().ok().as_deref(),
+            shuvarie_config::config_dir().ok().as_deref(),
             config,
         )
     }

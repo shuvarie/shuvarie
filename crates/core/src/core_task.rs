@@ -12,13 +12,13 @@ use shuvarie_db::Store;
 use shuvarie_llm::{FileChange, ProviderClient, TokenUsage};
 
 use crate::command::Command;
-use crate::config::Config;
-use crate::config::{Connections, ProviderConfig};
 use crate::embeddings::{self, EmbeddingSetup};
 use crate::event::Event;
 use crate::question::{AnswerResponse, QuestionGate, QuestionRequest};
 use crate::session::{CONTINUE_PROMPT, Session};
 use crate::shell::Shell;
+use shuvarie_config::Config;
+use shuvarie_config::{Connections, ProviderConfig};
 
 /// How a streamed turn ended, reported back to the run loop so it can decide
 /// whether to auto-continue after a context overflow.
@@ -250,7 +250,7 @@ pub async fn run(
     }
 
     let workspace_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let lsp_config = shuvarie_lsp::LspConfig::from(&config.lsp);
+    let lsp_config = crate::lsp_manager::lsp_config_from_repr(&config.lsp);
     let lsp = std::sync::Arc::new(tokio::sync::Mutex::new(shuvarie_lsp::LspManager::new(
         workspace_root.clone(),
         lsp_config.enabled,
@@ -392,7 +392,7 @@ pub async fn run(
                     Command::SetActiveProvider { name } => {
                         if ctx.connections.providers.contains_key(&name) {
                             let active = ctx.connections.active.get_or_insert_with(|| {
-                                crate::config::Active {
+                                shuvarie_config::Active {
                                     provider: name.clone(),
                                     model: None,
                                     variant: None,

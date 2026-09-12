@@ -1,14 +1,14 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::{CoreError, Result};
-
 mod config_kdl;
 mod connections;
 mod connections_kdl;
+mod error;
 mod kdl_util;
 
 pub use self::connections::{Active, Connections, ProviderConfig};
+pub use error::{ConfigError, ConfigParseError, Result};
 
 const CONFIG_DIR_NAME: &str = if cfg!(debug_assertions) {
     "shuvarie-dev"
@@ -21,7 +21,11 @@ const LOCAL_CONFIG_FILE_NAME: &str = if cfg!(debug_assertions) {
 } else {
     "shuvarie.kdl"
 };
-pub const LOCAL_CONFIG_DIR_NAME: &str = shuvarie_db::WORKSPACE_DIR_NAME;
+pub const WORKSPACE_DIR_NAME: &str = if cfg!(debug_assertions) {
+    ".shuvarie-dev"
+} else {
+    ".shuvarie"
+};
 
 /// One parsed config file, plus the top-level section names its file
 /// actually defines — absent sections keep their defaults, so the node
@@ -44,7 +48,7 @@ fn read_layer(path: &std::path::Path) -> Result<Option<ConfigLayer>> {
     match std::fs::read_to_string(path) {
         Ok(contents) => Ok(Some(parse_layer(&contents)?)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(CoreError::ConfigIo(e)),
+        Err(e) => Err(ConfigError::Io(e)),
     }
 }
 
@@ -251,7 +255,7 @@ fn effective(value: usize) -> usize {
     if value == 0 { usize::MAX } else { value }
 }
 
-/// Config-file mirror of [`shuvarie_lsp::LspConfig`]; the `shuvarie-lsp`
+/// Config-file mirror of `shuvarie_lsp::LspConfig`; the `shuvarie-lsp`
 /// crate itself stays config-format-free.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LspConfigRepr {
@@ -261,32 +265,6 @@ pub struct LspConfigRepr {
 
 type BTreeRepr = std::collections::BTreeMap<String, LspServerSpecRepr>;
 
-impl From<&shuvarie_lsp::LspConfig> for LspConfigRepr {
-    fn from(cfg: &shuvarie_lsp::LspConfig) -> Self {
-        Self {
-            disabled: !cfg.enabled,
-            servers: cfg
-                .servers
-                .iter()
-                .map(|(name, spec)| (name.clone(), LspServerSpecRepr::from(spec)))
-                .collect(),
-        }
-    }
-}
-
-impl From<&LspConfigRepr> for shuvarie_lsp::LspConfig {
-    fn from(repr: &LspConfigRepr) -> Self {
-        Self {
-            enabled: !repr.disabled,
-            servers: repr
-                .servers
-                .iter()
-                .map(|(name, spec)| (name.clone(), shuvarie_lsp::LspServerSpec::from(spec)))
-                .collect(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LspServerSpecRepr {
     pub command: Vec<String>,
@@ -295,31 +273,9 @@ pub struct LspServerSpecRepr {
     pub root_markers: Vec<String>,
 }
 
-impl From<&shuvarie_lsp::LspServerSpec> for LspServerSpecRepr {
-    fn from(spec: &shuvarie_lsp::LspServerSpec) -> Self {
-        Self {
-            command: spec.command.clone(),
-            extensions: spec.extensions.clone(),
-            no_auto_start: !spec.auto_start,
-            root_markers: spec.root_markers.clone(),
-        }
-    }
-}
-
-impl From<&LspServerSpecRepr> for shuvarie_lsp::LspServerSpec {
-    fn from(repr: &LspServerSpecRepr) -> Self {
-        Self {
-            command: repr.command.clone(),
-            extensions: repr.extensions.clone(),
-            auto_start: !repr.no_auto_start,
-            root_markers: repr.root_markers.clone(),
-        }
-    }
-}
-
 pub fn config_dir() -> Result<PathBuf> {
     let dir = dirs::config_dir().ok_or_else(|| {
-        CoreError::ConfigIo(std::io::Error::new(
+        ConfigError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "no config directory for this platform",
         ))
@@ -337,7 +293,7 @@ impl Config {
     pub fn local_config_candidates(cwd: &std::path::Path) -> [PathBuf; 2] {
         [
             cwd.join(LOCAL_CONFIG_FILE_NAME),
-            cwd.join(LOCAL_CONFIG_DIR_NAME).join(CONFIG_FILE_NAME),
+            cwd.join(WORKSPACE_DIR_NAME).join(CONFIG_FILE_NAME),
         ]
     }
 
@@ -372,12 +328,12 @@ impl Config {
         match std::fs::read_to_string(path) {
             Ok(contents) => config_kdl::from_kdl(&contents),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Err(CoreError::ConfigIo(std::io::Error::new(
+                Err(ConfigError::Io(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     format!("config file not found: {}", path.display()),
                 )))
             }
-            Err(e) => Err(CoreError::ConfigIo(e)),
+            Err(e) => Err(ConfigError::Io(e)),
         }
     }
 
@@ -385,7 +341,7 @@ impl Config {
         match std::fs::read_to_string(path) {
             Ok(contents) => config_kdl::from_kdl(&contents),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(CoreError::ConfigIo(e)),
+            Err(e) => Err(ConfigError::Io(e)),
         }
     }
 
@@ -556,29 +512,6 @@ mod tests {
     }
 
     #[test]
-    fn lsp_mirror_converts() {
-        let repr = LspConfigRepr {
-            disabled: true,
-            servers: [(
-                "go".to_string(),
-                LspServerSpecRepr {
-                    command: vec!["gopls".to_string()],
-                    extensions: vec![".go".to_string()],
-                    no_auto_start: true,
-                    root_markers: vec!["go.mod".to_string()],
-                },
-            )]
-            .into_iter()
-            .collect(),
-        };
-        let lsp: shuvarie_lsp::LspConfig = (&repr).into();
-        assert!(!lsp.enabled);
-        assert_eq!(lsp.resolve().get("go").expect("go").command[0], "gopls");
-        let back = LspConfigRepr::from(&lsp);
-        assert_eq!(repr, back);
-    }
-
-    #[test]
     fn bare_disabled_nodes_parse_as_defaults() {
         let text = r#"
             embedding {
@@ -603,7 +536,7 @@ mod tests {
             }
         "#;
         let err = config_kdl::from_kdl(text).unwrap_err();
-        let CoreError::ConfigParse(parse_err) = err else {
+        let ConfigError::Parse(parse_err) = err else {
             panic!("expected config parse error");
         };
         assert!(parse_err.message.contains("duplicate"), "{parse_err}");
@@ -613,7 +546,7 @@ mod tests {
     fn out_of_range_integer_is_an_error() {
         let text = "ui {\n    frame-rate 99999999999\n}";
         let err = config_kdl::from_kdl(text).unwrap_err();
-        let CoreError::ConfigParse(parse_err) = err else {
+        let ConfigError::Parse(parse_err) = err else {
             panic!("expected config parse error");
         };
         assert_eq!(parse_err.line, 2);
@@ -624,7 +557,7 @@ mod tests {
     fn invalid_sidebar_value_is_an_error() {
         let text = "ui {\n    sidebar sideways\n}";
         let err = config_kdl::from_kdl(text).unwrap_err();
-        let CoreError::ConfigParse(parse_err) = err else {
+        let ConfigError::Parse(parse_err) = err else {
             panic!("expected config parse error");
         };
         assert_eq!(parse_err.line, 2);
@@ -651,7 +584,7 @@ mod tests {
     fn type_error_surfaced_with_location() {
         let text = "ui {\n    frame-rate \"sixty\"\n}";
         let err = config_kdl::from_kdl(text).unwrap_err();
-        let CoreError::ConfigParse(parse_err) = err else {
+        let ConfigError::Parse(parse_err) = err else {
             panic!("expected config parse error");
         };
         assert_eq!(parse_err.line, 2);
@@ -705,7 +638,7 @@ mod tests {
         );
         assert_eq!(
             candidates[1],
-            PathBuf::from(format!("/proj/{LOCAL_CONFIG_DIR_NAME}/config.kdl"))
+            PathBuf::from(format!("/proj/{WORKSPACE_DIR_NAME}/config.kdl"))
         );
     }
 
@@ -714,11 +647,11 @@ mod tests {
         if cfg!(debug_assertions) {
             assert_eq!(CONFIG_DIR_NAME, "shuvarie-dev");
             assert_eq!(LOCAL_CONFIG_FILE_NAME, "shuvarie-dev.kdl");
-            assert_eq!(LOCAL_CONFIG_DIR_NAME, ".shuvarie-dev");
+            assert_eq!(WORKSPACE_DIR_NAME, ".shuvarie-dev");
         } else {
             assert_eq!(CONFIG_DIR_NAME, "shuvarie");
             assert_eq!(LOCAL_CONFIG_FILE_NAME, "shuvarie.kdl");
-            assert_eq!(LOCAL_CONFIG_DIR_NAME, ".shuvarie");
+            assert_eq!(WORKSPACE_DIR_NAME, ".shuvarie");
         }
     }
 
@@ -875,7 +808,7 @@ mod tests {
         std::fs::write(&top, "ui {\n    frame-rate \"sixty\"\n}").unwrap();
 
         let err = Config::load_chain(&[top]).unwrap_err();
-        let CoreError::ConfigParse(parse_err) = err else {
+        let ConfigError::Parse(parse_err) = err else {
             panic!("expected config parse error");
         };
         assert_eq!(parse_err.line, 2);
@@ -887,7 +820,7 @@ mod tests {
         let path = dir.path().join("nope.kdl");
 
         let err = Config::load_explicit(&path).unwrap_err();
-        let CoreError::ConfigIo(io_err) = &err else {
+        let ConfigError::Io(io_err) = &err else {
             panic!("expected config io error");
         };
         assert_eq!(io_err.kind(), std::io::ErrorKind::NotFound);
@@ -921,7 +854,7 @@ mod tests {
         std::fs::write(&path, "ui {\n    frame-rate \"sixty\"\n}").unwrap();
 
         let err = Config::load_explicit(&path).unwrap_err();
-        let CoreError::ConfigParse(parse_err) = err else {
+        let ConfigError::Parse(parse_err) = err else {
             panic!("expected config parse error");
         };
         assert_eq!(parse_err.line, 2);

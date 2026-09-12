@@ -4,19 +4,19 @@ use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 
 use super::kdl_util::{child_nodes, node_error, parse_document};
 use super::{
-    AgentConfig, Config, ContextConfig, CoreError, EmbeddingConfig, LspConfigRepr,
+    AgentConfig, Config, ConfigError, ContextConfig, EmbeddingConfig, LspConfigRepr,
     LspServerSpecRepr, RetryConfig, ShellConfig, SidebarPref, SkillsConfig, UiPrefs,
 };
-use crate::Result as CoreResult;
+use crate::Result;
 
-pub(crate) fn from_kdl(contents: &str) -> CoreResult<Config> {
+pub(crate) fn from_kdl(contents: &str) -> Result<Config> {
     Ok(from_kdl_with_sections(contents)?.0)
 }
 
 /// Parses one config file, returning the [`Config`] plus the top-level node
 /// names its file actually defines — absent sections keep their defaults, so
 /// the node list is what tells the merge step apart "absent" from "defined".
-pub(crate) fn from_kdl_with_sections(contents: &str) -> CoreResult<(Config, Vec<String>)> {
+pub(crate) fn from_kdl_with_sections(contents: &str) -> Result<(Config, Vec<String>)> {
     let doc = parse_document(contents)?;
     let mut config = Config::default();
     let mut sections = Vec::new();
@@ -41,8 +41,8 @@ fn set_once<T>(
     input: &str,
     node: &KdlNode,
     slot: &mut Option<T>,
-    value: CoreResult<Option<T>>,
-) -> CoreResult<()> {
+    value: Result<Option<T>>,
+) -> Result<()> {
     if slot.is_some() {
         return Err(duplicate(input, node, node.name().value()));
     }
@@ -50,11 +50,11 @@ fn set_once<T>(
     Ok(())
 }
 
-fn duplicate(input: &str, node: &KdlNode, field: &str) -> CoreError {
+fn duplicate(input: &str, node: &KdlNode, field: &str) -> ConfigError {
     node_error(input, node, format!("duplicate `{field}`"), None)
 }
 
-fn scalar_value<'a>(input: &str, node: &'a KdlNode) -> CoreResult<Option<&'a KdlValue>> {
+fn scalar_value<'a>(input: &str, node: &'a KdlNode) -> Result<Option<&'a KdlValue>> {
     let mut positionals = node.entries().iter().filter(|entry| entry.name().is_none());
     let Some(first) = positionals.next() else {
         return Ok(None);
@@ -70,7 +70,7 @@ fn scalar_value<'a>(input: &str, node: &'a KdlNode) -> CoreResult<Option<&'a Kdl
     Ok(Some(first.value()))
 }
 
-fn type_error(input: &str, node: &KdlNode, expected: &str) -> CoreError {
+fn type_error(input: &str, node: &KdlNode, expected: &str) -> ConfigError {
     node_error(
         input,
         node,
@@ -79,7 +79,7 @@ fn type_error(input: &str, node: &KdlNode, expected: &str) -> CoreError {
     )
 }
 
-fn range_error(input: &str, node: &KdlNode) -> CoreError {
+fn range_error(input: &str, node: &KdlNode) -> ConfigError {
     node_error(
         input,
         node,
@@ -88,7 +88,7 @@ fn range_error(input: &str, node: &KdlNode) -> CoreError {
     )
 }
 
-fn scalar_int<T: TryFrom<i128>>(input: &str, node: &KdlNode) -> CoreResult<Option<T>> {
+fn scalar_int<T: TryFrom<i128>>(input: &str, node: &KdlNode) -> Result<Option<T>> {
     match scalar_value(input, node)? {
         None => Ok(None),
         Some(KdlValue::Integer(value)) => T::try_from(*value)
@@ -98,19 +98,19 @@ fn scalar_int<T: TryFrom<i128>>(input: &str, node: &KdlNode) -> CoreResult<Optio
     }
 }
 
-fn scalar_u32(input: &str, node: &KdlNode) -> CoreResult<Option<u32>> {
+fn scalar_u32(input: &str, node: &KdlNode) -> Result<Option<u32>> {
     scalar_int(input, node)
 }
 
-fn scalar_u64(input: &str, node: &KdlNode) -> CoreResult<Option<u64>> {
+fn scalar_u64(input: &str, node: &KdlNode) -> Result<Option<u64>> {
     scalar_int(input, node)
 }
 
-fn scalar_usize(input: &str, node: &KdlNode) -> CoreResult<Option<usize>> {
+fn scalar_usize(input: &str, node: &KdlNode) -> Result<Option<usize>> {
     scalar_int(input, node)
 }
 
-fn scalar_bool(input: &str, node: &KdlNode) -> CoreResult<Option<bool>> {
+fn scalar_bool(input: &str, node: &KdlNode) -> Result<Option<bool>> {
     match scalar_value(input, node)? {
         None => Ok(None),
         Some(KdlValue::Bool(value)) => Ok(Some(*value)),
@@ -118,7 +118,7 @@ fn scalar_bool(input: &str, node: &KdlNode) -> CoreResult<Option<bool>> {
     }
 }
 
-fn scalar_string(input: &str, node: &KdlNode) -> CoreResult<Option<String>> {
+fn scalar_string(input: &str, node: &KdlNode) -> Result<Option<String>> {
     match scalar_value(input, node)? {
         None => Ok(None),
         Some(KdlValue::String(value)) => Ok(Some(value.clone())),
@@ -126,7 +126,7 @@ fn scalar_string(input: &str, node: &KdlNode) -> CoreResult<Option<String>> {
     }
 }
 
-fn scalar_string_vec(input: &str, node: &KdlNode) -> CoreResult<Option<Vec<String>>> {
+fn scalar_string_vec(input: &str, node: &KdlNode) -> Result<Option<Vec<String>>> {
     let mut values = Vec::new();
     for entry in node.entries().iter().filter(|entry| entry.name().is_none()) {
         match entry.value() {
@@ -143,7 +143,7 @@ fn scalar_string_vec(input: &str, node: &KdlNode) -> CoreResult<Option<Vec<Strin
     }
 }
 
-fn parse_ui(node: &KdlNode, input: &str) -> CoreResult<UiPrefs> {
+fn parse_ui(node: &KdlNode, input: &str) -> Result<UiPrefs> {
     let mut frame_rate = None;
     let mut sidebar = None;
     for child in child_nodes(node) {
@@ -163,7 +163,7 @@ fn parse_ui(node: &KdlNode, input: &str) -> CoreResult<UiPrefs> {
     Ok(prefs)
 }
 
-fn parse_sidebar(input: &str, node: &KdlNode) -> CoreResult<Option<SidebarPref>> {
+fn parse_sidebar(input: &str, node: &KdlNode) -> Result<Option<SidebarPref>> {
     match scalar_string(input, node)? {
         None => Ok(None),
         Some(value) => match value.as_str() {
@@ -180,7 +180,7 @@ fn parse_sidebar(input: &str, node: &KdlNode) -> CoreResult<Option<SidebarPref>>
     }
 }
 
-fn parse_embedding(node: &KdlNode, input: &str) -> CoreResult<EmbeddingConfig> {
+fn parse_embedding(node: &KdlNode, input: &str) -> Result<EmbeddingConfig> {
     let mut disabled = None;
     let mut provider = None;
     let mut model = None;
@@ -210,7 +210,7 @@ fn parse_embedding(node: &KdlNode, input: &str) -> CoreResult<EmbeddingConfig> {
     Ok(config)
 }
 
-fn parse_agent(node: &KdlNode, input: &str) -> CoreResult<AgentConfig> {
+fn parse_agent(node: &KdlNode, input: &str) -> Result<AgentConfig> {
     let mut max_turns = None;
     let mut worker_max_turns = None;
     for child in child_nodes(node) {
@@ -235,7 +235,7 @@ fn parse_agent(node: &KdlNode, input: &str) -> CoreResult<AgentConfig> {
     Ok(config)
 }
 
-fn parse_lsp(node: &KdlNode, input: &str) -> CoreResult<LspConfigRepr> {
+fn parse_lsp(node: &KdlNode, input: &str) -> Result<LspConfigRepr> {
     let mut disabled = None;
     let mut servers = None;
     for child in child_nodes(node) {
@@ -260,7 +260,7 @@ fn parse_lsp(node: &KdlNode, input: &str) -> CoreResult<LspConfigRepr> {
 fn parse_servers(
     node: &KdlNode,
     input: &str,
-) -> CoreResult<Option<BTreeMap<String, LspServerSpecRepr>>> {
+) -> Result<Option<BTreeMap<String, LspServerSpecRepr>>> {
     let mut servers = BTreeMap::new();
     for server_node in child_nodes(node) {
         let name = server_node.name().value().to_string();
@@ -276,7 +276,7 @@ fn parse_servers(
     }
 }
 
-fn parse_server_spec(node: &KdlNode, input: &str) -> CoreResult<LspServerSpecRepr> {
+fn parse_server_spec(node: &KdlNode, input: &str) -> Result<LspServerSpecRepr> {
     let mut command = None;
     let mut extensions = None;
     let mut no_auto_start = None;
@@ -310,7 +310,7 @@ fn parse_server_spec(node: &KdlNode, input: &str) -> CoreResult<LspServerSpecRep
     })
 }
 
-fn parse_skills(node: &KdlNode, input: &str) -> CoreResult<SkillsConfig> {
+fn parse_skills(node: &KdlNode, input: &str) -> Result<SkillsConfig> {
     let mut disabled = None;
     let mut dirs = None;
     for child in child_nodes(node) {
@@ -330,7 +330,7 @@ fn parse_skills(node: &KdlNode, input: &str) -> CoreResult<SkillsConfig> {
     Ok(config)
 }
 
-fn parse_context(node: &KdlNode, input: &str) -> CoreResult<ContextConfig> {
+fn parse_context(node: &KdlNode, input: &str) -> Result<ContextConfig> {
     let mut disabled = None;
     let mut reserved = None;
     let mut keep_recent_tokens = None;
@@ -392,7 +392,7 @@ fn parse_context(node: &KdlNode, input: &str) -> CoreResult<ContextConfig> {
     Ok(config)
 }
 
-fn parse_shell(node: &KdlNode, input: &str) -> CoreResult<ShellConfig> {
+fn parse_shell(node: &KdlNode, input: &str) -> Result<ShellConfig> {
     let mut path = None;
     for child in child_nodes(node) {
         if child.name().value() == "path" {
@@ -406,7 +406,7 @@ fn parse_shell(node: &KdlNode, input: &str) -> CoreResult<ShellConfig> {
     Ok(config)
 }
 
-fn parse_retry(node: &KdlNode, input: &str) -> CoreResult<RetryConfig> {
+fn parse_retry(node: &KdlNode, input: &str) -> Result<RetryConfig> {
     let mut max_retries = None;
     for child in child_nodes(node) {
         if child.name().value() == "max-retries" {
@@ -420,7 +420,7 @@ fn parse_retry(node: &KdlNode, input: &str) -> CoreResult<RetryConfig> {
     Ok(config)
 }
 
-pub(crate) fn to_kdl(config: &Config) -> CoreResult<String> {
+pub(crate) fn to_kdl(config: &Config) -> Result<String> {
     let mut doc = KdlDocument::new();
     let sections = [
         ui_node(&config.ui),

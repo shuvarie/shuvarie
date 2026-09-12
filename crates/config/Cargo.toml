@@ -1,0 +1,15 @@
+[package]
+name = "shuvarie-config"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dirs.workspace = true
+kdl.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

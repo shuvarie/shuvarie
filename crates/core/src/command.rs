@@ -1,4 +1,4 @@
-use crate::config::ProviderConfig;
+use shuvarie_config::ProviderConfig;
 
 #[derive(Debug, Clone)]
 pub enum Command {

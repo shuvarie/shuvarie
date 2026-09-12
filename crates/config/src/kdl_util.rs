@@ -1,7 +1,7 @@
 use kdl::{KdlDocument, KdlNode};
 
-use crate::CoreError;
-use crate::Result as CoreResult;
+use crate::ConfigError;
+use crate::Result;
 use crate::error::ConfigParseError;
 
 pub(crate) fn span_to_line_column(
@@ -20,7 +20,7 @@ pub(crate) fn span_to_line_column(
     (line, column, length)
 }
 
-pub(crate) fn parse_document(contents: &str) -> CoreResult<KdlDocument> {
+pub(crate) fn parse_document(contents: &str) -> Result<KdlDocument> {
     KdlDocument::parse(contents).map_err(|e| {
         let input: &str = &e.input;
         match e.diagnostics.first() {
@@ -42,9 +42,9 @@ pub(crate) fn at(
     length: usize,
     message: impl Into<String>,
     help: Option<String>,
-) -> CoreError {
+) -> ConfigError {
     let (line, column, length) = span_to_line_column(input, offset, length);
-    CoreError::ConfigParse(ConfigParseError {
+    ConfigError::Parse(ConfigParseError {
         message: message.into(),
         line,
         column,
@@ -58,7 +58,7 @@ pub(crate) fn node_error(
     node: &KdlNode,
     message: impl Into<String>,
     help: Option<String>,
-) -> CoreError {
+) -> ConfigError {
     at(
         input,
         node.span().offset(),

@@ -4,13 +4,13 @@ use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 
 use super::kdl_util::{node_error, parse_document};
 use super::{Active, Connections, ProviderConfig};
-use crate::Result as CoreResult;
+use crate::Result;
 
-pub(crate) fn from_kdl(contents: &str) -> CoreResult<Connections> {
+pub(crate) fn from_kdl(contents: &str) -> Result<Connections> {
     from_document(&parse_document(contents)?, contents)
 }
 
-fn from_document(doc: &KdlDocument, input: &str) -> CoreResult<Connections> {
+fn from_document(doc: &KdlDocument, input: &str) -> Result<Connections> {
     let mut connections = Connections::default();
     for node in doc.nodes() {
         match node.name().value() {
@@ -133,7 +133,7 @@ fn parse_provider(
     node: &KdlNode,
     input: &str,
     providers: &mut BTreeMap<String, ProviderConfig>,
-) -> CoreResult<()> {
+) -> Result<()> {
     if node.name().value() != "provider" {
         return Err(node_error(
             input,
@@ -272,7 +272,7 @@ fn parse_provider(
     Ok(())
 }
 
-pub(crate) fn to_kdl(connections: &Connections) -> CoreResult<String> {
+pub(crate) fn to_kdl(connections: &Connections) -> Result<String> {
     let mut doc = KdlDocument::new();
     if let Some(active) = &connections.active {
         let mut node = KdlNode::new("active");

@@ -150,7 +150,7 @@ impl App {
         workspace: WorkspaceInfo,
     ) -> Self {
         let mut welcome = Welcome::new();
-        if !connections.has_connected_providers() {
+        if !shuvarie_core::catalog::has_connected_providers(&connections) {
             welcome.open();
         }
         let initial_provider = connections.active.as_ref().map(|a| a.provider.clone());
@@ -1120,7 +1120,9 @@ impl App {
     fn reload_config(&mut self) {
         if let Ok(fresh) = Connections::load() {
             self.ctx.connections = fresh;
-            if self.ctx.connections.has_connected_providers() && self.welcome.open {
+            if shuvarie_core::catalog::has_connected_providers(&self.ctx.connections)
+                && self.welcome.open
+            {
                 self.welcome.close();
                 self.overlay = Overlay::None;
             }

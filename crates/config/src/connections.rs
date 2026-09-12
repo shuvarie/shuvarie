@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::{config_dir, connections_kdl};
-use crate::{CoreError, Result as CoreResult};
+use crate::{ConfigError, Result};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Active {
@@ -22,7 +22,7 @@ pub struct ProviderConfig {
     /// The display name of the provider (e.g. `Ollama Cloud`).
     pub name: String,
     /// How Shuvarie connects to the API — the rig transport, i.e. a
-    /// [`selune::ProviderType`] in kebab-case (e.g. `openai`, `openai-compat`,
+    /// `selune::ProviderType` in kebab-case (e.g. `openai`, `openai-compat`,
     /// `anthropic`, `google`, `ollama`). Older configs may still carry a
     /// Selune catalog id here; [`Self::catalog_id`] keeps those resolving.
     pub kind: String,
@@ -36,48 +36,34 @@ pub struct ProviderConfig {
 }
 
 impl Connections {
-    pub fn connections_path() -> CoreResult<PathBuf> {
+    pub fn connections_path() -> Result<PathBuf> {
         Ok(config_dir()?.join("connections.kdl"))
     }
 
-    pub fn load() -> CoreResult<Self> {
+    pub fn load() -> Result<Self> {
         let path = Self::connections_path()?;
         Self::load_from(&path)
     }
 
-    pub fn load_from(path: &Path) -> CoreResult<Self> {
+    pub fn load_from(path: &Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
             Ok(contents) => Ok(connections_kdl::from_kdl(&contents)?),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(CoreError::ConfigIo(e)),
+            Err(e) => Err(ConfigError::Io(e)),
         }
     }
 
-    pub fn save(&self) -> CoreResult<()> {
+    pub fn save(&self) -> Result<()> {
         let path = Self::connections_path()?;
         self.save_to(&path)
     }
 
-    pub fn save_to(&self, path: &Path) -> CoreResult<()> {
+    pub fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(path, connections_kdl::to_kdl(self)?)?;
         Ok(())
-    }
-
-    /// Whether the active provider (if any) is configured and connectable.
-    pub fn has_connected_providers(&self) -> bool {
-        if self.providers.is_empty() {
-            return false;
-        }
-        match &self.active {
-            None => false,
-            Some(active) => match self.providers.get(&active.provider) {
-                None => false,
-                Some(p) => p.is_connectable(),
-            },
-        }
     }
 }
 
@@ -107,40 +93,6 @@ impl ProviderConfig {
     /// field, else `kind` (which held the catalog id in older configs).
     pub fn catalog_id(&self) -> Option<&str> {
         self.catalog.as_deref().or(Some(self.kind.as_str()))
-    }
-
-    /// Whether the provider is configured enough to open a connection. An
-    /// explicit `catalog` entry governs (its `api_key` requirement); otherwise
-    /// the transport decides: a key is required unless it's a local one
-    /// (`ollama`). A `kind` that parses as neither is treated as a legacy
-    /// catalog id.
-    pub fn is_connectable(&self) -> bool {
-        let has_key = self
-            .api_key
-            .as_ref()
-            .map(|k| !k.trim().is_empty())
-            .unwrap_or(false);
-        if let Some(catalog) = &self.catalog {
-            return catalog_requires_key(catalog, has_key);
-        }
-        match crate::catalog::parse_provider_type(&self.kind) {
-            Some(selune::ProviderType::Ollama) => true,
-            Some(_) => has_key,
-            None => catalog_requires_key(&self.kind, has_key),
-        }
-    }
-}
-
-/// Whether a connection to the catalog entry `id` may proceed given whether a
-/// non-empty API key is present. Unknown catalog ids fall back to `has_key`.
-fn catalog_requires_key(id: &str, has_key: bool) -> bool {
-    let catalog = crate::catalog::providers();
-    match catalog.iter().find(|p| p.id.0 == id) {
-        Some(p) => match &p.api_key {
-            Some(_) => has_key,
-            None => true,
-        },
-        None => has_key,
     }
 }
 
@@ -383,7 +335,7 @@ mod tests {
     #[test]
     fn malformed_kdl_has_location() {
         let err = connections_kdl::from_kdl("active {").unwrap_err();
-        let CoreError::ConfigParse(e) = err else {
+        let ConfigError::Parse(e) = err else {
             panic!("expected parse error");
         };
         assert!(e.line >= 1);
@@ -430,35 +382,5 @@ mod tests {
     fn catalog_id_falls_back_to_legacy_kind() {
         let pc = ProviderConfig::new("cloud", "ollama-cloud", None, None);
         assert_eq!(pc.catalog_id(), Some("ollama-cloud"));
-    }
-
-    #[test]
-    fn is_connectable_transport_rules() {
-        let local = ProviderConfig::new("local", "ollama", None, None);
-        assert!(local.is_connectable());
-        let remote = ProviderConfig::new("remote", "openai-compat", None, None);
-        assert!(!remote.is_connectable());
-        let keyed = ProviderConfig::new("remote", "openai", Some("sk-x".into()), None);
-        assert!(keyed.is_connectable());
-        let blank_key = ProviderConfig::new("remote", "anthropic", Some("  ".into()), None);
-        assert!(!blank_key.is_connectable());
-    }
-
-    #[test]
-    fn is_connectable_legacy_catalog_kinds() {
-        let groq = ProviderConfig::new("groq", "groq", None, None);
-        assert!(!groq.is_connectable(), "catalog entry requires a key");
-        let groq = ProviderConfig::new("groq", "groq", Some("gsk-x".into()), None);
-        assert!(groq.is_connectable());
-    }
-
-    #[test]
-    fn is_connectable_explicit_catalog_governs() {
-        let pc = ProviderConfig::new("groq-compat", "openai-compat", Some("gsk-x".into()), None)
-            .with_catalog(Some("groq"));
-        assert!(pc.is_connectable());
-        let pc = ProviderConfig::new("copilot", "openai-compat", None, None)
-            .with_catalog(Some("copilot"));
-        assert!(pc.is_connectable(), "catalog entry needs no key");
     }
 }
