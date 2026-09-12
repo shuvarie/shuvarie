@@ -1,4 +1,5 @@
 use shuvarie_config::ProviderConfig;
+use shuvarie_db::StoredScroll;
 
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -34,6 +35,12 @@ pub enum Command {
     ListSessions,
     LoadSession {
         id: uuid::Uuid,
+    },
+    /// Persist the chat pane's last scroll position for a session, sent by
+    /// the TUI when it is about to leave the session (switch or quit).
+    SaveScroll {
+        id: uuid::Uuid,
+        scroll: StoredScroll,
     },
     DeleteSession {
         id: uuid::Uuid,

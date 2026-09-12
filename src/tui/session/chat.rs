@@ -6,7 +6,7 @@ use ratatui::prelude::*;
 use serde_json::Value;
 use shuvarie_core::tool_record::ToolRecord;
 use shuvarie_core::{DiagnosticInfo, Role};
-use shuvarie_db::ReasoningSegment;
+use shuvarie_db::{ReasoningSegment, StoredScroll};
 use shuvarie_llm::{FileChange, ShellStreams};
 use unicode_width::UnicodeWidthStr;
 
@@ -214,11 +214,26 @@ pub enum ChatMessage {
 
 /// Viewport-relative scroll position. `sticky_bottom` tracks the streaming
 /// follow state: pinned to the bottom while true, released by any upward
-/// scroll and re-engaged when scrolling back down to the last row.
+/// scroll and re-engaged when scrolling back down to the last row. `anchor`
+/// is the content-space position the last frame held the viewport top at
+/// (re-derived from `offset` every frame); it is what gets persisted for a
+/// session. `pending_anchor` holds a restored anchor awaiting its first
+/// frame, where it resolves into an `offset`.
 #[derive(Debug, Default, Clone, Copy)]
 struct Scroll {
     offset: u32,
     sticky_bottom: bool,
+    anchor: Option<(usize, u32)>,
+    pending_anchor: Option<(usize, u32)>,
+}
+
+/// How [`Chat::apply_session`] seeds the viewport scroll: restore the
+/// persisted position (session load), pin to the top (turn reverted), or
+/// keep the current viewport (turn restored).
+enum ScrollInit {
+    Restore,
+    Top,
+    Keep,
 }
 
 /// A selection endpoint in content space: turn index (same space as
@@ -321,8 +336,8 @@ impl Chat {
             stored: None,
             stored_len: 0,
             scroll: RefCell::new(Scroll {
-                offset: 0,
                 sticky_bottom: true,
+                ..Scroll::default()
             }),
             width: Cell::new(0),
             env_rev: 0,
@@ -498,9 +513,9 @@ impl Chat {
             ChatMessage::StreamError { .. } | ChatMessage::StreamCancelled => {
                 self.commit_interrupted()
             }
-            ChatMessage::Load { session } => self.apply_session(session, true),
-            ChatMessage::TurnReverted { session } => self.apply_session(session, true),
-            ChatMessage::TurnRestored { session } => self.apply_session(session, false),
+            ChatMessage::Load { session } => self.apply_session(session, ScrollInit::Restore),
+            ChatMessage::TurnReverted { session } => self.apply_session(session, ScrollInit::Top),
+            ChatMessage::TurnRestored { session } => self.apply_session(session, ScrollInit::Keep),
             ChatMessage::Reset => {
                 *self.turns.borrow_mut() = Vec::new();
                 *self.in_flight.borrow_mut() = None;
@@ -514,6 +529,8 @@ impl Chat {
                 let mut scroll = self.scroll.borrow_mut();
                 scroll.offset = 0;
                 scroll.sticky_bottom = true;
+                scroll.pending_anchor = None;
+                scroll.anchor = None;
             }
             ChatMessage::LspDiagnostics { path, diagnostics } => {
                 if diagnostics.is_empty() {
@@ -636,7 +653,9 @@ impl Chat {
         }
 
         let sticky = self.scroll.borrow().sticky_bottom;
-        let anchor = (!sticky).then(|| locate(&heights, self.scroll.borrow().offset));
+        let pending = self.scroll.borrow_mut().pending_anchor.take();
+        let anchor = (!sticky)
+            .then(|| pending.unwrap_or_else(|| locate(&heights, self.scroll.borrow().offset)));
 
         let offset = self.scroll.borrow().offset;
         let overscan = viewport;
@@ -722,6 +741,7 @@ impl Chat {
                 scroll.offset = scroll.offset.min(total.saturating_sub(viewport));
             }
             scroll.sticky_bottom = scroll.offset >= total.saturating_sub(viewport);
+            scroll.anchor = if scroll.sticky_bottom { None } else { anchor };
         }
         let scroll_y = self.scroll.borrow().offset;
 
@@ -1303,7 +1323,7 @@ impl Chat {
         self.streaming = false;
     }
 
-    fn apply_session(&mut self, session: shuvarie_core::Session, reset_scroll: bool) {
+    fn apply_session(&mut self, session: shuvarie_core::Session, scroll: ScrollInit) {
         self.clear_selection();
         let interrupted = session.last_assistant_interrupted();
         let ests = build_turn_ests(&session, interrupted);
@@ -1316,15 +1336,42 @@ impl Chat {
             .map(|(role, est)| TurnData::lazy(role, est))
             .collect();
         *self.in_flight.borrow_mut() = None;
+        let saved_scroll = session.scroll;
         self.stored = Some(session);
         self.stored_len = len;
         self.streaming = false;
         self.interrupted = interrupted;
         self.toggled.clear();
-        if reset_scroll {
-            let mut scroll = self.scroll.borrow_mut();
-            scroll.offset = 0;
-            scroll.sticky_bottom = false;
+        let mut scroll_state = self.scroll.borrow_mut();
+        scroll_state.pending_anchor = None;
+        scroll_state.anchor = None;
+        match scroll {
+            ScrollInit::Restore => {
+                scroll_state.sticky_bottom = saved_scroll.sticky;
+                if !saved_scroll.sticky {
+                    scroll_state.pending_anchor = saved_scroll
+                        .anchor
+                        .map(|(turn, row)| (turn as usize, row as u32));
+                }
+            }
+            ScrollInit::Top => {
+                scroll_state.offset = 0;
+                scroll_state.sticky_bottom = false;
+            }
+            ScrollInit::Keep => {}
+        }
+    }
+
+    /// The scroll position to persist when this session is left: the sticky
+    /// bottom flag plus, when released from the bottom, the content anchor
+    /// the viewport top was last held at (from the most recent frame).
+    pub fn scroll_save(&self) -> StoredScroll {
+        let scroll = self.scroll.borrow();
+        StoredScroll {
+            sticky: scroll.sticky_bottom,
+            anchor: scroll
+                .anchor
+                .map(|(turn, row)| (turn as u64, u64::from(row))),
         }
     }
 
@@ -2561,6 +2608,80 @@ mod tests {
         assert!(
             chat.scroll.borrow().sticky_bottom,
             "scrolling back to the bottom re-engages sticky"
+        );
+    }
+
+    #[test]
+    fn scroll_save_round_trips_through_the_persisted_anchor() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::Load {
+            session: est_hostile_session(30),
+        });
+        for _ in 0..3000 {
+            chat.update(ChatMessage::ScrollDown);
+        }
+        draw(&chat, 80, 20);
+        for _ in 0..10 {
+            chat.update(ChatMessage::ScrollUp);
+        }
+        draw(&chat, 80, 20);
+        let saved = chat.scroll_save();
+        assert!(!saved.sticky, "a released viewport saves non-sticky");
+        let (turn, row) = saved.anchor.expect("a released viewport saves an anchor");
+        let restored_anchor = Some((turn as usize, row as u32));
+
+        let mut reloaded = Chat::new();
+        let mut session = est_hostile_session(30);
+        session.scroll = StoredScroll {
+            sticky: saved.sticky,
+            anchor: Some((turn, row)),
+        };
+        reloaded.update(ChatMessage::Load { session });
+        assert!(!reloaded.scroll.borrow().sticky_bottom);
+        assert!(
+            reloaded.scroll.borrow().anchor.is_none(),
+            "loading drops the previous session's anchor"
+        );
+        draw(&reloaded, 80, 20);
+        assert_eq!(
+            reloaded.scroll.borrow().anchor,
+            restored_anchor,
+            "restore lands the viewport top on the saved anchor"
+        );
+        draw(&reloaded, 80, 20);
+        assert_eq!(
+            reloaded.scroll.borrow().anchor,
+            restored_anchor,
+            "the restored anchor holds across frames"
+        );
+    }
+
+    #[test]
+    fn scroll_save_round_trips_sticky_bottom() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::Load {
+            session: est_hostile_session(30),
+        });
+        for _ in 0..10 {
+            chat.update(ChatMessage::ScrollUp);
+        }
+        draw(&chat, 80, 20);
+        for _ in 0..3000 {
+            chat.update(ChatMessage::ScrollDown);
+        }
+        draw(&chat, 80, 20);
+        let saved = chat.scroll_save();
+        assert!(saved.sticky, "the bottom-pinned viewport saves sticky");
+        assert!(saved.anchor.is_none());
+
+        let mut reloaded = Chat::new();
+        let mut session = est_hostile_session(30);
+        session.scroll = saved;
+        reloaded.update(ChatMessage::Load { session });
+        draw(&reloaded, 80, 20);
+        assert!(
+            reloaded.scroll.borrow().sticky_bottom,
+            "restore re-pins the viewport to the bottom"
         );
     }
 

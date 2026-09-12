@@ -136,6 +136,15 @@ pub struct Session {
     pub created_at: jiff::Timestamp,
     #[auto]
     pub updated_at: jiff::Timestamp,
+    /// Chat pane was pinned to the bottom of the history when the session was
+    /// last left.
+    #[default(false)]
+    pub scroll_sticky: bool,
+    /// Scroll anchor turn (dense message index) the viewport top was held at
+    /// when released from the bottom.
+    pub scroll_turn: Option<u64>,
+    /// Scroll anchor wrapped row within `scroll_turn`.
+    pub scroll_row: Option<u64>,
     #[has_many]
     pub messages: toasty::Deferred<Vec<Message>>,
 }

@@ -623,6 +623,11 @@ pub async fn run(
                             }
                         }
                     }
+                    Command::SaveScroll { id, scroll } => {
+                        // Fire-and-forget: a failed scroll write is harmless
+                        // and must never surface as a session error.
+                        let _ = ctx.store.set_scroll(id, scroll).await;
+                    }
                     Command::DeleteSession { id } => {
                         if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;

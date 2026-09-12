@@ -532,8 +532,12 @@ async fn send_message_persists_session_and_messages() {
 
     let store = Store::open_in_memory().await.unwrap();
     let store_clone = store.clone();
+    // Disable connection retries: the missing ollama must surface as an
+    // immediate `StreamError` instead of a `RetryScheduled` wait.
+    let mut config = empty_config();
+    config.retry.max_retries = 0;
     let handle = tokio::spawn(run(
-        empty_config(),
+        config,
         connections,
         store_clone,
         StartupSession::None,

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use shuvarie_db::{ReasoningSegment, StoredMessage, StoredSession};
+use shuvarie_db::{ReasoningSegment, StoredMessage, StoredScroll, StoredSession};
 use shuvarie_llm::ChatMsg;
 use shuvarie_llm::TokenUsage;
 
@@ -51,6 +51,9 @@ pub struct Session {
     /// cache-hit metrics. Not maintained by the live turn loop (which reports
     /// per-request usage through events).
     pub last_usage: Option<TokenUsage>,
+    /// Chat pane scroll position persisted at the last leave of the session;
+    /// the TUI seeds its scroll engine from it when the session loads.
+    pub scroll: StoredScroll,
 }
 
 impl Session {
@@ -62,6 +65,7 @@ impl Session {
         let mut s = Self {
             id: Some(stored.id),
             title: Some(stored.title),
+            scroll: stored.scroll,
             ..Self::default()
         };
         for m in &stored.messages {
@@ -142,6 +146,7 @@ impl Session {
         self.reasoning_tokens = 0;
         self.cached_tokens = 0;
         self.last_usage = None;
+        self.scroll = StoredScroll::default();
     }
 
     pub fn push_user(&mut self, content: impl Into<String>) {
@@ -250,6 +255,7 @@ mod tests {
             model: None,
             messages,
             tool_calls: Vec::new(),
+            scroll: shuvarie_db::StoredScroll::default(),
         }
     }
 

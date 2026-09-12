@@ -58,6 +58,26 @@ name = "updated_at"
 ty = "String"
 storage_ty = "Text"
 
+[[schema.tables.columns]]
+id = { table = 0, index = 8 }
+name = "scroll_sticky"
+ty = "Bool"
+storage_ty = "Boolean"
+
+[[schema.tables.columns]]
+id = { table = 0, index = 9 }
+name = "scroll_turn"
+ty = "U64"
+storage_ty = { UnsignedInteger = 8 }
+nullable = true
+
+[[schema.tables.columns]]
+id = { table = 0, index = 10 }
+name = "scroll_row"
+ty = "U64"
+storage_ty = { UnsignedInteger = 8 }
+nullable = true
+
 [[schema.tables.indices]]
 id = { table = 0, index = 0 }
 name = "index_sessions_by_id"

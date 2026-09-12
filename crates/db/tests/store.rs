@@ -1,4 +1,4 @@
-use shuvarie_db::{ReasoningSegment, Store, StoredSession, WORKSPACE_DIR_NAME};
+use shuvarie_db::{ReasoningSegment, Store, StoredScroll, StoredSession, WORKSPACE_DIR_NAME};
 use shuvarie_llm::Role;
 use shuvarie_llm::TokenUsage;
 
@@ -244,6 +244,42 @@ async fn reopen_applies_migrations_and_preserves_data() {
     assert_eq!(loaded.model.as_deref(), Some("m1"));
     assert_eq!(loaded.messages.len(), 1);
     assert_eq!(loaded.messages[0].content, "hello");
+}
+
+#[tokio::test]
+async fn set_scroll_persists_and_loads_without_touching_updated_at() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store.create_session("t", None, None).await.unwrap();
+    store.append_message(id, Role::User, "hello").await.unwrap();
+    let before = store.list_sessions().await.unwrap()[0].updated_at_epoch_ms;
+
+    store
+        .set_scroll(
+            id,
+            StoredScroll {
+                sticky: false,
+                anchor: Some((3, 41)),
+            },
+        )
+        .await
+        .unwrap();
+    let loaded: StoredSession = store.load_session(id).await.unwrap();
+    assert_eq!(
+        loaded.scroll,
+        StoredScroll {
+            sticky: false,
+            anchor: Some((3, 41)),
+        }
+    );
+    assert_eq!(
+        store.list_sessions().await.unwrap()[0].updated_at_epoch_ms,
+        before,
+        "a scroll write must not reorder the session list"
+    );
+
+    store.set_scroll(id, StoredScroll::default()).await.unwrap();
+    let loaded: StoredSession = store.load_session(id).await.unwrap();
+    assert_eq!(loaded.scroll, StoredScroll::default());
 }
 
 #[tokio::test]

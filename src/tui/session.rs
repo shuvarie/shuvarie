@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use ratatui::layout::{Alignment, Constraint::*, Layout, Rect};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph};
+use shuvarie_db::StoredScroll;
 use shuvarie_llm::TokenUsage;
 use termina::event::{KeyCode, KeyEvent, KeyEventKind};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -266,6 +267,12 @@ impl SessionScreen {
 
     pub fn has_messages(&self) -> bool {
         self.chat.has_messages()
+    }
+
+    /// The session to leave and its persisted chat scroll position; `None`
+    /// when no session row is loaded yet, so there is nothing to save.
+    pub fn scroll_save(&self) -> Option<(uuid::Uuid, StoredScroll)> {
+        Some((self.session_id?, self.chat.scroll_save()))
     }
 
     /// Bash mode: the prompt starts with `!`, so a submit runs the rest as a

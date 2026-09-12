@@ -24,6 +24,16 @@ pub struct SessionSummary {
     pub updated_at_epoch_ms: i64,
 }
 
+/// Persisted chat scroll position of a session: whether the viewport was
+/// pinned to the bottom of the history, and — when released from the bottom —
+/// the content anchor it was held at (`turn` = dense message index, `row` =
+/// wrapped row within that turn).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StoredScroll {
+    pub sticky: bool,
+    pub anchor: Option<(u64, u64)>,
+}
+
 #[derive(Debug, Clone)]
 pub struct StoredSession {
     pub id: uuid::Uuid,
@@ -32,6 +42,7 @@ pub struct StoredSession {
     pub model: Option<String>,
     pub messages: Vec<StoredMessage>,
     pub tool_calls: Vec<StoredToolCall>,
+    pub scroll: StoredScroll,
 }
 
 #[derive(Debug, Clone)]
@@ -237,6 +248,7 @@ impl Store {
             .ok_or(DbError::NotFound { id })?;
         let messages = self.messages_for_session(id).await?;
         let tool_calls = self.tool_calls_for_session(id).await?;
+        let scroll = scroll_of(&session);
         Ok(StoredSession {
             id: session.id,
             title: session.title,
@@ -244,6 +256,7 @@ impl Store {
             model: session.model,
             messages,
             tool_calls,
+            scroll,
         })
     }
 
@@ -259,6 +272,7 @@ impl Store {
         };
         let messages = self.messages_for_session(session.id).await?;
         let tool_calls = self.tool_calls_for_session(session.id).await?;
+        let scroll = scroll_of(&session);
         Ok(Some(StoredSession {
             id: session.id,
             title: session.title,
@@ -266,6 +280,7 @@ impl Store {
             model: session.model,
             messages,
             tool_calls,
+            scroll,
         }))
     }
 
@@ -878,6 +893,37 @@ impl Store {
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
         Ok(())
+    }
+
+    /// Persist a session's chat scroll position. A raw update bypasses the
+    /// model's auto-timestamp, so `updated_at` is untouched and scrolling
+    /// never reorders the session list.
+    pub async fn set_scroll(&mut self, id: uuid::Uuid, scroll: StoredScroll) -> Result<()> {
+        toasty::sql::statement(
+            "UPDATE sessions SET scroll_sticky = ?1, scroll_turn = ?2, scroll_row = ?3 \
+             WHERE id = ?4",
+        )
+        .bind_typed(scroll.sticky, db::Type::Boolean)
+        .bind_typed(
+            scroll.anchor.map(|(turn, _)| turn),
+            db::Type::UnsignedInteger(8),
+        )
+        .bind_typed(
+            scroll.anchor.map(|(_, row)| row),
+            db::Type::UnsignedInteger(8),
+        )
+        .bind_typed(id.as_bytes().to_vec(), db::Type::Blob)
+        .exec(&mut self.db)
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
+        Ok(())
+    }
+}
+
+fn scroll_of(session: &Session) -> StoredScroll {
+    StoredScroll {
+        sticky: session.scroll_sticky,
+        anchor: session.scroll_turn.zip(session.scroll_row),
     }
 }
 

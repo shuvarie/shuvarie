@@ -7,6 +7,9 @@ CREATE TABLE "sessions" (
     "parent_id" UUID,
     "created_at" TEXT NOT NULL,
     "updated_at" TEXT NOT NULL,
+    "scroll_sticky" BOOLEAN NOT NULL DEFAULT 0,
+    "scroll_turn" INTEGER,
+    "scroll_row" INTEGER,
     PRIMARY KEY ("id")
 );
 -- #[toasty::breakpoint]

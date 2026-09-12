@@ -645,6 +645,7 @@ impl App {
                 if let Some(ConfirmQuitEffect::Confirm) =
                     self.confirm_quit.update(ConfirmQuitMessage::Confirm)
                 {
+                    self.save_scroll();
                     return Some(AppEffect::Quit);
                 }
             }
@@ -691,6 +692,7 @@ impl App {
                 if let Some(effect) = self.session_picker.update(m) {
                     match effect {
                         SessionPickerEffect::LoadSession { id } => {
+                            self.save_scroll();
                             self.ctx.send(shuvarie_core::Command::LoadSession { id });
                             self.close_overlay();
                         }
@@ -698,6 +700,7 @@ impl App {
                             self.ctx.send(shuvarie_core::Command::DeleteSession { id });
                         }
                         SessionPickerEffect::NewSession => {
+                            self.save_scroll();
                             self.session.update(SessionMessage::Reset);
                             self.ctx.send(shuvarie_core::Command::NewSession);
                             self.close_overlay();
@@ -792,6 +795,7 @@ impl App {
                                 .send(shuvarie_core::Command::SearchHistory { query });
                         }
                         HistorySearchEffect::LoadSession { id } => {
+                            self.save_scroll();
                             self.ctx.send(shuvarie_core::Command::LoadSession { id });
                             self.close_overlay();
                         }
@@ -1007,6 +1011,16 @@ impl App {
         None
     }
 
+    /// Persists the chat pane's scroll position for the session being left
+    /// (switch, reset, or quit) before the transition is dispatched; a no-op
+    /// when no session row is loaded.
+    fn save_scroll(&self) {
+        if let Some((id, scroll)) = self.session.scroll_save() {
+            self.ctx
+                .send(shuvarie_core::Command::SaveScroll { id, scroll });
+        }
+    }
+
     fn refresh_sessions(&mut self) {
         self.session_picker.loading = true;
         self.ctx.send(shuvarie_core::Command::ListSessions);
@@ -1084,6 +1098,7 @@ impl App {
                 self.overlay = Overlay::SessionPicker;
             }
             CommandAction::NewSession => {
+                self.save_scroll();
                 self.session.update(SessionMessage::Reset);
                 self.ctx.send(shuvarie_core::Command::NewSession);
             }
@@ -1110,6 +1125,7 @@ impl App {
                 if self.session.is_streaming() {
                     self.ctx.send(shuvarie_core::Command::CancelStream);
                 }
+                self.save_scroll();
                 return Some(AppEffect::Quit);
             }
         }
