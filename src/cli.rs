@@ -5,6 +5,7 @@ use clap::{
         styling::{AnsiColor, Style},
     },
 };
+use uuid::Uuid;
 use std::path::PathBuf;
 
 const STYLES: Styles = Styles::styled()
@@ -25,4 +26,11 @@ pub struct Cli {
     /// Use a certain config file
     #[arg(long, value_name = "FILE")]
     pub config: Option<PathBuf>,
+}
+
+pub fn show_resume_hint(session_id: Uuid) {
+    println!();
+    println!("This session can be reopened with:");
+    println!();
+    println!("  shuvarie -s {session_id}");
 }

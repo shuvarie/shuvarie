@@ -1,6 +1,8 @@
 use clap::Parser;
 use tokio::sync::mpsc::channel;
 
+use crate::cli::show_resume_hint;
+
 mod cli;
 mod tui;
 
@@ -38,13 +40,16 @@ async fn main() -> color_eyre::Result<()> {
     drop(cmd_tx);
     let core_res = core.await;
 
-    let session_id = res?;
+    let res = res?;
     core_res?;
-    if let Some(session_id) = session_id {
-        println!();
-        println!("This session can be reopened with:");
-        println!();
-        println!("  shuvarie -s {session_id}");
+
+    if let Some(res_enum) = res {
+        match res_enum {
+            tui::TuiResponse::SessionSaved { session_id } => {
+                show_resume_hint(session_id);
+            }
+        }
     }
+
     Ok(())
 }

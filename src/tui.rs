@@ -37,11 +37,17 @@ mod warning;
 mod welcome;
 mod workspace;
 
+pub enum TuiResponse {
+    SessionSaved {
+        session_id: uuid::Uuid,
+    },
+}
+
 pub async fn run_tui(
     config: Config,
     cmd_tx: Sender<Command>,
     event_rx: Receiver<CoreEvent>,
-) -> io::Result<Option<uuid::Uuid>> {
+) -> io::Result<Option<TuiResponse>> {
     let mut term = PlatformTerminal::new()?;
     term.enter_raw_mode()?;
 
@@ -62,7 +68,12 @@ pub async fn run_tui(
     let deinit = deinit_terminal(rat.backend_mut().terminal_mut());
     let session_id = session_id?;
     deinit?;
-    Ok(session_id)
+
+    if let Some(session_id) = session_id {
+        return Ok(Some(TuiResponse::SessionSaved { session_id }));
+    }
+
+    Ok(None)
 }
 
 /// Minimum interval between frames. `None` disables the cap (one draw per
