@@ -25,3 +25,12 @@ target
 # Local shuvarie data (working-directory session database)
 .shuvarie/
 .shuvarie-dev/
+
+#-- nix --#
+
+# Ignore build outputs from performing a nix-build or `nix build` command
+result
+result-*
+
+# Ignore automatically generated direnv output
+.direnv

@@ -93,6 +93,8 @@ cargo clippy --all-targets
 cargo fmt --check
 ```
 
+Nix flakes: `nix build .#` builds the binary and runs the test suite in checkPhase; `nix develop` provides the toolchain. The flake splices the `vendor/selune` submodule from its own `selune` input in `postUnpack`, because Nix drops submodule gitlinks from git trees.
+
 ## Tips
 
 ### AGENTS.md

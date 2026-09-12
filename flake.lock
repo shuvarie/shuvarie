@@ -1,0 +1,45 @@
+{
+  "nodes": {
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1789006805,
+        "narHash": "sha256-xB8mKMOx1IA9vTDNLmJZ6n4wCMq/cuWBBOzGCRnqxrU=",
+        "ref": "nixos-unstable",
+        "rev": "8ce4ef6cb6f871616146b9fe26d2a5ae594e94fe",
+        "revCount": 1070770,
+        "type": "git",
+        "url": "https://github.com/NixOS/nixpkgs"
+      },
+      "original": {
+        "ref": "nixos-unstable",
+        "type": "git",
+        "url": "https://github.com/NixOS/nixpkgs"
+      }
+    },
+    "root": {
+      "inputs": {
+        "nixpkgs": "nixpkgs",
+        "selune": "selune"
+      }
+    },
+    "selune": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1789200267,
+        "narHash": "sha256-UjktZjDXdhSZHAEsE8m+o4vyo1J6/LptsPfq8MgFJDc=",
+        "ref": "main",
+        "rev": "5074a81f65c64055b08442dc7cbc429a9768185d",
+        "revCount": 32,
+        "type": "git",
+        "url": "https://github.com/chardoncs/selune"
+      },
+      "original": {
+        "ref": "main",
+        "type": "git",
+        "url": "https://github.com/chardoncs/selune"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
