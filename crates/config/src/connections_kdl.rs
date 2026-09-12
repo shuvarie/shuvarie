@@ -272,6 +272,12 @@ fn parse_provider(
     Ok(())
 }
 
+const FILE_HEADER: &str = concat!(
+    "// ¡¡¡ THIS FILE CONTAINS YOUR API KEYS !!!\n",
+    "// ¡¡¡ DO NOT SHARE IT IN PUBLIC !!!\n",
+    "\n",
+);
+
 pub(crate) fn to_kdl(connections: &Connections) -> Result<String> {
     let mut doc = KdlDocument::new();
     if let Some(active) = &connections.active {
@@ -327,5 +333,5 @@ pub(crate) fn to_kdl(connections: &Connections) -> Result<String> {
     providers.set_children(body);
     doc.nodes_mut().push(providers);
     doc.autoformat();
-    Ok(doc.to_string())
+    Ok(format!("{FILE_HEADER}{doc}"))
 }

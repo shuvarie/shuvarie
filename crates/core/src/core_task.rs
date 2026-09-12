@@ -3422,6 +3422,7 @@ mod tests {
         while let Some(event) = event_rx.recv().await {
             match event {
                 Event::ReasoningReceived { .. } => reasoning_chunks += 1,
+                Event::TokenReceived { .. } => saw_token = true,
                 Event::StreamCancelled => break,
                 _ => {}
             }

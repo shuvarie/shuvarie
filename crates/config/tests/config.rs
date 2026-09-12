@@ -50,6 +50,26 @@ fn round_trip_serialization() {
 }
 
 #[test]
+fn saved_connections_start_with_secret_warning() {
+    let connections = sample_connections();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("connections.kdl");
+
+    connections.save_to(&path).expect("save");
+    let saved = std::fs::read_to_string(&path).expect("read saved file");
+    assert!(
+        saved.starts_with(
+            "// ¡¡¡ THIS FILE CONTAINS YOUR API KEYS !!!\n\
+             // ¡¡¡ DO NOT SHARE IT IN PUBLIC !!!\n\n"
+        ),
+        "expected warning header followed by a blank line at top:\n{saved}"
+    );
+
+    let parsed = Connections::load_from(&path).expect("load");
+    assert_eq!(connections, parsed);
+}
+
+#[test]
 fn default_connections_round_trip() {
     let connections = Connections::default();
     let dir = tempfile::tempdir().expect("tempdir");
