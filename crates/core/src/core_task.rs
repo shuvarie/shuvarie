@@ -510,7 +510,7 @@ pub async fn run(
                                 &command,
                                 &cwd,
                                 None,
-                                &crate::tools::ShellOutputTx::new(chunk_tx),
+                                &crate::tools::ShellOutputTx::full(chunk_tx),
                             )
                             .await;
                             let _ = pump.await;
@@ -520,10 +520,7 @@ pub async fn run(
                                     id,
                                     ok: run.status.success(),
                                     exit: run.status.code(),
-                                    stdout: match run.status.code() {
-                                        Some(code) => format!("exit {code}:\n{}", run.out),
-                                        None => run.out,
-                                    },
+                                    stdout: run.out,
                                     stderr: run.err,
                                     duration_ms,
                                 },

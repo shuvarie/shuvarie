@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::time::Instant;
 
 use ratatui::prelude::*;
@@ -25,26 +26,29 @@ pub enum BashMessage {
         stderr: String,
         duration_ms: u64,
     },
+    ScrollUp,
+    ScrollDown,
     Dismiss,
 }
 
-/// Output rows kept visible in the popup; older rows collapse into a hint.
-const MAX_OUTPUT_ROWS: usize = 10;
-
 /// Floating display-only window for the latest bash-mode (`!`) run, anchored
-/// above the prompt input. Always expanded, dismissed with Escape; a new run
-/// reopens it. The content is never persisted nor sent to the model.
+/// above the prompt input. The run's captured output is shown verbatim (raw
+/// text, one row per line, no trimming, wrapping, or markdown) and stays
+/// scrolled to the newest rows unless the user wheels up; Escape dismisses and
+/// a new run reopens it. The content is never persisted nor sent to the model.
 pub struct BashPopup {
     id: Option<u64>,
     command: String,
     running: bool,
     ok: bool,
     exit: Option<i32>,
-    stdout: String,
-    stderr: String,
+    stdout: StreamText,
+    stderr: StreamText,
     duration_ms: u64,
     started_at: Option<Instant>,
     open: bool,
+    pub(crate) scroll: Cell<usize>,
+    pub(crate) follow: Cell<bool>,
 }
 
 impl BashPopup {
@@ -55,11 +59,13 @@ impl BashPopup {
             running: false,
             ok: true,
             exit: None,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: StreamText::new(),
+            stderr: StreamText::new(),
             duration_ms: 0,
             started_at: None,
             open: false,
+            scroll: Cell::new(0),
+            follow: Cell::new(true),
         }
     }
 
@@ -86,16 +92,18 @@ impl BashPopup {
                 self.running = true;
                 self.ok = true;
                 self.exit = None;
-                self.stdout = String::new();
-                self.stderr = String::new();
+                self.stdout = StreamText::new();
+                self.stderr = StreamText::new();
                 self.duration_ms = 0;
                 self.started_at = Some(Instant::now());
                 self.open = true;
+                self.scroll.set(0);
+                self.follow.set(true);
             }
             BashMessage::Output { id, stdout, stderr } => {
                 if self.id == Some(id) && self.running {
-                    self.stdout = stdout;
-                    self.stderr = stderr;
+                    self.stdout.set(stdout);
+                    self.stderr.set(stderr);
                 }
             }
             BashMessage::Finished {
@@ -110,53 +118,101 @@ impl BashPopup {
                     self.running = false;
                     self.ok = ok;
                     self.exit = exit;
-                    self.stdout = stdout;
-                    self.stderr = stderr;
+                    self.stdout.set(stdout);
+                    self.stderr.set(stderr);
                     self.duration_ms = duration_ms;
                     self.started_at = None;
                 }
+            }
+            BashMessage::ScrollUp => {
+                self.follow.set(false);
+                self.scroll.set(self.scroll.get().saturating_sub(1));
+            }
+            BashMessage::ScrollDown => {
+                self.scroll.set(self.scroll.get().saturating_add(1));
             }
             BashMessage::Dismiss => self.open = false,
         }
     }
 
-    /// The popup content: status header with the command, then the output
-    /// tail (at most [`MAX_OUTPUT_ROWS`] rows, oldest collapsed into a hint).
-    fn content_lines(&self, width: u16, max_rows: usize) -> Vec<Line<'static>> {
-        let inner_w = usize::from(width);
-        let mut lines = vec![self.header_line(inner_w)];
-        let budget = max_rows.saturating_sub(1).min(MAX_OUTPUT_ROWS);
+    fn body_total(&self) -> usize {
+        self.stdout.rows() + self.stderr.rows()
+    }
 
-        let (_, stdout_body) = split_status_line(&self.stdout);
-        let stdout_rows: Vec<&str> = stdout_body.lines().collect();
-        let stderr_rows: Vec<&str> = self.stderr.lines().collect();
-        let separator = usize::from(!stdout_rows.is_empty() && !stderr_rows.is_empty());
-        let total = stdout_rows.len() + separator + stderr_rows.len();
-
-        let skip = total.saturating_sub(budget);
-        if skip > 0 {
-            lines.push(
-                Line::from(format!("… +{skip} earlier lines"))
-                    .fg(theme::TEXT_MUTED)
-                    .italic(),
-            );
+    fn body_row(&self, i: usize) -> (&str, Color) {
+        let stdout_rows = self.stdout.rows();
+        if i < stdout_rows {
+            (self.stdout.row(i), theme::TEXT_DIM)
+        } else {
+            (self.stderr.row(i - stdout_rows), theme::ERROR)
         }
-        let mut pushed = 0usize;
-        let mut push_row = |lines: &mut Vec<Line<'static>>, row: &str, fg: Color| {
-            if pushed >= skip {
-                let clipped: String = row.chars().take(inner_w).collect();
-                lines.push(Line::from(clipped).fg(fg));
-            }
-            pushed += 1;
+    }
+
+    /// The painted popup rect for the `(history, input)` layout areas, or
+    /// `None` when closed or clipped away. Shared by `view` and mouse
+    /// hit-testing in the session's zone router.
+    pub fn rect_for(&self, history: Rect, input: Rect) -> Option<Rect> {
+        if !self.open() || history.height == 0 || input.width < 4 {
+            return None;
+        }
+        let width = input.width;
+        let inner_budget = usize::from(history.height.saturating_sub(4).max(1));
+        let content_rows = 1 + self.body_total().min(inner_budget.saturating_sub(1));
+        let help_row = 1;
+        let height = (content_rows as u16 + help_row + 3).min(history.height);
+        let y = input.y.saturating_sub(height).max(history.y);
+        let area = Rect::new(
+            input.x,
+            y,
+            width,
+            input.y.saturating_sub(y).max(height.min(1)),
+        );
+        (!area.is_empty()).then_some(area)
+    }
+
+    /// Paint the popup floating above the input area, clamped into the
+    /// history pane. Rendered last so it floats over the chat content.
+    pub fn view(&self, frame: &mut Frame<'_>, history: Rect, input: Rect) {
+        let Some(area) = self.rect_for(history, input) else {
+            return;
         };
-        for row in &stdout_rows {
-            push_row(&mut lines, row, theme::TEXT_DIM);
-        }
-        if separator == 1 && skip <= stdout_rows.len() {
-            lines.push(Line::from(""));
-        }
-        for row in &stderr_rows {
-            push_row(&mut lines, row, theme::ERROR);
+
+        let block = theme::overlay_block("bash");
+        let inner = block.inner(area);
+        frame.render_widget(Clear, area);
+        frame.render_widget(block, area);
+
+        let inner_w = usize::from(inner.width);
+        let viewport = usize::from(inner.height.saturating_sub(2));
+        let mut lines = self.body_lines(inner_w, viewport);
+        lines.push(theme::help_line(&[("Esc", "dismiss")]).fg(theme::TEXT_MUTED));
+        frame.render_widget(ratatui::widgets::Paragraph::new(lines), inner);
+    }
+
+    /// Resolve the scroll offset against the body's row total and viewport,
+    /// re-engaging the tail follow when the view reaches the bottom.
+    fn window(&self, viewport: usize) -> usize {
+        let max_offset = self.body_total().saturating_sub(viewport);
+        let offset = if self.follow.get() {
+            max_offset
+        } else {
+            self.scroll.get().min(max_offset)
+        };
+        self.scroll.set(offset);
+        self.follow.set(offset >= max_offset);
+        offset
+    }
+
+    /// The popup content: status header, then the body's viewport rows.
+    fn body_lines(&self, inner_w: usize, viewport: usize) -> Vec<Line<'_>> {
+        let total = self.body_total();
+        let offset = self.window(viewport);
+        let mut lines = Vec::with_capacity(viewport + 1);
+        lines.push(self.header_line(inner_w));
+        for i in offset..(offset + viewport).min(total) {
+            let (row, fg) = self.body_row(i);
+            let clipped: String = row.chars().take(inner_w).collect();
+            lines.push(Line::from(clipped).fg(fg));
         }
         lines
     }
@@ -185,11 +241,8 @@ impl BashPopup {
             format_duration_ms(ms)
         } else {
             let mut parts: Vec<String> = Vec::new();
-            let (label, _) = split_status_line(&self.stdout);
-            match (&label, self.exit) {
-                (Some(label), _) if label != "exit 0" => parts.push(label.clone()),
-                (None, Some(code)) if code != 0 => parts.push(format!("exit {code}")),
-                _ => {}
+            if let Some(code) = self.exit.filter(|code| *code != 0) {
+                parts.push(format!("exit {code}"));
             }
             parts.push(format_duration_ms(self.duration_ms));
             parts.join(" · ")
@@ -205,48 +258,6 @@ impl BashPopup {
         }
         Line::from(header)
     }
-
-    /// The popup's painted rect for the `(history, input)` layout areas, or
-    /// `None` when closed or clipped away. Shared by `view` and mouse
-    /// hit-testing in the session's zone router.
-    pub fn rect_for(&self, history: Rect, input: Rect) -> Option<Rect> {
-        if !self.open() || history.height == 0 || input.width < 4 {
-            return None;
-        }
-        let width = input.width;
-        // Title row + uniform(1) padding bound the content: `inner` insets
-        // the top by 2 (title + padding) and the bottom by 1.
-        let inner_budget = history.height.saturating_sub(4).max(1) as usize;
-        let content = self.content_lines(width.saturating_sub(2), inner_budget);
-        let help_row = 1;
-        let height = (content.len() as u16 + help_row + 3).min(history.height);
-        let y = input.y.saturating_sub(height).max(history.y);
-        let area = Rect::new(
-            input.x,
-            y,
-            width,
-            input.y.saturating_sub(y).max(height.min(1)),
-        );
-        (!area.is_empty()).then_some(area)
-    }
-
-    /// Paint the popup floating above the input area, clamped into the
-    /// history pane. Rendered last so it floats over the chat content.
-    pub fn view(&self, frame: &mut Frame<'_>, history: Rect, input: Rect) {
-        let Some(area) = self.rect_for(history, input) else {
-            return;
-        };
-
-        let inner_budget = history.height.saturating_sub(4).max(1) as usize;
-        let mut lines = self.content_lines(area.width.saturating_sub(2), inner_budget);
-        lines.push(theme::help_line(&[("Esc", "dismiss")]).fg(theme::TEXT_MUTED));
-
-        frame.render_widget(Clear, area);
-        let block = theme::overlay_block("bash");
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        frame.render_widget(ratatui::widgets::Paragraph::new(lines), inner);
-    }
 }
 
 impl Default for BashPopup {
@@ -255,24 +266,65 @@ impl Default for BashPopup {
     }
 }
 
-/// Split a leading `exit N:` status line off the finished stdout, mirroring
-/// the run_shell tool block header. Text without a newline (a live tail) is
-/// all body — a status label only exists when the core prepended one.
-fn split_status_line(text: &str) -> (Option<String>, &str) {
-    let Some((first, rest)) = text.split_once('\n') else {
-        return (None, text);
-    };
-    let label = first
-        .strip_prefix("exit ")
-        .and_then(|s| s.strip_suffix(':'))
-        .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
-        .map(|n| format!("exit {n}"));
-    (label, rest)
+/// A captured stream held as raw text plus precomputed row-start offsets, so
+/// only the viewport's rows materialize when the popup paints.
+struct StreamText {
+    text: String,
+    starts: Vec<usize>,
+}
+
+impl StreamText {
+    fn new() -> Self {
+        Self {
+            text: String::new(),
+            starts: Vec::new(),
+        }
+    }
+
+    fn set(&mut self, text: String) {
+        self.starts.clear();
+        let bytes = text.as_bytes();
+        if !bytes.is_empty() {
+            self.starts.push(0);
+            for (i, byte) in bytes.iter().enumerate() {
+                if *byte == b'\n' && i + 1 < bytes.len() {
+                    self.starts.push(i + 1);
+                }
+            }
+        }
+        self.text = text;
+    }
+
+    fn rows(&self) -> usize {
+        self.starts.len()
+    }
+
+    fn row(&self, i: usize) -> &str {
+        let start = self.starts[i];
+        let end = match self.starts.get(i + 1) {
+            Some(&next) => next - 1,
+            None => self.text.len() - usize::from(self.text.ends_with('\n')),
+        };
+        self.text[start..end]
+            .strip_suffix('\r')
+            .unwrap_or(&self.text[start..end])
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn finish(popup: &mut BashPopup, stdout: &str) {
+        popup.update(BashMessage::Finished {
+            id: 1,
+            ok: true,
+            exit: Some(0),
+            stdout: stdout.into(),
+            stderr: String::new(),
+            duration_ms: 10,
+        });
+    }
 
     #[test]
     fn lifecycle_tracks_the_latest_run() {
@@ -285,6 +337,7 @@ mod tests {
         });
         assert!(popup.open());
         assert!(popup.running());
+        assert!(popup.follow.get());
 
         popup.update(BashMessage::Output {
             id: 3,
@@ -297,22 +350,19 @@ mod tests {
             id: 3,
             ok: false,
             exit: Some(1),
-            stdout: "exit 1:\nerror: could not compile".into(),
+            stdout: "error: could not compile".into(),
             stderr: String::new(),
             duration_ms: 1500,
         });
         assert!(popup.open(), "a finished run stays open until dismissed");
         assert!(!popup.running());
 
-        popup.update(BashMessage::Dismiss);
-        assert!(!popup.open());
-
         popup.update(BashMessage::Output {
             id: 3,
             stdout: "late".into(),
             stderr: String::new(),
         });
-        assert_eq!(popup.stdout, "exit 1:\nerror: could not compile");
+        assert_eq!(popup.stdout.text, "error: could not compile");
 
         popup.update(BashMessage::Started {
             id: 4,
@@ -320,7 +370,9 @@ mod tests {
         });
         assert!(popup.open(), "a new run reopens the popup");
         assert_eq!(popup.command, "ls");
-        assert!(popup.stdout.is_empty());
+        assert_eq!(popup.stdout.text, "");
+        assert_eq!(popup.scroll.get(), 0, "a new run resets the scroll");
+        assert!(popup.follow.get());
     }
 
     #[test]
@@ -345,9 +397,9 @@ mod tests {
             id: 1,
             command: "make test".into(),
         });
-        let header = popup.content_lines(80, 12);
-        assert_eq!(header.len(), 1);
-        let text: String = header[0]
+        let lines = popup.body_lines(80, 12);
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0]
             .spans
             .iter()
             .map(|s| s.content.to_string())
@@ -358,11 +410,11 @@ mod tests {
             id: 1,
             ok: false,
             exit: Some(2),
-            stdout: "exit 2:\nno rule".into(),
+            stdout: "no rule".into(),
             stderr: String::new(),
             duration_ms: 700,
         });
-        let text: String = popup.content_lines(80, 12)[0]
+        let text: String = popup.body_lines(80, 12)[0]
             .spans
             .iter()
             .map(|s| s.content.to_string())
@@ -372,27 +424,90 @@ mod tests {
     }
 
     #[test]
-    fn output_shows_tail_with_overflow_hint() {
+    fn output_renders_raw_and_verbatim() {
+        let mut popup = BashPopup::new();
+        popup.update(BashMessage::Started {
+            id: 1,
+            command: "printf".into(),
+        });
+        finish(&mut popup, "  leading spaces stay  \n\n\ttab too\n");
+        let lines = popup.body_lines(80, 12);
+        assert_eq!(lines.len(), 4, "header + 3 rows, trailing newline dropped");
+        let text = |line: &Line<'_>| {
+            line.spans
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect::<String>()
+        };
+        assert_eq!(text(&lines[1]), "  leading spaces stay  ");
+        assert_eq!(text(&lines[2]), "");
+        assert_eq!(text(&lines[3]), "\ttab too");
+    }
+
+    #[test]
+    fn full_output_fits_when_below_the_viewport() {
+        let mut popup = BashPopup::new();
+        popup.update(BashMessage::Started {
+            id: 1,
+            command: "seq 3".into(),
+        });
+        finish(&mut popup, "1\n2\n3");
+        let lines = popup.body_lines(80, 12);
+        assert_eq!(lines.len(), 4, "header + every row");
+        let last = lines[3].spans[0].content.to_string();
+        assert_eq!(last, "3");
+    }
+
+    #[test]
+    fn overflow_follows_the_tail_and_scrolls() {
         let mut popup = BashPopup::new();
         popup.update(BashMessage::Started {
             id: 1,
             command: "seq 30".into(),
         });
-        let body: String = (1..=30).map(|i| format!("line {i}\n")).collect();
-        popup.update(BashMessage::Finished {
+        popup.update(BashMessage::Output {
             id: 1,
-            ok: true,
-            exit: Some(0),
-            stdout: format!("exit 0:\n{body}"),
+            stdout: (1..=30).map(|i| format!("line {i}\n")).collect(),
             stderr: String::new(),
-            duration_ms: 10,
         });
 
-        let lines = popup.content_lines(80, 6);
-        assert_eq!(lines.len(), 7, "header + hint + 5 tail rows");
-        let hint = lines[1].spans[0].content.to_string();
-        assert_eq!(hint, "… +25 earlier lines");
-        let last = lines[6].spans[0].content.to_string();
-        assert_eq!(last, "line 30", "the newest rows stay visible");
+        let text = |line: &Line<'_>| line.spans[0].content.to_string();
+        let lines = popup.body_lines(80, 4);
+        assert_eq!(lines.len(), 5, "header + viewport rows, no overflow hint");
+        assert_eq!(text(&lines[1]), "line 27");
+        assert_eq!(text(&lines[4]), "line 30", "the tail stays visible");
+
+        for _ in 0..26 {
+            popup.update(BashMessage::ScrollUp);
+        }
+        let lines = popup.body_lines(80, 4);
+        assert_eq!(text(&lines[1]), "line 1", "scrolled all the way to the top");
+        assert!(
+            !popup.follow.get(),
+            "scrolling up disengages the tail follow"
+        );
+
+        popup.update(BashMessage::Output {
+            id: 1,
+            stdout: (1..=31).map(|i| format!("line {i}\n")).collect(),
+            stderr: String::new(),
+        });
+        let lines = popup.body_lines(80, 4);
+        assert_eq!(
+            text(&lines[1]),
+            "line 1",
+            "new output does not move a scrolled-away view"
+        );
+        assert!(!popup.follow.get());
+
+        for _ in 0..40 {
+            popup.update(BashMessage::ScrollDown);
+        }
+        let lines = popup.body_lines(80, 4);
+        assert_eq!(text(&lines[4]), "line 31", "clamped at the newest rows");
+        assert!(
+            popup.follow.get(),
+            "reaching the bottom re-engages the follow"
+        );
     }
 }

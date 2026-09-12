@@ -8,6 +8,7 @@ use crate::shell::Shell;
 
 const MAX_COMMAND_OUTPUT: usize = 16 * 1024;
 const SHELL_CAPTURE_BYTES: usize = 64 * 1024;
+const SHELL_RAW_CAPTURE_BYTES: usize = 1024 * 1024;
 const SHELL_STREAM_TAIL_CHARS: usize = 2048;
 const SHELL_STREAM_INTERVAL_MS: u64 = 100;
 
@@ -20,22 +21,46 @@ pub struct ShellChunk {
 
 /// Bounded channel sender carrying live `run_shell` output to the core task.
 /// Each clone is tagged with the owning worker so the TUI can attach the
-/// streamed output to the right tool activity entry.
+/// streamed output to the right tool activity entry. Tail mode (the tool
+/// path) streams and returns trimmed display caps; raw mode (bash mode's
+/// display popup) keeps the full untrimmed capture.
 #[derive(Clone)]
 pub struct ShellOutputTx {
     tx: tokio::sync::mpsc::Sender<ShellChunk>,
     worker: Option<String>,
+    raw: bool,
 }
 
 impl ShellOutputTx {
     pub fn new(tx: tokio::sync::mpsc::Sender<ShellChunk>) -> Self {
-        Self { tx, worker: None }
+        Self {
+            tx,
+            worker: None,
+            raw: false,
+        }
+    }
+
+    pub fn full(tx: tokio::sync::mpsc::Sender<ShellChunk>) -> Self {
+        Self {
+            tx,
+            worker: None,
+            raw: true,
+        }
     }
 
     pub fn tagged(&self, worker: &str) -> Self {
         Self {
             tx: self.tx.clone(),
             worker: Some(worker.to_string()),
+            raw: self.raw,
+        }
+    }
+
+    fn capture_bytes(&self) -> usize {
+        if self.raw {
+            SHELL_RAW_CAPTURE_BYTES
+        } else {
+            SHELL_CAPTURE_BYTES
         }
     }
 
@@ -44,10 +69,26 @@ impl ShellOutputTx {
             .tx
             .send(ShellChunk {
                 worker: self.worker.clone(),
-                stdout: stream_tail(stdout),
-                stderr: stream_tail(stderr),
+                stdout: self.stream_text(stdout),
+                stderr: self.stream_text(stderr),
             })
             .await;
+    }
+
+    fn stream_text(&self, bytes: &[u8]) -> String {
+        if self.raw {
+            String::from_utf8_lossy(bytes).into_owned()
+        } else {
+            stream_tail(bytes)
+        }
+    }
+
+    fn display(&self, bytes: &[u8]) -> String {
+        if self.raw {
+            String::from_utf8_lossy(bytes).into_owned()
+        } else {
+            display_stream(bytes)
+        }
     }
 }
 
@@ -71,8 +112,9 @@ fn display_stream(bytes: &[u8]) -> String {
 }
 
 /// One finished shell run: the exit status, whether the run hit its timeout,
-/// and the captured streams (`out`/`err` are display-capped, `captured` is the
-/// trimmed full capture for error messages).
+/// and the captured streams. In tail mode `out`/`err` are trimmed and
+/// display-capped; in raw mode they carry the full capture verbatim.
+/// `captured` is the trimmed capture used for tool error messages.
 pub(crate) struct ShellRun {
     pub status: std::process::ExitStatus,
     pub timed_out: bool,
@@ -81,9 +123,10 @@ pub(crate) struct ShellRun {
     pub captured: String,
 }
 
-/// Spawns `command` through `shell` in `cwd`, streaming live output tails
-/// through `shell_tx` as they arrive. `timeout_secs: None` runs unbounded;
-/// a timeout kills the process group and reports the partial capture.
+/// Spawns `command` through `shell` in `cwd`, streaming live output through
+/// `shell_tx` as it arrives (the stream tail in tail mode, the full capture in
+/// raw mode). `timeout_secs: None` runs unbounded; a timeout kills the process
+/// group and reports the partial capture.
 pub(crate) async fn run_shell_command(
     shell: &Shell,
     command: &str,
@@ -117,6 +160,7 @@ pub(crate) async fn run_shell_command(
     let mut captured: Vec<u8> = Vec::new();
     let mut out: Vec<u8> = Vec::new();
     let mut err: Vec<u8> = Vec::new();
+    let capture_bytes = shell_tx.capture_bytes();
     let mut last_emit =
         std::time::Instant::now() - std::time::Duration::from_millis(SHELL_STREAM_INTERVAL_MS);
     let interval = std::time::Duration::from_millis(SHELL_STREAM_INTERVAL_MS);
@@ -128,13 +172,13 @@ pub(crate) async fn run_shell_command(
                 match maybe_chunk {
                     Some((is_stderr, chunk)) => {
                         captured.extend_from_slice(&chunk);
-                        cap_buffer(&mut captured);
+                        cap_buffer(&mut captured, SHELL_CAPTURE_BYTES);
                         if is_stderr {
                             err.extend_from_slice(&chunk);
-                            cap_buffer(&mut err);
+                            cap_buffer(&mut err, capture_bytes);
                         } else {
                             out.extend_from_slice(&chunk);
-                            cap_buffer(&mut out);
+                            cap_buffer(&mut out, capture_bytes);
                         }
                         if last_emit.elapsed() >= interval {
                             last_emit = std::time::Instant::now();
@@ -154,13 +198,13 @@ pub(crate) async fn run_shell_command(
                 // Drain remaining output so it is not lost with the pipes.
                 while let Some((is_stderr, chunk)) = chunk_rx.recv().await {
                     captured.extend_from_slice(&chunk);
-                    cap_buffer(&mut captured);
+                    cap_buffer(&mut captured, SHELL_CAPTURE_BYTES);
                     if is_stderr {
                         err.extend_from_slice(&chunk);
-                        cap_buffer(&mut err);
+                        cap_buffer(&mut err, capture_bytes);
                     } else {
                         out.extend_from_slice(&chunk);
-                        cap_buffer(&mut out);
+                        cap_buffer(&mut out, capture_bytes);
                     }
                 }
                 let status = status.map_err(|e| format!("wait shell: {e}"))?;
@@ -184,8 +228,8 @@ pub(crate) async fn run_shell_command(
                 return Ok(ShellRun {
                     status,
                     timed_out: true,
-                    out: display_stream(&out),
-                    err: display_stream(&err),
+                    out: shell_tx.display(&out),
+                    err: shell_tx.display(&err),
                     captured: String::from_utf8_lossy(&captured).trim().to_string(),
                 });
             }
@@ -200,8 +244,8 @@ pub(crate) async fn run_shell_command(
     Ok(ShellRun {
         status,
         timed_out: false,
-        out: display_stream(&out),
-        err: display_stream(&err),
+        out: shell_tx.display(&out),
+        err: shell_tx.display(&err),
         captured: String::from_utf8_lossy(&captured).trim().to_string(),
     })
 }
@@ -378,9 +422,9 @@ where
     })
 }
 
-fn cap_buffer(buf: &mut Vec<u8>) {
-    if buf.len() > SHELL_CAPTURE_BYTES {
-        let drop = buf.len() - SHELL_CAPTURE_BYTES;
+fn cap_buffer(buf: &mut Vec<u8>, cap: usize) {
+    if buf.len() > cap {
+        let drop = buf.len() - cap;
         buf.drain(..drop);
     }
 }
@@ -540,6 +584,63 @@ mod tests {
             }
         }
         assert!(saw_stream, "unbounded runs still stream live tails");
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn raw_capture_returns_the_full_untrimmed_output() {
+        let (dir, _guard) = tempdir();
+        let shell = crate::shell::resolve(None).shell;
+        let run = run_shell_command(
+            &shell,
+            "printf '  keep  \\n\\nlines  '",
+            dir.path(),
+            None,
+            &ShellOutputTx::full(tokio::sync::mpsc::channel(64).0),
+        )
+        .await
+        .unwrap();
+        assert_eq!(run.out, "  keep  \n\nlines  ");
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn tail_capture_trims_and_caps_display() {
+        let (dir, _guard) = tempdir();
+        let shell = crate::shell::resolve(None).shell;
+        let run = run_shell_command(
+            &shell,
+            "printf '  keep  \\n\\nlines  '",
+            dir.path(),
+            None,
+            &ShellOutputTx::new(tokio::sync::mpsc::channel(64).0),
+        )
+        .await
+        .unwrap();
+        assert_eq!(run.out, "keep  \n\nlines");
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn raw_streams_carry_the_full_buffer() {
+        let (dir, _guard) = tempdir();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let shell = crate::shell::resolve(None).shell;
+        let _ = run_shell_command(
+            &shell,
+            "echo leading-marker; echo trailing-marker",
+            dir.path(),
+            None,
+            &ShellOutputTx::full(tx),
+        )
+        .await;
+        let mut full_chunk = false;
+        while let Ok(chunk) = rx.try_recv() {
+            if chunk.stdout.contains("leading-marker") && chunk.stdout.contains("trailing-marker") {
+                full_chunk = true;
+            }
+        }
+        assert!(full_chunk, "raw chunks carry the whole capture, not a tail");
         drop(dir);
     }
 

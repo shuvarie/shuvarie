@@ -2466,6 +2466,46 @@ mod tests {
     }
 
     #[test]
+    fn wheel_scrolls_only_within_the_history_pane() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::TokenReceived {
+            content: "hello".into(),
+        });
+        draw(&chat, 80, 20);
+        let rect = chat.history_rect.get();
+        assert!(rect.height > 0, "the history pane is laid out");
+
+        chat.update(ChatMessage::Wheel {
+            up: false,
+            column: rect.x + 1,
+            row: rect.y + 1,
+        });
+        assert_eq!(chat.scroll.borrow().offset, 3, "wheel-down scrolls 3 rows");
+
+        chat.update(ChatMessage::Wheel {
+            up: true,
+            column: rect.x + 1,
+            row: rect.y + 1,
+        });
+        assert_eq!(chat.scroll.borrow().offset, 0);
+        assert!(
+            !chat.scroll.borrow().sticky_bottom,
+            "wheel-up disengages sticky like ScrollUp"
+        );
+
+        chat.update(ChatMessage::Wheel {
+            up: false,
+            column: rect.x + rect.width,
+            row: rect.y,
+        });
+        assert_eq!(
+            chat.scroll.borrow().offset,
+            0,
+            "a wheel outside the history pane does not scroll"
+        );
+    }
+
+    #[test]
     fn scroll_up_sticks_and_anchor_holds_while_streaming() {
         let mut chat = Chat::new();
         chat.update(ChatMessage::Load {

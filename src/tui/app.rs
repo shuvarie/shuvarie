@@ -267,20 +267,18 @@ impl App {
                             row: mouse.row,
                         }))
                     }
-                    MouseEventKind::ScrollUp => Some(AppMessage::Session(SessionMessage::Chat(
-                        ChatMessage::Wheel {
-                            up: true,
-                            column: mouse.column,
-                            row: mouse.row,
-                        },
-                    ))),
-                    MouseEventKind::ScrollDown => Some(AppMessage::Session(SessionMessage::Chat(
-                        ChatMessage::Wheel {
+                    MouseEventKind::ScrollUp => Some(AppMessage::Session(SessionMessage::Wheel {
+                        up: true,
+                        column: mouse.column,
+                        row: mouse.row,
+                    })),
+                    MouseEventKind::ScrollDown => {
+                        Some(AppMessage::Session(SessionMessage::Wheel {
                             up: false,
                             column: mouse.column,
                             row: mouse.row,
-                        },
-                    ))),
+                        }))
+                    }
                     _ => None,
                 },
                 TermEvent::Paste(text) => self.map_paste(&text),

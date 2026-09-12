@@ -46,6 +46,13 @@ pub enum SessionMessage {
         column: u16,
         row: u16,
     },
+    /// A mouse-wheel scroll at a terminal cell. Routed by zone: the bash
+    /// popup scrolls its own output, the chat history pane scrolls itself.
+    Wheel {
+        up: bool,
+        column: u16,
+        row: u16,
+    },
     CopySelection,
     CutSelection,
     CancelRequested,
@@ -446,6 +453,24 @@ impl SessionScreen {
                 None
             }
             SessionMessage::Mouse { kind, column, row } => self.handle_mouse(kind, column, row),
+            SessionMessage::Wheel { up, column, row } => {
+                let input_area = self.input_area.get();
+                let history_area = self.history_area.get();
+                let over_popup = self
+                    .bash
+                    .rect_for(history_area, input_area)
+                    .is_some_and(|rect| rect.contains(ratatui::layout::Position::new(column, row)));
+                if over_popup {
+                    self.bash.update(if up {
+                        BashMessage::ScrollUp
+                    } else {
+                        BashMessage::ScrollDown
+                    });
+                } else {
+                    self.chat.update(ChatMessage::Wheel { up, column, row });
+                }
+                None
+            }
             SessionMessage::CopySelection => {
                 if let Some(text) = self.input.buffer.selected_text() {
                     return Some(SessionEffect::CopyToClipboard { text });
@@ -1931,7 +1956,7 @@ mod tests {
             id: 7,
             ok: true,
             exit: Some(0),
-            stdout: "exit 0:\ndone".into(),
+            stdout: "done".into(),
             stderr: String::new(),
             duration_ms: 120,
         }));
@@ -1939,6 +1964,74 @@ mod tests {
 
         screen.update(SessionMessage::Bash(BashMessage::Dismiss));
         assert!(!screen.bash.open());
+    }
+
+    #[test]
+    fn wheel_routes_to_the_popup_over_it_and_leaves_it_elsewhere() {
+        let mut screen = SessionScreen::new();
+        let body: String = (1..=40).map(|i| format!("line {i}\n")).collect();
+        screen.update(SessionMessage::Bash(BashMessage::Started {
+            id: 7,
+            command: "seq 40".into(),
+        }));
+        screen.update(SessionMessage::Bash(BashMessage::Output {
+            id: 7,
+            stdout: body,
+            stderr: String::new(),
+        }));
+        draw(&screen, 100, 30);
+        let input_area = screen.input_area.get();
+        let history_area = screen.history_area.get();
+        let popup = screen
+            .bash
+            .rect_for(history_area, input_area)
+            .expect("popup is on screen");
+        assert!(screen.bash.follow.get(), "the tail is followed by default");
+
+        let inside =
+            ratatui::layout::Position::new(popup.x + popup.width / 2, popup.y + popup.height / 2);
+        for _ in 0..30 {
+            screen.update(SessionMessage::Wheel {
+                up: true,
+                column: inside.x,
+                row: inside.y,
+            });
+        }
+        assert!(
+            !screen.bash.follow.get(),
+            "wheeling up over the popup scrolls it"
+        );
+        assert_eq!(screen.bash.scroll.get(), 0);
+
+        let buf = draw(&screen, 100, 30);
+        let popup_area = screen
+            .bash
+            .rect_for(history_area, input_area)
+            .expect("popup is on screen");
+        let (help, _) = find_row(&buf, "dismiss");
+        assert!(
+            help >= popup_area.y && help < popup_area.y + popup_area.height,
+            "the help line renders inside the popup (row {help})"
+        );
+
+        let outside = ratatui::layout::Position::new(input_area.x + 1, input_area.y);
+        assert!(
+            !popup.contains(outside),
+            "the probe point sits below the popup"
+        );
+        for _ in 0..3 {
+            screen.update(SessionMessage::Wheel {
+                up: true,
+                column: outside.x,
+                row: outside.y,
+            });
+        }
+        assert_eq!(
+            screen.bash.scroll.get(),
+            0,
+            "a wheel elsewhere never moves the popup"
+        );
+        assert!(!screen.bash.follow.get());
     }
 
     #[test]
