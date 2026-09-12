@@ -662,7 +662,7 @@ fn push_todo_rows(
                     .fg(theme::TEXT_DIM)
                     .add_modifier(Modifier::CROSSED_OUT),
             ),
-            TodoStatus::InProgress => ("◐", theme::ACCENT, Style::new().fg(theme::TEXT).bold()),
+            TodoStatus::InProgress => ("●", theme::ACCENT, Style::new().fg(theme::TEXT).bold()),
             TodoStatus::Pending => ("○", theme::TEXT_MUTED, Style::new().fg(theme::TEXT_DIM)),
         };
         body.fixed(Line::from(vec![
@@ -1349,7 +1349,7 @@ mod tests {
         assert!(text.contains("todo + \"update UI\""), "header/body: {text}");
         assert!(text.contains("1/3 done"), "header/body: {text}");
         assert!(text.contains("✓ set up schema"), "header/body: {text}");
-        assert!(text.contains("◐ write migration"), "header/body: {text}");
+        assert!(text.contains("● write migration"), "header/body: {text}");
         assert!(text.contains("○ update UI"), "header/body: {text}");
         assert!(
             !text.contains("Todos (1/3 done)"),
@@ -1381,7 +1381,7 @@ mod tests {
         });
         let text = block_text(&block, &env);
         assert!(text.contains("✓ set up schema"), "header/body: {text}");
-        assert!(text.contains("◐ write migration"), "header/body: {text}");
+        assert!(text.contains("● write migration"), "header/body: {text}");
         assert!(text.contains("○ update UI"), "header/body: {text}");
         assert!(text.contains("1/3 done"), "header/body: {text}");
     }
