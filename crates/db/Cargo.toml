@@ -1,5 +1,6 @@
 [package]
 name = "shuvarie-db"
+description = "AI coding TUI for chivalrous people (DB module)"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
