@@ -57,7 +57,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Charles Dong <chardon_cs@proton.me>"]
 license = "MIT"
-repository = "https://github.com/chardoncs/shuvarie.git"
+repository = "https://github.com/shuvarie/shuvarie.git"
 
 [workspace.dependencies]
 dirs = "7"
