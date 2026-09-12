@@ -7,9 +7,13 @@
 
 *-- moonshotai/Kimi-K2.6*
 
-Be hold, your majesty. Our coding knights are ready.
+<!-- TODO Dungeons & Dragons / Forgotten Realm vibe introduction -->
 
-*With Shuvarie, sire, we can:*
+Let me tell you a story, True Soul.
+
+<!-- TODO preface -->
+
+*With Shuvarie, we can:*
 
 <!-- TODO features section -->
 
