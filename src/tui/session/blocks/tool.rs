@@ -478,8 +478,8 @@ impl ToolBlock {
                     );
                 }
             }
-            "question" => {
-                header.push(Span::raw("question").fg(theme::TEXT).bold());
+            "question" | "apply_patch" => {
+                header.push(Span::raw(self.name.clone()).fg(theme::TEXT).bold());
             }
             "todo" => {
                 header.push(Span::raw("todo").fg(theme::TEXT).bold());
@@ -1470,6 +1470,30 @@ mod tests {
             );
             assert!(!text.contains("extra"), "raw args leaked: {text}");
         }
+    }
+
+    #[test]
+    fn apply_patch_header_shows_name_only() {
+        let env = ChatEnv {
+            rev: 0,
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let mut block = ToolBlock::new(
+            "apply_patch",
+            r#"{"patch":"*** Begin Patch\n*** Add File: new.txt\n+hi\n*** End Patch"}"#.to_string(),
+            None,
+            None,
+        );
+        block.update(ToolMessage::Finish {
+            ok: true,
+            output: String::new(),
+            stderr: String::new(),
+            file_change: None,
+            duration_ms: 5,
+        });
+        let text = block_text(&block, &env);
+        assert!(text.contains("apply_patch"), "header/body: {text}");
+        assert!(!text.contains("Begin Patch"), "raw args leaked: {text}");
     }
 
     #[test]
