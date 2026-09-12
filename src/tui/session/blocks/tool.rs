@@ -465,6 +465,19 @@ impl ToolBlock {
                     header.push(Span::raw(format!(" · lines {start}–{end}")).fg(theme::TEXT_MUTED));
                 }
             }
+            "edit_file" | "write_file" | "delete_file" => {
+                let path = args.get("path").and_then(Value::as_str).unwrap_or("");
+                header.push(Span::raw(self.name.clone()).fg(theme::TEXT).bold());
+                if !path.is_empty() {
+                    let avail = inner_w.saturating_sub(spans_width(&header) + 1);
+                    let path_display: String = path.chars().take(avail).collect();
+                    header.push(
+                        Span::raw(format!(" {path_display}"))
+                            .fg(theme::ACCENT)
+                            .bold(),
+                    );
+                }
+            }
             "question" => {
                 header.push(Span::raw("question").fg(theme::TEXT).bold());
             }
@@ -1424,6 +1437,39 @@ mod tests {
         assert!(!text.contains("fn main()"), "output leaked: {text}");
         assert!(!text.contains("more lines"), "hint leaked: {text}");
         assert_eq!(block.est().tool_rows, 0);
+    }
+
+    #[test]
+    fn write_and_edit_headers_show_only_path() {
+        let env = ChatEnv {
+            rev: 0,
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        for (name, path) in [
+            ("write_file", "gen.rs"),
+            ("edit_file", "src/main.rs"),
+            ("delete_file", "old.txt"),
+        ] {
+            let mut block = ToolBlock::new(
+                name,
+                format!(r#"{{"path":"{path}","extra":"ignore me"}}"#),
+                None,
+                None,
+            );
+            block.update(ToolMessage::Finish {
+                ok: true,
+                output: String::new(),
+                stderr: String::new(),
+                file_change: None,
+                duration_ms: 5,
+            });
+            let text = block_text(&block, &env);
+            assert!(
+                text.contains(&format!("{name} {path}")),
+                "header/body: {text}"
+            );
+            assert!(!text.contains("extra"), "raw args leaked: {text}");
+        }
     }
 
     #[test]
