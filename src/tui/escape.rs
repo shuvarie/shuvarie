@@ -1,7 +1,7 @@
 use termina::escape::csi::{
     Csi, DecPrivateMode, DecPrivateModeCode, Keyboard, KittyKeyboardFlags, Mode, Window,
 };
-use termina::escape::osc::Osc;
+use termina::escape::osc::{Osc, Selection};
 
 pub const ENTER_ALTERNATE_SCREEN: Csi = Csi::Mode(Mode::SetDecPrivateMode(DecPrivateMode::Code(
     DecPrivateModeCode::ClearAndEnableAlternateScreen,
@@ -71,4 +71,8 @@ pub fn pop_window_title() -> Csi {
 // simply ignore the sequence.
 pub fn set_window_title(title: &str) -> Osc<'_> {
     Osc::SetWindowTitle(title)
+}
+
+pub fn set_clipboard(text: &str) -> Osc<'_> {
+    Osc::SetSelection(Selection::CLIPBOARD, text)
 }

@@ -10,6 +10,7 @@ pub const OVERLAY: Color = Color::Rgb(34, 34, 42);
 
 pub const ACCENT: Color = Color::Rgb(212, 175, 95);
 pub const ACCENT_BG: Color = Color::Rgb(52, 48, 42);
+pub const SELECTION: Color = Color::Rgb(78, 60, 28);
 
 pub const TEXT: Color = Color::Rgb(224, 216, 196);
 pub const TEXT_DIM: Color = Color::Rgb(128, 120, 104);

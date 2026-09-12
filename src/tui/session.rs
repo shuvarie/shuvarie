@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 use ratatui::layout::{Alignment, Constraint::*, Layout, Rect};
@@ -28,9 +29,25 @@ pub mod virtualizer;
 pub use bash::BashMessage;
 pub use chat::ChatMessage;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseKind {
+    Down,
+    Drag,
+    Up,
+}
+
 pub enum SessionMessage {
     Text(TextAreaMessage),
     Chat(ChatMessage),
+    /// Left-button mouse activity at a terminal cell. Routed by zone: the
+    /// input area, the bash popup (swallowed), then the chat history pane.
+    Mouse {
+        kind: MouseKind,
+        column: u16,
+        row: u16,
+    },
+    CopySelection,
+    CutSelection,
     CancelRequested,
     EscapePressed,
     ShowError {
@@ -69,6 +86,10 @@ pub enum SessionMessage {
     Slash(SlashMessage),
     /// Sidebar control: collapse toggle (Ctrl+W) and pref/width updates.
     Sidebar(SidebarMessage),
+    /// `[ui] copy-on-select`: copy the chat selection on mouse-up.
+    SetCopyOnSelect {
+        enabled: bool,
+    },
     /// A bash-mode (`!`) run's display-only popup: start, live output,
     /// finish, or Escape dismissal.
     Bash(bash::BashMessage),
@@ -185,6 +206,11 @@ pub struct SessionScreen {
     last_escape: Option<Instant>,
     working_todos: Vec<shuvarie_core::tools::todos::TodoItem>,
     skills: Vec<Skill>,
+    /// Last painted layout rects, for mouse zone routing between frames.
+    input_area: Cell<Rect>,
+    history_area: Cell<Rect>,
+    /// Copy the chat selection on mouse-up (`[ui] copy-on-select`).
+    copy_on_select: bool,
 }
 
 impl SessionScreen {
@@ -207,6 +233,9 @@ impl SessionScreen {
             last_escape: None,
             working_todos: Vec::new(),
             skills: Vec::new(),
+            input_area: Cell::new(Rect::default()),
+            history_area: Cell::new(Rect::default()),
+            copy_on_select: false,
         }
     }
 
@@ -416,12 +445,33 @@ impl SessionScreen {
                 self.chat.update(msg);
                 None
             }
+            SessionMessage::Mouse { kind, column, row } => self.handle_mouse(kind, column, row),
+            SessionMessage::CopySelection => {
+                if let Some(text) = self.input.buffer.selected_text() {
+                    return Some(SessionEffect::CopyToClipboard { text });
+                }
+                if let Some(text) = self.chat.selected_text() {
+                    return Some(SessionEffect::CopyToClipboard { text });
+                }
+                None
+            }
+            SessionMessage::CutSelection => {
+                if let Some(text) = self.input.buffer.selected_text() {
+                    self.input.buffer.delete_selection();
+                    return Some(SessionEffect::CopyToClipboard { text });
+                }
+                None
+            }
             SessionMessage::Bash(m) => {
                 self.bash.update(m);
                 None
             }
             SessionMessage::Sidebar(m) => {
                 self.sidebar.update(m);
+                None
+            }
+            SessionMessage::SetCopyOnSelect { enabled } => {
+                self.copy_on_select = enabled;
                 None
             }
             SessionMessage::Slash(m) => match m {
@@ -739,6 +789,37 @@ impl SessionScreen {
         self.sync_todos(shuvarie_core::tools::todos::parse_items(output).unwrap_or_default());
     }
 
+    /// Route a left-button mouse event by zone: the input area feeds the
+    /// text area, the bash popup swallows (its content is display-only),
+    /// everything else inside the chat pane goes to the chat model.
+    fn handle_mouse(&mut self, kind: MouseKind, column: u16, row: u16) -> Option<SessionEffect> {
+        let input_area = self.input_area.get();
+        if input_area.contains(ratatui::layout::Position::new(column, row)) {
+            if !self.question.open {
+                let msg = match kind {
+                    MouseKind::Down => TextAreaMessage::MouseDown { column, row },
+                    MouseKind::Drag => TextAreaMessage::MouseDrag { column, row },
+                    MouseKind::Up => TextAreaMessage::MouseUp,
+                };
+                self.input.update(msg);
+            }
+            return None;
+        }
+        let history_area = self.history_area.get();
+        if let Some(popup) = self.bash.rect_for(history_area, input_area)
+            && popup.contains(ratatui::layout::Position::new(column, row))
+        {
+            return None;
+        }
+        self.chat.update(ChatMessage::Mouse { kind, column, row });
+        if self.copy_on_select
+            && let Some(text) = self.chat.take_pending_copy()
+        {
+            return Some(SessionEffect::CopyToClipboard { text });
+        }
+        None
+    }
+
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
         let collapsed = self.sidebar.collapsed_at(area.width);
         let content_area = if collapsed {
@@ -784,6 +865,8 @@ impl SessionScreen {
             Length(1),
         ])
         .areas(content_area);
+        self.history_area.set(history_area);
+        self.input_area.set(input_area);
 
         frame.render_widget(
             Paragraph::new(theme::title_header(&title))
@@ -966,6 +1049,11 @@ pub enum SessionEffect {
     RunCommand(CommandAction),
     RecallSteered {
         stacked: bool,
+    },
+    /// Store `text` on the system clipboard (written as OSC 52 by the render
+    /// loop).
+    CopyToClipboard {
+        text: String,
     },
 }
 

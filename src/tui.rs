@@ -38,9 +38,7 @@ mod welcome;
 mod workspace;
 
 pub enum TuiResponse {
-    SessionSaved {
-        session_id: uuid::Uuid,
-    },
+    SessionSaved { session_id: uuid::Uuid },
 }
 
 pub async fn run_tui(
@@ -161,7 +159,11 @@ where
                     // next draw. The wake becomes a message so the animated
                     // models refresh through their `update` paths.
                     spinner_wake = None;
-                    apply_msg(&mut app, Some(AppMessage::SpinnerUpdate))
+                    apply_msg(
+                        &mut app,
+                        rat.backend_mut().terminal_mut(),
+                        Some(AppMessage::SpinnerUpdate),
+                    )
                 }
                 // Terminal event — draws under the same frame budget as core
                 // events; when idle the budget has already elapsed, so keys
@@ -169,13 +171,13 @@ where
                 ev = event_stream.next() => {
                     let Some(ev_result) = ev else { break 'render_loop Ok(app.session.session_id); };
                     let msg = app.map_event(Event::Terminal(ev_result?));
-                    apply_msg(&mut app, msg)
+                    apply_msg(&mut app, rat.backend_mut().terminal_mut(), msg)
                 }
                 // Core event — drain all already-queued core events as one batch.
                 ev = event_rx.recv() => {
                     let Some(ev) = ev else { break 'render_loop Ok(app.session.session_id); };
                     let msg = app.map_event(Event::Core(ev));
-                    apply_msg(&mut app, msg)
+                    apply_msg(&mut app, rat.backend_mut().terminal_mut(), msg)
                 }
             };
 
@@ -212,12 +214,18 @@ where
     }
 }
 
-/// Apply a mapped message, recording a quit request on `AppEffect::Quit`.
-/// Returns `true` if there was a message to apply.
-fn apply_msg(app: &mut App, msg: Option<AppMessage>) -> bool {
+/// Apply a mapped message, recording a quit request on `AppEffect::Quit` and
+/// writing `AppEffect::CopyToClipboard` as OSC 52 (the render loop owns the
+/// terminal). Returns `true` if there was a message to apply.
+fn apply_msg(app: &mut App, terminal: &mut PlatformTerminal, msg: Option<AppMessage>) -> bool {
     if let Some(msg) = msg {
-        if let Some(AppEffect::Quit) = app.update(msg) {
-            app.mark_quit();
+        match app.update(msg) {
+            Some(AppEffect::Quit) => app.mark_quit(),
+            Some(AppEffect::CopyToClipboard(text)) => {
+                let _ = write!(terminal, "{}", escape::set_clipboard(&text));
+                let _ = terminal.flush();
+            }
+            None => {}
         }
         true
     } else {

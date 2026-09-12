@@ -7,7 +7,7 @@ use termina::event::{KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use tokio::sync::mpsc::Sender;
 
 use crate::tui::event::Event;
-use crate::tui::utils::ctrl;
+use crate::tui::utils::{ctrl, ctrl_shift};
 
 use super::add_provider::{AddProviderForm, AddProviderMessage, AddProviderOutcome};
 use super::command_menu::{CommandMenu, CommandMenuMessage};
@@ -17,7 +17,9 @@ use super::confirm_quit::{ConfirmQuit, ConfirmQuitEffect, ConfirmQuitMessage};
 use super::context::UpdateCtx;
 use super::history_search::{HistorySearch, HistorySearchEffect, HistorySearchMessage};
 use super::model_picker::{ModelPicker, ModelPickerEffect, ModelPickerMessage};
-use super::session::{BashMessage, ChatMessage, SessionEffect, SessionMessage, SessionScreen};
+use super::session::{
+    BashMessage, ChatMessage, MouseKind, SessionEffect, SessionMessage, SessionScreen,
+};
 use super::session_picker::{SessionPicker, SessionPickerEffect, SessionPickerMessage};
 use super::sidebar::SidebarMessage;
 use super::spinner::SpinnerKind;
@@ -108,6 +110,7 @@ pub enum AppMessage {
 #[derive(Debug)]
 pub enum AppEffect {
     Quit,
+    CopyToClipboard(String),
 }
 
 pub struct App {
@@ -175,6 +178,9 @@ impl App {
                 });
                 s.sidebar
                     .update(SidebarMessage::SetPref { pref: ui.sidebar });
+                s.update(SessionMessage::SetCopyOnSelect {
+                    enabled: ui.copy_on_select,
+                });
                 s.sidebar.update(SidebarMessage::SetWidth {
                     cols: viewport_cols,
                 });
@@ -240,12 +246,27 @@ impl App {
                     cols: size.cols,
                 }),
                 TermEvent::Mouse(mouse) if self.overlay == Overlay::None => match mouse.kind {
-                    MouseEventKind::Down(MouseButton::Left) => Some(AppMessage::Session(
-                        SessionMessage::Chat(ChatMessage::Click {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        Some(AppMessage::Session(SessionMessage::Mouse {
+                            kind: MouseKind::Down,
                             column: mouse.column,
                             row: mouse.row,
-                        }),
-                    )),
+                        }))
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        Some(AppMessage::Session(SessionMessage::Mouse {
+                            kind: MouseKind::Drag,
+                            column: mouse.column,
+                            row: mouse.row,
+                        }))
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        Some(AppMessage::Session(SessionMessage::Mouse {
+                            kind: MouseKind::Up,
+                            column: mouse.column,
+                            row: mouse.row,
+                        }))
+                    }
                     MouseEventKind::ScrollUp => Some(AppMessage::Session(SessionMessage::Chat(
                         ChatMessage::Wheel {
                             up: true,
@@ -319,6 +340,12 @@ impl App {
                     #[allow(clippy::single_match)]
                     match key.kind {
                         KeyEventKind::Press => match key.code {
+                            KeyCode::Char('c') if ctrl_shift(&key) => {
+                                return Some(AppMessage::Session(SessionMessage::CopySelection));
+                            }
+                            KeyCode::Char('x') if ctrl_shift(&key) => {
+                                return Some(AppMessage::Session(SessionMessage::CutSelection));
+                            }
                             KeyCode::Char('c') if ctrl(&key) => {
                                 if !self.session.input.is_empty() {
                                     return Some(AppMessage::Session(SessionMessage::Text(
@@ -651,6 +678,9 @@ impl App {
                             if let Some(effect) = self.run_command(action) {
                                 return Some(effect);
                             }
+                        }
+                        SessionEffect::CopyToClipboard { text } => {
+                            return Some(AppEffect::CopyToClipboard(text));
                         }
                     }
                 }

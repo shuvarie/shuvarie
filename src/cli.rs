@@ -5,8 +5,8 @@ use clap::{
         styling::{AnsiColor, Style},
     },
 };
-use uuid::Uuid;
 use std::path::PathBuf;
+use uuid::Uuid;
 
 const STYLES: Styles = Styles::styled()
     .header(AnsiColor::BrightGreen.on_default().bold())

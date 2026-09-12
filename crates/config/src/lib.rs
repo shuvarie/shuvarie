@@ -190,6 +190,10 @@ pub struct UiPrefs {
     /// Default sidebar expansion: `auto` (width-based), `expanded`, or
     /// `collapsed`. `auto` is omitted from the saved file.
     pub sidebar: SidebarPref,
+
+    /// Copy the selection to the system clipboard when a chat drag finalizes.
+    /// Off by default; copying stays available via Ctrl+Shift+C.
+    pub copy_on_select: bool,
 }
 
 impl Default for UiPrefs {
@@ -197,6 +201,7 @@ impl Default for UiPrefs {
         Self {
             frame_rate: 60,
             sidebar: SidebarPref::Auto,
+            copy_on_select: false,
         }
     }
 }
@@ -613,6 +618,26 @@ mod tests {
         assert!(!text.contains("sidebar"), "auto must be omitted: {text}");
         let parsed = config_kdl::from_kdl(&text).unwrap();
         assert_eq!(parsed, config);
+    }
+
+    #[test]
+    fn ui_copy_on_select_round_trips() {
+        let parsed = config_kdl::from_kdl("").unwrap();
+        assert!(!parsed.ui.copy_on_select);
+        let parsed = config_kdl::from_kdl("ui { copy-on-select #true }").unwrap();
+        assert!(parsed.ui.copy_on_select);
+        let parsed = config_kdl::from_kdl("ui { copy-on-select #false }").unwrap();
+        assert!(!parsed.ui.copy_on_select);
+
+        let mut config = Config::default();
+        config.ui.copy_on_select = true;
+        let text = config_kdl::to_kdl(&config).unwrap();
+        assert!(text.contains("copy-on-select #true"), "body: {text}");
+        assert!(
+            !config_kdl::to_kdl(&Config::default())
+                .unwrap()
+                .contains("copy-on-select")
+        );
     }
 
     #[test]

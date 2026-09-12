@@ -146,10 +146,14 @@ fn scalar_string_vec(input: &str, node: &KdlNode) -> Result<Option<Vec<String>>>
 fn parse_ui(node: &KdlNode, input: &str) -> Result<UiPrefs> {
     let mut frame_rate = None;
     let mut sidebar = None;
+    let mut copy_on_select = None;
     for child in child_nodes(node) {
         match child.name().value() {
             "frame-rate" => set_once(input, child, &mut frame_rate, scalar_u32(input, child))?,
             "sidebar" => set_once(input, child, &mut sidebar, parse_sidebar(input, child))?,
+            "copy-on-select" => {
+                set_once(input, child, &mut copy_on_select, scalar_bool(input, child))?;
+            }
             _ => {}
         }
     }
@@ -159,6 +163,9 @@ fn parse_ui(node: &KdlNode, input: &str) -> Result<UiPrefs> {
     }
     if let Some(value) = sidebar {
         prefs.sidebar = value;
+    }
+    if let Some(value) = copy_on_select {
+        prefs.copy_on_select = value;
     }
     Ok(prefs)
 }
@@ -487,6 +494,9 @@ fn ui_node(cfg: &UiPrefs) -> Option<KdlNode> {
     }
     if cfg.sidebar != defaults.sidebar {
         children.push(value_node("sidebar", sidebar_pref_text(cfg.sidebar)));
+    }
+    if cfg.copy_on_select {
+        children.push(value_node("copy-on-select", true));
     }
     section_node("ui", children)
 }

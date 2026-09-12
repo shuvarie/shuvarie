@@ -206,11 +206,12 @@ impl BashPopup {
         Line::from(header)
     }
 
-    /// Paint the popup floating above the input area, clamped into the
-    /// history pane. Rendered last so it floats over the chat content.
-    pub fn view(&self, frame: &mut Frame<'_>, history: Rect, input: Rect) {
+    /// The popup's painted rect for the `(history, input)` layout areas, or
+    /// `None` when closed or clipped away. Shared by `view` and mouse
+    /// hit-testing in the session's zone router.
+    pub fn rect_for(&self, history: Rect, input: Rect) -> Option<Rect> {
         if !self.open() || history.height == 0 || input.width < 4 {
-            return;
+            return None;
         }
         let width = input.width;
         // Title row + uniform(1) padding bound the content: `inner` insets
@@ -226,17 +227,24 @@ impl BashPopup {
             width,
             input.y.saturating_sub(y).max(height.min(1)),
         );
-        if area.is_empty() {
+        (!area.is_empty()).then_some(area)
+    }
+
+    /// Paint the popup floating above the input area, clamped into the
+    /// history pane. Rendered last so it floats over the chat content.
+    pub fn view(&self, frame: &mut Frame<'_>, history: Rect, input: Rect) {
+        let Some(area) = self.rect_for(history, input) else {
             return;
-        }
+        };
+
+        let inner_budget = history.height.saturating_sub(4).max(1) as usize;
+        let mut lines = self.content_lines(area.width.saturating_sub(2), inner_budget);
+        lines.push(theme::help_line(&[("Esc", "dismiss")]).fg(theme::TEXT_MUTED));
 
         frame.render_widget(Clear, area);
         let block = theme::overlay_block("bash");
         let inner = block.inner(area);
         frame.render_widget(block, area);
-
-        let mut lines = content;
-        lines.push(theme::help_line(&[("Esc", "dismiss")]).fg(theme::TEXT_MUTED));
         frame.render_widget(ratatui::widgets::Paragraph::new(lines), inner);
     }
 }

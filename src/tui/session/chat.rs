@@ -1,5 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
 
 use ratatui::prelude::*;
 use serde_json::Value;
@@ -7,14 +8,111 @@ use shuvarie_core::tool_record::ToolRecord;
 use shuvarie_core::{DiagnosticInfo, Role};
 use shuvarie_db::ReasoningSegment;
 use shuvarie_llm::{FileChange, ShellStreams};
+use unicode_width::UnicodeWidthStr;
 
+use super::MouseKind;
 use super::blocks::{
     Block, BlockMessage, ChatEnv, ContextBlock, ReasoningBlock, SteeredPrompt, SystemText,
     TextBlock, ToolBlock, ToolMessage, UserPrompt,
 };
-use super::segment::BlockAddr;
+use super::segment::{BlockAddr, ResolvedRow, slice_visual, visual_row_text};
 use super::virtualizer::{TurnData, TurnEst, TurnFlags, locate, paint_turn};
 use crate::tui::theme;
+
+/// Selection column bounds of one wrapped row.
+type WrapBounds = (Option<u16>, Option<u16>);
+
+/// One logical source row under the selection: which turn/segment/source
+/// row it came from, the wrapped rows it covers with their selection column
+/// bounds, and the resolved handle for extraction.
+struct CopyGroup {
+    key: (usize, usize, u32),
+    wraps: Vec<(u32, WrapBounds)>,
+    resolved: ResolvedRow,
+}
+
+/// Drop selection column bounds that touch a row's text edges: a selection
+/// starting at the text's first column or ending past its last column still
+/// copies the whole logical row cleanly.
+fn normalize_cols(
+    resolved: &ResolvedRow,
+    from: Option<u16>,
+    to: Option<u16>,
+) -> (Option<u16>, Option<u16>) {
+    let end = resolved.pad_x.saturating_add(resolved.text_width);
+    (
+        from.filter(|c| *c > resolved.pad_x),
+        to.filter(|c| *c < end),
+    )
+}
+
+impl CopyGroup {
+    fn flush(self, out: &mut Vec<Option<String>>) {
+        let total = self.resolved.wrap_total as usize;
+        let full = self.wraps.len() == total
+            && self.wraps.iter().enumerate().all(|(i, (w, bounds))| {
+                *w as usize == i && bounds.0.is_none() && bounds.1.is_none()
+            });
+        if full {
+            out.push(Some(self.resolved.copy_text()));
+            return;
+        }
+        let line = self.resolved.line();
+        for (w, (from, to)) in &self.wraps {
+            let text = visual_row_text(&line, self.resolved.text_width, self.resolved.trim, *w);
+            let text = if from.is_some() || to.is_some() {
+                let a = from.map_or(0, |c| usize::from(c.saturating_sub(self.resolved.pad_x)));
+                let b = to.map_or(usize::MAX, |c| {
+                    usize::from(c.saturating_sub(self.resolved.pad_x))
+                });
+                slice_visual(&text, a, b)
+            } else {
+                text
+            };
+            out.push(Some(text));
+        }
+    }
+}
+
+/// Selection column bounds for one highlighted content row: interior rows
+/// span the full content width, boundary rows run from the selection's
+/// column, inset by the segment's text padding.
+fn sel_columns(
+    turn: usize,
+    row: u32,
+    start: &SelPos,
+    end: &SelPos,
+    pad: u16,
+    content_width: u16,
+) -> (u16, u16) {
+    let from = (turn == start.turn && start.row == row).then_some(start.col);
+    let to = (turn == end.turn && end.row == row).then_some(end.col);
+    let x0 = from.map_or(0, |c| pad.saturating_add(c).min(content_width));
+    let x1 = to.map_or(content_width, |c| pad.saturating_add(c).min(content_width));
+    (x0, x1)
+}
+
+/// Paint the selection background over `[x0, x1)` of one row, extending a
+/// boundary by one cell when a wide glyph straddles it.
+fn tint_row(buf: &mut Buffer, clip: Rect, content_width: u16, y: u16, mut x0: u16, mut x1: u16) {
+    let right = clip.x.saturating_add(content_width);
+    x0 = x0.min(right);
+    x1 = x1.min(right);
+    if x0 >= x1 {
+        return;
+    }
+    if x0 > clip.x && buf[(x0 - 1, y)].symbol().width() == 2 {
+        x0 -= 1;
+    }
+    if x1 < right && buf[(x1 - 1, y)].symbol().width() == 2 {
+        x1 += 1;
+    }
+    for x in x0..x1 {
+        if let Some(cell) = buf.cell_mut((x, y)) {
+            cell.set_bg(theme::SELECTION);
+        }
+    }
+}
 
 pub enum ChatMessage {
     BeginUserTurn {
@@ -84,7 +182,11 @@ pub enum ChatMessage {
     },
     ScrollUp,
     ScrollDown,
-    Click {
+    /// Left-button mouse activity at a terminal cell inside the history
+    /// pane: down starts a selection, drag extends it, up finalizes — or
+    /// toggles the block under a click (movement under the drag slop).
+    Mouse {
+        kind: super::MouseKind,
         column: u16,
         row: u16,
     },
@@ -120,6 +222,59 @@ struct Scroll {
     sticky_bottom: bool,
 }
 
+/// A selection endpoint in content space: turn index (same space as
+/// [`BlockAddr::turn`]), the wrapped row within that turn, and the column
+/// within the content width. Anchored, so it survives scrolling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct SelPos {
+    turn: usize,
+    row: u32,
+    col: u16,
+}
+
+/// A drag selection: the fixed anchor and the moving head.
+#[derive(Debug, Clone, Copy)]
+struct SelRange {
+    anchor: SelPos,
+    head: SelPos,
+}
+
+/// Movement under this many cells (rows + columns) counts as a click, not a
+/// drag, and toggles the block under the cursor on mouse-up.
+const CLICK_SLOP: u32 = 3;
+
+/// Clicks within this window at the same cell escalate: double selects the
+/// word, triple the whole logical row.
+const MULTI_CLICK_WINDOW: Duration = Duration::from_millis(500);
+
+impl SelRange {
+    /// The endpoints ordered ascending; `None` for a collapsed (zero-width)
+    /// selection.
+    fn ordered(&self) -> Option<(SelPos, SelPos)> {
+        let (a, b) = if (self.anchor.turn, self.anchor.row, self.anchor.col)
+            <= (self.head.turn, self.head.row, self.head.col)
+        {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        };
+        let collapsed = a.turn == b.turn && a.row == b.row && a.col >= b.col;
+        (!collapsed).then_some((a, b))
+    }
+
+    /// Drag distance in content cells: rows plus columns; a cross-turn head
+    /// is always a drag.
+    fn drag_distance(&self) -> u32 {
+        if self.anchor.turn != self.head.turn {
+            return u32::MAX;
+        }
+        self.anchor
+            .row
+            .abs_diff(self.head.row)
+            .saturating_add(u32::from(self.anchor.col.abs_diff(self.head.col)))
+    }
+}
+
 /// The chat history pane: committed turns (lazily materialized TEA block
 /// lists backed by the stored session), the in-flight streaming turn, and the
 /// windowed scroll engine. Only turns intersecting the viewport (plus an
@@ -143,6 +298,15 @@ pub struct Chat {
     width: Cell<u16>,
     env_rev: u64,
     toggled: BTreeSet<(usize, usize)>,
+    /// Live drag selection in content space; survives scrolling.
+    selection: RefCell<Option<SelRange>>,
+    /// A mouse button is down inside the history pane.
+    dragging: Cell<bool>,
+    /// Last click for double/triple-click escalation: position, time, count.
+    last_click: RefCell<Option<(SelPos, Instant, u8)>>,
+    /// Set when mouse-up finalized a non-empty selection, for the
+    /// copy-on-select hook the session consumes.
+    pending_copy: Cell<bool>,
     history_rect: Cell<Rect>,
 }
 
@@ -164,6 +328,10 @@ impl Chat {
             width: Cell::new(0),
             env_rev: 0,
             toggled: BTreeSet::new(),
+            selection: RefCell::new(None),
+            dragging: Cell::new(false),
+            last_click: RefCell::new(None),
+            pending_copy: Cell::new(false),
             history_rect: Cell::new(Rect::default()),
         }
     }
@@ -215,6 +383,9 @@ impl Chat {
     pub fn update(&mut self, msg: ChatMessage) {
         match msg {
             ChatMessage::BeginUserTurn { content } => {
+                if self.in_flight.borrow().is_some() {
+                    self.clear_selection_from(self.turns.borrow().len());
+                }
                 let mut turn = TurnData::new(Role::User);
                 turn.set_blocks(vec![Block::User(UserPrompt::new(content))], false);
                 self.turns.borrow_mut().push(turn);
@@ -340,6 +511,7 @@ impl Chat {
                 self.streaming = false;
                 self.interrupted = false;
                 self.toggled.clear();
+                self.clear_selection();
                 let mut scroll = self.scroll.borrow_mut();
                 scroll.offset = 0;
                 scroll.sticky_bottom = true;
@@ -361,7 +533,9 @@ impl Chat {
                 let mut scroll = self.scroll.borrow_mut();
                 scroll.offset = scroll.offset.saturating_add(1);
             }
-            ChatMessage::Click { column, row } => self.handle_click(column, row),
+            ChatMessage::Mouse { kind, column, row } => {
+                self.handle_mouse(kind, column, row);
+            }
             ChatMessage::Wheel { up, column, row } => {
                 if self.in_history(column, row) {
                     let mut scroll = self.scroll.borrow_mut();
@@ -385,13 +559,19 @@ impl Chat {
                 let mut steered = self.steered.borrow_mut();
                 if !steered.is_empty() {
                     steered.remove(0);
+                    drop(steered);
+                    self.remap_after_steered_removed();
                 }
             }
             ChatMessage::SteeredRecalled => {
                 self.steered.borrow_mut().pop();
+                let removed = self.turns.borrow().len() + 1 + self.steered.borrow().len();
+                self.clear_selection_from(removed);
             }
             ChatMessage::SteeredCleared => {
                 self.steered.borrow_mut().clear();
+                let from = self.turns.borrow().len() + 1;
+                self.clear_selection_from(from);
             }
             ChatMessage::SpinnerUpdate => {
                 let env = ChatEnv {
@@ -422,6 +602,7 @@ impl Chat {
 
         if self.width.get() != content_width {
             self.width.set(content_width);
+            self.clear_selection();
             for slot in turns.iter_mut() {
                 slot.cache = None;
             }
@@ -624,10 +805,388 @@ impl Chat {
                 }
                 y += h;
             }
+
+            if self.selection.borrow().is_some() {
+                self.paint_selection_overlay(
+                    &turns,
+                    &in_flight,
+                    &steered,
+                    &heights,
+                    turns_len,
+                    scroll_y,
+                    area,
+                    content_width,
+                    buf,
+                );
+            }
         }
 
         self.render_scrollbar(frame, area, scroll_y, total);
         self.evict(&mut turns, scroll_y, viewport);
+    }
+
+    /// Tint the selected content rows after the paint pass. Geometry-only:
+    /// interior rows tint the full content width, boundary rows from the
+    /// selection's column, snapped outward around wide glyphs.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_selection_overlay(
+        &self,
+        turns: &[TurnData],
+        in_flight: &Option<TurnData>,
+        steered: &[TurnData],
+        heights: &[u32],
+        turns_len: usize,
+        scroll_y: u32,
+        clip: Rect,
+        content_width: u16,
+        buf: &mut Buffer,
+    ) {
+        let sel = *self.selection.borrow();
+        let Some((start, end)) = sel.as_ref().and_then(SelRange::ordered) else {
+            return;
+        };
+        let viewport = u32::from(clip.height);
+        let mut y = 0u32;
+        for (i, h) in heights.iter().enumerate() {
+            let cache = if i < turns_len {
+                turns.get(i).and_then(|slot| slot.cache.as_ref())
+            } else if i == turns_len {
+                in_flight.as_ref().and_then(|slot| slot.cache.as_ref())
+            } else {
+                steered
+                    .get(i - turns_len - 1)
+                    .and_then(|slot| slot.cache.as_ref())
+            };
+            let turn_idx = i;
+            let h = *h;
+            let lo = if turn_idx == start.turn {
+                start.row.min(h.saturating_sub(1))
+            } else {
+                0
+            };
+            let hi = if turn_idx == end.turn {
+                end.row.saturating_add(1).min(h)
+            } else {
+                h
+            };
+            if lo >= hi {
+                y += h;
+                continue;
+            }
+            if let Some(cache) = cache {
+                for seg in &cache.segs {
+                    let seg_lo = seg.start.max(lo).max(scroll_y.saturating_sub(y));
+                    let seg_hi = (seg.start + seg.height)
+                        .min(hi)
+                        .min((scroll_y + viewport).saturating_sub(y));
+                    if seg_lo >= seg_hi {
+                        continue;
+                    }
+                    for row in seg_lo..seg_hi {
+                        let global = y + row;
+                        let (x0, x1) = sel_columns(
+                            turn_idx,
+                            row,
+                            &start,
+                            &end,
+                            seg.segment.padding.0,
+                            content_width,
+                        );
+                        if x0 >= x1 {
+                            continue;
+                        }
+                        let screen_y =
+                            clip.y + u16::try_from(global - scroll_y).unwrap_or(u16::MAX);
+                        tint_row(buf, clip, content_width, screen_y, x0, x1);
+                    }
+                }
+            }
+            y += h;
+        }
+    }
+
+    /// Borrow a turn slot by selection-space index: committed turns, then
+    /// the in-flight turn, then the steered queue.
+    fn with_turn<R>(&self, turn_idx: usize, f: impl FnOnce(&TurnData) -> R) -> Option<R> {
+        let turns_len = self.turns.borrow().len();
+        if turn_idx < turns_len {
+            let turns = self.turns.borrow();
+            return turns.get(turn_idx).map(f);
+        }
+        if turn_idx == turns_len {
+            let in_flight = self.in_flight.borrow();
+            return in_flight.as_ref().map(f);
+        }
+        let steered = self.steered.borrow();
+        steered.get(turn_idx.checked_sub(turns_len + 1)?).map(f)
+    }
+
+    fn turn_count(&self) -> usize {
+        self.turns.borrow().len()
+            + usize::from(self.in_flight.borrow().is_some())
+            + self.steered.borrow().len()
+    }
+
+    fn turn_height(&self, turn_idx: usize, width: u16) -> u32 {
+        self.with_turn(turn_idx, |turn| turn.height(width, self.env_rev))
+            .unwrap_or(0)
+    }
+
+    /// The content-space position under a terminal cell, `None` outside the
+    /// history pane or past the last turn.
+    fn sel_pos_at(&self, column: u16, row: u16) -> Option<SelPos> {
+        if !self.in_history(column, row) {
+            return None;
+        }
+        let rect = self.history_rect.get();
+        let content_y = self.scroll.borrow().offset + u32::from(row - rect.y);
+        let width = self.width.get();
+        if width == 0 {
+            return None;
+        }
+        let mut start = 0u32;
+        for i in 0..self.turn_count() {
+            let h = self.turn_height(i, width);
+            if content_y < start + h {
+                return Some(SelPos {
+                    turn: i,
+                    row: content_y - start,
+                    col: column - rect.x,
+                });
+            }
+            start += h;
+        }
+        None
+    }
+
+    fn handle_mouse(&mut self, kind: MouseKind, column: u16, row: u16) {
+        match kind {
+            MouseKind::Down => {
+                self.clear_selection();
+                self.dragging.set(false);
+                let Some(pos) = self.sel_pos_at(column, row) else {
+                    return;
+                };
+                if self.escalated_click(pos) {
+                    return;
+                }
+                *self.selection.borrow_mut() = Some(SelRange {
+                    anchor: pos,
+                    head: pos,
+                });
+                self.dragging.set(true);
+            }
+            MouseKind::Drag => {
+                if !self.dragging.get() {
+                    return;
+                }
+                if let Some(pos) = self.sel_pos_at(column, row)
+                    && let Some(sel) = self.selection.borrow_mut().as_mut()
+                {
+                    sel.head = pos;
+                }
+                self.drag_auto_scroll(row);
+            }
+            MouseKind::Up => {
+                if !self.dragging.get() {
+                    return;
+                }
+                self.dragging.set(false);
+                let range = *self.selection.borrow();
+                let Some(range) = range else { return };
+                if range.drag_distance() < CLICK_SLOP {
+                    self.clear_selection();
+                    self.handle_click(column, row);
+                } else if range.ordered().is_some() {
+                    self.pending_copy.set(true);
+                }
+            }
+        }
+    }
+
+    /// One row of auto-scroll when a drag reaches a viewport edge; the
+    /// sticky-bottom state re-engages at the bottom through the next view.
+    fn drag_auto_scroll(&self, row: u16) {
+        let rect = self.history_rect.get();
+        if rect.height == 0 {
+            return;
+        }
+        let mut scroll = self.scroll.borrow_mut();
+        if row <= rect.y {
+            scroll.offset = scroll.offset.saturating_sub(1);
+            scroll.sticky_bottom = false;
+        } else if row + 1 >= rect.y + rect.height {
+            scroll.offset = scroll.offset.saturating_add(1);
+        }
+    }
+
+    fn clear_selection(&self) {
+        *self.selection.borrow_mut() = None;
+        self.pending_copy.set(false);
+    }
+
+    /// Escalate a same-cell click inside [`MULTI_CLICK_WINDOW`]: double
+    /// selects the word, triple the whole logical row. The selection is
+    /// final (dragging stays disarmed, copy is flagged); `true` when the
+    /// click was consumed, so a failed resolve falls through to point start.
+    fn escalated_click(&self, pos: SelPos) -> bool {
+        let now = Instant::now();
+        let count = match *self.last_click.borrow() {
+            Some((last, at, count))
+                if last == pos && now.duration_since(at) <= MULTI_CLICK_WINDOW =>
+            {
+                (count % 3) + 1
+            }
+            _ => 1,
+        };
+        *self.last_click.borrow_mut() = Some((pos, now, count));
+        if count == 1 {
+            return false;
+        }
+        let width = self.width.get();
+        if width == 0 {
+            return false;
+        }
+        let span = if count >= 3 {
+            self.logical_row_range(pos, width)
+        } else {
+            self.word_range(pos)
+        };
+        let Some((anchor, head)) = span else {
+            return false;
+        };
+        *self.selection.borrow_mut() = Some(SelRange { anchor, head });
+        self.pending_copy.set(true);
+        true
+    }
+
+    /// Resolve the visual row under `pos` for word/row picking.
+    fn resolved_visual_row(&self, pos: SelPos) -> Option<ResolvedRow> {
+        let width = self.width.get();
+        self.with_turn(pos.turn, |slot| {
+            let cache = slot.cache.as_ref()?;
+            for seg in &cache.segs {
+                if pos.row >= seg.start && pos.row < seg.start + seg.height {
+                    return seg.segment.locate_row(pos.row - seg.start, width);
+                }
+            }
+            None
+        })
+        .flatten()
+    }
+
+    /// The whitespace-delimited run of the visual row under `pos`.
+    fn word_range(&self, pos: SelPos) -> Option<(SelPos, SelPos)> {
+        let resolved = self.resolved_visual_row(pos)?;
+        let text = visual_row_text(
+            &resolved.line(),
+            resolved.text_width,
+            resolved.trim,
+            resolved.wrap_index,
+        );
+        let text_col = usize::from(pos.col.saturating_sub(resolved.pad_x));
+        let mut hit: Option<(usize, usize)> = None;
+        let mut run_start: Option<usize> = None;
+        let mut x = 0usize;
+        for c in text.chars() {
+            let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+            if c.is_whitespace() {
+                if let Some(s) = run_start.take()
+                    && text_col >= s
+                    && text_col < x
+                {
+                    hit = Some((s, x));
+                    break;
+                }
+            } else {
+                run_start.get_or_insert(x);
+            }
+            x += w;
+        }
+        if hit.is_none()
+            && let Some(s) = run_start
+        {
+            hit = Some((s, x));
+        }
+        let (start, end) = hit?;
+        if start >= end {
+            return None;
+        }
+        let anchor = SelPos {
+            turn: pos.turn,
+            row: pos.row,
+            col: resolved.pad_x.saturating_add(start as u16),
+        };
+        let head = SelPos {
+            turn: pos.turn,
+            row: pos.row,
+            col: resolved.pad_x.saturating_add(end as u16),
+        };
+        Some((anchor, head))
+    }
+
+    /// The full logical row (all wraps) under `pos`, spanning the row's
+    /// content range so copy emits the clean logical text.
+    fn logical_row_range(&self, pos: SelPos, width: u16) -> Option<(SelPos, SelPos)> {
+        let resolved = self.resolved_visual_row(pos)?;
+        let first = pos.row.saturating_sub(resolved.wrap_index);
+        let last = pos.row.saturating_add(
+            resolved
+                .wrap_total
+                .saturating_sub(1)
+                .saturating_sub(resolved.wrap_index),
+        );
+        let anchor = SelPos {
+            turn: pos.turn,
+            row: first,
+            col: 0,
+        };
+        let head = SelPos {
+            turn: pos.turn,
+            row: last,
+            col: width,
+        };
+        Some((anchor, head))
+    }
+
+    /// Re-address the selection after the in-flight turn committed: its
+    /// index now addresses the committed turn; steered turns shift by one.
+    fn remap_after_commit(&self) {
+        let in_flight_idx = self.turns.borrow().len().saturating_sub(1);
+        if let Some(sel) = self.selection.borrow_mut().as_mut() {
+            for pos in [&mut sel.anchor, &mut sel.head] {
+                if pos.turn > in_flight_idx {
+                    pos.turn += 1;
+                }
+            }
+        }
+    }
+
+    /// Re-address the selection after steered[0] was dispatched: turns at
+    /// its old index are gone, later steered turns shift down by one.
+    fn remap_after_steered_removed(&self) {
+        let removed = self.turns.borrow().len() + 1;
+        if let Some(sel) = self.selection.borrow_mut().as_mut() {
+            for pos in [&mut sel.anchor, &mut sel.head] {
+                if pos.turn > removed {
+                    pos.turn -= 1;
+                }
+            }
+        }
+        self.clear_selection_from(removed);
+    }
+
+    /// Drop the selection when it references a turn at or past `from`
+    /// (removed steered turn, wiped in-flight, session replacement).
+    fn clear_selection_from(&self, from: usize) {
+        if self
+            .selection
+            .borrow()
+            .as_ref()
+            .is_some_and(|sel| sel.anchor.turn >= from || sel.head.turn >= from)
+        {
+            self.clear_selection();
+        }
     }
 
     /// Materialize + render a turn on demand from `update` paths (toggle,
@@ -721,6 +1280,7 @@ impl Chat {
             turn.refresh_est(false);
             self.turns.borrow_mut().push(turn);
             self.interrupted = false;
+            self.remap_after_commit();
         }
         self.streaming = false;
     }
@@ -739,12 +1299,16 @@ impl Chat {
                 turn.rev += 1;
                 turn.refresh_est(true);
                 self.turns.borrow_mut().push(turn);
+                self.remap_after_commit();
+            } else {
+                self.clear_selection_from(self.turns.borrow().len());
             }
         }
         self.streaming = false;
     }
 
     fn apply_session(&mut self, session: shuvarie_core::Session, reset_scroll: bool) {
+        self.clear_selection();
         let interrupted = session.last_assistant_interrupted();
         let ests = build_turn_ests(&session, interrupted);
         let len = ests.len();
@@ -766,6 +1330,120 @@ impl Chat {
             scroll.offset = 0;
             scroll.sticky_bottom = false;
         }
+    }
+
+    /// Text of the active chat selection, copied on demand; `None` when no
+    /// selection is live. Fully covered logical rows copy clean logical
+    /// text (gutterless code, decorated tool rows); boundary rows copy the
+    /// visual fragment the pixels show.
+    pub fn selected_text(&self) -> Option<String> {
+        let (start, end) = (*self.selection.borrow()).and_then(|r| r.ordered())?;
+        let width = self.width.get();
+        if width == 0 {
+            return None;
+        }
+        let last = self.turn_count().saturating_sub(1);
+        if start.turn > last {
+            return None;
+        }
+        let end_turn = end.turn.min(last);
+
+        let mut out: Vec<Option<String>> = Vec::new();
+        let mut group: Option<CopyGroup> = None;
+        for turn in start.turn..=end_turn {
+            let turn_h = self.turn_height(turn, width);
+            if turn_h == 0 {
+                continue;
+            }
+            let lo = if turn == start.turn {
+                start.row.min(turn_h - 1)
+            } else {
+                0
+            };
+            let hi = if turn == end_turn {
+                end.row.min(turn_h - 1)
+            } else {
+                turn_h - 1
+            };
+            if lo > hi {
+                continue;
+            }
+            for row in lo..=hi {
+                let hit = self.with_turn(turn, |slot| {
+                    let cache = slot.cache.as_ref()?;
+                    for (seg_idx, seg) in cache.segs.iter().enumerate() {
+                        if row >= seg.start && row < seg.start + seg.height {
+                            return seg
+                                .segment
+                                .locate_row(row - seg.start, width)
+                                .map(|resolved| (seg_idx, resolved));
+                        }
+                    }
+                    None
+                });
+                let from = (turn == start.turn && row == start.row).then_some(start.col);
+                let to = (turn == end_turn && row == end.row).then_some(end.col);
+                let hit = hit.flatten();
+                let cols = hit.as_ref().map(|(_, r)| normalize_cols(r, from, to));
+                match hit {
+                    Some((seg_idx, resolved)) => {
+                        let key = (turn, seg_idx, resolved.source_row);
+                        let bounds = cols.expect("resolved row carries normalized bounds");
+                        match &mut group {
+                            Some(g) if g.key == key => g.wraps.push((resolved.wrap_index, bounds)),
+                            _ => {
+                                if let Some(done) = group.take() {
+                                    done.flush(&mut out);
+                                }
+                                group = Some(CopyGroup {
+                                    key,
+                                    wraps: vec![(resolved.wrap_index, bounds)],
+                                    resolved,
+                                });
+                            }
+                        }
+                    }
+                    None => {
+                        if let Some(done) = group.take() {
+                            done.flush(&mut out);
+                        }
+                        out.push(None);
+                    }
+                }
+            }
+        }
+        if let Some(done) = group.take() {
+            done.flush(&mut out);
+        }
+
+        let mut rows: Vec<String> = Vec::new();
+        let mut blanks = 0usize;
+        for entry in out {
+            match entry {
+                Some(text) => {
+                    for _ in 0..blanks {
+                        rows.push(String::new());
+                    }
+                    blanks = 0;
+                    rows.push(text);
+                }
+                None => blanks += 1,
+            }
+        }
+        if rows.is_empty() {
+            None
+        } else {
+            Some(rows.join("\n"))
+        }
+    }
+
+    /// Copy-on-select hook: the selection's text once, right after a drag
+    /// finalized it, then cleared.
+    pub fn take_pending_copy(&self) -> Option<String> {
+        if !self.pending_copy.replace(false) {
+            return None;
+        }
+        self.selected_text()
     }
 
     fn in_history(&self, column: u16, row: u16) -> bool {
@@ -852,6 +1530,7 @@ impl Chat {
     }
 
     fn toggle_block(&mut self, addr: BlockAddr) {
+        self.clear_selection();
         let turns_len = self.turns.borrow().len();
         if addr.turn < turns_len {
             self.ensure_materialized(addr.turn);
@@ -2111,7 +2790,13 @@ mod tests {
         let Some(row) = click_row else {
             panic!("tool block background not found");
         };
-        chat.update(ChatMessage::Click {
+        chat.update(ChatMessage::Mouse {
+            kind: super::MouseKind::Down,
+            column: rect.x + 5,
+            row,
+        });
+        chat.update(ChatMessage::Mouse {
+            kind: super::MouseKind::Up,
             column: rect.x + 5,
             row,
         });
@@ -2126,6 +2811,281 @@ mod tests {
             .last()
             .map(Block::is_expanded);
         assert_eq!(expanded, Some(true));
+    }
+
+    /// The buffer row holding `needle`, searched left to right.
+    fn row_with(buf: &ratatui::buffer::Buffer, needle: &str) -> Option<(u16, u16)> {
+        for y in 0..buf.area().height {
+            for x in 0..buf.area().width {
+                let line: String = (x..buf.area().width)
+                    .map(|cx| buf[(cx, y)].symbol().to_string())
+                    .collect::<String>();
+                if let Some(col) = line.find(needle) {
+                    return Some((x + col as u16, y));
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn drag_selects_and_copies_plain_text() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "hello brave world".into(),
+        });
+        let buf = draw(&chat, 80, 20);
+        let (col, row) = row_with(&buf, "hello").expect("prompt text on screen");
+        chat.update(ChatMessage::Mouse {
+            kind: super::MouseKind::Down,
+            column: col,
+            row,
+        });
+        chat.update(ChatMessage::Mouse {
+            kind: super::MouseKind::Drag,
+            column: col + 1,
+            row,
+        });
+        let (end_col, _) = row_with(&buf, "world").expect("tail on screen");
+        chat.update(ChatMessage::Mouse {
+            kind: super::MouseKind::Drag,
+            column: end_col + "world".len() as u16,
+            row,
+        });
+        assert_eq!(chat.selected_text().as_deref(), Some("hello brave world"));
+        chat.update(ChatMessage::Mouse {
+            kind: super::MouseKind::Up,
+            column: end_col + "world".len() as u16,
+            row,
+        });
+        assert_eq!(chat.selected_text().as_deref(), Some("hello brave world"));
+        assert!(chat.take_pending_copy().is_some(), "drag finalized");
+        assert!(chat.take_pending_copy().is_none(), "consumed once");
+    }
+
+    #[test]
+    fn small_drag_is_a_click_without_selection() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "check".into(),
+        });
+        chat.update(ChatMessage::ToolStarted {
+            name: "read_file".into(),
+            args: serde_json::json!({}),
+            worker: None,
+            call_id: None,
+        });
+        chat.update(ChatMessage::ToolFinished {
+            name: "read_file".into(),
+            ok: true,
+            output: String::new(),
+            worker: None,
+            file_change: None,
+            streams: None,
+            duration_ms: 0,
+            call_id: None,
+        });
+        let buf = draw(&chat, 80, 20);
+        let Some((col, row)) = (1..buf.area().height)
+            .find_map(|row| (buf[(0, row)].bg == theme::SUCCESS_BG).then_some((5, row)))
+        else {
+            panic!("tool block background not found");
+        };
+        chat.update(ChatMessage::Mouse {
+            kind: super::MouseKind::Down,
+            column: col,
+            row,
+        });
+        chat.update(ChatMessage::Mouse {
+            kind: super::MouseKind::Drag,
+            column: col + 1,
+            row,
+        });
+        chat.update(ChatMessage::Mouse {
+            kind: super::MouseKind::Up,
+            column: col + 1,
+            row,
+        });
+        assert!(chat.selected_text().is_none(), "slop drag stays a click");
+        let expanded = chat
+            .in_flight
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .blocks
+            .as_ref()
+            .unwrap()
+            .last()
+            .map(Block::is_expanded);
+        assert_eq!(expanded, Some(true));
+    }
+
+    #[test]
+    fn selection_cleared_on_session_load() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "hello brave world".into(),
+        });
+        let buf = draw(&chat, 80, 20);
+        let (col, row) = row_with(&buf, "hello").expect("prompt text");
+        chat.update(ChatMessage::Mouse {
+            kind: super::MouseKind::Down,
+            column: col,
+            row,
+        });
+        chat.update(ChatMessage::Mouse {
+            kind: super::MouseKind::Drag,
+            column: col + 10,
+            row,
+        });
+        assert!(chat.selected_text().is_some());
+        chat.update(ChatMessage::Load {
+            session: shuvarie_core::Session::default(),
+        });
+        assert!(chat.selected_text().is_none());
+    }
+
+    #[test]
+    fn drag_across_wrapped_rows_copies_logical_text() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "first words here and some more words that wrap the row width\nsecond line"
+                .into(),
+        });
+        let buf = draw(&chat, 50, 20);
+        let Some((col, row)) = row_with(&buf, "first words") else {
+            panic!("first line on screen");
+        };
+        chat.update(ChatMessage::Mouse {
+            kind: super::MouseKind::Down,
+            column: col,
+            row,
+        });
+        let Some((end_col, end_row)) = row_with(&buf, "second line") else {
+            panic!("second line on screen");
+        };
+        chat.update(ChatMessage::Mouse {
+            kind: super::MouseKind::Drag,
+            column: end_col + "second line".len() as u16,
+            row: end_row,
+        });
+        assert_eq!(
+            chat.selected_text().as_deref(),
+            Some("first words here and some more words that wrap the row width\nsecond line")
+        );
+    }
+
+    #[test]
+    fn boundary_drag_copies_visual_fragment() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "alpha beta gamma".into(),
+        });
+        let buf = draw(&chat, 80, 20);
+        let Some((col, row)) = row_with(&buf, "beta") else {
+            panic!("text on screen");
+        };
+        chat.update(ChatMessage::Mouse {
+            kind: super::MouseKind::Down,
+            column: col,
+            row,
+        });
+        chat.update(ChatMessage::Mouse {
+            kind: super::MouseKind::Drag,
+            column: col + 4,
+            row,
+        });
+        assert_eq!(chat.selected_text().as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn double_click_selects_word() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "alpha beta gamma".into(),
+        });
+        let buf = draw(&chat, 80, 20);
+        let Some((col, row)) = row_with(&buf, "beta") else {
+            panic!("text on screen");
+        };
+        for _ in 0..2 {
+            chat.update(ChatMessage::Mouse {
+                kind: super::MouseKind::Down,
+                column: col,
+                row,
+            });
+        }
+        assert_eq!(chat.selected_text().as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn triple_click_selects_logical_row() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "alpha beta gamma\nsecond row".into(),
+        });
+        let buf = draw(&chat, 80, 20);
+        let Some((col, row)) = row_with(&buf, "beta") else {
+            panic!("text on screen");
+        };
+        for _ in 0..3 {
+            chat.update(ChatMessage::Mouse {
+                kind: super::MouseKind::Down,
+                column: col,
+                row,
+            });
+        }
+        assert_eq!(chat.selected_text().as_deref(), Some("alpha beta gamma"));
+    }
+
+    #[test]
+    fn fourth_click_starts_a_fresh_point_selection() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "alpha beta gamma".into(),
+        });
+        let buf = draw(&chat, 80, 20);
+        let Some((col, row)) = row_with(&buf, "beta") else {
+            panic!("text on screen");
+        };
+        for _ in 0..4 {
+            chat.update(ChatMessage::Mouse {
+                kind: super::MouseKind::Down,
+                column: col,
+                row,
+            });
+        }
+        assert_eq!(chat.selected_text(), None, "count wrapped to point start");
+    }
+
+    #[test]
+    fn overlay_tints_selection_cells() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "alpha beta gamma".into(),
+        });
+        let buf = draw(&chat, 80, 20);
+        let Some((col, row)) = row_with(&buf, "beta") else {
+            panic!("text on screen");
+        };
+        chat.update(ChatMessage::Mouse {
+            kind: super::MouseKind::Down,
+            column: col,
+            row,
+        });
+        chat.update(ChatMessage::Mouse {
+            kind: super::MouseKind::Drag,
+            column: col + 4,
+            row,
+        });
+        let buf = draw(&chat, 80, 20);
+        let mut tinted = 0usize;
+        for x in 0..buf.area().width {
+            if buf[(x, row)].bg == theme::SELECTION {
+                tinted += 1;
+            }
+        }
+        assert_eq!(tinted, 4, "boundary row tints exactly the head cols");
     }
 
     #[test]

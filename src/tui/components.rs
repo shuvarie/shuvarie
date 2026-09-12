@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::ops::Range;
 
 use ratatui::layout::{Alignment, Rect};
 use ratatui::prelude::*;
@@ -60,6 +61,8 @@ pub struct InputBuffer {
     pub value: String,
     pub cursor: usize,
     pub scroll_offset: Cell<usize>,
+    /// Selection anchor in `value` byte coordinates; the head is the cursor.
+    sel_anchor: Cell<Option<usize>>,
     pastes: Vec<String>,
 }
 
@@ -69,6 +72,7 @@ impl InputBuffer {
             value: String::new(),
             cursor: 0,
             scroll_offset: Cell::new(0),
+            sel_anchor: Cell::new(None),
             pastes: Vec::new(),
         }
     }
@@ -77,7 +81,77 @@ impl InputBuffer {
         self.value.clear();
         self.cursor = 0;
         self.scroll_offset.set(0);
+        self.sel_anchor.set(None);
         self.pastes.clear();
+    }
+
+    fn clear_anchor(&self) {
+        self.sel_anchor.set(None);
+    }
+
+    /// Anchor a selection at the current cursor unless one is already
+    /// active: the anchor is fixed, the cursor is the moving head.
+    pub fn anchor_here(&self) {
+        if self.sel_anchor.get().is_none() {
+            self.sel_anchor.set(Some(self.cursor));
+        }
+    }
+
+    /// Extend the selection so its head lands on byte `to`.
+    pub fn select_to(&mut self, to: usize) {
+        self.anchor_here();
+        self.cursor = to.min(self.value.len());
+    }
+
+    /// Move the cursor to `byte`, collapsing any selection.
+    pub fn place_cursor(&mut self, byte: usize) {
+        self.cursor = byte.min(self.value.len());
+        self.sel_anchor.set(None);
+    }
+
+    /// The selected byte range in `value`, `None` when empty or collapsed.
+    pub fn selection(&self) -> Option<Range<usize>> {
+        let anchor = self.sel_anchor.get()?;
+        let (start, end) = if anchor <= self.cursor {
+            (anchor, self.cursor)
+        } else {
+            (self.cursor, anchor)
+        };
+        (start < end).then_some(start..end)
+    }
+
+    /// The selected text with paste markers expanded back to their payload.
+    pub fn selected_text(&self) -> Option<String> {
+        let range = self.selection()?;
+        let mut out = String::new();
+        for c in self.value[range].chars() {
+            match marker_id(c) {
+                Some(id) => out.push_str(self.pastes.get(id).map(String::as_str).unwrap_or("")),
+                None => out.push(c),
+            }
+        }
+        Some(out)
+    }
+
+    /// Delete the active selection, leaving the cursor at its start.
+    /// `false` when nothing is selected.
+    pub fn delete_selection(&mut self) -> bool {
+        let Some(range) = self.selection() else {
+            return false;
+        };
+        self.cut_range(range.clone());
+        self.cursor = range.start;
+        self.clear_anchor();
+        true
+    }
+
+    /// Byte index of the `(visual_row, col)` cell at the given wrap width,
+    /// or `None` past the buffer's rows. A column past a row's width lands
+    /// on the row's break byte.
+    pub fn byte_at(&self, width: usize, visual_row: usize, col: usize) -> Option<usize> {
+        let rows = self.rows(width);
+        let row = rows.get(visual_row)?;
+        Some(row_col_to_byte(row, col))
     }
 
     pub fn push(&mut self, c: char) {
@@ -88,12 +162,14 @@ impl InputBuffer {
         self.insert_char('\n');
     }
 
-    fn insert_char(&mut self, c: char) {
+    pub fn insert_char(&mut self, c: char) {
+        self.delete_selection();
         self.value.insert(self.cursor, c);
         self.cursor += c.len_utf8();
     }
 
     pub fn insert_str(&mut self, s: &str) {
+        self.delete_selection();
         self.value.insert_str(self.cursor, s);
         self.cursor += s.len();
     }
@@ -162,6 +238,9 @@ impl InputBuffer {
     }
 
     pub fn backspace(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         if self.cursor > 0 {
             let prev = self.value[..self.cursor].chars().last().unwrap();
             let start = self.cursor - prev.len_utf8();
@@ -200,6 +279,9 @@ impl InputBuffer {
     }
 
     pub fn delete(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         if self.cursor < self.value.len() {
             let next = self.value[self.cursor..].chars().next().unwrap();
             let end = self.cursor + next.len_utf8();
@@ -211,6 +293,9 @@ impl InputBuffer {
     /// before a `\n` or at EOF), delete the newline (joining lines); otherwise
     /// delete from the cursor to the end of the current logical line.
     pub fn kill_to_end(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         if self.cursor == self.value.len() {
             return;
         }
@@ -228,6 +313,9 @@ impl InputBuffer {
     /// Emacs `backward-kill-line` (bound to `Ctrl+U` in this app): delete from
     /// the start of the current logical line to the cursor.
     pub fn kill_to_line_start(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         let line_start = self.value[..self.cursor]
             .rfind('\n')
             .map(|i| i + 1)
@@ -319,6 +407,7 @@ impl InputBuffer {
         self.value = s.to_string();
         self.cursor = self.value.len();
         self.scroll_offset.set(0);
+        self.sel_anchor.set(None);
         self.pastes.clear();
     }
 
@@ -436,9 +525,11 @@ impl InputBuffer {
         let total = rows.len();
         let start = self.scroll_offset.get().min(total.saturating_sub(1));
         let text_style = Style::new().fg(text_color);
+        let selected_style = Style::new().fg(text_color).bg(theme::SELECTION);
         let cursor_style = Style::new()
             .fg(cursor_color)
             .add_modifier(Modifier::REVERSED);
+        let sel = self.selection();
 
         let mut lines: Vec<Line<'static>> = Vec::new();
         for r in rows.iter().skip(start).take(viewport.max(1)) {
@@ -449,8 +540,11 @@ impl InputBuffer {
                 if is_cursor {
                     found_cursor = true;
                 }
+                let in_selection = sel.as_ref().is_some_and(|s| s.contains(bi));
                 let style = if is_cursor {
                     cursor_style
+                } else if in_selection {
+                    selected_style
                 } else if self.marker_id_at(*bi).is_some() {
                     paste_label_style()
                 } else {
@@ -460,10 +554,15 @@ impl InputBuffer {
             }
             if !found_cursor && self.cursor == r.end_byte {
                 spans.push(Span::styled(" ".to_string(), cursor_style));
-            }
-            if spans.is_empty() {
+            } else if spans.is_empty() {
+                let row_start = r.chars.first().map_or(r.end_byte, |(_, bi)| *bi);
+                let row_selected = sel
+                    .as_ref()
+                    .is_some_and(|s| s.start <= r.end_byte && s.end > row_start);
                 let style = if self.cursor == r.end_byte {
                     cursor_style
+                } else if row_selected {
+                    selected_style
                 } else {
                     text_style
                 };
@@ -538,6 +637,12 @@ fn paste_label_style() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+fn input_block<'a>() -> Block<'a> {
+    Block::new()
+        .bg(theme::SURFACE)
+        .padding(ratatui::widgets::Padding::symmetric(2, 1))
+}
+
 impl Default for InputBuffer {
     fn default() -> Self {
         Self::new()
@@ -560,6 +665,15 @@ pub enum TextAreaMessage {
     Newline,
     CursorUp,
     CursorDown,
+    SelectLeft,
+    SelectRight,
+    SelectUp,
+    SelectDown,
+    SelectHome,
+    SelectEnd,
+    MouseDown { column: u16, row: u16 },
+    MouseDrag { column: u16, row: u16 },
+    MouseUp,
     Submit,
     Clear,
 }
@@ -573,6 +687,8 @@ pub struct TextArea {
     pub placeholder: &'static str,
     pub max_height: u16,
     pub width: Cell<usize>,
+    /// Last painted area, for mouse-position → byte mapping between frames.
+    view_area: Cell<Rect>,
     /// Prompt drafts recalled with Up/Ctrl+P; most recent last.
     up_stack: Vec<String>,
     /// Drafts displaced by an up-recall, recallable with Down/Ctrl+N.
@@ -587,6 +703,7 @@ impl TextArea {
             placeholder,
             max_height: 8,
             width: Cell::new(0),
+            view_area: Cell::new(Rect::default()),
             up_stack: Vec::new(),
             down_stack: Vec::new(),
         }
@@ -598,6 +715,7 @@ impl TextArea {
             placeholder,
             max_height,
             width: Cell::new(0),
+            view_area: Cell::new(Rect::default()),
             up_stack: Vec::new(),
             down_stack: Vec::new(),
         }
@@ -630,12 +748,54 @@ impl TextArea {
             }
             KeyCode::Enter => Some(TextAreaMessage::Submit),
             KeyCode::Backspace => Some(TextAreaMessage::Backspace),
-            KeyCode::Left => Some(TextAreaMessage::Left),
-            KeyCode::Right => Some(TextAreaMessage::Right),
-            KeyCode::Up => Some(TextAreaMessage::CursorUp),
-            KeyCode::Down => Some(TextAreaMessage::CursorDown),
-            KeyCode::Home => Some(TextAreaMessage::Home),
-            KeyCode::End => Some(TextAreaMessage::End),
+            KeyCode::Left => {
+                let msg = if key.modifiers.contains(Modifiers::SHIFT) {
+                    TextAreaMessage::SelectLeft
+                } else {
+                    TextAreaMessage::Left
+                };
+                Some(msg)
+            }
+            KeyCode::Right => {
+                let msg = if key.modifiers.contains(Modifiers::SHIFT) {
+                    TextAreaMessage::SelectRight
+                } else {
+                    TextAreaMessage::Right
+                };
+                Some(msg)
+            }
+            KeyCode::Up => {
+                let msg = if key.modifiers.contains(Modifiers::SHIFT) {
+                    TextAreaMessage::SelectUp
+                } else {
+                    TextAreaMessage::CursorUp
+                };
+                Some(msg)
+            }
+            KeyCode::Down => {
+                let msg = if key.modifiers.contains(Modifiers::SHIFT) {
+                    TextAreaMessage::SelectDown
+                } else {
+                    TextAreaMessage::CursorDown
+                };
+                Some(msg)
+            }
+            KeyCode::Home => {
+                let msg = if key.modifiers.contains(Modifiers::SHIFT) {
+                    TextAreaMessage::SelectHome
+                } else {
+                    TextAreaMessage::Home
+                };
+                Some(msg)
+            }
+            KeyCode::End => {
+                let msg = if key.modifiers.contains(Modifiers::SHIFT) {
+                    TextAreaMessage::SelectEnd
+                } else {
+                    TextAreaMessage::End
+                };
+                Some(msg)
+            }
             KeyCode::Char(c) => Some(TextAreaMessage::Input(c)),
             _ => None,
         }
@@ -674,40 +834,91 @@ impl TextArea {
             }
             TextAreaMessage::Left => {
                 self.buffer.left();
+                self.buffer.clear_anchor();
                 None
             }
             TextAreaMessage::Right => {
                 self.buffer.right();
+                self.buffer.clear_anchor();
                 None
             }
             TextAreaMessage::LeftWord => {
                 self.buffer.left_word();
+                self.buffer.clear_anchor();
                 None
             }
             TextAreaMessage::RightWord => {
                 self.buffer.right_word();
+                self.buffer.clear_anchor();
                 None
             }
             TextAreaMessage::Home => {
                 self.buffer.home();
+                self.buffer.clear_anchor();
                 None
             }
             TextAreaMessage::End => {
                 self.buffer.end();
+                self.buffer.clear_anchor();
                 None
             }
             TextAreaMessage::CursorUp => {
                 if !self.recall_up() {
                     self.buffer.up(width);
                 }
+                self.buffer.clear_anchor();
                 None
             }
             TextAreaMessage::CursorDown => {
                 if !self.recall_down() {
                     self.buffer.down(width);
                 }
+                self.buffer.clear_anchor();
                 None
             }
+            TextAreaMessage::SelectLeft => {
+                self.buffer.anchor_here();
+                self.buffer.left();
+                None
+            }
+            TextAreaMessage::SelectRight => {
+                self.buffer.anchor_here();
+                self.buffer.right();
+                None
+            }
+            TextAreaMessage::SelectUp => {
+                self.buffer.anchor_here();
+                self.buffer.up(width);
+                None
+            }
+            TextAreaMessage::SelectDown => {
+                self.buffer.anchor_here();
+                self.buffer.down(width);
+                None
+            }
+            TextAreaMessage::SelectHome => {
+                self.buffer.anchor_here();
+                self.buffer.home();
+                None
+            }
+            TextAreaMessage::SelectEnd => {
+                self.buffer.anchor_here();
+                self.buffer.end();
+                None
+            }
+            TextAreaMessage::MouseDown { column, row } => {
+                if let Some(byte) = self.hit_byte(column, row) {
+                    self.buffer.place_cursor(byte);
+                }
+                None
+            }
+            TextAreaMessage::MouseDrag { column, row } => {
+                if let Some(byte) = self.hit_byte(column, row) {
+                    self.buffer.select_to(byte);
+                }
+                None
+            }
+            TextAreaMessage::MouseUp => None,
             TextAreaMessage::Submit => {
                 let content = self.buffer.expanded().trim().to_string();
                 if content.is_empty() {
@@ -726,6 +937,24 @@ impl TextArea {
 
     fn buffer_width(&self) -> usize {
         self.width.get().max(1)
+    }
+
+    /// Byte index under a terminal cell, or `None` outside the input's
+    /// content box. `column`/`row` are terminal-cell coordinates from a
+    /// mouse event; the visual row accounts for the buffer's scroll.
+    fn hit_byte(&self, column: u16, row: u16) -> Option<usize> {
+        let area = self.view_area.get();
+        if area.width == 0 || area.height == 0 {
+            return None;
+        }
+        let inner = input_block().inner(area);
+        if !inner.contains(ratatui::layout::Position::new(column, row)) {
+            return None;
+        }
+        let width = usize::from(inner.width.max(1));
+        let visual = usize::from(row - inner.y) + self.buffer.scroll_offset.get();
+        let col = usize::from(column - inner.x);
+        self.buffer.byte_at(width, visual, col)
     }
 
     /// Whether an up-recall (`Up`/`Ctrl+P`) should swap in a stashed draft:
@@ -814,9 +1043,8 @@ impl TextArea {
     /// `text_color` recolors the buffer text — bash mode, where a submit
     /// runs the prompt as a local shell command.
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect, text_color: Color) {
-        let block = Block::new()
-            .bg(crate::tui::theme::SURFACE)
-            .padding(ratatui::widgets::Padding::symmetric(2, 1));
+        self.view_area.set(area);
+        let block = input_block();
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -1430,5 +1658,221 @@ mod tests {
         assert_eq!(area.buffer.value, "previous");
         area.update(TextAreaMessage::CursorDown);
         assert_eq!(area.buffer.expanded(), "abl1\nl2\nl3");
+    }
+
+    fn select(b: &mut InputBuffer, start: usize, end: usize) {
+        b.place_cursor(start);
+        b.anchor_here();
+        b.select_to(end);
+    }
+
+    #[test]
+    fn anchor_and_extend_selects_and_copies() {
+        let mut b = InputBuffer::new();
+        b.set("hello");
+        select(&mut b, 2, 5);
+        assert_eq!(b.selection(), Some(2..5));
+        assert_eq!(b.selected_text().as_deref(), Some("llo"));
+        select(&mut b, 5, 2);
+        assert_eq!(b.selection(), Some(2..5), "reversed drag normalizes");
+        assert_eq!(b.selected_text().as_deref(), Some("llo"));
+    }
+
+    #[test]
+    fn plain_move_collapses_selection() {
+        let mut area = TextArea::with_max_height("p", 8);
+        area.width.set(40);
+        area.buffer.set("hello");
+        select(&mut area.buffer, 0, 3);
+        assert_eq!(area.buffer.selection(), Some(0..3));
+        area.update(TextAreaMessage::Right);
+        assert_eq!(
+            area.buffer.selection(),
+            None,
+            "plain motion collapses to the head"
+        );
+        assert_eq!(area.buffer.cursor, 4);
+    }
+
+    #[test]
+    fn typing_replaces_selection() {
+        let mut b = InputBuffer::new();
+        b.set("hello");
+        select(&mut b, 2, 5);
+        b.push('E');
+        assert_eq!(b.value, "heE");
+        assert_eq!(b.cursor, "heE".len());
+        assert_eq!(b.selection(), None);
+    }
+
+    #[test]
+    fn paste_replaces_selection() {
+        let mut b = InputBuffer::new();
+        b.set("hello world");
+        select(&mut b, 0, 5);
+        b.paste("X\nY");
+        assert_eq!(b.expanded(), "X\nY world");
+        assert_eq!(b.cursor, "X\nY".len());
+    }
+
+    #[test]
+    fn backspace_deletes_whole_selection() {
+        let mut b = InputBuffer::new();
+        b.set("hello world");
+        select(&mut b, 0, 6);
+        b.backspace();
+        assert_eq!(b.value, "world");
+        assert_eq!(b.cursor, 0);
+        assert_eq!(b.selection(), None);
+    }
+
+    #[test]
+    fn forward_delete_deletes_whole_selection() {
+        let mut b = InputBuffer::new();
+        b.set("hello world");
+        select(&mut b, 0, 6);
+        b.delete();
+        assert_eq!(b.value, "world");
+        assert_eq!(b.cursor, 0);
+    }
+
+    #[test]
+    fn kill_keys_delete_selection_first() {
+        let mut b = InputBuffer::new();
+        b.set("alpha beta");
+        select(&mut b, 0, 5);
+        b.kill_to_end();
+        assert_eq!(b.value, " beta");
+        let mut b = InputBuffer::new();
+        b.set("alpha beta");
+        select(&mut b, 0, 5);
+        b.kill_to_line_start();
+        assert_eq!(b.value, " beta");
+        assert_eq!(b.cursor, 0);
+    }
+
+    #[test]
+    fn mouse_drag_selects_within_view() {
+        let mut area = TextArea::with_max_height("p", 8);
+        area.buffer.set("hello world");
+        area.width.set(16);
+        area.view_area.set(Rect::new(0, 0, 20, 4));
+        area.update(TextAreaMessage::MouseDown { column: 2, row: 1 });
+        assert_eq!(area.buffer.cursor, 0);
+        area.update(TextAreaMessage::MouseDrag { column: 7, row: 1 });
+        assert_eq!(area.buffer.selection(), Some(0..5));
+        assert_eq!(area.buffer.selected_text().as_deref(), Some("hello"));
+        area.update(TextAreaMessage::MouseUp);
+        assert_eq!(area.buffer.selection(), Some(0..5), "up keeps the drag");
+        area.update(TextAreaMessage::MouseDown { column: 13, row: 1 });
+        assert_eq!(area.buffer.selection(), None, "down collapses");
+        assert_eq!(area.buffer.cursor, "hello world".len());
+    }
+
+    #[test]
+    fn mouse_click_outside_text_is_ignored() {
+        let mut area = TextArea::with_max_height("p", 8);
+        area.buffer.set("hello");
+        area.width.set(16);
+        area.view_area.set(Rect::new(0, 0, 20, 4));
+        area.update(TextAreaMessage::MouseDown { column: 0, row: 1 });
+        assert_eq!(area.buffer.cursor, "hello".len(), "padding column ignored");
+        area.update(TextAreaMessage::MouseDrag { column: 2, row: 3 });
+        assert_eq!(area.buffer.cursor, "hello".len(), "padding row ignored");
+        area.view_area.set(Rect::default());
+        area.update(TextAreaMessage::MouseDown { column: 2, row: 1 });
+        assert_eq!(area.buffer.cursor, "hello".len(), "unpainted area is inert");
+    }
+
+    #[test]
+    fn selection_expands_paste_marker_on_copy() {
+        let mut b = InputBuffer::new();
+        b.set("ab");
+        b.paste("l1\nl2\nl3");
+        select(&mut b, 0, 1);
+        assert_eq!(b.selected_text().as_deref(), Some("a"));
+        let len = b.value.len();
+        select(&mut b, 0, len);
+        assert_eq!(b.selected_text().as_deref(), Some("abl1\nl2\nl3"));
+    }
+
+    #[test]
+    fn deleting_selection_drops_swallowed_paste() {
+        let mut b = InputBuffer::new();
+        b.paste("l1\nl2\nl3");
+        b.insert_str("ok");
+        select(&mut b, 0, 3);
+        b.delete();
+        assert_eq!(b.value, "ok");
+        assert_eq!(b.expanded(), "ok");
+        assert!(b.pastes.iter().all(String::is_empty));
+    }
+
+    #[test]
+    fn cursor_lines_highlight_selection_cells() {
+        let mut b = InputBuffer::new();
+        b.set("hello");
+        select(&mut b, 0, 3);
+        let lines = b.cursor_lines(theme::TEXT, theme::ACCENT, 20, 8);
+        let row = &lines[0];
+        let highlighted: String = row
+            .spans
+            .iter()
+            .filter(|s| s.style.bg == Some(theme::SELECTION))
+            .map(|s| s.content.to_string())
+            .collect();
+        assert_eq!(highlighted, "hel");
+        assert_eq!(
+            row.spans[3].style.add_modifier,
+            Modifier::REVERSED,
+            "the head cell keeps the cursor"
+        );
+    }
+
+    #[test]
+    fn cursor_lines_highlight_empty_row_break() {
+        let mut b = InputBuffer::new();
+        b.set("a\n\nb");
+        select(&mut b, 0, 3);
+        assert_eq!(b.selection(), Some(0..3));
+        let lines = b.cursor_lines(theme::TEXT, theme::ACCENT, 20, 8);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[1].spans[0].style.bg, Some(theme::SELECTION));
+        assert_eq!(lines[2].spans[0].style.bg, None, "beyond the break");
+    }
+
+    #[test]
+    fn selection_covers_logical_breaks() {
+        let mut b = InputBuffer::new();
+        b.set("first line\nsecond line");
+        let len = b.value.len();
+        select(&mut b, 0, len);
+        assert_eq!(
+            b.selected_text().as_deref(),
+            Some("first line\nsecond line")
+        );
+    }
+
+    #[test]
+    fn select_up_extends_visual_column() {
+        let mut b = InputBuffer::new();
+        b.set("one\ntwo");
+        b.end();
+        b.anchor_here();
+        b.up(20);
+        assert_eq!(b.selection(), Some(3..7));
+        assert_eq!(b.selected_text().as_deref(), Some("\ntwo"));
+    }
+
+    #[test]
+    fn selection_resets_on_set_and_clear() {
+        let mut b = InputBuffer::new();
+        b.set("hello");
+        select(&mut b, 0, 3);
+        b.set("fresh");
+        assert_eq!(b.selection(), None);
+        select(&mut b, 0, 3);
+        b.clear();
+        assert_eq!(b.selection(), None);
     }
 }

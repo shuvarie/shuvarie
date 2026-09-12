@@ -1,4 +1,4 @@
-pub use keys::{alt, alt_shift, ctrl};
+pub use keys::{alt, alt_shift, ctrl, ctrl_shift};
 
 mod keys;
 pub mod num;

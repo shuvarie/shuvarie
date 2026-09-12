@@ -145,6 +145,24 @@ impl BodySource {
         }
     }
 
+    /// The copy text of one source row: the logical content without layout
+    /// decoration — code without the number gutter, diffs without the
+    /// gutter columns, everything else as shown.
+    pub(crate) fn row_copy_text(&self, index: u32) -> String {
+        match self {
+            BodySource::Text { rows, prefix, .. } => {
+                format!("{prefix}{}", rows.row_str(index))
+            }
+            BodySource::Numbered { rows } => rows.row_str(index).to_string(),
+            BodySource::Diff { lines } => diff_row_copy_text(&lines[index as usize]),
+            BodySource::Lines { lines } => lines[index as usize]
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect(),
+        }
+    }
+
     pub(crate) fn row(&self, index: u32) -> Line<'static> {
         match self {
             BodySource::Text {
@@ -178,6 +196,20 @@ fn diff_row_text(line: &DiffLine) -> String {
     let new_num = gutter_number(line.new_line);
     let text = line.text.trim_end_matches(['\r', '\n']);
     format!("  {old_num} {new_num} {marker}{text}")
+}
+
+fn diff_row_copy_text(line: &DiffLine) -> String {
+    if line.kind == DiffLineKind::Ellipsis {
+        return String::new();
+    }
+    let marker = match line.kind {
+        DiffLineKind::Add => "+",
+        DiffLineKind::Remove => "-",
+        DiffLineKind::Context => " ",
+        DiffLineKind::Ellipsis => unreachable!(),
+    };
+    let text = line.text.trim_end_matches(['\r', '\n']);
+    format!("{marker}{text}")
 }
 
 fn diff_row_line(line: &DiffLine) -> Line<'static> {
@@ -368,6 +400,50 @@ pub(crate) fn wrapped_line_count(line: &Line<'_>, width: u16, trim: bool) -> u32
         .line_count(width) as u32
 }
 
+/// The text one wrapped row of `line` shows at `width`: rendered into a
+/// scratch buffer with the same paragraph settings so copy output matches
+/// the pixels exactly. The fast path returns the spans as-is when the line
+/// fits.
+pub(crate) fn visual_row_text(line: &Line<'_>, width: u16, trim: bool, index: u32) -> String {
+    if index == 0 && line.width() <= usize::from(width) {
+        return line.spans.iter().map(|s| s.content.clone()).collect();
+    }
+    let total = wrapped_line_count(line, width, trim);
+    let offset = index.min(total.saturating_sub(1));
+    let area = Rect::new(0, 0, width.max(1), 1);
+    let mut buf = Buffer::empty(area);
+    Paragraph::new(vec![line.clone()])
+        .wrap(Wrap { trim })
+        .scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0))
+        .render(area, &mut buf);
+    (0..area.width)
+        .map(|x| buf[(x, 0)].symbol().to_string())
+        .collect::<String>()
+        .trim_end()
+        .to_string()
+}
+
+/// The substring of a rendered row between content columns `[from, to)`,
+/// keeping any wide glyph straddling a boundary. `to` past the row's end
+/// takes the rest of the row.
+pub(crate) fn slice_visual(text: &str, from: usize, to: usize) -> String {
+    let mut out = String::new();
+    let mut x = 0usize;
+    for c in text.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if x + w <= from {
+            x += w;
+            continue;
+        }
+        if x >= to {
+            break;
+        }
+        out.push(c);
+        x += w;
+    }
+    out
+}
+
 /// One rendered chunk of the chat: its body chunks, an optional full-width
 /// block background, padding applied inside that background, and an optional
 /// click hit target spanning the segment's rows. Block models project into
@@ -521,6 +597,86 @@ impl Segment {
             chunk.paint_band(a..b, width, self.trim, rect, buf);
             cursor += rows;
         }
+    }
+
+    /// Resolve a segment-local wrapped row back to the source row it
+    /// projects, mirroring `paint`'s layout. `None` on padding rows, empty
+    /// segments, and rows past the body.
+    pub fn locate_row(&self, row_in_seg: u32, content_width: u16) -> Option<ResolvedRow> {
+        let width = self.text_width(content_width);
+        if self.is_empty(width) {
+            return None;
+        }
+        let pad_y = u32::from(self.padding.1);
+        let body_row = row_in_seg.checked_sub(pad_y)?;
+        let mut cursor = 0u32;
+        for chunk in &self.chunks {
+            let rows = chunk.row_count(width, self.trim);
+            if body_row < cursor + rows {
+                let local = body_row - cursor;
+                return match chunk {
+                    BodyChunk::Fixed(chunk) => {
+                        let counts = chunk.counts(width, self.trim);
+                        let (first, _last, offset) = count_window(&counts, local, local + 1)?;
+                        let source = BodySource::Lines {
+                            lines: Rc::from(chunk.lines.clone()),
+                        };
+                        Some(ResolvedRow {
+                            source,
+                            source_row: first as u32,
+                            wrap_index: offset,
+                            wrap_total: counts[first],
+                            text_width: width,
+                            pad_x: self.padding.0,
+                            trim: self.trim,
+                        })
+                    }
+                    BodyChunk::Sliced(chunk) => {
+                        let (first, _last, offset) = count_window(&chunk.counts, local, local + 1)?;
+                        Some(ResolvedRow {
+                            source: chunk.source.clone(),
+                            source_row: chunk.start + first as u32,
+                            wrap_index: offset,
+                            wrap_total: chunk.counts[first],
+                            text_width: width,
+                            pad_x: self.padding.0,
+                            trim: self.trim,
+                        })
+                    }
+                };
+            }
+            cursor += rows;
+        }
+        None
+    }
+}
+
+/// A segment-local wrapped row resolved back to its source: which body row
+/// produced it, which wrapped slice of that row it is, and the source handle
+/// for text extraction. Copy-only; paint never touches it.
+pub struct ResolvedRow {
+    pub source: BodySource,
+    pub source_row: u32,
+    /// Wrapped-row offset within the source row.
+    pub wrap_index: u32,
+    pub wrap_total: u32,
+    /// Text width the row was resolved at (content width minus the segment
+    /// padding), for visual extraction.
+    pub text_width: u16,
+    /// Segment padding columns the text starts at, in content coordinates.
+    pub pad_x: u16,
+    pub trim: bool,
+}
+
+impl ResolvedRow {
+    /// The row's logical copy text, without layout decoration.
+    pub fn copy_text(&self) -> String {
+        self.source.row_copy_text(self.source_row)
+    }
+
+    /// The styled line of the source row.
+    pub fn line(&self) -> Line<'static> {
+        self.source.row(self.source_row)
     }
 }
 
@@ -868,5 +1024,125 @@ pub(crate) mod tests {
             trim: true,
         };
         assert_eq!(seg.measure(40), 1 + 2 * u32::from(BLOCK_PADDING.1));
+    }
+
+    fn sample_text_source() -> BodySource {
+        BodySource::Text {
+            rows: TextRows::new("short\na very long tool output row that wraps around the\nthird"),
+            prefix: "",
+            style: Style::new(),
+        }
+    }
+
+    #[test]
+    fn locate_row_resolves_fixed_chunks() {
+        let seg = Segment::chunked(
+            BodyChunk::rows(sample_text_source(), 0, 40, false),
+            None,
+            (2, 1),
+            false,
+        );
+        assert_eq!(seg.measure(40), 6);
+        assert!(seg.locate_row(0, 40).is_none(), "padding row");
+        let head = seg.locate_row(1, 40).expect("first body row");
+        assert_eq!(head.copy_text(), "short");
+        assert_eq!((head.wrap_index, head.wrap_total), (0, 1));
+        let wrapped_head = seg.locate_row(2, 40).expect("wrapped row");
+        assert_eq!(wrapped_head.source_row, 1);
+        assert_eq!(wrapped_head.wrap_index, 0);
+        let wrapped_tail = seg.locate_row(3, 40).expect("wrapped tail");
+        assert_eq!(wrapped_tail.source_row, 1);
+        assert_eq!(wrapped_tail.wrap_index, 1);
+        let tail = seg.locate_row(4, 40).expect("third source row");
+        assert_eq!(tail.copy_text(), "third");
+        assert!(seg.locate_row(5, 40).is_none(), "past the body");
+    }
+
+    #[test]
+    fn locate_row_resolves_sliced_chunks() {
+        let source = sample_text_source();
+        let counts: Rc<[u32]> = (0..3)
+            .map(|i| source_row_count(&source, i, 40, false))
+            .collect();
+        let seg = Segment::chunked(BodyChunk::counted(source, 0, counts), None, (2, 1), false);
+        let mid = seg.locate_row(3, 40).expect("second wrapped row");
+        assert_eq!(mid.source_row, 1);
+        assert_eq!(mid.wrap_index, 1);
+        assert_eq!(mid.wrap_total, 2);
+        let tail = seg.locate_row(4, 40).expect("third source row");
+        assert_eq!(tail.copy_text(), "third");
+        assert!(seg.locate_row(5, 40).is_none(), "trailing padding");
+    }
+
+    #[test]
+    fn visual_row_text_matches_painted_window() {
+        for (trim, line) in [
+            (false, Line::from("short line")),
+            (
+                false,
+                Line::from("a much longer line that will definitely wrap at the given width"),
+            ),
+            (
+                false,
+                Line::from("        let value = compute_something(with_a_long_argument, args);"),
+            ),
+            (
+                true,
+                Line::from("        let value = compute_something(with_a_long_argument, args);"),
+            ),
+        ] {
+            let w = 30;
+            let total = wrapped_line_count(&line, w, trim);
+            let mut buf = Buffer::empty(Rect::new(
+                0,
+                0,
+                w,
+                u16::try_from(2 * total.max(1)).unwrap_or(u16::MAX),
+            ));
+            Paragraph::new(vec![line.clone()])
+                .wrap(Wrap { trim })
+                .render(buf.area, &mut buf);
+            for i in 0..total {
+                let painted: String = (0..w)
+                    .map(|x| buf[(x, i as u16)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string();
+                assert_eq!(visual_row_text(&line, w, trim, i), painted);
+            }
+        }
+    }
+
+    #[test]
+    fn visual_row_text_fast_path_matches_spans() {
+        let line = Line::from("no wrap here");
+        assert_eq!(visual_row_text(&line, 40, true, 0), "no wrap here");
+    }
+
+    #[test]
+    fn copy_text_strips_layout_decoration() {
+        let numbered = BodySource::Numbered {
+            rows: TextRows::new("let x = 1;\nlet y = 2;"),
+        };
+        assert_eq!(numbered.row_copy_text(0), "let x = 1;");
+        assert_eq!(numbered.row_text(0), "       1 let x = 1;");
+        let diff = BodySource::Diff {
+            lines: Rc::from(vec![
+                DiffLine {
+                    kind: DiffLineKind::Add,
+                    old_line: None,
+                    new_line: Some(3),
+                    text: "let z = 3;".to_string(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Context,
+                    old_line: Some(3),
+                    new_line: Some(3),
+                    text: "kept".to_string(),
+                },
+            ]),
+        };
+        assert_eq!(diff.row_copy_text(0), "+let z = 3;");
+        assert_eq!(diff.row_copy_text(1), " kept");
     }
 }
