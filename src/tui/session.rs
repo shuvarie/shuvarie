@@ -1009,11 +1009,15 @@ impl SessionScreen {
                 .chat
                 .has_steered()
                 .then_some(("Alt+↑", "recall steered"));
-            let ctrl_c = if self.input.is_empty() {
+            let input_selection = self.input.buffer.selection().is_some();
+            let ctrl_c = if input_selection || self.chat.has_selection() {
+                "copy"
+            } else if self.input.is_empty() {
                 "quit"
             } else {
                 "clear"
             };
+            let cut = input_selection.then_some(("Ctrl+X", "cut"));
             let footer = if !self.question.open && self.slash.active() {
                 theme::help_line(&[("Tab", "complete"), ("↑↓", "select"), ("Esc", "dismiss")])
             } else if self.chat.is_streaming() {
@@ -1025,12 +1029,14 @@ impl SessionScreen {
                 if bash_mode {
                     bindings.insert(0, ("Enter", "run"));
                 }
+                bindings.extend(cut);
                 bindings.extend(recall);
                 theme::help_line(&bindings)
             } else {
                 let enter = if bash_mode { "run" } else { "send" };
                 let mut bindings =
                     vec![("Enter", enter), ("Ctrl+M", "commands"), ("Ctrl+C", ctrl_c)];
+                bindings.extend(cut);
                 bindings.extend(recall);
                 theme::help_line(&bindings)
             };

@@ -74,30 +74,29 @@ impl CopyGroup {
     }
 }
 
-/// Selection column bounds for one highlighted content row: interior rows
-/// span the full content width, boundary rows run from the selection's
-/// column, inset by the segment's text padding.
+/// Selection columns of one content row: boundary rows span from the
+/// selection's content column, interior rows the full content width.
 fn sel_columns(
     turn: usize,
     row: u32,
     start: &SelPos,
     end: &SelPos,
-    pad: u16,
     content_width: u16,
 ) -> (u16, u16) {
     let from = (turn == start.turn && start.row == row).then_some(start.col);
     let to = (turn == end.turn && end.row == row).then_some(end.col);
-    let x0 = from.map_or(0, |c| pad.saturating_add(c).min(content_width));
-    let x1 = to.map_or(content_width, |c| pad.saturating_add(c).min(content_width));
+    let x0 = from.map_or(0, |c| c.min(content_width));
+    let x1 = to.map_or(content_width, |c| c.min(content_width));
     (x0, x1)
 }
 
-/// Paint the selection background over `[x0, x1)` of one row, extending a
-/// boundary by one cell when a wide glyph straddles it.
+/// Paint the selection background over content-space `[x0, x1)` of one row,
+/// translated into screen space, extending a boundary by one cell when a wide
+/// glyph straddles it.
 fn tint_row(buf: &mut Buffer, clip: Rect, content_width: u16, y: u16, mut x0: u16, mut x1: u16) {
     let right = clip.x.saturating_add(content_width);
-    x0 = x0.min(right);
-    x1 = x1.min(right);
+    x0 = clip.x.saturating_add(x0.min(content_width));
+    x1 = clip.x.saturating_add(x1.min(content_width));
     if x0 >= x1 {
         return;
     }
@@ -859,6 +858,10 @@ impl Chat {
             };
             let turn_idx = i;
             let h = *h;
+            if turn_idx < start.turn || turn_idx > end.turn {
+                y += h;
+                continue;
+            }
             let lo = if turn_idx == start.turn {
                 start.row.min(h.saturating_sub(1))
             } else {
@@ -884,14 +887,7 @@ impl Chat {
                     }
                     for row in seg_lo..seg_hi {
                         let global = y + row;
-                        let (x0, x1) = sel_columns(
-                            turn_idx,
-                            row,
-                            &start,
-                            &end,
-                            seg.segment.padding.0,
-                            content_width,
-                        );
+                        let (x0, x1) = sel_columns(turn_idx, row, &start, &end, content_width);
                         if x0 >= x1 {
                             continue;
                         }
@@ -1330,6 +1326,11 @@ impl Chat {
             scroll.offset = 0;
             scroll.sticky_bottom = false;
         }
+    }
+
+    /// Whether a chat selection is live.
+    pub fn has_selection(&self) -> bool {
+        self.selection.borrow().is_some()
     }
 
     /// Text of the active chat selection, copied on demand; `None` when no
@@ -1822,11 +1823,16 @@ mod tests {
     }
 
     fn draw(chat: &Chat, width: u16, height: u16) -> ratatui::buffer::Buffer {
-        let backend = TestBackend::new(width, height);
+        draw_at(chat, Rect::new(0, 0, width, height))
+    }
+
+    fn draw_at(chat: &Chat, area: Rect) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(
+            area.x.saturating_add(area.width),
+            area.y.saturating_add(area.height),
+        );
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| chat.view(frame, Rect::new(0, 0, width, height)))
-            .unwrap();
+        terminal.draw(|frame| chat.view(frame, area)).unwrap();
         terminal.backend().buffer().clone()
     }
 
@@ -3096,6 +3102,118 @@ mod tests {
             });
         }
         assert_eq!(chat.selected_text(), None, "count wrapped to point start");
+    }
+
+    #[test]
+    fn overlay_tints_boundary_row_at_screen_offset() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "alpha beta gamma".into(),
+        });
+        let clip = Rect::new(10, 2, 80, 20);
+        let buf = draw_at(&chat, clip);
+        let Some((col, row)) = row_with(&buf, "beta") else {
+            panic!("text on screen");
+        };
+        assert!(col >= clip.x, "text right of the clip origin");
+        chat.update(ChatMessage::Mouse {
+            kind: super::MouseKind::Down,
+            column: col,
+            row,
+        });
+        chat.update(ChatMessage::Mouse {
+            kind: super::MouseKind::Drag,
+            column: col + 4,
+            row,
+        });
+        let buf = draw_at(&chat, clip);
+        let tinted: Vec<u16> = (0..buf.area().width)
+            .filter(|&x| buf[(x, row)].bg == theme::SELECTION)
+            .collect();
+        assert_eq!(
+            tinted,
+            (col..col + 4).collect::<Vec<_>>(),
+            "boundary row tints exactly the selected columns on screen"
+        );
+    }
+
+    #[test]
+    fn overlay_tints_interior_rows_full_width_at_screen_offset() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "alpha beta gamma\nsecond row here".into(),
+        });
+        let clip = Rect::new(10, 2, 80, 20);
+        let buf = draw_at(&chat, clip);
+        let Some((col, row)) = row_with(&buf, "beta") else {
+            panic!("text on screen");
+        };
+        chat.update(ChatMessage::Mouse {
+            kind: super::MouseKind::Down,
+            column: col,
+            row,
+        });
+        let Some((tail_col, tail_row)) = row_with(&buf, "second") else {
+            panic!("second row on screen");
+        };
+        chat.update(ChatMessage::Mouse {
+            kind: super::MouseKind::Drag,
+            column: tail_col + 3,
+            row: tail_row,
+        });
+        let buf = draw_at(&chat, clip);
+        let content = clip.x..clip.x + chat_width_of(clip.width);
+        for row in (row + 1)..tail_row {
+            for x in 0..buf.area().width {
+                assert_eq!(
+                    buf[(x, row)].bg == theme::SELECTION,
+                    content.contains(&x),
+                    "interior row {row} tints exactly the content width"
+                );
+            }
+        }
+    }
+
+    fn chat_width_of(pane_width: u16) -> u16 {
+        pane_width.saturating_sub(1)
+    }
+
+    #[test]
+    fn overlay_tints_only_the_selected_turn() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "first turn".into(),
+        });
+        chat.update(ChatMessage::StreamDone);
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "second turn".into(),
+        });
+        chat.update(ChatMessage::StreamDone);
+        let buf = draw(&chat, 80, 20);
+        let Some((col, row)) = row_with(&buf, "second") else {
+            panic!("second turn on screen");
+        };
+        chat.update(ChatMessage::Mouse {
+            kind: super::MouseKind::Down,
+            column: col,
+            row,
+        });
+        chat.update(ChatMessage::Mouse {
+            kind: super::MouseKind::Drag,
+            column: col + 4,
+            row,
+        });
+        let buf = draw(&chat, 80, 20);
+        let Some((_, other_row)) = row_with(&buf, "first") else {
+            panic!("first turn on screen");
+        };
+        for x in 0..buf.area().width {
+            assert_ne!(
+                buf[(x, other_row)].bg,
+                theme::SELECTION,
+                "a turn outside the selection never tints"
+            );
+        }
     }
 
     #[test]

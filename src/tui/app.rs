@@ -7,7 +7,7 @@ use termina::event::{KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use tokio::sync::mpsc::Sender;
 
 use crate::tui::event::Event;
-use crate::tui::utils::{ctrl, ctrl_shift};
+use crate::tui::utils::ctrl;
 
 use super::add_provider::{AddProviderForm, AddProviderMessage, AddProviderOutcome};
 use super::command_menu::{CommandMenu, CommandMenuMessage};
@@ -338,19 +338,23 @@ impl App {
                     #[allow(clippy::single_match)]
                     match key.kind {
                         KeyEventKind::Press => match key.code {
-                            KeyCode::Char('c') if ctrl_shift(&key) => {
-                                return Some(AppMessage::Session(SessionMessage::CopySelection));
-                            }
-                            KeyCode::Char('x') if ctrl_shift(&key) => {
-                                return Some(AppMessage::Session(SessionMessage::CutSelection));
-                            }
                             KeyCode::Char('c') if ctrl(&key) => {
+                                if self.session.input.buffer.selection().is_some()
+                                    || self.session.chat.has_selection()
+                                {
+                                    return Some(AppMessage::Session(
+                                        SessionMessage::CopySelection,
+                                    ));
+                                }
                                 if !self.session.input.is_empty() {
                                     return Some(AppMessage::Session(SessionMessage::Text(
                                         TextAreaMessage::Clear,
                                     )));
                                 }
                                 return Some(AppMessage::RequestQuit);
+                            }
+                            KeyCode::Char('x') if ctrl(&key) => {
+                                return Some(AppMessage::Session(SessionMessage::CutSelection));
                             }
                             KeyCode::Char('m') if ctrl(&key) => {
                                 return Some(AppMessage::OpenCommandMenu);
