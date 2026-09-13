@@ -3496,9 +3496,8 @@ mod tests {
 
         let mut tokens = 0;
         while let Some(event) = event_rx.recv().await {
-            match event {
-                Event::TokenReceived { .. } => tokens += 1,
-                _ => {}
+            if let Event::TokenReceived { .. } = event {
+                tokens += 1;
             }
         }
         assert_eq!(tokens, 2, "the whole text segment streams");

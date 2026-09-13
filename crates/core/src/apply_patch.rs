@@ -119,6 +119,8 @@ pub fn parse_patch(patch_text: &str) -> Result<Vec<Hunk>, String> {
                 if let Some(content) = lines[i].strip_prefix('+') {
                     contents.push_str(content);
                     contents.push('\n');
+                } else if lines[i].is_empty() {
+                    contents.push('\n');
                 }
                 i += 1;
             }
@@ -176,6 +178,9 @@ pub fn parse_patch(patch_text: &str) -> Result<Vec<Hunk>, String> {
                             old_lines.push(content.to_string());
                         } else if let Some(content) = change_line.strip_prefix('+') {
                             new_lines.push(content.to_string());
+                        } else if change_line.is_empty() {
+                            old_lines.push(String::new());
+                            new_lines.push(String::new());
                         }
                         i += 1;
                     }
@@ -771,6 +776,64 @@ mod tests {
         assert_eq!(files[2].kind, PatchFileKind::Delete);
         assert!(files[2].new.is_none());
         assert!(out.as_text().expect("text output").contains("Success"));
+    }
+
+    #[tokio::test]
+    async fn applies_blank_context_lines_without_prefix() {
+        let (_dir, _guard) = tempdir();
+        std::fs::write(
+            "blank.rs",
+            "fn a() {\n    let x = 1;\n\n    let y = 2;\n}\n",
+        )
+        .unwrap();
+
+        let patch = r#"*** Begin Patch
+*** Update File: blank.rs
+@@
+ fn a() {
+     let x = 1;
+
+-    let y = 2;
++    let y = 3;
+ }
+*** End Patch"#;
+        let tool = ApplyPatch::new(None, FileLocks::new());
+        let mut ctx = ToolContext::default();
+        tool.call(&mut ctx, json!({ "patchText": patch }))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string("blank.rs").unwrap(),
+            "fn a() {\n    let x = 1;\n\n    let y = 3;\n}\n"
+        );
+    }
+
+    #[test]
+    fn parses_bare_blank_chunk_lines_as_empty_context() {
+        let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n one\n\n two\n*** End Patch";
+        let hunks = parse_patch(patch).unwrap();
+        let Hunk::Update { chunks, .. } = hunks.into_iter().next().unwrap() else {
+            panic!("expected update hunk");
+        };
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(
+            chunks[0].old_lines,
+            vec!["one".to_string(), String::new(), "two".to_string()]
+        );
+        assert_eq!(chunks[0].new_lines, chunks[0].old_lines);
+    }
+
+    #[test]
+    fn parses_blank_add_lines_and_ignores_section_gap() {
+        let patch = "*** Begin Patch\n*** Add File: a.txt\n+one\n\n+two\n*** End Patch";
+        let hunks = parse_patch(patch).unwrap();
+        assert_eq!(
+            hunks,
+            vec![Hunk::Add {
+                path: "a.txt".into(),
+                contents: "one\n\ntwo".into(),
+            }]
+        );
     }
 
     #[tokio::test]
