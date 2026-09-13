@@ -45,6 +45,11 @@ pub enum Command {
     DeleteSession {
         id: uuid::Uuid,
     },
+    /// Rename the active session. The core trims the title; an empty (or
+    /// unchanged) title is a no-op.
+    SetTitle {
+        title: String,
+    },
     SearchHistory {
         query: String,
     },

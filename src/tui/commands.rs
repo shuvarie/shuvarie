@@ -6,6 +6,7 @@ pub enum CommandAction {
     AddProvider,
     OpenSessionPicker,
     NewSession,
+    EditTitle,
     UndoLastTurn,
     Redo,
     Replay,
@@ -16,11 +17,12 @@ pub enum CommandAction {
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 11] = [
+    pub const ALL: [CommandAction; 12] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::OpenSessionPicker,
         CommandAction::NewSession,
+        CommandAction::EditTitle,
         CommandAction::UndoLastTurn,
         CommandAction::Redo,
         CommandAction::Replay,
@@ -36,6 +38,7 @@ impl CommandAction {
             CommandAction::AddProvider => "provider",
             CommandAction::OpenSessionPicker => "sessions",
             CommandAction::NewSession => "new",
+            CommandAction::EditTitle => "title",
             CommandAction::UndoLastTurn => "undo",
             CommandAction::Redo => "redo",
             CommandAction::Replay => "replay",
@@ -44,6 +47,12 @@ impl CommandAction {
             CommandAction::ToggleSidebar => "sidebar",
             CommandAction::Quit => "quit",
         }
+    }
+
+    /// Whether the command accepts free-form arguments after its name
+    /// (e.g. `/title My title`).
+    pub fn takes_args(self) -> bool {
+        matches!(self, CommandAction::EditTitle)
     }
 }
 
@@ -79,6 +88,12 @@ pub fn default_commands() -> Vec<CommandEntry> {
             name: "New session",
             description: "Start a fresh conversation",
             action: CommandAction::NewSession,
+            available: true,
+        },
+        CommandEntry {
+            name: "Edit title",
+            description: "Rename the current session",
+            action: CommandAction::EditTitle,
             available: true,
         },
         CommandEntry {
@@ -146,23 +161,45 @@ pub fn unescape(text: &str) -> &str {
     }
 }
 
-/// Parse submitted text as a slash command: the whole (trimmed) text must be a
-/// single token of the form `<trigger><alias>` matching a known command
-/// (case-insensitive). Escaped prefixes (`//`, `::`) never parse.
-pub fn parse_command(text: &str) -> Option<CommandAction> {
+/// A parsed `<trigger><alias> [args]` submission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParsedCommand {
+    pub action: CommandAction,
+    /// The trimmed remainder after the command name, `Some` only when
+    /// non-empty. Commands that take no args (see
+    /// [`CommandAction::takes_args`]) never parse with one.
+    pub args: Option<String>,
+}
+
+/// Parse submitted text as a slash command: the whole (trimmed) text must be
+/// of the form `<trigger><alias>` matching a known command
+/// (case-insensitive), optionally followed by an argument string for commands
+/// that take one. Escaped prefixes (`//`, `::`) never parse.
+pub fn parse_command(text: &str) -> Option<ParsedCommand> {
     let text = text.trim();
     let first = text.chars().next()?;
     if !TRIGGER_CHARS.contains(&first) || is_escaped(text) {
         return None;
     }
     let rest = &text[first.len_utf8()..];
-    if rest.is_empty() || rest.chars().any(char::is_whitespace) {
+    let (alias, args) = match rest.find(char::is_whitespace) {
+        Some(i) => (&rest[..i], rest[i..].trim()),
+        None => (rest, ""),
+    };
+    if alias.is_empty() {
         return None;
     }
-    CommandAction::ALL
+    let action = CommandAction::ALL
         .iter()
         .copied()
-        .find(|a| a.slash_name().eq_ignore_ascii_case(rest))
+        .find(|a| a.slash_name().eq_ignore_ascii_case(alias))?;
+    if !args.is_empty() && !action.takes_args() {
+        return None;
+    }
+    Some(ParsedCommand {
+        action,
+        args: (!args.is_empty()).then(|| args.to_string()),
+    })
 }
 
 /// A parsed `/skill:<name> [args]` invocation (also accepted with the `:`
@@ -230,19 +267,100 @@ mod tests {
     fn parse_recognizes_commands() {
         assert_eq!(
             parse_command("/model"),
-            Some(CommandAction::OpenModelSelect)
+            Some(ParsedCommand {
+                action: CommandAction::OpenModelSelect,
+                args: None
+            })
         );
         assert_eq!(
             parse_command(":MODEL"),
-            Some(CommandAction::OpenModelSelect)
+            Some(ParsedCommand {
+                action: CommandAction::OpenModelSelect,
+                args: None
+            })
         );
-        assert_eq!(parse_command("/undo"), Some(CommandAction::UndoLastTurn));
-        assert_eq!(parse_command("/continue"), Some(CommandAction::Continue));
-        assert_eq!(parse_command("/reload"), Some(CommandAction::Reload));
-        assert_eq!(parse_command(":Continue"), Some(CommandAction::Continue));
-        assert_eq!(parse_command("  /new  "), Some(CommandAction::NewSession));
-        assert_eq!(parse_command(":quit"), Some(CommandAction::Quit));
-        assert_eq!(parse_command("/QUIT"), Some(CommandAction::Quit));
+        assert_eq!(
+            parse_command("/undo"),
+            Some(ParsedCommand {
+                action: CommandAction::UndoLastTurn,
+                args: None
+            })
+        );
+        assert_eq!(
+            parse_command("/continue"),
+            Some(ParsedCommand {
+                action: CommandAction::Continue,
+                args: None
+            })
+        );
+        assert_eq!(
+            parse_command("/reload"),
+            Some(ParsedCommand {
+                action: CommandAction::Reload,
+                args: None
+            })
+        );
+        assert_eq!(
+            parse_command(":Continue"),
+            Some(ParsedCommand {
+                action: CommandAction::Continue,
+                args: None
+            })
+        );
+        assert_eq!(
+            parse_command("  /new  "),
+            Some(ParsedCommand {
+                action: CommandAction::NewSession,
+                args: None
+            })
+        );
+        assert_eq!(
+            parse_command(":quit"),
+            Some(ParsedCommand {
+                action: CommandAction::Quit,
+                args: None
+            })
+        );
+        assert_eq!(
+            parse_command("/QUIT"),
+            Some(ParsedCommand {
+                action: CommandAction::Quit,
+                args: None
+            })
+        );
+    }
+
+    #[test]
+    fn parse_command_with_arguments() {
+        assert_eq!(
+            parse_command("/title My title"),
+            Some(ParsedCommand {
+                action: CommandAction::EditTitle,
+                args: Some("My title".into())
+            })
+        );
+        assert_eq!(
+            parse_command(":TITLE   spaced   out  "),
+            Some(ParsedCommand {
+                action: CommandAction::EditTitle,
+                args: Some("spaced   out".into())
+            })
+        );
+        assert_eq!(
+            parse_command("/title"),
+            Some(ParsedCommand {
+                action: CommandAction::EditTitle,
+                args: None
+            })
+        );
+        assert_eq!(
+            parse_command("/title   "),
+            Some(ParsedCommand {
+                action: CommandAction::EditTitle,
+                args: None
+            }),
+            "whitespace-only remainder is no args"
+        );
     }
 
     #[test]
@@ -250,7 +368,11 @@ mod tests {
         assert_eq!(parse_command("//model"), None);
         assert_eq!(parse_command("::model"), None);
         assert_eq!(parse_command("/unknown"), None);
-        assert_eq!(parse_command("/model x"), None);
+        assert_eq!(
+            parse_command("/model x"),
+            None,
+            "commands without args never parse with one"
+        );
         assert_eq!(parse_command("/"), None);
         assert_eq!(parse_command(":"), None);
         assert_eq!(parse_command("hello"), None);

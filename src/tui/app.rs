@@ -23,6 +23,7 @@ use super::session::{
 use super::session_picker::{SessionPicker, SessionPickerEffect, SessionPickerMessage};
 use super::sidebar::SidebarMessage;
 use super::spinner::SpinnerKind;
+use super::title::{TitleEffect, TitleMessage, TitlePopup};
 use super::warning::{WarningMessage, WarningPopup};
 use super::welcome::{Welcome, WelcomeEffect, WelcomeMessage};
 use super::workspace::WorkspaceInfo;
@@ -37,6 +38,7 @@ pub enum Overlay {
     ConfirmQuit,
     SessionPicker,
     HistorySearch,
+    TitleEdit,
 }
 
 pub enum AppMessage {
@@ -55,6 +57,7 @@ pub enum AppMessage {
     Welcome(WelcomeMessage),
     SessionPicker(SessionPickerMessage),
     HistorySearch(HistorySearchMessage),
+    TitlePopup(TitleMessage),
     ConfigSaved,
     ConfigError {
         error: String,
@@ -77,6 +80,9 @@ pub enum AppMessage {
     },
     SessionCreated {
         id: uuid::Uuid,
+        title: String,
+    },
+    SessionTitleChanged {
         title: String,
     },
     SessionDeleted {
@@ -124,6 +130,7 @@ pub struct App {
     pub model_picker: ModelPicker,
     pub session_picker: SessionPicker,
     pub history_search: HistorySearch,
+    pub title_popup: TitlePopup,
     pub warning: WarningPopup,
     pub models: HashMap<String, Vec<Model>>,
     pending_model_pick: Option<String>,
@@ -194,6 +201,7 @@ impl App {
             model_picker: ModelPicker::new(),
             session_picker: SessionPicker::new(),
             history_search: HistorySearch::new(),
+            title_popup: TitlePopup::new(),
             warning: WarningPopup::new(),
             models: HashMap::new(),
             pending_model_pick: None,
@@ -331,6 +339,9 @@ impl App {
                                 .map_event(&key)
                                 .map(AppMessage::HistorySearch);
                         }
+                        Overlay::TitleEdit => {
+                            return self.title_popup.map_event(&key).map(AppMessage::TitlePopup);
+                        }
                         Overlay::None => {}
                     }
 
@@ -392,6 +403,9 @@ impl App {
                 CoreEvent::SessionStarted => None,
                 CoreEvent::SessionCreated { id, title } => {
                     Some(AppMessage::SessionCreated { id, title })
+                }
+                CoreEvent::SessionTitleChanged { title } => {
+                    Some(AppMessage::SessionTitleChanged { title })
                 }
                 CoreEvent::TokenReceived { content } => Some(AppMessage::Session(
                     SessionMessage::Chat(ChatMessage::TokenReceived { content }),
@@ -626,6 +640,9 @@ impl App {
             | Overlay::CommandMenu
             | Overlay::ConfirmQuit
             | Overlay::SessionPicker => None,
+            Overlay::TitleEdit => Some(AppMessage::TitlePopup(TitleMessage::Paste(
+                text.to_string(),
+            ))),
         }
     }
 
@@ -677,8 +694,8 @@ impl App {
                             self.ctx
                                 .send(shuvarie_core::Command::AnswerQuestion { id, answers });
                         }
-                        SessionEffect::RunCommand(action) => {
-                            if let Some(effect) = self.run_command(action) {
+                        SessionEffect::RunCommand { action, args } => {
+                            if let Some(effect) = self.run_command(action, args) {
                                 return Some(effect);
                             }
                         }
@@ -708,6 +725,17 @@ impl App {
                         SessionPickerEffect::Close => {
                             self.close_overlay();
                         }
+                    }
+                }
+            }
+            AppMessage::TitlePopup(m) => {
+                if let Some(effect) = self.title_popup.update(m) {
+                    match effect {
+                        TitleEffect::Set { title } => {
+                            self.close_overlay();
+                            self.ctx.send(shuvarie_core::Command::SetTitle { title });
+                        }
+                        TitleEffect::Close => self.close_overlay(),
                     }
                 }
             }
@@ -776,7 +804,7 @@ impl App {
             }
             AppMessage::CommandMenu(m) => {
                 if let Some(action) = self.command_menu.update(m)
-                    && let Some(effect) = self.run_command(action)
+                    && let Some(effect) = self.run_command(action, None)
                 {
                     return Some(effect);
                 }
@@ -860,7 +888,10 @@ impl App {
                                 .update(HistorySearchMessage::Resize { viewport_height: h });
                         }
                     }
-                    Overlay::None | Overlay::Welcome | Overlay::ConfirmQuit => {}
+                    Overlay::None
+                    | Overlay::Welcome
+                    | Overlay::ConfirmQuit
+                    | Overlay::TitleEdit => {}
                 }
             }
             AppMessage::ConfigSaved => {
@@ -948,6 +979,9 @@ impl App {
                 self.session.session_id = Some(id);
                 self.session.session_title = Some(title);
                 self.session_picker.active_id = Some(id);
+            }
+            AppMessage::SessionTitleChanged { title } => {
+                self.session.session_title = Some(title);
             }
             AppMessage::SessionsLoaded { sessions } => {
                 self.session_picker.set_sessions(sessions);
@@ -1057,12 +1091,14 @@ impl App {
         let can_continue = self.session.can_continue();
         self.command_menu
             .set_availability(CommandAction::Continue, can_continue);
+        self.command_menu
+            .set_availability(CommandAction::EditTitle, self.session.session_id.is_some());
     }
 
     /// Runs a command action (from the Ctrl+M menu or the inline slash menu).
     /// Run a command action. Returns `Some(AppEffect)` when the action needs
     /// to escalate to the parent (quit).
-    fn run_command(&mut self, action: CommandAction) -> Option<AppEffect> {
+    fn run_command(&mut self, action: CommandAction, args: Option<String>) -> Option<AppEffect> {
         match action {
             CommandAction::OpenModelSelect => {
                 let models = self
@@ -1102,6 +1138,18 @@ impl App {
                 self.session.update(SessionMessage::Reset);
                 self.ctx.send(shuvarie_core::Command::NewSession);
             }
+            CommandAction::EditTitle => {
+                if self.session.session_id.is_none() {
+                    self.session.update(SessionMessage::ShowError {
+                        error: "no active session".into(),
+                    });
+                } else if let Some(title) = args {
+                    self.ctx.send(shuvarie_core::Command::SetTitle { title });
+                } else {
+                    self.title_popup.open(self.session.session_title.as_deref());
+                    self.overlay = Overlay::TitleEdit;
+                }
+            }
             CommandAction::UndoLastTurn => {
                 self.ctx.send(shuvarie_core::Command::UndoLastTurn);
             }
@@ -1140,6 +1188,7 @@ impl App {
         self.session_picker.close();
         self.history_search.close();
         self.confirm_quit.close();
+        self.title_popup.close();
         if self.welcome.open {
             self.welcome.close();
         }
@@ -1203,6 +1252,7 @@ impl App {
         self.session_picker.view(frame, area);
         self.history_search.view(frame, area);
         self.command_menu.view(frame, area);
+        self.title_popup.view(frame, area);
         self.confirm_quit.view(frame, area);
         self.warning.view(frame, area);
     }
@@ -1271,6 +1321,26 @@ mod tests {
             120,
             WorkspaceInfo::default(),
         )
+    }
+
+    fn app_with_rx(
+        connections: Connections,
+    ) -> (App, tokio::sync::mpsc::Receiver<shuvarie_core::Command>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let app = App::new(
+            UiPrefs::default(),
+            connections,
+            tx,
+            120,
+            WorkspaceInfo::default(),
+        );
+        (app, rx)
+    }
+
+    fn active_session(app: &mut App) {
+        app.welcome.close();
+        app.overlay = Overlay::None;
+        app.session.session_id = Some(uuid::Uuid::now_v7());
     }
 
     fn connected() -> Connections {
@@ -1425,5 +1495,96 @@ mod tests {
             !app.session.sidebar.collapsed_at(200),
             "manual override sticks across widths"
         );
+    }
+
+    #[tokio::test]
+    async fn title_command_with_args_sends_set_title() {
+        let (mut app, mut rx) = app_with_rx(connected());
+        active_session(&mut app);
+        app.run_command(CommandAction::EditTitle, Some("New name".into()));
+        let cmd = rx.recv().await.unwrap();
+        assert!(matches!(
+            cmd,
+            shuvarie_core::Command::SetTitle { ref title } if title == "New name"
+        ));
+    }
+
+    #[test]
+    fn title_command_without_args_opens_popup_prefilled() {
+        let (mut app, mut rx) = app_with_rx(connected());
+        active_session(&mut app);
+        app.session.session_title = Some("Old title".into());
+        app.run_command(CommandAction::EditTitle, None);
+        assert!(matches!(app.overlay, Overlay::TitleEdit));
+        assert!(app.title_popup.open);
+        assert_eq!(app.title_popup.buffer.value, "Old title");
+        assert!(rx.try_recv().is_err(), "no command sent until submit");
+    }
+
+    #[tokio::test]
+    async fn title_popup_submit_sends_set_title_and_closes() {
+        let (mut app, mut rx) = app_with_rx(connected());
+        active_session(&mut app);
+        app.session.session_title = Some("Old title".into());
+        app.run_command(CommandAction::EditTitle, None);
+        app.update(AppMessage::TitlePopup(TitleMessage::Input('!')));
+        app.update(AppMessage::TitlePopup(TitleMessage::Submit));
+        assert!(!app.title_popup.open);
+        assert!(matches!(app.overlay, Overlay::None));
+        let cmd = rx.recv().await.unwrap();
+        assert!(matches!(
+            cmd,
+            shuvarie_core::Command::SetTitle { ref title } if title == "Old title!"
+        ));
+    }
+
+    #[test]
+    fn title_command_without_session_shows_error() {
+        let (mut app, mut rx) = app_with_rx(connected());
+        app.welcome.close();
+        app.overlay = Overlay::None;
+        app.run_command(CommandAction::EditTitle, None);
+        assert!(matches!(app.overlay, Overlay::None), "popup stays closed");
+        assert!(!app.title_popup.open);
+        assert!(app.session.error.is_some(), "error is shown");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn title_edit_overlay_captures_keys() {
+        let (mut app, mut rx) = app_with_rx(connected());
+        active_session(&mut app);
+        app.session.session_title = Some("Old".into());
+        app.run_command(CommandAction::EditTitle, None);
+        let key =
+            termina::event::KeyEvent::new(KeyCode::Char('z'), termina::event::Modifiers::NONE);
+        assert!(matches!(
+            app.map_event(Event::Terminal(TermEvent::Key(key))),
+            Some(AppMessage::TitlePopup(TitleMessage::Input('z')))
+        ));
+        app.update(AppMessage::TitlePopup(TitleMessage::Input('z')));
+        app.update(AppMessage::TitlePopup(TitleMessage::Submit));
+        assert!(!app.title_popup.open);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            shuvarie_core::Command::SetTitle { ref title } if title == "Oldz"
+        ));
+        // The header only moves when the core echoes the change back.
+        assert_eq!(app.session.session_title.as_deref(), Some("Old"));
+        app.update(AppMessage::SessionTitleChanged {
+            title: "Oldz".into(),
+        });
+        assert_eq!(app.session.session_title.as_deref(), Some("Oldz"));
+    }
+
+    #[test]
+    fn session_title_changed_event_updates_header() {
+        let mut app = app_with(connected());
+        active_session(&mut app);
+        app.session.session_title = Some("Before".into());
+        app.update(AppMessage::SessionTitleChanged {
+            title: "After".into(),
+        });
+        assert_eq!(app.session.session_title.as_deref(), Some("After"));
     }
 }

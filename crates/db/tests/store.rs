@@ -283,6 +283,38 @@ async fn set_scroll_persists_and_loads_without_touching_updated_at() {
 }
 
 #[tokio::test]
+async fn set_title_renames_without_touching_updated_at() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let first = store.create_session("first", None, None).await.unwrap();
+    let second = store.create_session("second", None, None).await.unwrap();
+    store
+        .append_message(first, Role::User, "bump first")
+        .await
+        .unwrap();
+    let second_before = store
+        .list_sessions()
+        .await
+        .unwrap()
+        .iter()
+        .find(|s| s.id == second)
+        .unwrap()
+        .updated_at_epoch_ms;
+
+    store.set_title(second, "renamed").await.unwrap();
+    let loaded = store.load_session(second).await.unwrap();
+    assert_eq!(loaded.title, "renamed");
+
+    let list = store.list_sessions().await.unwrap();
+    let entry = list.iter().find(|s| s.id == second).unwrap();
+    assert_eq!(entry.title, "renamed");
+    assert_eq!(
+        entry.updated_at_epoch_ms, second_before,
+        "a rename must not reorder the session list"
+    );
+    assert_eq!(list[0].id, first, "order unchanged by the rename");
+}
+
+#[tokio::test]
 async fn search_finds_messages_across_sessions_ranked() {
     let mut store = Store::open_in_memory().await.unwrap();
     let s1 = store.create_session("rust", None, None).await.unwrap();

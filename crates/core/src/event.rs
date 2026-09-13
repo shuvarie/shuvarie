@@ -168,6 +168,11 @@ pub enum Event {
     SessionDeleted {
         id: uuid::Uuid,
     },
+    /// The active session's title changed (a `/title` edit); the TUI updates
+    /// its title bar and terminal tab title.
+    SessionTitleChanged {
+        title: String,
+    },
     SessionError {
         error: String,
     },

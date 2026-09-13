@@ -628,6 +628,38 @@ pub async fn run(
                         // and must never surface as a session error.
                         let _ = ctx.store.set_scroll(id, scroll).await;
                     }
+                    Command::SetTitle { title } => {
+                        let title = title.trim();
+                        if title.is_empty() {
+                            continue;
+                        }
+                        let Some(s) = &ctx.session else { continue; };
+                        let mut guard = s.lock().await;
+                        let Some(id) = guard.id else { continue; };
+                        if guard.title.as_deref() == Some(title) {
+                            continue;
+                        }
+                        match ctx.store.set_title(id, title).await {
+                            Ok(()) => {
+                                guard.title = Some(title.to_string());
+                                drop(guard);
+                                let _ = ctx
+                                    .event_tx
+                                    .send(Event::SessionTitleChanged {
+                                        title: title.to_string(),
+                                    })
+                                    .await;
+                            }
+                            Err(e) => {
+                                drop(guard);
+                                let _ = ctx.event_tx
+                                    .send(Event::SessionError {
+                                        error: format!("failed to set title: {e}"),
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
                     Command::DeleteSession { id } => {
                         if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;

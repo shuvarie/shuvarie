@@ -918,6 +918,18 @@ impl Store {
         .map_err(|e| DbError::Query(e.to_string()))?;
         Ok(())
     }
+
+    /// Rename a session. A raw update bypasses the model's auto-timestamp, so
+    /// `updated_at` is untouched and renaming never reorders the session list.
+    pub async fn set_title(&mut self, id: uuid::Uuid, title: &str) -> Result<()> {
+        toasty::sql::statement("UPDATE sessions SET title = ?1 WHERE id = ?2")
+            .bind_typed(title, db::Type::Text)
+            .bind_typed(id.as_bytes().to_vec(), db::Type::Blob)
+            .exec(&mut self.db)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        Ok(())
+    }
 }
 
 fn scroll_of(session: &Session) -> StoredScroll {

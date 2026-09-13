@@ -32,6 +32,7 @@ mod sidebar;
 mod slash;
 mod spinner;
 mod theme;
+mod title;
 mod utils;
 mod warning;
 mod welcome;

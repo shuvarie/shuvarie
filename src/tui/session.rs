@@ -411,6 +411,8 @@ impl SessionScreen {
             .set_availability(CommandAction::Replay, has_messages);
         self.slash
             .set_availability(CommandAction::Continue, self.chat.last_turn_interrupted());
+        self.slash
+            .set_availability(CommandAction::EditTitle, self.session_id.is_some());
         let buffer = self.input.buffer.value.clone();
         self.slash.sync(&buffer);
     }
@@ -430,9 +432,12 @@ impl SessionScreen {
                                 }
                                 return Some(SessionEffect::RunBash { command });
                             }
-                            if let Some(action) = commands::parse_command(&content) {
+                            if let Some(cmd) = commands::parse_command(&content) {
                                 self.sync_slash();
-                                return Some(SessionEffect::RunCommand(action));
+                                return Some(SessionEffect::RunCommand {
+                                    action: cmd.action,
+                                    args: cmd.args,
+                                });
                             }
                             let expanded = match self.expand_skill(&content) {
                                 Ok(Some(expanded)) => expanded,
@@ -527,7 +532,7 @@ impl SessionScreen {
                     if let Some(action) = self.slash.selected_action() {
                         self.input.buffer.clear();
                         self.sync_slash();
-                        return Some(SessionEffect::RunCommand(action));
+                        return Some(SessionEffect::RunCommand { action, args: None });
                     }
                     None
                 }
@@ -1084,7 +1089,12 @@ pub enum SessionEffect {
         id: u64,
         answers: Option<Vec<Vec<String>>>,
     },
-    RunCommand(CommandAction),
+    RunCommand {
+        action: CommandAction,
+        /// Free-form arguments after the command name (e.g. `/title My
+        /// title`); `None` for menu launches (Ctrl+M or the slash menu).
+        args: Option<String>,
+    },
     RecallSteered {
         stacked: bool,
     },
