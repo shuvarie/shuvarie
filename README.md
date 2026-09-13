@@ -7,6 +7,8 @@
 
 *-- moonshotai/Kimi-K2.6*
 
+![Demo screenshot](./docs/images/shuvarie-screenshot-demo.png)
+
 <!-- TODO Dungeons & Dragons / Forgotten Realm vibe introduction -->
 
 Let me tell you a story, True Soul.
