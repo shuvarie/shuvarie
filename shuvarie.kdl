@@ -3,7 +3,7 @@ permissions {
     // Dev environment
     allow "./.shuvarie-dev/"
     // Cargo registry for checking out rustdocs
-    allow "~/.cargo/registry/"
+    allow mode="ro" "~/.cargo/registry/"
     // Git
     allow "./.gitignore" "./.gitmodules" "./.gitattributes"
     // GitHub files
