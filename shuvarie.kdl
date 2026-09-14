@@ -4,5 +4,11 @@ permissions {
     allow "./.shuvarie-dev/"
     // Cargo registry for checking out rustdocs
     allow "~/.cargo/registry/"
+    // Git
+    allow "./.gitignore" "./.gitmodules" "./.gitattributes"
+    // GitHub files
+    allow "./.github/"
+    // Agents directory
+    allow "./.agents/"
   }
 }
