@@ -7,7 +7,7 @@ use termina::event::{KeyCode, KeyEvent};
 use crate::tui::utils::ctrl;
 
 use super::add_provider::centered_rect;
-use super::list::{render_list_item, scroll_offset_for};
+use super::list::{render_list_item, render_list_item_dim, scroll_offset_for};
 use super::theme;
 
 pub enum SessionPickerMessage {
@@ -153,6 +153,9 @@ impl SessionPicker {
             }
             SessionPickerMessage::Select => {
                 if let Some(s) = self.sessions.get(self.selected) {
+                    if s.in_use {
+                        return None;
+                    }
                     let id = s.id;
                     self.close();
                     Some(SessionPickerEffect::LoadSession { id })
@@ -162,6 +165,9 @@ impl SessionPicker {
             }
             SessionPickerMessage::ToggleDelete => {
                 if self.sessions.is_empty() {
+                    return None;
+                }
+                if self.sessions[self.selected].in_use {
                     return None;
                 }
                 if self.confirm_delete {
@@ -226,17 +232,32 @@ impl SessionPicker {
                 .take(list_area.height as usize)
                 .map(|(idx, s)| {
                     let marker = theme::active_marker(Some(s.id) == self.active_id);
-                    let content = format!("{marker}{} · {} msgs", s.title, s.message_count);
-                    render_list_item(content, idx == self.selected)
+                    if s.in_use {
+                        render_list_item_dim(
+                            format!(
+                                "{marker}{} · {} msgs · used elsewhere",
+                                s.title, s.message_count
+                            ),
+                            idx == self.selected,
+                        )
+                    } else {
+                        render_list_item(
+                            format!("{marker}{} · {} msgs", s.title, s.message_count),
+                            idx == self.selected,
+                        )
+                    }
                 })
                 .collect();
             frame.render_widget(List::new(visible), list_area);
         }
 
+        let locked_selected = self.sessions.get(self.selected).is_some_and(|s| s.in_use);
         let hint = if self.confirm_delete {
             theme::help_line(&[("Ctrl+D", "confirm delete"), ("Esc", "cancel")])
         } else if self.sessions.is_empty() {
             theme::help_line(&[("N", "new session"), ("Esc", "close")])
+        } else if locked_selected {
+            theme::help_line(&[("N", "new"), ("Esc", "close")])
         } else {
             theme::help_line(&[
                 ("Enter", "resume"),

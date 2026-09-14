@@ -7,6 +7,7 @@ pub use model::{
     Message, MessageEmbedding, MsgRole, ReasoningSegment, Session, SessionType, ToolCall, UndoLog,
 };
 pub use store::{
-    EmbeddableMessage, SearchHit, SearchSource, SessionSummary, Store, StoredMessage, StoredScroll,
-    StoredSession, StoredToolCall, UndoEntry, WORKSPACE_DIR_NAME,
+    EmbeddableMessage, LockAcquire, SESSION_LOCK_HEARTBEAT_MS, SESSION_LOCK_TTL_MS, SearchHit,
+    SearchSource, SessionSummary, Store, StoredMessage, StoredScroll, StoredSession,
+    StoredToolCall, UndoEntry, WORKSPACE_DIR_NAME,
 };

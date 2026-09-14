@@ -184,6 +184,12 @@ pub enum Event {
     SessionError {
         error: String,
     },
+    /// A session could not be entered (or its lock was lost mid-session):
+    /// another live client holds the session-wide lock. The session list
+    /// refreshes so the picker can show it as in use.
+    SessionLocked {
+        id: uuid::Uuid,
+    },
     TurnReverted {
         session: crate::Session,
         /// The undone user prompt, recalled into the input area; `None` when

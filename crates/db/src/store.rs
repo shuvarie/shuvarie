@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use shuvarie_llm::Role;
 use shuvarie_llm::TokenUsage;
@@ -16,12 +18,24 @@ static MIGRATIONS: toasty::migration::MigrationSet = toasty::embed_migrations!()
 
 pub use shuvarie_config::WORKSPACE_DIR_NAME;
 
+pub const SESSION_LOCK_TTL_MS: i64 = 30_000;
+
+pub const SESSION_LOCK_HEARTBEAT_MS: u64 = 10_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockAcquire {
+    Acquired,
+    Ours,
+    Held,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionSummary {
     pub id: uuid::Uuid,
     pub title: String,
     pub message_count: u64,
     pub updated_at_epoch_ms: i64,
+    pub in_use: bool,
 }
 
 /// Persisted chat scroll position of a session: whether the viewport was
@@ -168,6 +182,7 @@ impl From<ToolCall> for StoredToolCall {
 #[derive(Clone)]
 pub struct Store {
     db: toasty::Db,
+    client_id: Option<Arc<str>>,
 }
 
 impl Store {
@@ -186,7 +201,9 @@ impl Store {
                     .map_err(|e| DbError::Open(format!("write {}: {e}", gitignore.display())))?;
             }
         }
-        let driver = toasty_driver_turso::Turso::file(path).experimental_index_method(true);
+        let driver = toasty_driver_turso::Turso::file(path)
+            .experimental_index_method(true)
+            .experimental_multiprocess_wal(true);
         Self::open_with_driver(driver).await
     }
 
@@ -213,10 +230,21 @@ impl Store {
             .apply(&db)
             .await
             .map_err(|e| DbError::Migration(e.to_string()))?;
-        Ok(Self { db })
+        let mut store = Self {
+            db,
+            client_id: None,
+        };
+        store.ensure_session_locks().await?;
+        Ok(store)
+    }
+
+    pub fn with_client_id(mut self, client_id: impl Into<Arc<str>>) -> Self {
+        self.client_id = Some(client_id.into());
+        self
     }
 
     pub async fn list_sessions(&mut self) -> Result<Vec<SessionSummary>> {
+        let locked = self.locked_session_ids(now_ms()).await?;
         let sessions = Session::filter(Session::fields().session_type().eq(SessionType::Main))
             .latest_by(Session::fields().updated_at())
             .exec(&mut self.db)
@@ -234,6 +262,7 @@ impl Store {
                 title: s.title,
                 message_count: count,
                 updated_at_epoch_ms: s.updated_at.as_millisecond(),
+                in_use: locked.contains(&s.id),
             });
         }
         Ok(out)
@@ -596,6 +625,11 @@ impl Store {
             .exec(&mut self.db)
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
+        toasty::sql::statement("DELETE FROM session_locks WHERE session_id = ?1")
+            .bind_typed(id.as_bytes().to_vec(), db::Type::Blob)
+            .exec(&mut self.db)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
         Ok(())
     }
 
@@ -930,6 +964,185 @@ impl Store {
             .map_err(|e| DbError::Query(e.to_string()))?;
         Ok(())
     }
+
+    pub async fn acquire_session_lock(
+        &mut self,
+        session_id: uuid::Uuid,
+        now_ms: i64,
+    ) -> Result<LockAcquire> {
+        let Some(client_id) = self.client_id.clone() else {
+            return Ok(LockAcquire::Acquired);
+        };
+        let cutoff = now_ms - SESSION_LOCK_TTL_MS;
+        if let Some((holder, beat)) = self.lock_row(session_id).await? {
+            if holder == client_id.as_ref() {
+                self.touch_session_lock(session_id, now_ms).await?;
+                return Ok(LockAcquire::Ours);
+            }
+            if beat >= cutoff {
+                return Ok(LockAcquire::Held);
+            }
+            let taken = self
+                .takeover_session_lock(session_id, &client_id, now_ms, cutoff)
+                .await?;
+            return Ok(if taken > 0 {
+                LockAcquire::Acquired
+            } else {
+                LockAcquire::Held
+            });
+        }
+        match toasty::sql::statement(
+            "INSERT INTO session_locks (session_id, client_id, beat) VALUES (?1, ?2, ?3)",
+        )
+        .bind_typed(session_id.as_bytes().to_vec(), db::Type::Blob)
+        .bind_typed(client_id.to_string(), db::Type::Text)
+        .bind(now_ms)
+        .exec(&mut self.db)
+        .await
+        {
+            Ok(_) => Ok(LockAcquire::Acquired),
+            Err(_) => {
+                let taken = self
+                    .takeover_session_lock(session_id, &client_id, now_ms, cutoff)
+                    .await?;
+                Ok(if taken > 0 {
+                    LockAcquire::Acquired
+                } else {
+                    LockAcquire::Held
+                })
+            }
+        }
+    }
+
+    pub async fn touch_session_lock(
+        &mut self,
+        session_id: uuid::Uuid,
+        now_ms: i64,
+    ) -> Result<bool> {
+        let Some(client_id) = self.client_id.clone() else {
+            return Ok(true);
+        };
+        let updated = toasty::sql::statement(
+            "UPDATE session_locks SET beat = ?1 WHERE session_id = ?2 AND client_id = ?3",
+        )
+        .bind(now_ms)
+        .bind_typed(session_id.as_bytes().to_vec(), db::Type::Blob)
+        .bind_typed(client_id.to_string(), db::Type::Text)
+        .exec(&mut self.db)
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
+        Ok(updated > 0)
+    }
+
+    pub async fn release_session_lock(&mut self, session_id: uuid::Uuid) -> Result<()> {
+        let Some(client_id) = self.client_id.clone() else {
+            return Ok(());
+        };
+        toasty::sql::statement(
+            "DELETE FROM session_locks WHERE session_id = ?1 AND client_id = ?2",
+        )
+        .bind_typed(session_id.as_bytes().to_vec(), db::Type::Blob)
+        .bind_typed(client_id.to_string(), db::Type::Text)
+        .exec(&mut self.db)
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn locked_by_other(&mut self, session_id: uuid::Uuid, now_ms: i64) -> Result<bool> {
+        let cutoff = now_ms - SESSION_LOCK_TTL_MS;
+        Ok(match self.lock_row(session_id).await? {
+            Some((holder, beat)) => {
+                beat >= cutoff && Some(holder.as_str()) != self.client_id.as_deref()
+            }
+            None => false,
+        })
+    }
+
+    async fn ensure_session_locks(&mut self) -> Result<()> {
+        toasty::sql::statement(
+            "CREATE TABLE IF NOT EXISTS session_locks ( \
+                 session_id BLOB PRIMARY KEY, \
+                 client_id TEXT NOT NULL, \
+                 beat INTEGER NOT NULL)",
+        )
+        .exec(&mut self.db)
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn lock_row(&mut self, session_id: uuid::Uuid) -> Result<Option<(String, i64)>> {
+        let rows =
+            toasty::sql::query("SELECT client_id, beat FROM session_locks WHERE session_id = ?1")
+                .bind_typed(session_id.as_bytes().to_vec(), db::Type::Blob)
+                .column_types([Type::String, Type::I64])
+                .exec(&mut self.db)
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?;
+        Ok(rows.into_iter().next().and_then(|row| match row {
+            toasty::stmt::Value::Record(fields) => Some((
+                match &fields[0] {
+                    toasty::stmt::Value::String(s) => s.clone(),
+                    _ => String::new(),
+                },
+                match &fields[1] {
+                    toasty::stmt::Value::I64(v) => *v,
+                    _ => 0,
+                },
+            )),
+            _ => None,
+        }))
+    }
+
+    async fn takeover_session_lock(
+        &mut self,
+        session_id: uuid::Uuid,
+        client_id: &str,
+        now_ms: i64,
+        cutoff: i64,
+    ) -> Result<u64> {
+        toasty::sql::statement(
+            "UPDATE session_locks SET client_id = ?2, beat = ?3 \
+             WHERE session_id = ?1 AND client_id != ?2 AND beat < ?4",
+        )
+        .bind_typed(session_id.as_bytes().to_vec(), db::Type::Blob)
+        .bind_typed(client_id.to_string(), db::Type::Text)
+        .bind(now_ms)
+        .bind(cutoff)
+        .exec(&mut self.db)
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))
+    }
+
+    async fn locked_session_ids(&mut self, now_ms: i64) -> Result<HashSet<uuid::Uuid>> {
+        let cutoff = now_ms - SESSION_LOCK_TTL_MS;
+        let client_id = self.client_id.clone();
+        let query = match &client_id {
+            Some(client) => toasty::sql::query(
+                "SELECT session_id FROM session_locks WHERE beat >= ?1 AND client_id != ?2",
+            )
+            .bind(cutoff)
+            .bind_typed(client.to_string(), db::Type::Text),
+            None => toasty::sql::query("SELECT session_id FROM session_locks WHERE beat >= ?1")
+                .bind(cutoff),
+        };
+        let rows = query
+            .column_types([Type::Bytes])
+            .exec(&mut self.db)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        let mut out = HashSet::new();
+        for row in rows {
+            if let toasty::stmt::Value::Record(fields) = row
+                && let toasty::stmt::Value::Bytes(b) = &fields[0]
+                && let Ok(id) = uuid::Uuid::from_slice(b)
+            {
+                out.insert(id);
+            }
+        }
+        Ok(out)
+    }
 }
 
 fn scroll_of(session: &Session) -> StoredScroll {
@@ -937,6 +1150,10 @@ fn scroll_of(session: &Session) -> StoredScroll {
         sticky: session.scroll_sticky,
         anchor: session.scroll_turn.zip(session.scroll_row),
     }
+}
+
+fn now_ms() -> i64 {
+    jiff::Timestamp::now().as_millisecond()
 }
 
 fn f32_blob(values: &[f32]) -> Vec<u8> {

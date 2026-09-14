@@ -54,6 +54,22 @@ pub fn render_list_item_line(line: Line<'static>, is_selected: bool) -> ListItem
     ListItem::new(Line::from(spans)).style(style)
 }
 
+pub fn render_list_item_dim(content: String, is_selected: bool) -> ListItem<'static> {
+    let prefix: &'static str = if is_selected { "▶ " } else { "  " };
+    let line = Line::from(vec![
+        Span::raw(prefix).fg(theme::TEXT_MUTED),
+        Span::raw(content).fg(theme::TEXT_DIM),
+    ]);
+    let style = if is_selected {
+        ratatui::style::Style::new()
+            .bg(theme::ACCENT_BG)
+            .fg(theme::TEXT_DIM)
+    } else {
+        ratatui::style::Style::new()
+    };
+    ListItem::new(line).style(style)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -121,6 +121,10 @@ where
     // across the spinners currently animating. `None` when none are. Armed
     // after each draw, before it is ever read.
     let mut spinner_wake;
+    // Session picker list refresh: while the picker is open the list is
+    // re-fetched periodically so lock states stay live.
+    let mut picker_wake;
+    const PICKER_REFRESH: Duration = Duration::from_secs(2);
 
     'render_loop: loop {
         sync_window_title(
@@ -137,6 +141,10 @@ where
         // frame boundary keeps every spinner at its own frame rate.
         spinner_wake = spinner::next_wake(app.active_spinners())
             .map(|until| tokio::time::Instant::now() + until);
+        picker_wake = app
+            .session_picker
+            .open
+            .then(|| tokio::time::Instant::now() + PICKER_REFRESH);
 
         'event_listening: loop {
             let changed = tokio::select! {
@@ -172,6 +180,20 @@ where
                         &mut app,
                         rat.backend_mut().terminal_mut(),
                         Some(AppMessage::SpinnerUpdate),
+                    )
+                }
+                _ = async {
+                    if let Some(deadline) = picker_wake {
+                        tokio::time::sleep_until(deadline).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                }, if picker_wake.is_some() => {
+                    picker_wake = Some(tokio::time::Instant::now() + PICKER_REFRESH);
+                    apply_msg(
+                        &mut app,
+                        rat.backend_mut().terminal_mut(),
+                        Some(AppMessage::PickerRefresh),
                     )
                 }
                 // Terminal event — draws under the same frame budget as core

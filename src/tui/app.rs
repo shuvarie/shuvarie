@@ -100,6 +100,7 @@ pub enum AppMessage {
     SessionDeleted {
         id: uuid::Uuid,
     },
+    SessionLocked,
     SessionError {
         error: String,
     },
@@ -123,6 +124,7 @@ pub enum AppMessage {
     Warning(WarningMessage),
     /// The render loop's spinner wake: refresh the animated spinner renders.
     SpinnerUpdate,
+    PickerRefresh,
 }
 
 #[derive(Debug)]
@@ -598,6 +600,7 @@ impl App {
                     Some(AppMessage::SessionLoaded { id, title, session })
                 }
                 CoreEvent::SessionDeleted { id } => Some(AppMessage::SessionDeleted { id }),
+                CoreEvent::SessionLocked { .. } => Some(AppMessage::SessionLocked),
                 CoreEvent::SessionError { error } => Some(AppMessage::SessionError { error }),
                 CoreEvent::TurnReverted { session, prompt } => {
                     Some(AppMessage::Session(SessionMessage::TurnReverted {
@@ -1090,6 +1093,14 @@ impl App {
             AppMessage::SessionError { error } => {
                 self.session.update(SessionMessage::ShowError { error });
             }
+            AppMessage::SessionLocked => {
+                if self.session_picker.open {
+                    self.ctx.send(shuvarie_core::Command::ListSessions);
+                } else {
+                    self.warning
+                        .open("This session is in use in another shuvarie instance.".into());
+                }
+            }
             AppMessage::LspStatus { servers } => {
                 self.session
                     .sidebar
@@ -1120,6 +1131,11 @@ impl App {
             }
             AppMessage::SpinnerUpdate => {
                 self.session.update(SessionMessage::SpinnerUpdate);
+            }
+            AppMessage::PickerRefresh => {
+                if self.session_picker.open {
+                    self.ctx.send(shuvarie_core::Command::ListSessions);
+                }
             }
         }
         None

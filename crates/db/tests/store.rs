@@ -1,4 +1,7 @@
-use shuvarie_db::{ReasoningSegment, Store, StoredScroll, StoredSession, WORKSPACE_DIR_NAME};
+use shuvarie_db::{
+    LockAcquire, ReasoningSegment, SESSION_LOCK_TTL_MS, Store, StoredScroll, StoredSession,
+    WORKSPACE_DIR_NAME,
+};
 use shuvarie_llm::Role;
 use shuvarie_llm::TokenUsage;
 
@@ -513,4 +516,188 @@ async fn semantic_search_respects_limit_and_delete() {
             .is_empty(),
         "deleted session leaves no embeddings"
     );
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+#[tokio::test]
+async fn session_lock_acquire_refresh_and_release() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(&dir.path().join("data.db"))
+        .await
+        .unwrap()
+        .with_client_id("a");
+    let id = store.create_session("locked", None, None).await.unwrap();
+    let base = now_ms();
+
+    assert_eq!(
+        store.acquire_session_lock(id, base).await.unwrap(),
+        LockAcquire::Acquired
+    );
+    assert_eq!(
+        store.acquire_session_lock(id, base + 5_000).await.unwrap(),
+        LockAcquire::Ours
+    );
+
+    store.release_session_lock(id).await.unwrap();
+    assert_eq!(
+        store.acquire_session_lock(id, base + 6_000).await.unwrap(),
+        LockAcquire::Acquired
+    );
+}
+
+#[tokio::test]
+async fn session_lock_held_until_ttl_then_takeover() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.db");
+    let id = {
+        let mut a = Store::open(&path).await.unwrap().with_client_id("a");
+        let id = a.create_session("held", None, None).await.unwrap();
+        a.acquire_session_lock(id, now_ms()).await.unwrap();
+        id
+    };
+
+    let mut b = Store::open(&path).await.unwrap().with_client_id("b");
+    assert_eq!(
+        b.acquire_session_lock(id, now_ms()).await.unwrap(),
+        LockAcquire::Held
+    );
+    assert_eq!(
+        b.acquire_session_lock(id, now_ms() + SESSION_LOCK_TTL_MS + 1)
+            .await
+            .unwrap(),
+        LockAcquire::Acquired,
+        "stale lock is taken over"
+    );
+}
+
+#[tokio::test]
+async fn touch_session_lock_reports_lost_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.db");
+    let id = {
+        let mut a = Store::open(&path).await.unwrap().with_client_id("a");
+        let id = a.create_session("stale", None, None).await.unwrap();
+        a.acquire_session_lock(id, now_ms() - SESSION_LOCK_TTL_MS - 1)
+            .await
+            .unwrap();
+        id
+    };
+
+    let mut b = Store::open(&path).await.unwrap().with_client_id("b");
+    b.acquire_session_lock(id, now_ms()).await.unwrap();
+
+    let mut a = Store::open(&path).await.unwrap().with_client_id("a");
+    assert!(!a.touch_session_lock(id, now_ms()).await.unwrap());
+}
+
+#[tokio::test]
+async fn locked_by_other_reflects_holder_and_ttl() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.db");
+    let base = now_ms();
+    let id = {
+        let mut a = Store::open(&path).await.unwrap().with_client_id("a");
+        let id = a.create_session("held", None, None).await.unwrap();
+        a.acquire_session_lock(id, base).await.unwrap();
+        id
+    };
+
+    let mut b = Store::open(&path).await.unwrap().with_client_id("b");
+    assert!(b.locked_by_other(id, base + 1_000).await.unwrap());
+    assert!(
+        !b.locked_by_other(id, base + SESSION_LOCK_TTL_MS + 1)
+            .await
+            .unwrap()
+    );
+
+    b.acquire_session_lock(id, base + SESSION_LOCK_TTL_MS + 2)
+        .await
+        .unwrap();
+    assert!(
+        !b.locked_by_other(id, base + SESSION_LOCK_TTL_MS + 2)
+            .await
+            .unwrap(),
+        "own lock"
+    );
+
+    let mut anonymous = Store::open(&path).await.unwrap();
+    assert!(
+        anonymous
+            .locked_by_other(id, base + SESSION_LOCK_TTL_MS + 3)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn list_sessions_reports_in_use_for_other_clients() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.db");
+    let (s1, s2) = {
+        let mut a = Store::open(&path).await.unwrap().with_client_id("a");
+        let s1 = a.create_session("a", None, None).await.unwrap();
+        let s2 = a.create_session("b", None, None).await.unwrap();
+        a.acquire_session_lock(s1, now_ms()).await.unwrap();
+        (s1, s2)
+    };
+
+    let mut b = Store::open(&path).await.unwrap().with_client_id("b");
+    b.acquire_session_lock(s2, now_ms()).await.unwrap();
+    let list = b.list_sessions().await.unwrap();
+    let in_use = |list: &[shuvarie_db::SessionSummary], id: uuid::Uuid| {
+        list.iter().find(|s| s.id == id).unwrap().in_use
+    };
+    assert!(in_use(&list, s1), "other client's lock shows as in use");
+    assert!(!in_use(&list, s2), "own lock never shows as in use");
+
+    let mut anonymous = Store::open(&path).await.unwrap();
+    let list = anonymous.list_sessions().await.unwrap();
+    assert!(in_use(&list, s1));
+    assert!(in_use(&list, s2));
+}
+
+#[tokio::test]
+async fn delete_session_clears_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.db");
+    let id = {
+        let mut a = Store::open(&path).await.unwrap().with_client_id("a");
+        let id = a.create_session("doomed", None, None).await.unwrap();
+        a.acquire_session_lock(id, now_ms()).await.unwrap();
+        id
+    };
+
+    let mut b = Store::open(&path).await.unwrap().with_client_id("b");
+    b.delete_session(id).await.unwrap();
+    assert!(!b.locked_by_other(id, now_ms()).await.unwrap());
+}
+
+#[tokio::test]
+async fn reopen_legacy_database_with_multiprocess_wal() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.db");
+    {
+        let db = toasty::Db::builder()
+            .models(toasty::models!(
+                shuvarie_db::Session,
+                shuvarie_db::Message,
+                shuvarie_db::MessageEmbedding,
+                shuvarie_db::ToolCall,
+                shuvarie_db::UndoLog
+            ))
+            .build(toasty_driver_turso::Turso::file(&path).experimental_index_method(true))
+            .await
+            .unwrap();
+        drop(db);
+    }
+
+    let mut store = Store::open(&path).await.unwrap();
+    store.create_session("legacy", None, None).await.unwrap();
+    assert_eq!(store.list_sessions().await.unwrap().len(), 1);
 }

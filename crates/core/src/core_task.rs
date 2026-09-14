@@ -8,7 +8,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 
-use shuvarie_db::Store;
+use shuvarie_db::{LockAcquire, SESSION_LOCK_HEARTBEAT_MS, Store};
 use shuvarie_llm::{FileChange, ProviderClient, TokenUsage};
 
 use crate::command::Command;
@@ -188,6 +188,7 @@ struct CoreCtx {
     context_announced: bool,
     skills: crate::skills::Skills,
     session: Option<Arc<Mutex<Session>>>,
+    locked_session: Option<uuid::Uuid>,
     manager_turns: usize,
     worker_turns: usize,
     max_output_chars: usize,
@@ -206,6 +207,7 @@ pub async fn run(
     mut cmd_rx: Receiver<Command>,
     event_tx: Sender<Event>,
 ) {
+    let store = store.with_client_id(uuid::Uuid::now_v7().to_string());
     let mut semantic_search: Option<AbortHandle> = None;
     let (stream_done_tx, mut stream_done_rx) = tokio::sync::mpsc::channel::<StreamOutcome>(1);
     let mut overflow_retries: usize = 0;
@@ -267,6 +269,11 @@ pub async fn run(
     // Don't fire immediately on the first tick.
     lsp_pump_tick.reset();
 
+    let mut lock_beat =
+        tokio::time::interval(std::time::Duration::from_millis(SESSION_LOCK_HEARTBEAT_MS));
+    lock_beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    lock_beat.reset();
+
     let skills = crate::skills::Skills::load(&workspace_root, &config.skills);
     let _ = event_tx
         .send(Event::SkillsLoaded {
@@ -304,13 +311,21 @@ pub async fn run(
         context_announced: false,
         skills,
         session: None,
+        locked_session: None,
         manager_turns,
         worker_turns,
         max_output_chars,
         max_output_bytes,
         steer,
     };
-    load_startup_session(&mut ctx.store, &mut ctx.session, &ctx.event_tx, startup).await;
+    load_startup_session(
+        &mut ctx.store,
+        &mut ctx.session,
+        &mut ctx.locked_session,
+        &ctx.event_tx,
+        startup,
+    )
+    .await;
 
     loop {
         let retry_deadline = pending_retry.as_ref().map(|p| p.deadline);
@@ -467,6 +482,7 @@ pub async fn run(
                         pending_retry = None;
                         conn_retries = 0;
                         ctx.context_announced = false;
+                        release_active_lock(&mut ctx).await;
                         clear_steered(&mut steered, &ctx.steer, &ctx.event_tx).await;
                         dismiss_pending_questions(&mut pending_questions);
                         ctx.session = Some(Arc::new(Mutex::new(Session::new())));
@@ -480,6 +496,7 @@ pub async fn run(
                         pending_retry = None;
                         conn_retries = 0;
                         ctx.context_announced = false;
+                        release_active_lock(&mut ctx).await;
                         clear_steered(&mut steered, &ctx.steer, &ctx.event_tx).await;
                         dismiss_pending_questions(&mut pending_questions);
                         ctx.session = Some(Arc::new(Mutex::new(Session::new())));
@@ -623,6 +640,19 @@ pub async fn run(
                         }
                         pending_retry = None;
                         conn_retries = 0;
+                        match ctx.store.acquire_session_lock(id, now_ms()).await {
+                            Ok(LockAcquire::Held) => {
+                                let _ = ctx.event_tx.send(Event::SessionLocked { id }).await;
+                                continue;
+                            }
+                            Ok(_) => {
+                                if ctx.locked_session != Some(id) {
+                                    release_active_lock(&mut ctx).await;
+                                    ctx.locked_session = Some(id);
+                                }
+                            }
+                            Err(_) => {}
+                        }
                         clear_steered(&mut steered, &ctx.steer, &ctx.event_tx).await;
                         dismiss_pending_questions(&mut pending_questions);
                         match ctx.store.load_session(id).await {
@@ -688,11 +718,18 @@ pub async fn run(
                         if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
                         }
+                        if let Ok(true) = ctx.store.locked_by_other(id, now_ms()).await {
+                            let _ = ctx.event_tx.send(Event::SessionLocked { id }).await;
+                            continue;
+                        }
                         pending_retry = None;
                         conn_retries = 0;
                         clear_steered(&mut steered, &ctx.steer, &ctx.event_tx).await;
                         match ctx.store.delete_session(id).await {
                             Ok(()) => {
+                                if ctx.locked_session == Some(id) {
+                                    ctx.locked_session = None;
+                                }
                                 if let Some(s) = &ctx.session
                                     && s.lock().await.id == Some(id)
                                 {
@@ -1003,6 +1040,18 @@ pub async fn run(
                     emit_lsp_status(&mgr, &ctx.event_tx).await;
                 }
             }
+            _ = lock_beat.tick() => {
+                if let Some(id) = ctx.locked_session {
+                    match ctx.store.touch_session_lock(id, now_ms()).await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            ctx.locked_session = None;
+                            let _ = ctx.event_tx.send(Event::SessionLocked { id }).await;
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
             question = question_rx.recv() => {
                 let Some(req) = question else { break };
                 let id = next_question_id;
@@ -1097,7 +1146,22 @@ pub async fn run(
         }
     }
 
+    release_active_lock(&mut ctx).await;
+
     ctx.lsp.lock().await.shutdown_all().await;
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+async fn release_active_lock(ctx: &mut CoreCtx) {
+    if let Some(id) = ctx.locked_session.take() {
+        let _ = ctx.store.release_session_lock(id).await;
+    }
 }
 
 const SEARCH_LIMIT: u64 = 50;
@@ -1344,6 +1408,12 @@ impl CoreCtx {
                     Ok(id) => {
                         guard.id = Some(id);
                         guard.title = Some(title.clone());
+                        match self.store.acquire_session_lock(id, now_ms()).await {
+                            Ok(LockAcquire::Acquired | LockAcquire::Ours) => {
+                                self.locked_session = Some(id);
+                            }
+                            Ok(LockAcquire::Held) | Err(_) => {}
+                        }
                         let _ = self
                             .event_tx
                             .send(Event::SessionCreated { id, title })
@@ -1642,6 +1712,7 @@ impl CoreCtx {
 async fn load_startup_session(
     store: &mut Store,
     session: &mut Option<Arc<Mutex<Session>>>,
+    locked: &mut Option<uuid::Uuid>,
     event_tx: &Sender<Event>,
     startup: StartupSession,
 ) {
@@ -1672,6 +1743,14 @@ async fn load_startup_session(
     };
     let Some(stored) = stored else { return };
     let id = stored.id;
+    match store.acquire_session_lock(id, now_ms()).await {
+        Ok(LockAcquire::Held) => {
+            let _ = event_tx.send(Event::SessionLocked { id }).await;
+            return;
+        }
+        Ok(_) => *locked = Some(id),
+        Err(_) => {}
+    }
     let loaded = Session::from_stored(stored);
     *session = Some(Arc::new(Mutex::new(loaded.clone())));
     let _ = event_tx
