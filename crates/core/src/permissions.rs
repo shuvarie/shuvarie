@@ -1,4 +1,5 @@
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use regex::Regex;
 use shuvarie_config::{
@@ -100,6 +101,32 @@ pub struct PermissionRequest {
     pub respond: oneshot::Sender<bool>,
 }
 
+/// Signals that a permission denial should cut the agent turn: set by the
+/// authorize layer on every rule deny and user rejection, consumed by the
+/// stream task right after the denied tool's result is persisted, so the turn
+/// ends like a user cancel instead of continuing past the denial.
+#[derive(Clone, Default)]
+pub struct DenyCut(std::sync::Arc<AtomicBool>);
+
+impl DenyCut {
+    pub fn trigger(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_set(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    /// Consumes the signal, reporting whether it was set.
+    pub fn take(&self) -> bool {
+        self.0.swap(false, Ordering::SeqCst)
+    }
+
+    pub fn reset(&self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 /// The channel the tools pause on for `ask` verdicts; the core task forwards
 /// requests to the TUI as [`crate::Event::PermissionRequested`] and resolves
 /// them with [`crate::Command::PermissionDecide`].
@@ -113,8 +140,9 @@ impl PermissionGate {
         Self { tx }
     }
 
-    /// Blocks until the user allows or denies. A closed channel or a dropped
-    /// responder is a denial.
+    /// Blocks until the user allows or denies. `Ok(false)` is a user denial;
+    /// a closed channel or a dropped responder is an error (the turn is being
+    /// torn down already).
     pub async fn request(&self, description: String) -> Result<bool, String> {
         let (respond, rx) = oneshot::channel();
         self.tx
@@ -124,7 +152,8 @@ impl PermissionGate {
             })
             .await
             .map_err(|_| "permission channel closed".to_string())?;
-        Ok(rx.await.unwrap_or(false))
+        rx.await
+            .map_err(|_| "permission responder dropped".to_string())
     }
 }
 
@@ -143,7 +172,6 @@ struct CompiledShellRule {
     verb: Verb,
     raw: String,
     matcher: ShellMatcher,
-    interrupt: bool,
 }
 
 #[derive(Clone)]
@@ -261,24 +289,32 @@ impl Permissions {
     }
 
     /// Runs a permission check and, for `ask` decisions, pauses on `gate`
-    /// until the user answers. A denial (rule or user) is an error naming
-    /// the matched rule.
+    /// until the user answers. Every denial — a matched `deny` rule or a user
+    /// rejection — triggers `cut` (the turn ends like a user cancel) and is
+    /// an error naming the matched rule.
     pub async fn authorize_path(
         &self,
         gate: &PermissionGate,
+        cut: &DenyCut,
         kind: PathKind,
         path: &Path,
         display: &str,
     ) -> Result<(), String> {
         match self.check_path(kind, path) {
             Decision::Allow => Ok(()),
-            Decision::Deny { reason } => Err(format!("permission denied: {reason}")),
+            Decision::Deny { reason } => {
+                cut.trigger();
+                Err(format!("permission denied: {reason}"))
+            }
             Decision::Ask { reason } => {
                 let description = format!("Allow {} `{display}`?\n{reason}", kind.action());
-                if gate.request(description).await.unwrap_or(false) {
-                    Ok(())
-                } else {
-                    Err(format!("permission denied by the user: {reason}"))
+                match gate.request(description).await {
+                    Ok(true) => Ok(()),
+                    Ok(false) => {
+                        cut.trigger();
+                        Err(format!("permission denied by the user: {reason}"))
+                    }
+                    Err(err) => Err(err),
                 }
             }
         }
@@ -288,29 +324,38 @@ impl Permissions {
     pub async fn authorize_shell(
         &self,
         gate: &PermissionGate,
+        cut: &DenyCut,
         command: &str,
     ) -> Result<(), String> {
         match self.check_shell(command) {
             Decision::Allow => Ok(()),
-            Decision::Deny { reason } => Err(format!("permission denied: {reason}")),
+            Decision::Deny { reason } => {
+                cut.trigger();
+                Err(format!("permission denied: {reason}"))
+            }
             Decision::Ask { reason } => {
                 let description = format!("Allow running this command?\n{command}\n{reason}");
-                if gate.request(description).await.unwrap_or(false) {
-                    Ok(())
-                } else {
-                    Err(format!("permission denied by the user: {reason}"))
+                match gate.request(description).await {
+                    Ok(true) => Ok(()),
+                    Ok(false) => {
+                        cut.trigger();
+                        Err(format!("permission denied by the user: {reason}"))
+                    }
+                    Err(err) => Err(err),
                 }
             }
         }
     }
 
-    /// The output watcher for `deny interrupt=#true` shell rules, if any are
-    /// configured.
+    /// The output watcher for `deny` shell rules: reports the first rule
+    /// whose pattern matches captured command output. Any `deny` rule cuts
+    /// the turn when its pattern trips the output, so every deny rule is
+    /// watched.
     pub fn output_interrupt(&self) -> Option<OutputInterrupt> {
         let rules = self
             .shell
             .iter()
-            .filter(|rule| rule.interrupt && rule.verb == Verb::Deny)
+            .filter(|rule| rule.verb == Verb::Deny)
             .map(|rule| (rule.matcher.clone(), rule.raw.clone()))
             .collect::<Vec<_>>();
         (!rules.is_empty()).then_some(OutputInterrupt { rules })
@@ -386,7 +431,6 @@ impl CompiledShellRule {
             verb: rule.verb,
             raw: rule.pattern.clone(),
             matcher,
-            interrupt: rule.interrupt,
         })
     }
 
@@ -407,8 +451,8 @@ impl ShellMatcher {
     }
 }
 
-/// The `deny interrupt=#true` watcher: reports the first rule whose pattern
-/// matches captured command output.
+/// The `deny` output watcher: reports the first rule whose pattern matches
+/// captured command output.
 pub struct OutputInterrupt {
     rules: Vec<(ShellMatcher, String)>,
 }
@@ -432,17 +476,26 @@ fn verb_decision(verb: Verb, reason: String) -> Decision {
     }
 }
 
-/// The permission engine plus its ask gate, cloned into every gated tool as
-/// one handle.
+/// The permission engine plus its ask gate and deny-cut signal, cloned into
+/// every gated tool as one handle.
 #[derive(Clone)]
 pub struct Access {
     permissions: std::sync::Arc<Permissions>,
     gate: PermissionGate,
+    deny_cut: DenyCut,
 }
 
 impl Access {
-    pub fn new(permissions: std::sync::Arc<Permissions>, gate: PermissionGate) -> Self {
-        Self { permissions, gate }
+    pub fn new(
+        permissions: std::sync::Arc<Permissions>,
+        gate: PermissionGate,
+        deny_cut: DenyCut,
+    ) -> Self {
+        Self {
+            permissions,
+            gate,
+            deny_cut,
+        }
     }
 
     /// Authorizes a canonicalized file path (see
@@ -454,19 +507,32 @@ impl Access {
         display: &str,
     ) -> Result<(), String> {
         self.permissions
-            .authorize_path(&self.gate, kind, path, display)
+            .authorize_path(&self.gate, &self.deny_cut, kind, path, display)
             .await
     }
 
     /// Authorizes a `run_shell` command line (see
     /// [`Permissions::authorize_shell`]).
     pub async fn authorize_shell(&self, command: &str) -> Result<(), String> {
-        self.permissions.authorize_shell(&self.gate, command).await
+        self.permissions
+            .authorize_shell(&self.gate, &self.deny_cut, command)
+            .await
     }
 
-    /// The `deny interrupt=#true` output watcher, if configured.
+    /// The `deny` output watcher, if any deny rules are configured.
     pub fn output_interrupt(&self) -> Option<OutputInterrupt> {
         self.permissions.output_interrupt()
+    }
+
+    /// Flags the turn for cutting; `run_shell` calls this when a deny rule
+    /// trips the captured output of a running command.
+    pub fn trigger_cut(&self) {
+        self.deny_cut.trigger();
+    }
+
+    /// The turn-cut signal, shared with the stream task that consumes it.
+    pub fn turn_cut(&self) -> &DenyCut {
+        &self.deny_cut
     }
 }
 
@@ -601,7 +667,6 @@ mod tests {
             verb,
             pattern: pattern.to_string(),
             kind: ShellPatternKind::Raw,
-            interrupt: false,
         }
     }
 
@@ -833,7 +898,6 @@ mod tests {
                         verb: Verb::Deny,
                         pattern: "rm (-rf|-fr|--force --recursive)".to_string(),
                         kind: ShellPatternKind::Regex,
-                        interrupt: false,
                     }],
                 },
             },
@@ -864,7 +928,6 @@ mod tests {
                         verb: Verb::Deny,
                         pattern: "rm (".to_string(),
                         kind: ShellPatternKind::Regex,
-                        interrupt: false,
                     }],
                 },
             },
@@ -982,8 +1045,85 @@ mod tests {
         assert_eq!(perms.check_shell("cargo build"), Decision::Allow);
     }
 
+    #[tokio::test]
+    async fn authorize_triggers_the_cut_on_every_denial() {
+        let (tx, rx) = mpsc::channel::<PermissionRequest>(8);
+        let gate = PermissionGate::new(tx);
+        let cut = DenyCut::default();
+        let perms = std::sync::Arc::new(config_scoped(
+            Some(Verb::Allow),
+            Some(Verb::Ask),
+            vec![],
+            None,
+            vec![shell_rule(Verb::Deny, "sudo")],
+        ));
+        let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
+        let answer = |allow: bool| {
+            let rx = rx.clone();
+            async move {
+                rx.lock()
+                    .unwrap()
+                    .recv()
+                    .await
+                    .unwrap()
+                    .respond
+                    .send(allow)
+                    .ok()
+            }
+        };
+
+        let cut1 = cut.clone();
+        let err = perms
+            .authorize_shell(&gate, &cut1, "sudo apt install")
+            .await
+            .unwrap_err();
+        assert!(err.contains("shell-patterns: deny"), "{err}");
+        assert!(cut1.is_set(), "rule deny triggers the cut");
+        assert!(cut.take());
+
+        let cut2 = cut.clone();
+        let perms2 = perms.clone();
+        let gate2 = gate.clone();
+        let allow = answer(false);
+        let denied = tokio::spawn(async move {
+            perms2
+                .authorize_path(
+                    &gate2,
+                    &cut2,
+                    PathKind::Read,
+                    Path::new("/etc/hosts"),
+                    "/etc/hosts",
+                )
+                .await
+        });
+        allow.await.unwrap();
+        let err = denied.await.unwrap().unwrap_err();
+        assert!(err.contains("denied by the user"), "{err}");
+        assert!(cut.is_set(), "user denial triggers the cut");
+        assert!(cut.take());
+
+        let cut3 = cut.clone();
+        let perms3 = perms.clone();
+        let gate3 = gate.clone();
+        let allow = answer(true);
+        let granted = tokio::spawn(async move {
+            perms3
+                .authorize_path(
+                    &gate3,
+                    &cut3,
+                    PathKind::Read,
+                    Path::new("/etc/hosts"),
+                    "/etc/hosts",
+                )
+                .await
+        });
+        allow.await.unwrap();
+        assert!(granted.await.unwrap().is_ok());
+        assert!(!cut.is_set(), "allowing never triggers the cut");
+    }
+
     #[test]
-    fn output_interrupt_checks_deny_rules_only() {
+    fn output_interrupt_watches_every_deny_rule() {
         let perms = Permissions::build(
             &PermissionsConfig {
                 default: Some(Verb::Allow),
@@ -995,13 +1135,16 @@ mod tests {
                             verb: Verb::Deny,
                             pattern: "sudo".to_string(),
                             kind: ShellPatternKind::Raw,
-                            interrupt: true,
                         },
                         ShellRule {
                             verb: Verb::Ask,
                             pattern: "secret".to_string(),
                             kind: ShellPatternKind::Raw,
-                            interrupt: true,
+                        },
+                        ShellRule {
+                            verb: Verb::Deny,
+                            pattern: "rm (-rf|-fr)".to_string(),
+                            kind: ShellPatternKind::Regex,
                         },
                     ],
                 },
@@ -1013,6 +1156,10 @@ mod tests {
         assert_eq!(
             interrupt.check("Password: \nsudo: permission denied"),
             Some("shell-patterns: deny \"sudo\" (matched command output)".into())
+        );
+        assert_eq!(
+            interrupt.check("error: rm -rf refused"),
+            Some("shell-patterns: deny \"rm (-rf|-fr)\" (matched command output)".into())
         );
         assert_eq!(interrupt.check("plain output"), None);
         assert!(builtin().output_interrupt().is_none());

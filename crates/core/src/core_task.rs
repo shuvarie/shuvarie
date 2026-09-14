@@ -14,7 +14,7 @@ use shuvarie_llm::{FileChange, ProviderClient, TokenUsage};
 use crate::command::Command;
 use crate::embeddings::{self, EmbeddingSetup};
 use crate::event::Event;
-use crate::permissions::{Access, PermissionGate, PermissionRequest};
+use crate::permissions::{Access, DenyCut, PermissionGate, PermissionRequest};
 use crate::question::{AnswerResponse, QuestionGate, QuestionRequest};
 use crate::session::{CONTINUE_PROMPT, Session};
 use crate::shell::Shell;
@@ -240,7 +240,11 @@ pub async fn run(
     let (permission_tx, mut permission_rx) = tokio::sync::mpsc::channel::<PermissionRequest>(8);
     let mut pending_permissions: HashMap<u64, oneshot::Sender<bool>> = HashMap::new();
     let mut next_permission_id: u64 = 0;
-    let access = Access::new(permissions, PermissionGate::new(permission_tx));
+    let access = Access::new(
+        permissions,
+        PermissionGate::new(permission_tx),
+        DenyCut::default(),
+    );
 
     // Bash-mode (`!`) runs, routed back to the TUI by id.
     let mut next_bash_id: u64 = 0;
@@ -1105,6 +1109,12 @@ pub async fn run(
                         overflow_retries = 0;
                         conn_retries = 0;
                         ctx.active_stream = None;
+                        // A permission denial cut may leave sibling ask
+                        // responders behind; drop them so late decisions are
+                        // no-ops (a deny cut fires while tool calls are
+                        // running, unlike a steer cut).
+                        dismiss_pending_questions(&mut pending_questions);
+                        dismiss_pending_permissions(&mut pending_permissions);
                         // Steer in the next queued prompt, if any. The queue
                         // keeps preempting: the fresh turn is armed again so
                         // the next queued prompt cuts in at its next action
@@ -1675,6 +1685,8 @@ impl CoreCtx {
         let turn_state_shared = Arc::new(Mutex::new(TurnState::default()));
         let stream_done = self.stream_done_tx.clone();
         let steer_shared = self.steer.clone();
+        let deny_cut_shared = self.access.turn_cut().clone();
+        deny_cut_shared.reset();
         self.turn_state = Some(turn_state_shared.clone());
         self.active_stream = Some(
             tokio::spawn(async move {
@@ -1692,6 +1704,7 @@ impl CoreCtx {
                     turn_state_shared,
                     stream_done,
                     steer_shared,
+                    deny_cut_shared,
                 )
                 .await;
             })
@@ -1900,6 +1913,7 @@ async fn stream_stream_to_events(
     turn_state: Arc<Mutex<TurnState>>,
     stream_done_tx: Sender<StreamOutcome>,
     steer: SteerSignal,
+    deny_cut: crate::permissions::DenyCut,
 ) {
     use futures_util::StreamExt;
 
@@ -1935,7 +1949,7 @@ async fn stream_stream_to_events(
         if starts_action_after_boundary(&item, &action) && steer.is_armed() && steer.begin_preempt()
         {
             done = None;
-            outcome = cut_turn_for_steer(&turn_state, &mut store, &session, &event_tx).await;
+            outcome = cut_turn_cancelled(&turn_state, &mut store, &session, &event_tx).await;
             break;
         }
         match item {
@@ -2299,7 +2313,18 @@ async fn stream_stream_to_events(
             && steer.begin_preempt()
         {
             done = None;
-            outcome = cut_turn_for_steer(&turn_state, &mut store, &session, &event_tx).await;
+            outcome = cut_turn_cancelled(&turn_state, &mut store, &session, &event_tx).await;
+            break;
+        }
+        // A permission denial (rule deny or user rejection) ends the turn
+        // like a user cancel: the denied call's result was just persisted, so
+        // the denial reason stays visible in its block. Skipped once the
+        // final `Done` was seen so a straggling worker denial cannot discard
+        // a finished turn's reply.
+        if done.is_none() && deny_cut.is_set() {
+            deny_cut.take();
+            done = None;
+            outcome = cut_turn_cancelled(&turn_state, &mut store, &session, &event_tx).await;
             break;
         }
     }
@@ -2498,10 +2523,11 @@ fn killed_records(
         .collect()
 }
 
-/// Cut the stream for a queued steered prompt: persist the partial turn as
-/// interrupted, surface the cancellation, and report `Preempted` back to the
-/// run loop so it dispatches the queued prompt.
-async fn cut_turn_for_steer(
+/// Cut the stream for a queued steered prompt or a permission denial:
+/// persist the partial turn as interrupted, surface the cancellation, and
+/// report `Preempted` back to the run loop so it dispatches any queued
+/// prompt.
+async fn cut_turn_cancelled(
     turn_state: &Arc<Mutex<TurnState>>,
     store: &mut Store,
     session: &Arc<Mutex<Session>>,
@@ -2725,6 +2751,7 @@ fn context_budget(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::StreamExt as _;
     use selune::ProviderType;
     use shuvarie_llm::StreamItem;
     use shuvarie_llm::TokenUsage;
@@ -2807,6 +2834,7 @@ mod tests {
                 turn_state,
                 stream_done_tx,
                 SteerSignal::default(),
+                DenyCut::default(),
             )
             .await;
         });
@@ -2886,6 +2914,7 @@ mod tests {
                 turn_state,
                 stream_done_tx,
                 SteerSignal::default(),
+                DenyCut::default(),
             )
             .await;
         });
@@ -2984,6 +3013,7 @@ mod tests {
                 turn_state,
                 stream_done_tx,
                 SteerSignal::default(),
+                DenyCut::default(),
             )
             .await;
         });
@@ -3101,6 +3131,7 @@ mod tests {
                 turn_state,
                 stream_done_tx,
                 SteerSignal::default(),
+                DenyCut::default(),
             )
             .await;
         });
@@ -3194,6 +3225,7 @@ mod tests {
                 turn_state,
                 stream_done_tx,
                 SteerSignal::default(),
+                DenyCut::default(),
             )
             .await;
         });
@@ -3231,6 +3263,19 @@ mod tests {
     async fn spawn_preempt_stream(
         items: Vec<StreamItem>,
         steer: SteerSignal,
+        deny_cut: crate::permissions::DenyCut,
+    ) -> (
+        Arc<Mutex<Session>>,
+        tokio::sync::mpsc::Receiver<Event>,
+        tokio::sync::mpsc::Receiver<StreamOutcome>,
+    ) {
+        spawn_stream_core(Box::pin(futures_util::stream::iter(items)), steer, deny_cut).await
+    }
+
+    async fn spawn_stream_core(
+        stream: shuvarie_llm::StreamStream,
+        steer: SteerSignal,
+        deny_cut: crate::permissions::DenyCut,
     ) -> (
         Arc<Mutex<Session>>,
         tokio::sync::mpsc::Receiver<Event>,
@@ -3242,7 +3287,6 @@ mod tests {
         let mut store = Store::open_in_memory().await.unwrap();
         let id = store.create_session("preempt", None, None).await.unwrap();
         session.lock().await.id = Some(id);
-        let stream: shuvarie_llm::StreamStream = Box::pin(futures_util::stream::iter(items));
         let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
         let turn_state = Arc::new(Mutex::new(TurnState::default()));
         let (stream_done_tx, stream_done_rx) = tokio::sync::mpsc::channel(1);
@@ -3262,6 +3306,7 @@ mod tests {
                 turn_state,
                 stream_done_tx,
                 steer,
+                deny_cut,
             )
             .await;
         });
@@ -3317,6 +3362,7 @@ mod tests {
                 },
             ],
             steer,
+            DenyCut::default(),
         )
         .await;
 
@@ -3365,6 +3411,7 @@ mod tests {
                 },
             ],
             steer,
+            DenyCut::default(),
         )
         .await;
 
@@ -3408,6 +3455,7 @@ mod tests {
                 },
             ],
             steer,
+            DenyCut::default(),
         )
         .await;
 
@@ -3454,6 +3502,7 @@ mod tests {
                 },
             ],
             steer,
+            DenyCut::default(),
         )
         .await;
 
@@ -3511,6 +3560,7 @@ mod tests {
                 },
             ],
             steer,
+            DenyCut::default(),
         )
         .await;
 
@@ -3560,6 +3610,7 @@ mod tests {
                 },
             ],
             steer,
+            DenyCut::default(),
         )
         .await;
 
@@ -3582,6 +3633,144 @@ mod tests {
         assert!(saw_cancel, "cut fires once the whole batch settled");
         assert_eq!(stream_done_rx.recv().await, Some(StreamOutcome::Preempted));
         assert_eq!(session.lock().await.tool_records.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn permission_deny_cuts_the_turn_after_the_denied_result() {
+        let deny_cut = DenyCut::default();
+        let wait_cut = deny_cut.clone();
+        let stream: shuvarie_llm::StreamStream = Box::pin(
+            futures_util::stream::iter(vec![
+                main_tool_start("read_file", "c1"),
+                StreamItem::ToolResult {
+                    name: "read_file".into(),
+                    output: "permission denied: paths: deny \".env\"".into(),
+                    ok: false,
+                    worker: None,
+                    file_change: None,
+                    streams: None,
+                    call_id: "c1".into(),
+                },
+                StreamItem::Done {
+                    text: "the model keeps going".into(),
+                    usage: TokenUsage::default(),
+                },
+            ])
+            .enumerate()
+            .then(move |(i, item)| {
+                let wait_cut = wait_cut.clone();
+                async move {
+                    // The tool denies while its call runs: the producer only
+                    // yields the result once the denial happened.
+                    if i == 1 {
+                        while !wait_cut.is_set() {
+                            tokio::task::yield_now().await;
+                        }
+                    }
+                    item
+                }
+            }),
+        );
+        let (session, mut event_rx, mut stream_done_rx) =
+            spawn_stream_core(stream, SteerSignal::default(), deny_cut.clone()).await;
+
+        // The tool denies while its call runs: after the start, before the
+        // result is streamed.
+        let mut saw_start = false;
+        let mut denied = None;
+        loop {
+            let event = event_rx.recv().await.expect("events before the cut");
+            match event {
+                Event::ToolStarted { .. } => {
+                    saw_start = true;
+                    deny_cut.trigger();
+                }
+                Event::ToolFinished { ok, output, .. } => {
+                    denied = Some((ok, output));
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_start);
+        let (ok, output) = denied.expect("the denied call finished before the cut");
+        assert!(!ok, "the denial is a failed result");
+        assert!(
+            output.contains("permission denied"),
+            "the denial reason stays visible: {output}"
+        );
+
+        let mut saw_cancel = false;
+        while let Some(event) = event_rx.recv().await {
+            if matches!(event, Event::StreamCancelled) {
+                saw_cancel = true;
+                break;
+            }
+        }
+        assert!(saw_cancel, "the denial cut emits StreamCancelled");
+        assert_eq!(stream_done_rx.recv().await, Some(StreamOutcome::Preempted));
+        assert!(!deny_cut.is_set(), "the stream task consumed the signal");
+
+        let guard = session.lock().await;
+        assert_eq!(guard.interrupted.get(&0), Some(&true));
+        assert_eq!(guard.tool_records.len(), 1);
+        let record = &guard.tool_records[0];
+        assert!(
+            !record.killed,
+            "the denied call returned, so it is not killed"
+        );
+        assert!(!record.ok);
+        assert!(
+            record.output.contains("permission denied"),
+            "{:#}",
+            record.output
+        );
+    }
+
+    #[tokio::test]
+    async fn deny_after_done_cannot_discard_a_finished_turn() {
+        let deny_cut = DenyCut::default();
+        let (session, mut event_rx, mut stream_done_rx) = spawn_preempt_stream(
+            vec![
+                main_tool_start("grep", "c1"),
+                main_tool_result("grep", "c1"),
+                StreamItem::Done {
+                    text: "the reply".into(),
+                    usage: TokenUsage::default(),
+                },
+            ],
+            SteerSignal::default(),
+            deny_cut.clone(),
+        )
+        .await;
+
+        let mut saw_done = false;
+        let mut saw_cancel = false;
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                Event::StreamDone { .. } => {
+                    saw_done = true;
+                    deny_cut.trigger();
+                }
+                Event::StreamCancelled => {
+                    saw_cancel = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_done, "the finished turn committed");
+        assert!(
+            !saw_cancel,
+            "a straggling denial cannot cut a finished turn"
+        );
+        assert_eq!(stream_done_rx.recv().await, Some(StreamOutcome::Finished));
+        let guard = session.lock().await;
+        assert!(guard.interrupted.is_empty());
+        assert_eq!(
+            guard.messages.last().map(|m| m.content.as_str()),
+            Some("the reply")
+        );
     }
 
     #[tokio::test]
@@ -3608,6 +3797,7 @@ mod tests {
                 },
             ],
             steer,
+            DenyCut::default(),
         )
         .await;
 
@@ -3653,6 +3843,7 @@ mod tests {
                 },
             ],
             steer,
+            DenyCut::default(),
         )
         .await;
 
@@ -3704,6 +3895,7 @@ mod tests {
                 },
             ],
             steer,
+            DenyCut::default(),
         )
         .await;
 
@@ -3740,6 +3932,7 @@ mod tests {
                 },
             ],
             steer,
+            DenyCut::default(),
         )
         .await;
 
@@ -3795,6 +3988,7 @@ mod tests {
                 turn_state,
                 stream_done_tx,
                 steer_shared,
+                DenyCut::default(),
             )
             .await;
         });
@@ -3952,6 +4146,7 @@ mod tests {
                 turn_state_shared,
                 stream_done_tx,
                 SteerSignal::default(),
+                DenyCut::default(),
             )
             .await;
         });

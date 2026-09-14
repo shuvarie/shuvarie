@@ -119,8 +119,8 @@ fn display_stream(bytes: &[u8]) -> String {
 pub(crate) struct ShellRun {
     pub status: std::process::ExitStatus,
     pub timed_out: bool,
-    /// Set when a `deny interrupt=#true` permission rule matched the captured
-    /// output and the command was killed.
+    /// Set when a `deny` permission rule matched the captured output and the
+    /// command was killed.
     pub interrupted: Option<String>,
     pub out: String,
     pub err: String,
@@ -330,7 +330,7 @@ impl Tool for RunShell {
 
     fn description(&self) -> String {
         format!(
-            "Run a shell command line in the workspace, executed through the resolved shell (`{}`). Pipes, redirects, and shell operators work naturally. Output streams live to the user while the command runs. Captured stdout and stderr (combined) are returned, capped at 16 KB. The command and its children are killed when it exceeds the timeout; if the command is expected to take longer and is not waiting for interactive input, retry with a larger timeout_secs value. The working directory can be set with `cwd`. Commands are permission-gated: a denied command fails with the matched rule named, and a run can be killed when its output trips a deny-with-interrupt rule.",
+            "Run a shell command line in the workspace, executed through the resolved shell (`{}`). Pipes, redirects, and shell operators work naturally. Output streams live to the user while the command runs. Captured stdout and stderr (combined) are returned, capped at 16 KB. The command and its children are killed when it exceeds the timeout; if the command is expected to take longer and is not waiting for interactive input, retry with a larger timeout_secs value. The working directory can be set with `cwd`. Commands are permission-gated: a denied command interrupts the turn, whether denied upfront by the command text or killed mid-run because its output tripped a deny rule.",
             self.shell.invocation()
         )
     }
@@ -387,6 +387,7 @@ impl Tool for RunShell {
             .await?;
 
             if let Some(reason) = &run.interrupted {
+                access.trigger_cut();
                 ctx.insert_result(ShellStreams {
                     stdout: format!("interrupted: {reason}\n{}", run.out),
                     stderr: run.err,
@@ -855,6 +856,7 @@ mod tests {
                 shell: shuvarie_config::RuleSet::default(),
                 ..shuvarie_config::PermissionsConfig::builtin()
             });
+        let cut = access.turn_cut().clone();
         let tool = RunShell::new(
             ShellOutputTx::new(tokio::sync::mpsc::channel(64).0),
             crate::shell::resolve(None).shell,
@@ -872,6 +874,7 @@ mod tests {
             message.contains("permission denied by the user"),
             "{message}"
         );
+        assert!(cut.is_set(), "a user rejection must flag the turn cut");
         drop(dir);
     }
 
@@ -886,11 +889,11 @@ mod tests {
                     verb: shuvarie_config::Verb::Deny,
                     pattern: "secret-output".to_string(),
                     kind: shuvarie_config::ShellPatternKind::Raw,
-                    interrupt: true,
                 }],
             },
             ..shuvarie_config::PermissionsConfig::builtin()
         });
+        let cut = access.turn_cut().clone();
         let tool = RunShell::new(
             ShellOutputTx::new(tokio::sync::mpsc::channel(64).0),
             crate::shell::resolve(None).shell,
@@ -909,6 +912,7 @@ mod tests {
             message.contains("killed") && message.contains("secret"),
             "{message}"
         );
+        assert!(cut.is_set(), "output-match deny must flag the turn cut");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(10),
             "interrupt must kill promptly"

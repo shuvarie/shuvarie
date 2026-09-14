@@ -4,7 +4,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use shuvarie_llm::ToolContext;
 
-use crate::permissions::{Access, PermissionGate, Permissions};
+use crate::permissions::{Access, DenyCut, PermissionGate, Permissions};
 
 static CWD_LOCK: Mutex<()> = Mutex::new(());
 
@@ -51,7 +51,7 @@ pub(crate) fn access_for_config(config: &shuvarie_config::PermissionsConfig) -> 
         .unwrap(),
     );
     let (tx, _rx) = tokio::sync::mpsc::channel(1);
-    Access::new(permissions, PermissionGate::new(tx))
+    Access::new(permissions, PermissionGate::new(tx), DenyCut::default())
 }
 
 /// [`Access`] whose ask gate is driven by the returned receiver, so tests can
@@ -70,5 +70,8 @@ pub(crate) fn access_with_answering_gate(
         .unwrap(),
     );
     let (tx, rx) = tokio::sync::mpsc::channel(1);
-    (Access::new(permissions, PermissionGate::new(tx)), rx)
+    (
+        Access::new(permissions, PermissionGate::new(tx), DenyCut::default()),
+        rx,
+    )
 }

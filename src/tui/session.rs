@@ -843,6 +843,7 @@ impl SessionScreen {
                 self.retry = None;
                 self.last_escape = None;
                 self.permission.close();
+                self.question.close();
             }
             _ => {}
         }

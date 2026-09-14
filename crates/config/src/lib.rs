@@ -235,10 +235,6 @@ pub struct ShellRule {
 
     /// How the pattern matches a command: `raw` (default) or `regex`.
     pub kind: ShellPatternKind,
-
-    /// `deny` rules with `#true` kill a running command whose captured output
-    /// matches the pattern.
-    pub interrupt: bool,
 }
 
 /// How a shell pattern matches a command.
@@ -1657,7 +1653,7 @@ mod tests {
                     /-ask-all
                     ask "rm"
                     ask pattern="regex" "rm (-rf|-fr|--force --recursive)"
-                    deny interrupt=#true "sudo"
+                    deny "sudo"
                 }
             }
         "#;
@@ -1684,7 +1680,6 @@ mod tests {
         );
         assert_eq!(perms.shell.rules[1].kind, ShellPatternKind::Regex);
         assert_eq!(perms.shell.rules[2].pattern, "sudo");
-        assert!(perms.shell.rules[2].interrupt);
 
         let text = config_kdl::to_kdl(&parsed).unwrap();
         let reparsed = config_kdl::from_kdl(&text).unwrap();
@@ -1775,6 +1770,10 @@ mod tests {
                 "permissions { shell-patterns { ask mode=\"ro\" \"x\" } }",
                 "unknown property",
             ),
+            (
+                "permissions { shell-patterns { deny interrupt=#true \"x\" } }",
+                "unknown property",
+            ),
         ];
         for (text, needle) in cases {
             let err = config_kdl::from_kdl(text).unwrap_err();
@@ -1822,7 +1821,6 @@ mod tests {
         for rule in &perms.shell.rules[..2] {
             assert_eq!(rule.verb, Verb::Deny);
             assert_eq!(rule.kind, ShellPatternKind::Regex);
-            assert!(!rule.interrupt);
         }
         assert_eq!(perms.shell.rules[0].pattern, "rm (-rf|-fr)");
         assert_eq!(perms.shell.rules[1].pattern, "git push --force");

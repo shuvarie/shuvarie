@@ -903,7 +903,7 @@ fn parse_path_rules(node: &KdlNode, input: &str) -> Result<Vec<PathRule>> {
 }
 
 fn parse_shell_rules(node: &KdlNode, input: &str) -> Result<Vec<ShellRule>> {
-    check_props(input, node, &["pattern", "interrupt"])?;
+    check_props(input, node, &["pattern"])?;
     let verb = rule_verb(input, node)?;
     let kind = match property_string(input, node, "pattern")?.as_deref() {
         None => ShellPatternKind::Raw,
@@ -918,7 +918,6 @@ fn parse_shell_rules(node: &KdlNode, input: &str) -> Result<Vec<ShellRule>> {
             ));
         }
     };
-    let interrupt = prop_bool(input, node, "interrupt")?.unwrap_or_default();
     rule_patterns(input, node, "pattern")?
         .into_iter()
         .map(|pattern| {
@@ -926,7 +925,6 @@ fn parse_shell_rules(node: &KdlNode, input: &str) -> Result<Vec<ShellRule>> {
                 verb,
                 pattern,
                 kind,
-                interrupt,
             })
         })
         .collect()
@@ -1199,7 +1197,7 @@ fn permissions_node(cfg: &PermissionsConfig) -> Option<KdlNode> {
         children.push(scope_node(
             "shell-patterns",
             &cfg.shell,
-            |rule| (rule.verb, rule.kind, rule.interrupt),
+            |rule| (rule.verb, rule.kind),
             shell_rule_group,
         ));
     }
@@ -1261,9 +1259,6 @@ fn shell_rule_group(rules: &[&ShellRule]) -> KdlNode {
     let mut node = KdlNode::new(first.verb.as_str());
     if first.kind == ShellPatternKind::Regex {
         node.push(KdlEntry::new_prop("pattern", "regex"));
-    }
-    if first.interrupt {
-        node.push(KdlEntry::new_prop("interrupt", true));
     }
     for rule in rules {
         node.push(KdlEntry::new(rule.pattern.as_str()));

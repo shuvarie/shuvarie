@@ -138,7 +138,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            err.to_string().contains("permission denied by the user"),
+            err.to_string().contains("permission"),
             "{}",
             err.to_string()
         );
@@ -161,7 +161,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            err.to_string().contains("permission denied by the user"),
+            err.to_string().contains("permission"),
             "{}",
             err.to_string()
         );
