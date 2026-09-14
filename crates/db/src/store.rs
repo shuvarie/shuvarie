@@ -10,8 +10,9 @@ use toasty::stmt::Type;
 
 use crate::error::{DbError, Result};
 use crate::model::{
-    Message, MessageEmbedding, MsgRole, ReasoningSegment, Session, SessionType, ToolCall, UndoLog,
-    encode_reasoning, parse_reasoning,
+    Message, MessageEmbedding, MsgRole, ReasoningSegment, Session, SessionType, TextSegment,
+    ToolCall, UndoLog, encode_reasoning, encode_text_segments, parse_reasoning,
+    parse_text_segments,
 };
 
 static MIGRATIONS: toasty::migration::MigrationSet = toasty::embed_migrations!();
@@ -65,6 +66,10 @@ pub struct StoredMessage {
     pub role: MsgRole,
     pub content: String,
     pub reasoning: Vec<ReasoningSegment>,
+    /// The turn's text runs with the tool-call positions they streamed at, so
+    /// a reload rebuilds the interleave; empty on older rows (the runs then
+    /// fall back to the joined `content`).
+    pub text_segments: Vec<TextSegment>,
     pub interrupted: bool,
     pub seq: u64,
     pub input_tokens: u64,
@@ -105,6 +110,7 @@ pub struct UndoEntry {
     pub user_content: String,
     pub assistant_content: String,
     pub reasoning: Vec<ReasoningSegment>,
+    pub text_segments: Vec<TextSegment>,
     pub usage: TokenUsage,
     pub cost: f64,
     pub tool_calls: Vec<StoredToolCall>,
@@ -143,6 +149,7 @@ impl From<Message> for StoredMessage {
             role: m.role,
             content: m.content,
             reasoning: parse_reasoning(&m.reasoning),
+            text_segments: parse_text_segments(&m.text_segments),
             interrupted: m.interrupted,
             seq: m.seq,
             input_tokens: m.input_tokens,
@@ -368,6 +375,7 @@ impl Store {
             role: MsgRole::from(role),
             content: content.to_string(),
             reasoning: String::new(),
+            text_segments: String::new(),
             interrupted: false,
             input_tokens: 0,
             output_tokens: 0,
@@ -391,6 +399,7 @@ impl Store {
         session_id: uuid::Uuid,
         content: &str,
         reasoning: &[ReasoningSegment],
+        text_segments: &[TextSegment],
         interrupted: bool,
         usage: TokenUsage,
         cost: f64,
@@ -403,6 +412,7 @@ impl Store {
             role: MsgRole::Assistant,
             content: content.to_string(),
             reasoning: encode_reasoning(reasoning),
+            text_segments: encode_text_segments(text_segments),
             interrupted,
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
@@ -426,6 +436,7 @@ impl Store {
         message_id: u64,
         content: &str,
         reasoning: &[ReasoningSegment],
+        text_segments: &[TextSegment],
         interrupted: bool,
         usage: TokenUsage,
         cost: f64,
@@ -434,6 +445,7 @@ impl Store {
         Message::update_by_id(message_id)
             .content(content.to_string())
             .reasoning(encode_reasoning(reasoning))
+            .text_segments(encode_text_segments(text_segments))
             .interrupted(interrupted)
             .input_tokens(usage.input_tokens)
             .output_tokens(usage.output_tokens)
@@ -460,6 +472,7 @@ impl Store {
             role: MsgRole::Assistant,
             content: content.to_string(),
             reasoning: String::new(),
+            text_segments: String::new(),
             interrupted: false,
             input_tokens: 0,
             output_tokens: 0,
@@ -570,6 +583,7 @@ impl Store {
             user_content: entry.user_content.clone(),
             assistant_content: entry.assistant_content.clone(),
             reasoning: encode_reasoning(&entry.reasoning),
+            text_segments: encode_text_segments(&entry.text_segments),
             usage_json,
             tool_calls_json,
             file_changes_json,
@@ -595,6 +609,7 @@ impl Store {
             user_content: row.user_content,
             assistant_content: row.assistant_content,
             reasoning: parse_reasoning(&row.reasoning),
+            text_segments: parse_text_segments(&row.text_segments),
             usage: serde_json::from_str(&row.usage_json).unwrap_or_default(),
             cost: 0.0,
             tool_calls: deserialize_tool_calls(&row.tool_calls_json),

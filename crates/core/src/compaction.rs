@@ -273,6 +273,7 @@ mod tests {
             role,
             content: content.to_string(),
             reasoning: Vec::new(),
+            text_segments: Vec::new(),
             interrupted: false,
             seq: 0,
             input_tokens: 0,

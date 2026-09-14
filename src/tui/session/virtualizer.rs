@@ -4,6 +4,7 @@ use ratatui::prelude::*;
 use shuvarie_core::Role;
 use shuvarie_core::tool_record::ToolRecord;
 use shuvarie_core::tools::todos::parse_items;
+use shuvarie_db::TextSegment;
 use shuvarie_llm::{FileChange, PatchFileKind};
 use unicode_width::UnicodeWidthStr;
 
@@ -70,12 +71,15 @@ impl TurnEst {
     }
 
     /// Build the estimate of a stored session message from its raw data —
-    /// the lazy path: blocks are not materialized yet.
+    /// the lazy path: blocks are not materialized yet. Text runs interleave
+    /// with the tools at their `after_tool` positions, mirroring
+    /// `materialize_blocks`.
     pub fn from_session_parts(
         role: Role,
         content: &str,
         tools: &[&ToolRecord],
         reasoning_count: usize,
+        text_runs: &[TextSegment],
         summary_marker: bool,
         interrupted_marker: bool,
     ) -> Self {
@@ -95,18 +99,43 @@ impl TurnEst {
                     est.deco_rows += 1;
                 }
                 let mut prev_tool = false;
-                for record in tools {
+                let mut run_i = 0usize;
+                for (tool_idx, record) in tools.iter().enumerate() {
+                    while let Some(run) = text_runs.get(run_i)
+                        && (run.after_tool as usize) <= tool_idx
+                    {
+                        if !run.text.is_empty() {
+                            est.padding_rows += 2 * u32::from(TEXT_PADDING.1);
+                            est.add_text(&run.text);
+                            prev_tool = false;
+                        }
+                        run_i += 1;
+                    }
                     if prev_tool {
                         est.deco_rows += 1;
                     }
                     prev_tool = true;
                     est.add_tool(record);
                 }
-                if content.is_empty() {
-                    est.deco_rows += 1;
+                if text_runs.is_empty() {
+                    if content.is_empty() {
+                        est.deco_rows += 1;
+                    } else {
+                        est.padding_rows += 2 * u32::from(TEXT_PADDING.1);
+                        est.add_text(content);
+                    }
                 } else {
-                    est.padding_rows += 2 * u32::from(TEXT_PADDING.1);
-                    est.add_text(content);
+                    let mut any_text = false;
+                    for run in &text_runs[run_i.min(text_runs.len())..] {
+                        if !run.text.is_empty() {
+                            est.padding_rows += 2 * u32::from(TEXT_PADDING.1);
+                            est.add_text(&run.text);
+                            any_text = true;
+                        }
+                    }
+                    if !any_text && content.is_empty() {
+                        est.deco_rows += 1;
+                    }
                 }
                 if interrupted_marker {
                     est.deco_rows += 1;

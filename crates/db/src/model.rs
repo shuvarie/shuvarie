@@ -31,6 +31,41 @@ pub(crate) fn parse_reasoning(raw: &str) -> Vec<ReasoningSegment> {
     }]
 }
 
+/// One assistant text run with the number of tool calls that completed before
+/// it started, so a reload can rebuild the interleave the stream showed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TextSegment {
+    #[serde(default)]
+    pub after_tool: u64,
+    #[serde(default)]
+    pub text: String,
+}
+
+pub(crate) fn encode_text_segments(segments: &[TextSegment]) -> String {
+    if segments.is_empty() {
+        return String::new();
+    }
+    serde_json::to_string(segments).unwrap_or_default()
+}
+
+pub(crate) fn parse_text_segments(raw: &str) -> Vec<TextSegment> {
+    if raw.trim().is_empty() {
+        return Vec::new();
+    }
+    serde_json::from_str::<Vec<TextSegment>>(raw).unwrap_or_default()
+}
+
+/// The turn's text runs fused back into the stored message `content`: the
+/// paragraph break between runs travels inside the stream deltas, so the
+/// runs concatenate byte-identically to the joined turn text.
+pub fn join_text_segments(segments: &[TextSegment]) -> String {
+    let mut text = String::new();
+    for seg in segments {
+        text.push_str(&seg.text);
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,6 +99,42 @@ mod tests {
                 duration_ms: 0,
             }]
         );
+    }
+
+    #[test]
+    fn parse_text_segments_round_trips_and_ignores_garbage() {
+        let segments = vec![
+            TextSegment {
+                after_tool: 0,
+                text: "before".to_string(),
+            },
+            TextSegment {
+                after_tool: 2,
+                text: "after".to_string(),
+            },
+        ];
+        let raw = encode_text_segments(&segments);
+        assert_eq!(parse_text_segments(&raw), segments);
+        assert!(parse_text_segments("").is_empty());
+        assert!(parse_text_segments("   ").is_empty());
+        assert!(parse_text_segments("plain text").is_empty());
+        assert_eq!(encode_text_segments(&[]), "");
+    }
+
+    #[test]
+    fn join_text_segments_concatenates_the_separator_bearing_runs() {
+        let segments = vec![
+            TextSegment {
+                after_tool: 0,
+                text: "start".to_string(),
+            },
+            TextSegment {
+                after_tool: 1,
+                text: "\n\nresumed".to_string(),
+            },
+        ];
+        assert_eq!(join_text_segments(&segments), "start\n\nresumed");
+        assert_eq!(join_text_segments(&[]), "");
     }
 
     #[test]
@@ -162,6 +233,9 @@ pub struct Message {
     pub role: MsgRole,
     pub content: String,
     pub reasoning: String,
+    /// JSON of [`TextSegment`]s: the turn's text runs with the tool-call
+    /// positions they streamed at, so a reload rebuilds the interleave.
+    pub text_segments: String,
     pub interrupted: bool,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -217,6 +291,7 @@ pub struct UndoLog {
     pub user_content: String,
     pub assistant_content: String,
     pub reasoning: String,
+    pub text_segments: String,
     pub usage_json: String,
     pub tool_calls_json: String,
     pub file_changes_json: String,

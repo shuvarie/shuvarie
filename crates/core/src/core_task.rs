@@ -1252,7 +1252,7 @@ the list current.";
 struct TurnState {
     assistant_message_id: Option<u64>,
     assistant_seq: u64,
-    pending_text: String,
+    text_segments: Vec<shuvarie_db::TextSegment>,
     pending_reasoning: Vec<shuvarie_db::ReasoningSegment>,
     tool_records: Vec<crate::tool_record::ToolRecord>,
     /// Tool calls started but not yet finished, in start order: when the turn
@@ -1310,8 +1310,9 @@ async fn undo_last_turn(store: &mut Store, session_id: uuid::Uuid) -> Result<boo
     let entry = shuvarie_db::UndoEntry {
         turn_seq: assistant_msg.seq,
         user_content: user_msg.content,
-        assistant_content: assistant_msg.content,
-        reasoning: assistant_msg.reasoning,
+        assistant_content: assistant_msg.content.clone(),
+        reasoning: assistant_msg.reasoning.clone(),
+        text_segments: assistant_msg.text_segments.clone(),
         usage,
         cost: assistant_msg.cost,
         tool_calls: tool_calls.clone(),
@@ -1368,6 +1369,7 @@ async fn redo_turn(store: &mut Store, session_id: uuid::Uuid) -> Result<bool, St
             session_id,
             &entry.assistant_content,
             &entry.reasoning,
+            &entry.text_segments,
             false,
             entry.usage,
             entry.cost,
@@ -1921,7 +1923,7 @@ async fn stream_stream_to_events(
     let mut assistant_seq: u64 = 0;
     let mut pending_reasoning: Vec<shuvarie_db::ReasoningSegment> = Vec::new();
     let mut reasoning_started: Option<std::time::Instant> = None;
-    let mut pending_text = String::new();
+    let mut text_segments: Vec<shuvarie_db::TextSegment> = Vec::new();
     let mut tool_seq: u64 = 0;
     let mut turn_tool_records: Vec<crate::tool_record::ToolRecord> = Vec::new();
     let mut pending_tool_args: std::collections::HashMap<String, PendingTool> =
@@ -1954,10 +1956,21 @@ async fn stream_stream_to_events(
         }
         match item {
             shuvarie_llm::StreamItem::Delta { text } if !text.is_empty() => {
-                pending_text.push_str(&text);
+                let after_tool = turn_tool_records.len() as u64;
+                match text_segments.last_mut() {
+                    Some(segment) if segment.after_tool == after_tool => {
+                        segment.text.push_str(&text);
+                    }
+                    _ => {
+                        text_segments.push(shuvarie_db::TextSegment {
+                            after_tool,
+                            text: text.clone(),
+                        });
+                    }
+                }
                 {
                     let mut ts = turn_state.lock().await;
-                    ts.pending_text = pending_text.clone();
+                    ts.text_segments = text_segments.clone();
                 }
                 let _ = event_tx.send(Event::TokenReceived { content: text }).await;
                 action = ActionPhase::Text;
@@ -2211,8 +2224,8 @@ async fn stream_stream_to_events(
                     .await;
             }
             shuvarie_llm::StreamItem::Done { text, usage } => {
-                let text = if text.is_empty() && !pending_text.is_empty() {
-                    std::mem::take(&mut pending_text)
+                let text = if text.is_empty() && !text_segments.is_empty() {
+                    shuvarie_db::join_text_segments(&text_segments)
                 } else {
                     text
                 };
@@ -2224,7 +2237,7 @@ async fn stream_stream_to_events(
             shuvarie_llm::StreamItem::ConnectionError { message, reason } => {
                 persist_stream_error(
                     assistant_message_id,
-                    &pending_text,
+                    &text_segments,
                     &pending_reasoning,
                     &session,
                     &mut store,
@@ -2237,7 +2250,7 @@ async fn stream_stream_to_events(
             shuvarie_llm::StreamItem::Error { message } => {
                 persist_stream_error(
                     assistant_message_id,
-                    &pending_text,
+                    &text_segments,
                     &pending_reasoning,
                     &session,
                     &mut store,
@@ -2250,7 +2263,7 @@ async fn stream_stream_to_events(
             shuvarie_llm::StreamItem::Overflow => {
                 persist_stream_error(
                     assistant_message_id,
-                    &pending_text,
+                    &text_segments,
                     &pending_reasoning,
                     &session,
                     &mut store,
@@ -2347,12 +2360,26 @@ async fn stream_stream_to_events(
         let seq = guard.messages.len() - 1;
         let reasoning = pending_reasoning.clone();
         guard.reasoning.insert(seq as u64, reasoning.clone());
+        if !text_segments.is_empty() {
+            guard
+                .text_segments
+                .insert(seq as u64, text_segments.clone());
+        }
         guard.tool_records.append(&mut turn_tool_records);
         drop(guard);
         if let Some(id) = id {
             if let Some(msg_id) = assistant_message_id {
                 let _ = store
-                    .update_message(msg_id, &text, &reasoning, false, combined, cost, &usage)
+                    .update_message(
+                        msg_id,
+                        &text,
+                        &reasoning,
+                        &text_segments,
+                        false,
+                        combined,
+                        cost,
+                        &usage,
+                    )
                     .await;
                 let _ = store.truncate_undo_log(id).await;
                 if let Some(setup) = &embedding_setup {
@@ -2373,7 +2400,16 @@ async fn stream_stream_to_events(
                 }
             } else {
                 match store
-                    .append_assistant_message(id, &text, &reasoning, false, combined, cost, &usage)
+                    .append_assistant_message(
+                        id,
+                        &text,
+                        &reasoning,
+                        &text_segments,
+                        false,
+                        combined,
+                        cost,
+                        &usage,
+                    )
                     .await
                 {
                     Ok(msg) => {
@@ -2467,6 +2503,7 @@ async fn ensure_assistant_row(
             id,
             "",
             reasoning,
+            &[],
             false,
             shuvarie_llm::TokenUsage::default(),
             0.0,
@@ -2550,20 +2587,22 @@ async fn persist_interrupted_turn(
     session: &Option<Arc<Mutex<Session>>>,
     _event_tx: &Sender<Event>,
 ) {
-    let (text, reasoning, msg_id, tool_records, pending_tools, assistant_seq) = match turn_state {
-        Some(ts_arc) => {
-            let ts = ts_arc.lock().await;
-            (
-                ts.pending_text.clone(),
-                ts.pending_reasoning.clone(),
-                ts.assistant_message_id,
-                ts.tool_records.clone(),
-                ts.pending_tools.clone(),
-                ts.assistant_seq,
-            )
-        }
-        None => return,
-    };
+    let (text_segments, reasoning, msg_id, tool_records, pending_tools, assistant_seq) =
+        match turn_state {
+            Some(ts_arc) => {
+                let ts = ts_arc.lock().await;
+                (
+                    ts.text_segments.clone(),
+                    ts.pending_reasoning.clone(),
+                    ts.assistant_message_id,
+                    ts.tool_records.clone(),
+                    ts.pending_tools.clone(),
+                    ts.assistant_seq,
+                )
+            }
+            None => return,
+        };
+    let text = shuvarie_db::join_text_segments(&text_segments);
 
     let Some(s) = session else {
         return;
@@ -2580,6 +2619,7 @@ async fn persist_interrupted_turn(
                 msg_id,
                 &text,
                 &reasoning,
+                &text_segments,
                 true,
                 shuvarie_llm::TokenUsage::default(),
                 0.0,
@@ -2612,6 +2652,9 @@ async fn persist_interrupted_turn(
             g.push_assistant(text.clone());
             let seq = g.messages.len() - 1;
             g.reasoning.insert(seq as u64, reasoning);
+            if !text_segments.is_empty() {
+                g.text_segments.insert(seq as u64, text_segments);
+            }
             g.interrupted.insert(seq as u64, true);
             g.tool_records.extend(tool_records);
             g.tool_records.extend(killed);
@@ -2622,6 +2665,7 @@ async fn persist_interrupted_turn(
                 id,
                 &text,
                 &reasoning,
+                &text_segments,
                 true,
                 shuvarie_llm::TokenUsage::default(),
                 0.0,
@@ -2636,6 +2680,9 @@ async fn persist_interrupted_turn(
         if !reasoning.is_empty() {
             g.reasoning.insert(seq as u64, reasoning.clone());
         }
+        if !text_segments.is_empty() {
+            g.text_segments.insert(seq as u64, text_segments);
+        }
         g.interrupted.insert(seq as u64, true);
     }
 }
@@ -2649,12 +2696,13 @@ fn build_client(pc: &ProviderConfig) -> Result<ProviderClient, String> {
 
 async fn persist_stream_error(
     assistant_message_id: Option<u64>,
-    pending_text: &str,
+    text_segments: &[shuvarie_db::TextSegment],
     pending_reasoning: &[shuvarie_db::ReasoningSegment],
     session: &Arc<Mutex<Session>>,
     store: &mut Store,
 ) {
-    if pending_text.is_empty() && pending_reasoning.is_empty() {
+    let text = shuvarie_db::join_text_segments(text_segments);
+    if text.is_empty() && pending_reasoning.is_empty() {
         return;
     }
     let guard = session.lock().await;
@@ -2667,20 +2715,22 @@ async fn persist_stream_error(
         let _ = store
             .update_message(
                 msg_id,
-                pending_text,
+                &text,
                 pending_reasoning,
+                text_segments,
                 true,
                 shuvarie_llm::TokenUsage::default(),
                 0.0,
                 &shuvarie_llm::TokenUsage::default(),
             )
             .await;
-    } else if !pending_text.is_empty() {
+    } else if !text.is_empty() {
         let _ = store
             .append_assistant_message(
                 id,
-                pending_text,
+                &text,
                 pending_reasoning,
+                text_segments,
                 true,
                 shuvarie_llm::TokenUsage::default(),
                 0.0,
@@ -2689,10 +2739,13 @@ async fn persist_stream_error(
             .await;
     }
     let mut g = session.lock().await;
-    g.push_assistant(pending_text.to_string());
+    g.push_assistant(text);
     let seq = g.messages.len() - 1;
     if !pending_reasoning.is_empty() {
         g.reasoning.insert(seq as u64, pending_reasoning.to_vec());
+    }
+    if !text_segments.is_empty() {
+        g.text_segments.insert(seq as u64, text_segments.to_vec());
     }
     g.interrupted.insert(seq as u64, true);
 }
@@ -4056,7 +4109,10 @@ mod tests {
         let turn_state = Arc::new(Mutex::new(TurnState {
             assistant_message_id: Some(assistant.id),
             assistant_seq: 1,
-            pending_text: "partial".into(),
+            text_segments: vec![shuvarie_db::TextSegment {
+                after_tool: 0,
+                text: "partial".into(),
+            }],
             tool_records: vec![crate::tool_record::ToolRecord {
                 name: "read_file".into(),
                 args_json: "{}".into(),
@@ -4159,5 +4215,89 @@ mod tests {
         let guard = session.lock().await;
         assert_eq!(guard.tool_records.len(), 1);
         assert!(!guard.tool_records[0].killed);
+    }
+
+    #[tokio::test]
+    async fn text_runs_seal_at_tool_gaps() {
+        let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
+        let session = Arc::new(Mutex::new(Session::new()));
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+        let mut store = Store::open_in_memory().await.unwrap();
+        let id = store.create_session("runs", None, None).await.unwrap();
+        {
+            let mut guard = session.lock().await;
+            guard.id = Some(id);
+            guard.push_user("go");
+        }
+        store
+            .append_message(id, shuvarie_llm::Role::User, "go")
+            .await
+            .unwrap();
+        let stream: shuvarie_llm::StreamStream = Box::pin(futures_util::stream::iter(vec![
+            StreamItem::Delta {
+                text: "start".into(),
+            },
+            main_tool_start("read_file", "c1"),
+            main_tool_result("read_file", "c1"),
+            StreamItem::Delta {
+                text: "\n\nresumed".into(),
+            },
+            StreamItem::Done {
+                text: "start\n\nresumed".into(),
+                usage: TokenUsage::default(),
+            },
+        ]));
+        let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
+        let turn_state = Arc::new(Mutex::new(TurnState::default()));
+        let (stream_done_tx, _stream_done_rx) = tokio::sync::mpsc::channel(1);
+        let session_shared = session.clone();
+        let turn_state_shared = turn_state.clone();
+        let store_shared = store.clone();
+        tokio::spawn(async move {
+            stream_stream_to_events(
+                stream,
+                session_shared,
+                client,
+                None,
+                store_shared,
+                "ollama-model".into(),
+                20_000,
+                worker_usage,
+                None,
+                event_tx,
+                turn_state_shared,
+                stream_done_tx,
+                SteerSignal::default(),
+                DenyCut::default(),
+            )
+            .await;
+        });
+        while let Some(event) = event_rx.recv().await {
+            if matches!(event, Event::StreamDone { .. }) {
+                break;
+            }
+        }
+        let stored = store.load_session(id).await.unwrap();
+        let assistant = &stored.messages[1];
+        assert_eq!(assistant.content, "start\n\nresumed");
+        assert_eq!(
+            assistant.text_segments,
+            vec![
+                shuvarie_db::TextSegment {
+                    after_tool: 0,
+                    text: "start".into(),
+                },
+                shuvarie_db::TextSegment {
+                    after_tool: 1,
+                    text: "\n\nresumed".into(),
+                },
+            ],
+            "the resumed run seals at the tool gap"
+        );
+        let guard = session.lock().await;
+        assert_eq!(
+            guard.text_segments.get(&1).map(Vec::as_slice),
+            Some(assistant.text_segments.as_slice())
+        );
     }
 }

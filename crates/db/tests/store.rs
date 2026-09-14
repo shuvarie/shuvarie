@@ -74,6 +74,7 @@ async fn append_and_load_messages_in_order() {
             id,
             "hi there",
             &[],
+            &[],
             false,
             TokenUsage {
                 input_tokens: 10,
@@ -178,6 +179,7 @@ async fn reasoning_segments_round_trip_with_positions() {
             id,
             "done",
             &segments,
+            &[],
             false,
             TokenUsage::default(),
             0.0,
@@ -195,6 +197,7 @@ async fn reasoning_segments_round_trip_with_positions() {
             msg.id,
             "done edited",
             &segments,
+            &[],
             false,
             TokenUsage::default(),
             0.0,
@@ -204,6 +207,57 @@ async fn reasoning_segments_round_trip_with_positions() {
         .unwrap();
     let loaded: StoredSession = store.load_session(id).await.unwrap();
     assert_eq!(loaded.messages[1].reasoning, segments);
+}
+
+#[tokio::test]
+async fn text_segments_round_trip_with_positions() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store.create_session("runs", None, None).await.unwrap();
+    store.append_message(id, Role::User, "do it").await.unwrap();
+
+    let segments = vec![
+        shuvarie_db::TextSegment {
+            after_tool: 0,
+            text: "first run".to_string(),
+        },
+        shuvarie_db::TextSegment {
+            after_tool: 2,
+            text: "run after two tools".to_string(),
+        },
+    ];
+    let msg = store
+        .append_assistant_message(
+            id,
+            "first run\n\nrun after two tools",
+            &[],
+            &segments,
+            false,
+            TokenUsage::default(),
+            0.0,
+            &TokenUsage::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(msg.text_segments, segments);
+
+    let loaded: StoredSession = store.load_session(id).await.unwrap();
+    assert_eq!(loaded.messages[1].text_segments, segments);
+
+    store
+        .update_message(
+            msg.id,
+            "edited",
+            &[],
+            &segments,
+            false,
+            TokenUsage::default(),
+            0.0,
+            &TokenUsage::default(),
+        )
+        .await
+        .unwrap();
+    let loaded: StoredSession = store.load_session(id).await.unwrap();
+    assert_eq!(loaded.messages[1].text_segments, segments);
 }
 
 #[tokio::test]
@@ -331,6 +385,7 @@ async fn search_finds_messages_across_sessions_ranked() {
         .append_assistant_message(
             s1,
             "tokio::spawn runs a task on the runtime",
+            &[],
             &[],
             false,
             TokenUsage::default(),

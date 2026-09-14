@@ -6,7 +6,7 @@ use ratatui::prelude::*;
 use serde_json::Value;
 use shuvarie_core::tool_record::ToolRecord;
 use shuvarie_core::{DiagnosticInfo, Role};
-use shuvarie_db::{ReasoningSegment, StoredScroll};
+use shuvarie_db::{ReasoningSegment, StoredScroll, TextSegment};
 use shuvarie_llm::{FileChange, ShellStreams};
 use unicode_width::UnicodeWidthStr;
 
@@ -1733,9 +1733,9 @@ impl Chat {
 }
 
 /// Rebuild the turns of a stored session: user/system messages become their
-/// single blocks, assistant messages assemble reasoning, summary marker, tool
-/// blocks (in record order, before the text — matching reload layout), and
-/// the text chunk.
+/// single blocks, assistant messages assemble reasoning and text runs at the
+/// tool-call positions they streamed at (`after_tool`), the summary marker,
+/// and the tool blocks in record order.
 fn materialize_blocks(session: &shuvarie_core::Session, idx: usize) -> Vec<Block> {
     let message = &session.messages[idx];
     let mut blocks = Vec::new();
@@ -1745,6 +1745,11 @@ fn materialize_blocks(session: &shuvarie_core::Session, idx: usize) -> Vec<Block
         Role::Assistant => {
             let segments: &[ReasoningSegment] = session
                 .reasoning
+                .get(&(idx as u64))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let text_runs: &[TextSegment] = session
+                .text_segments
                 .get(&(idx as u64))
                 .map(Vec::as_slice)
                 .unwrap_or_default();
@@ -1761,7 +1766,19 @@ fn materialize_blocks(session: &shuvarie_core::Session, idx: usize) -> Vec<Block
                         *seg_i += 1;
                     }
                 };
+            let mut run_i = 0usize;
+            let drain_text = |blocks: &mut Vec<Block>, run_i: &mut usize, tools_done: usize| {
+                while let Some(run) = text_runs.get(*run_i)
+                    && (run.after_tool as usize) <= tools_done
+                {
+                    if !run.text.is_empty() {
+                        blocks.push(Block::Text(TextBlock::new(run.text.clone())));
+                    }
+                    *run_i += 1;
+                }
+            };
             drain_reasoning(&mut blocks, &mut seg_i, 0);
+            drain_text(&mut blocks, &mut run_i, 0);
             if session.summary_seq.is_some_and(|seq| seq as usize == idx) {
                 blocks.push(Block::Summary);
             }
@@ -1773,9 +1790,11 @@ fn materialize_blocks(session: &shuvarie_core::Session, idx: usize) -> Vec<Block
             {
                 blocks.push(Block::Tool(Box::new(ToolBlock::from_record(record))));
                 drain_reasoning(&mut blocks, &mut seg_i, count + 1);
+                drain_text(&mut blocks, &mut run_i, count + 1);
             }
             drain_reasoning(&mut blocks, &mut seg_i, usize::MAX);
-            if !message.content.is_empty() {
+            drain_text(&mut blocks, &mut run_i, usize::MAX);
+            if text_runs.is_empty() && !message.content.is_empty() {
                 blocks.push(Block::Text(TextBlock::new(message.content.clone())));
             }
         }
@@ -1798,12 +1817,18 @@ fn build_turn_ests(session: &shuvarie_core::Session, interrupted: bool) -> Vec<T
         .map(|(idx, message)| {
             let tools: Vec<&ToolRecord> = by_msg.get(&(idx as u64)).cloned().unwrap_or_default();
             let reasoning_count = session.reasoning.get(&(idx as u64)).map_or(0, Vec::len);
+            let text_runs: &[TextSegment] = session
+                .text_segments
+                .get(&(idx as u64))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
             let summary = session.summary_seq.is_some_and(|seq| seq as usize == idx);
             TurnEst::from_session_parts(
                 message.role,
                 &message.content,
                 &tools,
                 reasoning_count,
+                text_runs,
                 summary,
                 interrupted && idx == last && message.role == Role::Assistant,
             )
@@ -1819,6 +1844,7 @@ mod tests {
     use shuvarie_core::tool_record::ToolRecord;
 
     use crate::tui::session::blocks::ReasoningMessage;
+    use crate::tui::session::segment::{BLOCK_PADDING, TEXT_PADDING};
     use crate::tui::session::virtualizer::render_turn_cache;
 
     fn header_text(block: &Block) -> String {
@@ -2364,6 +2390,100 @@ mod tests {
         let blocks = materialize_blocks(&session, 1);
         assert_eq!(block_tags(&blocks), vec!["R", "T", "T", "R", "R", "X"]);
         assert!(header_text(&blocks[0]).contains("Thought"));
+    }
+
+    #[test]
+    fn reload_interleaves_text_between_tool_records() {
+        let mut session = shuvarie_core::Session::new();
+        session.push_user("do it");
+        session.push_assistant("start\n\nmid");
+        session.text_segments.insert(
+            1,
+            vec![
+                TextSegment {
+                    after_tool: 0,
+                    text: "start".to_string(),
+                },
+                TextSegment {
+                    after_tool: 2,
+                    text: "\n\nmid".to_string(),
+                },
+            ],
+        );
+        session.tool_records = vec![tool_record(1), tool_record(1)];
+
+        let blocks = materialize_blocks(&session, 1);
+        assert_eq!(
+            block_tags(&blocks),
+            vec!["X", "T", "T", "X"],
+            "text runs sit at their tool gaps; no trailing duplicate"
+        );
+        assert!(matches!(blocks.last().unwrap(), Block::Text(_)));
+    }
+
+    #[test]
+    fn reload_keeps_trailing_text_without_segments() {
+        let mut session = shuvarie_core::Session::new();
+        session.push_user("do it");
+        session.push_assistant("all at the end");
+        session.tool_records = vec![tool_record(1)];
+
+        let blocks = materialize_blocks(&session, 1);
+        assert_eq!(block_tags(&blocks), vec!["T", "X"]);
+    }
+
+    #[test]
+    fn est_walk_interleaves_text_between_tools() {
+        let tools = [tool_record(1), tool_record(1)];
+        let runs = [
+            TextSegment {
+                after_tool: 0,
+                text: "before".to_string(),
+            },
+            TextSegment {
+                after_tool: 2,
+                text: "between".to_string(),
+            },
+            TextSegment {
+                after_tool: 2,
+                text: "after".to_string(),
+            },
+        ];
+        let est = TurnEst::from_session_parts(
+            Role::Assistant,
+            "before\n\nbetween\n\nafter",
+            &tools.iter().collect::<Vec<_>>(),
+            0,
+            &runs,
+            false,
+            false,
+        );
+        assert_eq!(est.tool_count, 2);
+        assert_eq!(est.text_lines, 3, "one line per run");
+        assert_eq!(
+            est.padding_rows,
+            2 * 3 * u32::from(TEXT_PADDING.1) + 2 * 2 * u32::from(BLOCK_PADDING.1),
+            "padding per text run plus per tool"
+        );
+    }
+
+    #[test]
+    fn est_walk_without_runs_counts_one_text_block() {
+        let tools = [tool_record(1)];
+        let est = TurnEst::from_session_parts(
+            Role::Assistant,
+            "reply",
+            &tools.iter().collect::<Vec<_>>(),
+            0,
+            &[],
+            false,
+            false,
+        );
+        assert_eq!(est.text_lines, 1);
+        assert_eq!(
+            est.padding_rows,
+            2 * u32::from(TEXT_PADDING.1) + 2 * u32::from(BLOCK_PADDING.1)
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use shuvarie_db::{ReasoningSegment, StoredMessage, StoredScroll, StoredSession};
+use shuvarie_db::{ReasoningSegment, StoredMessage, StoredScroll, StoredSession, TextSegment};
 use shuvarie_llm::ChatMsg;
 use shuvarie_llm::TokenUsage;
 
@@ -34,6 +34,9 @@ pub struct Session {
     pub title: Option<String>,
     pub messages: Vec<ChatMsg>,
     pub reasoning: HashMap<u64, Vec<ReasoningSegment>>,
+    /// The turn's text runs keyed by dense message index, with the tool-call
+    /// positions they streamed at; drives the reload interleave.
+    pub text_segments: HashMap<u64, Vec<TextSegment>>,
     pub interrupted: HashMap<u64, bool>,
     pub tool_records: Vec<ToolRecord>,
     pub tokens: u64,
@@ -106,6 +109,9 @@ impl Session {
             if !m.reasoning.is_empty() {
                 s.reasoning.insert(idx as u64, m.reasoning.clone());
             }
+            if !m.text_segments.is_empty() {
+                s.text_segments.insert(idx as u64, m.text_segments.clone());
+            }
             if m.interrupted {
                 s.interrupted.insert(idx as u64, true);
             }
@@ -137,6 +143,7 @@ impl Session {
         self.title = None;
         self.messages.clear();
         self.reasoning.clear();
+        self.text_segments.clear();
         self.interrupted.clear();
         self.tool_records.clear();
         self.tokens = 0;
@@ -234,6 +241,7 @@ mod tests {
             role,
             content: content.to_string(),
             reasoning: Vec::new(),
+            text_segments: Vec::new(),
             interrupted: false,
             seq,
             input_tokens: 0,
@@ -324,5 +332,31 @@ mod tests {
         let stored = stored_session(vec![stored_message(0, MsgRole::User, "hi")]);
         let session = Session::from_stored(stored);
         assert!(session.last_usage.is_none());
+    }
+
+    #[test]
+    fn from_stored_maps_text_segments_to_dense_indices() {
+        let mut stored = stored_session(vec![
+            stored_message(0, MsgRole::User, "go"),
+            stored_message(7, MsgRole::Assistant, "start\n\nresumed"),
+        ]);
+        stored.messages[1].text_segments = vec![
+            shuvarie_db::TextSegment {
+                after_tool: 0,
+                text: "start".into(),
+            },
+            shuvarie_db::TextSegment {
+                after_tool: 1,
+                text: "\n\nresumed".into(),
+            },
+        ];
+
+        let session = Session::from_stored(stored);
+        let runs = session
+            .text_segments
+            .get(&1)
+            .expect("segments keyed by dense index");
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[1].after_tool, 1);
     }
 }

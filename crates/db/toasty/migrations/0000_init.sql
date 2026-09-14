@@ -57,6 +57,7 @@ CREATE TABLE "messages" (
     "role" TEXT NOT NULL CHECK ("role" IN ('system', 'user', 'assistant')),
     "content" TEXT NOT NULL,
     "reasoning" TEXT NOT NULL,
+    "text_segments" TEXT NOT NULL,
     "interrupted" BOOLEAN NOT NULL,
     "input_tokens" INTEGER NOT NULL,
     "output_tokens" INTEGER NOT NULL,
@@ -79,6 +80,7 @@ CREATE TABLE "undo_logs" (
     "user_content" TEXT NOT NULL,
     "assistant_content" TEXT NOT NULL,
     "reasoning" TEXT NOT NULL,
+    "text_segments" TEXT NOT NULL,
     "usage_json" TEXT NOT NULL,
     "tool_calls_json" TEXT NOT NULL,
     "file_changes_json" TEXT NOT NULL
