@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 
-use super::kdl_util::{child_nodes, node_error, parse_document};
+use super::kdl_util::{autoformat, child_nodes, node_error, parse_document};
 use super::{
     AgentConfig, Config, ConfigError, ContextConfig, EmbeddingConfig, LspConfigRepr,
     LspServerSpecRepr, Mode, PathRule, PermissionsConfig, RegistriesConfig, RegistryEntry,
@@ -997,7 +997,7 @@ pub(crate) fn to_kdl(config: &Config) -> Result<String> {
     for node in sections.into_iter().flatten() {
         doc.nodes_mut().push(node);
     }
-    doc.autoformat();
+    autoformat(&mut doc);
     Ok(doc.to_string())
 }
 

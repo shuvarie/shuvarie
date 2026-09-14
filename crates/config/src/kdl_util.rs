@@ -1,4 +1,4 @@
-use kdl::{KdlDocument, KdlNode};
+use kdl::{FormatConfig, KdlDocument, KdlDocumentFormat, KdlNode};
 
 use crate::ConfigError;
 use crate::Result;
@@ -70,4 +70,26 @@ pub(crate) fn node_error(
 
 pub(crate) fn child_nodes(node: &KdlNode) -> &[KdlNode] {
     node.children().map(KdlDocument::nodes).unwrap_or(&[])
+}
+
+const INDENT: &str = "  ";
+
+pub(crate) fn autoformat(doc: &mut KdlDocument) {
+    let config = FormatConfig::builder().indent(INDENT).build();
+    doc.autoformat_config(&config);
+    seed_children_decor(doc, 0);
+}
+
+fn seed_children_decor(doc: &mut KdlDocument, level: usize) {
+    for node in doc.nodes_mut() {
+        if let Some(children) = node.children_mut() {
+            if children.format().is_none() {
+                children.set_format(KdlDocumentFormat {
+                    leading: "\n".into(),
+                    trailing: INDENT.repeat(level),
+                });
+            }
+            seed_children_decor(children, level + 1);
+        }
+    }
 }

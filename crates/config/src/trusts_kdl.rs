@@ -1,6 +1,6 @@
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 
-use super::kdl_util::{node_error, parse_document};
+use super::kdl_util::{autoformat, node_error, parse_document};
 use super::trusts::{Category, TrustFile, TrustGrants, WorkspaceTrust};
 use crate::Result;
 
@@ -177,7 +177,7 @@ pub(crate) fn to_kdl(file: &TrustFile) -> Result<String> {
         }
         doc.nodes_mut().push(node);
     }
-    doc.autoformat();
+    autoformat(&mut doc);
     Ok(format!("{FILE_HEADER}{doc}"))
 }
 

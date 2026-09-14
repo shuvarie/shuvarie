@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 
-use super::kdl_util::{node_error, parse_document};
+use super::kdl_util::{autoformat, node_error, parse_document};
 use super::{Active, Connections, ProviderConfig};
 use crate::Result;
 
@@ -332,6 +332,6 @@ pub(crate) fn to_kdl(connections: &Connections) -> Result<String> {
     }
     providers.set_children(body);
     doc.nodes_mut().push(providers);
-    doc.autoformat();
+    autoformat(&mut doc);
     Ok(format!("{FILE_HEADER}{doc}"))
 }

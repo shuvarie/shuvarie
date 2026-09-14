@@ -3738,7 +3738,7 @@ mod tests {
         // The tool denies while its call runs: after the start, before the
         // result is streamed.
         let mut saw_start = false;
-        let mut denied = None;
+        let denied;
         loop {
             let event = event_rx.recv().await.expect("events before the cut");
             match event {

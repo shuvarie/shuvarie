@@ -1057,12 +1057,12 @@ mod tests {
             None,
             vec![shell_rule(Verb::Deny, "sudo")],
         ));
-        let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
+        let rx = std::sync::Arc::new(tokio::sync::Mutex::new(rx));
         let answer = |allow: bool| {
             let rx = rx.clone();
             async move {
                 rx.lock()
-                    .unwrap()
+                    .await
                     .recv()
                     .await
                     .unwrap()

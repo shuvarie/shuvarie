@@ -302,6 +302,50 @@ mod tests {
     }
 
     #[test]
+    fn generated_output_indents_two_spaces_per_level() {
+        let mut connections = Connections::default();
+        connections.providers.insert(
+            "local".to_string(),
+            ProviderConfig::new("local", "ollama", None, None),
+        );
+        let saved = connections_kdl::to_kdl(&connections).unwrap();
+        assert!(saved.contains("\n  provider "), "2-space provider: {saved}");
+        assert!(saved.contains("\n    kind "), "4-space kind: {saved}");
+        assert!(
+            saved.contains("\n  }\n}"),
+            "2-space closing braces: {saved}"
+        );
+        assert!(!saved.contains("\n     "), "no odd indent: {saved}");
+    }
+
+    #[test]
+    fn generated_output_closes_blocks_at_open_level() {
+        let mut connections = Connections::default();
+        let mut provider = ProviderConfig::new("a", "openai", None, None);
+        provider.catalog = Some("gpt-5".to_string());
+        provider.api_key = Some("key".to_string());
+        connections.providers.insert("a".to_string(), provider);
+        let saved = connections_kdl::to_kdl(&connections).unwrap();
+        // kdl renders string values as bare identifiers when they are plain
+        // idents (only quoted when quoting is required), so the plain values
+        // here come out unquoted.
+        let expected = [
+            "providers {",
+            "  provider id=a name=a {",
+            "    kind openai",
+            "    catalog gpt-5",
+            "    api-key key",
+            "  }",
+            "}",
+        ];
+        let body: Vec<&str> = saved
+            .lines()
+            .skip_while(|l| !l.starts_with("providers"))
+            .collect();
+        assert_eq!(body, expected, "{saved}");
+    }
+
+    #[test]
     fn rejects_non_string_active_children() {
         for text in [
             "active {\n    provider 1\n}",
