@@ -25,7 +25,7 @@ shuvarie-config.workspace = true
 shuvarie-db.workspace = true
 shuvarie-llm.workspace = true
 shuvarie-lsp.workspace = true
-similar = "3"
+similar = { version = "3", features = ["inline", "unicode"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "time"] }
 uuid.workspace = true

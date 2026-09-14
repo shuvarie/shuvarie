@@ -216,20 +216,72 @@ fn diff_row_line(line: &DiffLine) -> Line<'static> {
     if line.kind == DiffLineKind::Ellipsis {
         return Line::from(Span::raw("    …").fg(theme::TEXT_MUTED));
     }
-    let (marker, fg) = match line.kind {
-        DiffLineKind::Add => ("+", theme::SUCCESS),
-        DiffLineKind::Remove => ("-", theme::ERROR),
-        DiffLineKind::Context => (" ", theme::TEXT_DIM),
+    let (marker, fg, emph_bg) = match line.kind {
+        DiffLineKind::Add => ("+", theme::SUCCESS, Some(theme::DIFF_ADD_EMPH_BG)),
+        DiffLineKind::Remove => ("-", theme::ERROR, Some(theme::DIFF_DEL_EMPH_BG)),
+        DiffLineKind::Context => (" ", theme::TEXT_DIM, None),
         DiffLineKind::Ellipsis => unreachable!(),
     };
     let old_num = gutter_number(line.old_line);
     let new_num = gutter_number(line.new_line);
     let text = line.text.trim_end_matches(['\r', '\n']);
-    Line::from(vec![
+    let mut spans = vec![
         Span::raw(format!("  {old_num} {new_num} ")).fg(theme::TEXT_MUTED),
         Span::raw(marker).fg(fg).bold(),
-        Span::raw(text.to_string()).fg(fg),
-    ])
+    ];
+    spans.extend(edited_spans(text, &line.edits, fg, emph_bg));
+    Line::from(spans)
+}
+
+/// The row text split at the partial-edit ranges: edited runs carry the
+/// kind's emphasis background while the rest of the row keeps the row
+/// background painted behind it. Rows without edits render as one span.
+fn edited_spans(
+    text: &str,
+    edits: &[(u32, u32)],
+    fg: Color,
+    emph_bg: Option<Color>,
+) -> Vec<Span<'static>> {
+    if edits.is_empty() {
+        return vec![Span::raw(text.to_string()).fg(fg)];
+    }
+    let mut spans = Vec::new();
+    let mut cursor = 0usize;
+    for &(start, end) in edits {
+        let start = floor_char_boundary(text, start as usize).max(cursor);
+        let end = ceil_char_boundary(text, end as usize);
+        if start > cursor {
+            spans.push(Span::raw(text[cursor..start].to_string()).fg(fg));
+        }
+        if end > start {
+            let mut run = Span::raw(text[start..end].to_string()).fg(fg);
+            if let Some(bg) = emph_bg {
+                run = run.bg(bg);
+            }
+            spans.push(run);
+        }
+        cursor = cursor.max(end);
+    }
+    if cursor < text.len() {
+        spans.push(Span::raw(text[cursor..].to_string()).fg(fg));
+    }
+    spans
+}
+
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    let mut i = index.min(text.len());
+    while i > 0 && !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn ceil_char_boundary(text: &str, index: usize) -> usize {
+    let mut i = index.min(text.len());
+    while i < text.len() && !text.is_char_boundary(i) {
+        i += 1;
+    }
+    i
 }
 
 fn gutter_number(value: Option<u64>) -> String {
@@ -269,10 +321,12 @@ pub struct SlicedChunk {
 
 impl BodyChunk {
     /// Chunk a run of source rows: runs at or under [`CHUNK_ROWS`] render
-    /// fully materialized, longer runs render sliced.
+    /// fully materialized, longer runs render sliced. Diff runs always
+    /// render sliced: their rows tint their full row per kind, which the
+    /// painter resolves from the source at paint time.
     pub fn rows(source: BodySource, start: u32, width: u16, trim: bool) -> Self {
         let end = source.row_count();
-        if end.saturating_sub(start) <= CHUNK_ROWS {
+        if end.saturating_sub(start) <= CHUNK_ROWS && !matches!(source, BodySource::Diff { .. }) {
             let lines = (start..end).map(|i| source.row(i)).collect();
             BodyChunk::Fixed(FixedChunk {
                 lines,
@@ -322,25 +376,25 @@ impl BodyChunk {
 
     /// Paint the wrapped rows `band` (chunk-local) at `rect`.
     fn paint_band(&self, band: Range<u32>, width: u16, trim: bool, rect: Rect, buf: &mut Buffer) {
-        let window = match self {
+        match self {
             BodyChunk::Fixed(chunk) => {
                 let counts = chunk.counts(width, trim);
-                count_window(&counts, band.start, band.end)
-                    .map(|(first, last, offset)| (chunk.lines[first..=last].to_vec(), offset))
+                if let Some((first, last, offset)) = count_window(&counts, band.start, band.end) {
+                    render_window(chunk.lines[first..=last].to_vec(), offset, trim, rect, buf);
+                }
             }
             BodyChunk::Sliced(chunk) => {
-                count_window(&chunk.counts, band.start, band.end).map(|(first, last, offset)| {
-                    (
-                        (first..=last)
-                            .map(|i| chunk.source.row(chunk.start + i as u32))
-                            .collect::<Vec<Line<'static>>>(),
-                        offset,
-                    )
-                })
+                let window = count_window(&chunk.counts, band.start, band.end);
+                paint_row_bgs(&chunk.counts, band, rect, buf, |i| {
+                    source_row_bg(&chunk.source, chunk.start + i as u32)
+                });
+                if let Some((first, last, offset)) = window {
+                    let lines = (first..=last)
+                        .map(|i| chunk.source.row(chunk.start + i as u32))
+                        .collect::<Vec<Line<'static>>>();
+                    render_window(lines, offset, trim, rect, buf);
+                }
             }
-        };
-        if let Some((lines, offset)) = window {
-            render_window(lines, offset, trim, rect, buf);
         }
     }
 }
@@ -353,6 +407,53 @@ fn source_row_count(source: &BodySource, index: u32, width: u16, trim: bool) -> 
         return 1;
     }
     wrapped_line_count(&source.row(index), width, trim)
+}
+
+/// The full-row background a source row paints behind its glyphs: diff
+/// Add/Remove rows tint their whole row; every other row keeps the segment
+/// background.
+fn source_row_bg(source: &BodySource, index: u32) -> Option<Color> {
+    let BodySource::Diff { lines } = source else {
+        return None;
+    };
+    match lines.get(index as usize)?.kind {
+        DiffLineKind::Add => Some(theme::DIFF_ADD_BG),
+        DiffLineKind::Remove => Some(theme::DIFF_DEL_BG),
+        DiffLineKind::Context | DiffLineKind::Ellipsis => None,
+    }
+}
+
+/// Paint each wrapped row of `band` with the background its source row
+/// carries, across the full content width (wrapped continuations included).
+/// Cells without an explicit background keep it, so text painted on top
+/// shows the row tint between and past the glyphs.
+fn paint_row_bgs(
+    counts: &[u32],
+    band: Range<u32>,
+    rect: Rect,
+    buf: &mut Buffer,
+    source_bg: impl Fn(usize) -> Option<Color>,
+) {
+    let mut cum = 0u32;
+    let mut index = 0usize;
+    for row in band.start..band.end {
+        while index < counts.len() && row >= cum + counts[index] {
+            cum += counts[index];
+            index += 1;
+        }
+        if index >= counts.len() {
+            break;
+        }
+        let Some(bg) = source_bg(index) else {
+            continue;
+        };
+        let y = rect.y + u16::try_from(row - band.start).unwrap_or(u16::MAX);
+        for x in rect.x..rect.x.saturating_add(rect.width) {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_bg(bg);
+            }
+        }
+    }
 }
 
 /// Render `lines` with word wrapping, skipping `offset` wrapped rows from the
@@ -1133,16 +1234,156 @@ pub(crate) mod tests {
                     old_line: None,
                     new_line: Some(3),
                     text: "let z = 3;".to_string(),
+                    edits: Vec::new(),
                 },
                 DiffLine {
                     kind: DiffLineKind::Context,
                     old_line: Some(3),
                     new_line: Some(3),
                     text: "kept".to_string(),
+                    edits: Vec::new(),
                 },
             ]),
         };
         assert_eq!(diff.row_copy_text(0), "+let z = 3;");
         assert_eq!(diff.row_copy_text(1), " kept");
+    }
+
+    fn emphasis_diff_source() -> BodySource {
+        BodySource::Diff {
+            lines: Rc::from(vec![
+                DiffLine {
+                    kind: DiffLineKind::Remove,
+                    old_line: Some(3),
+                    new_line: None,
+                    text: "let value = old();\n".to_string(),
+                    edits: vec![(12, 15)],
+                },
+                DiffLine {
+                    kind: DiffLineKind::Add,
+                    old_line: None,
+                    new_line: Some(3),
+                    text: "let value = new();\n".to_string(),
+                    edits: vec![(12, 15)],
+                },
+                DiffLine {
+                    kind: DiffLineKind::Context,
+                    old_line: Some(4),
+                    new_line: Some(4),
+                    text: "kept();\n".to_string(),
+                    edits: Vec::new(),
+                },
+            ]),
+        }
+    }
+
+    #[test]
+    fn diff_rows_paint_row_background_with_partial_edit_emphasis() {
+        let width = 40;
+        let seg = Segment::chunked(
+            BodyChunk::rows(emphasis_diff_source(), 0, width, false),
+            Some(theme::SUCCESS_BG),
+            (0, 0),
+            false,
+        );
+        let buf = full_render(&seg, width);
+        // Row layout: "  {old:>4} {new:>4} {marker}{text}" — the text starts
+        // at column 13, so the emphasized run covers columns 25..28.
+        let bg_at = |row: u32, x: u16| buf[(x, row as u16)].bg;
+        assert_eq!(bg_at(0, 0), theme::DIFF_DEL_BG);
+        assert_eq!(bg_at(0, 12), theme::DIFF_DEL_BG);
+        assert_eq!(bg_at(0, width - 1), theme::DIFF_DEL_BG, "full row");
+        assert_eq!(bg_at(0, 25), theme::DIFF_DEL_EMPH_BG, "run start");
+        assert_eq!(bg_at(0, 27), theme::DIFF_DEL_EMPH_BG, "run end");
+        assert_eq!(bg_at(0, 28), theme::DIFF_DEL_BG, "after the run");
+        assert_eq!(bg_at(1, 0), theme::DIFF_ADD_BG);
+        assert_eq!(bg_at(1, 25), theme::DIFF_ADD_EMPH_BG);
+        assert_eq!(bg_at(1, 28), theme::DIFF_ADD_BG);
+        assert_eq!(bg_at(2, 0), theme::SUCCESS_BG, "context row");
+        assert_eq!(bg_at(2, width - 1), theme::SUCCESS_BG);
+    }
+
+    #[test]
+    fn diff_row_background_covers_wrapped_continuations() {
+        let source = BodySource::Diff {
+            lines: Rc::from(vec![DiffLine {
+                kind: DiffLineKind::Remove,
+                old_line: Some(1),
+                new_line: None,
+                text: "a long tool-edited row that certainly wraps past the pane edge for sure\n"
+                    .to_string(),
+                edits: Vec::new(),
+            }]),
+        };
+        let width = 30;
+        let seg = Segment::chunked(
+            BodyChunk::rows(source, 0, width, false),
+            Some(theme::SURFACE),
+            (0, 0),
+            false,
+        );
+        let buf = full_render(&seg, width);
+        let rows = buffer_rows(&buf, width, buf.area().height);
+        assert!(rows.iter().filter(|r| !r.is_empty()).count() >= 2, "wraps");
+        for (y, row) in rows.iter().enumerate() {
+            if row.is_empty() {
+                continue;
+            }
+            for x in 0..width {
+                assert_eq!(buf[(x, y as u16)].bg, theme::DIFF_DEL_BG, "row {y} col {x}");
+            }
+        }
+    }
+
+    #[test]
+    fn sliced_diff_rows_paint_backgrounds_like_the_full_render() {
+        let lines: Vec<DiffLine> = (0..60)
+            .map(|i| DiffLine {
+                kind: if i % 2 == 0 {
+                    DiffLineKind::Remove
+                } else {
+                    DiffLineKind::Add
+                },
+                old_line: (i % 2 == 0).then_some(i as u64),
+                new_line: (i % 2 == 1).then_some(i as u64),
+                text: format!(
+                    "edited row {i} with enough words to fill the pane width several times over"
+                ),
+                edits: (i % 2 == 0).then_some((0u32, 6u32)).into_iter().collect(),
+            })
+            .collect();
+        let width = 60;
+        let seg = Segment::chunked(
+            BodyChunk::rows(
+                BodySource::Diff {
+                    lines: Rc::from(lines),
+                },
+                0,
+                width,
+                false,
+            ),
+            Some(theme::SUCCESS_BG),
+            (0, 0),
+            false,
+        );
+        assert!(
+            matches!(seg.chunks[0], BodyChunk::Sliced(_)),
+            "60 rows must slice"
+        );
+        let full = full_render(&seg, width);
+        assert_eq!(full[(0, 0)].bg, theme::DIFF_DEL_BG);
+        // The rows overflow the pane and wrap, so locate the first Add row's
+        // leading wrapped row instead of assuming its y.
+        let add_row = buffer_rows(&full, width, full.area().height)
+            .iter()
+            .position(|row| row.contains("edited row 1"))
+            .expect("add row rendered") as u16;
+        assert_eq!(full[(0, add_row)].bg, theme::DIFF_ADD_BG);
+        assert_windows_match(
+            &seg,
+            width,
+            &full,
+            &[0, 20, 61, u32::from(full.area().height) - 1],
+        );
     }
 }

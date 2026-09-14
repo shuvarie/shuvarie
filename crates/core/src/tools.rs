@@ -119,6 +119,8 @@ fn workspace_root() -> Result<PathBuf, String> {
 
 pub(crate) fn compute_diff(old: &str, new: &str) -> Vec<DiffLine> {
     let diff = similar::TextDiff::from_lines(old, new);
+    let mut options = similar::InlineChangeOptions::new();
+    options.mode(similar::InlineChangeMode::UnicodeWords);
     let mut lines: Vec<DiffLine> = Vec::new();
     for group in diff.grouped_ops(3) {
         if !lines.is_empty() {
@@ -127,10 +129,11 @@ pub(crate) fn compute_diff(old: &str, new: &str) -> Vec<DiffLine> {
                 old_line: None,
                 new_line: None,
                 text: String::new(),
+                edits: Vec::new(),
             });
         }
         for op in group {
-            for change in diff.iter_changes(&op) {
+            for change in diff.iter_inline_changes_with_options(&op, options) {
                 let (kind, old_line, new_line) = match change.tag() {
                     similar::ChangeTag::Delete => (DiffLineKind::Remove, change.old_index(), None),
                     similar::ChangeTag::Insert => (DiffLineKind::Add, None, change.new_index()),
@@ -142,11 +145,26 @@ pub(crate) fn compute_diff(old: &str, new: &str) -> Vec<DiffLine> {
                 };
                 let old_line = old_line.map(|i| i as u64 + 1);
                 let new_line = new_line.map(|i| i as u64 + 1);
+                let mut text = String::new();
+                let mut edits = Vec::new();
+                for &(emphasized, value) in change.values() {
+                    let start = text.len() as u32;
+                    text.push_str(value);
+                    if emphasized {
+                        edits.push((start, text.len() as u32));
+                    }
+                }
+                let trimmed = text.trim_end_matches(['\r', '\n']).len() as u32;
+                edits.retain_mut(|(start, end)| {
+                    *end = (*end).min(trimmed);
+                    *start < *end
+                });
                 lines.push(DiffLine {
                     kind,
                     old_line,
                     new_line,
-                    text: change.value().to_string(),
+                    text,
+                    edits,
                 });
             }
         }
@@ -329,6 +347,32 @@ mod tests {
         let new = "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nL\n";
         let diff = compute_diff(old, new);
         assert!(diff.iter().any(|l| l.kind == DiffLineKind::Ellipsis));
+    }
+
+    #[test]
+    fn diff_marks_partial_edits() {
+        let lines = compute_diff("let value = compute(x);\n", "let value = compute(y);\n");
+        assert_eq!(
+            (lines[0].kind, lines[1].kind),
+            (DiffLineKind::Remove, DiffLineKind::Add)
+        );
+        assert_eq!(
+            lines[0].edits, lines[1].edits,
+            "paired rows emphasize the same run"
+        );
+        let (start, end) = lines[0].edits[0];
+        assert_eq!(&lines[0].text[start as usize..end as usize], "x");
+        assert_eq!(&lines[1].text[start as usize..end as usize], "y");
+        assert!(
+            (end as usize) <= lines[0].text.trim_end_matches(['\r', '\n']).len(),
+            "ranges must exclude the row break"
+        );
+
+        let lines = compute_diff("x\n", "x\ny\n");
+        assert!(
+            lines.iter().all(|line| line.edits.is_empty()),
+            "unpaired rows stay unemphasized: {lines:?}"
+        );
     }
 
     #[cfg(unix)]

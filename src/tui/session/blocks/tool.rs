@@ -1103,12 +1103,14 @@ mod tests {
                         old_line: Some(3),
                         new_line: None,
                         text: "        let value = old();\n".to_string(),
+                        edits: Vec::new(),
                     },
                     DiffLine {
                         kind: DiffLineKind::Add,
                         old_line: None,
                         new_line: Some(3),
                         text: "        let value = new();\n".to_string(),
+                        edits: Vec::new(),
                     },
                 ],
                 original: String::new(),
@@ -1748,6 +1750,7 @@ mod tests {
                 old_line: (i % 2 == 0).then_some(i as u64),
                 new_line: (i % 2 == 1).then_some(i as u64),
                 text: format!("        let value_{i} = compute({i});"),
+                edits: Vec::new(),
             })
             .collect();
         let mut block = ToolBlock::new("edit_file", r#"{"path":"a.rs"}"#.to_string(), None, None);

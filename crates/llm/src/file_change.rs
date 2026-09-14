@@ -137,6 +137,11 @@ pub struct DiffLine {
     pub old_line: Option<u64>,
     pub new_line: Option<u64>,
     pub text: String,
+    /// Byte ranges within the row's text of the partially-edited runs to
+    /// highlight with a background; empty when the whole row changed. The
+    /// ranges never cover the trailing row break.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edits: Vec<(u32, u32)>,
 }
 
 /// Display-only stdout/stderr split for a `run_shell` call, attached to the

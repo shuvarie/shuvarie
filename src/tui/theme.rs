@@ -21,6 +21,10 @@ pub const RUNNING_BG: Color = Color::Rgb(38, 38, 46);
 pub const SUCCESS_BG: Color = Color::Rgb(26, 40, 30);
 pub const WARNING_BG: Color = Color::Rgb(45, 37, 23);
 pub const ERROR_BG: Color = Color::Rgb(46, 26, 24);
+pub const DIFF_ADD_BG: Color = Color::Rgb(34, 58, 42);
+pub const DIFF_ADD_EMPH_BG: Color = Color::Rgb(50, 84, 58);
+pub const DIFF_DEL_BG: Color = Color::Rgb(62, 34, 30);
+pub const DIFF_DEL_EMPH_BG: Color = Color::Rgb(94, 50, 44);
 
 #[allow(dead_code)]
 pub const SUCCESS: Color = Color::Rgb(138, 146, 90);
