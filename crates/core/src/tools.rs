@@ -7,6 +7,7 @@ mod question;
 mod read_file;
 mod run_shell;
 pub mod todos;
+mod web_search;
 mod webfetch;
 mod write_file;
 
@@ -17,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 use shuvarie_llm::{DiffLine, DiffLineKind, DynamicTool, Tool};
 
+use crate::WebSearchConfig;
 use crate::lsp_manager::SharedManager;
 use crate::question::QuestionGate;
 use crate::shell::Shell;
@@ -29,6 +31,7 @@ use lsp::Lsp;
 use question::Question;
 use read_file::ReadFile;
 use run_shell::RunShell;
+use web_search::WebSearch;
 use webfetch::WebFetch;
 use write_file::WriteFile;
 
@@ -158,8 +161,9 @@ pub fn all_tools(
     shell_tx: ShellOutputTx,
     shell: Shell,
     todo_state: todos::TodoState,
+    web_search: Option<&WebSearchConfig>,
 ) -> Vec<DynamicTool> {
-    vec![
+    let mut tools = vec![
         shuvarie_llm::into_dynamic(
             "read_file",
             ReadFile::new(read_cache.clone(), max_output_chars, max_output_bytes),
@@ -181,7 +185,14 @@ pub fn all_tools(
         shuvarie_llm::into_dynamic("webfetch", WebFetch::new(max_output_chars)),
         shuvarie_llm::into_dynamic("question", Question::new(question_gate)),
         shuvarie_llm::into_dynamic(todos::Todo::NAME, todos::Todo::new(todo_state)),
-    ]
+    ];
+    if let Some(config) = web_search {
+        tools.push(shuvarie_llm::into_dynamic(
+            WebSearch::NAME,
+            WebSearch::new(config, max_output_chars),
+        ));
+    }
+    tools
 }
 
 pub fn read_tools(
@@ -189,8 +200,9 @@ pub fn read_tools(
     read_cache: ReadCache,
     max_output_chars: usize,
     max_output_bytes: usize,
+    web_search: Option<&WebSearchConfig>,
 ) -> Vec<DynamicTool> {
-    vec![
+    let mut tools = vec![
         shuvarie_llm::into_dynamic(
             "read_file",
             ReadFile::new(read_cache, max_output_chars, max_output_bytes),
@@ -200,7 +212,14 @@ pub fn read_tools(
         shuvarie_llm::into_dynamic("glob", Glob),
         shuvarie_llm::into_dynamic("lsp", Lsp::new(lsp)),
         shuvarie_llm::into_dynamic("webfetch", WebFetch::new(max_output_chars)),
-    ]
+    ];
+    if let Some(config) = web_search {
+        tools.push(shuvarie_llm::into_dynamic(
+            WebSearch::NAME,
+            WebSearch::new(config, max_output_chars),
+        ));
+    }
+    tools
 }
 
 pub fn command_tools(shell_tx: ShellOutputTx, shell: Shell) -> Vec<DynamicTool> {

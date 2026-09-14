@@ -72,6 +72,7 @@ fn merge_layer(config: &mut Config, layer: &ConfigLayer) {
                     config.registries.entries.insert(name.clone(), *entry);
                 }
             }
+            "tools" => config.tools = layer.config.tools.clone(),
             "lsp" => {
                 config.lsp.disabled = layer.config.lsp.disabled;
                 for (lang, spec) in &layer.config.lsp.servers {
@@ -102,6 +103,8 @@ pub struct Config {
     pub retry: RetryConfig,
 
     pub registries: RegistriesConfig,
+
+    pub tools: ToolsConfig,
 }
 
 fn default_max_turns() -> usize {
@@ -164,6 +167,101 @@ impl ContextConfig {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ShellConfig {
     pub path: Option<String>,
+}
+
+/// Opt-in agent tools. Every entry is absent from the file by default, and
+/// absence means the tool is not offered to the model at all.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ToolsConfig {
+    /// `tools { web-search { … } }` — the user-configured web search backend.
+    /// `None` (section absent) or `enabled #false` registers no tool.
+    pub web_search: Option<WebSearchConfig>,
+}
+
+/// A user-defined web search backend: one endpoint plus how to send the query
+/// (`params`) and how to read the response (`kind`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WebSearchConfig {
+    /// Stored as `enabled #true`; omitted or `#false` registers no tool.
+    pub enabled: bool,
+
+    /// The search endpoint. Must start with `http://` or `https://`.
+    pub url: String,
+
+    /// How to read the response: structured JSON results or fetch-and-convert
+    /// to markdown.
+    pub kind: WebSearchKind,
+
+    /// Request headers sent with every call. Values may carry `$VAR` /
+    /// `${VAR}` placeholders resolved from the environment at tool build time.
+    pub headers: BTreeMap<String, String>,
+
+    /// How the query reaches the endpoint.
+    pub params: WebSearchParams,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebSearchKind {
+    /// JSON search API: the response body is `{"results":[{title,url,content}]}`.
+    Ollama,
+    /// Fetch the URL and convert the response body to markdown.
+    ToMarkdown,
+}
+
+impl WebSearchKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ollama => "ollama",
+            Self::ToMarkdown => "to_markdown",
+        }
+    }
+}
+
+/// How the search query is sent to the endpoint.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WebSearchParams {
+    /// `body-json` = POST a JSON body, `query` = GET with URL query parameters.
+    pub kind: WebSearchParamKind,
+
+    /// Tool argument name → remote parameter name (`query as="q"`).
+    pub map: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebSearchParamKind {
+    BodyJson,
+    Query,
+}
+
+impl WebSearchParamKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::BodyJson => "body-json",
+            Self::Query => "query",
+        }
+    }
+
+    /// The transport matching the endpoint's backend when `params` is omitted.
+    pub fn default_for(kind: WebSearchKind) -> Self {
+        match kind {
+            WebSearchKind::Ollama => Self::BodyJson,
+            WebSearchKind::ToMarkdown => Self::Query,
+        }
+    }
+}
+
+impl WebSearchParams {
+    /// The params matching the endpoint's backend when `params` is omitted.
+    pub fn default_for(kind: WebSearchKind) -> Self {
+        let remote = match kind {
+            WebSearchKind::Ollama => "query",
+            WebSearchKind::ToMarkdown => "q",
+        };
+        Self {
+            kind: WebSearchParamKind::default_for(kind),
+            map: BTreeMap::from([("query".to_string(), remote.to_string())]),
+        }
+    }
 }
 
 /// Registry sources for provider/model catalogs. `selune` is the built-in
@@ -1105,5 +1203,268 @@ mod tests {
             config.registries.entry("vendor-y"),
             RegistryEntry::default()
         );
+    }
+
+    #[test]
+    fn web_search_absent_by_default() {
+        let parsed = config_kdl::from_kdl("").unwrap();
+        assert_eq!(parsed.tools.web_search, None);
+        let text = config_kdl::to_kdl(&Config::default()).unwrap();
+        assert!(!text.contains("tools"), "body: {text}");
+    }
+
+    #[test]
+    fn web_search_ollama_example() {
+        let text = r#"
+            tools {
+                web-search {
+                    enabled #true
+
+                    url "https://ollama.com/api/web_search"
+                    type "ollama"
+
+                    headers {
+                        Authorization "Bearer $OLLAMA_API_KEY"
+                    }
+
+                    params type="body-json" {
+                        query as="query"
+                    }
+                }
+
+                /-web-search {
+                    enabled #true
+
+                    url "https://duckduckgo.com"
+                    type "to_markdown"
+
+                    params type="query" {
+                        query as="q"
+                    }
+                }
+            }
+        "#;
+        let parsed = config_kdl::from_kdl(text).unwrap();
+        let web = parsed
+            .tools
+            .web_search
+            .expect("only one web-search survives");
+        assert!(web.enabled);
+        assert_eq!(web.url, "https://ollama.com/api/web_search");
+        assert_eq!(web.kind, WebSearchKind::Ollama);
+        assert_eq!(
+            web.headers.get("Authorization").map(String::as_str),
+            Some("Bearer $OLLAMA_API_KEY")
+        );
+        assert_eq!(web.params.kind, WebSearchParamKind::BodyJson);
+        assert_eq!(
+            web.params.map.get("query").map(String::as_str),
+            Some("query")
+        );
+    }
+
+    #[test]
+    fn web_search_to_markdown_example() {
+        let text = r#"
+            tools {
+                web-search {
+                    enabled #true
+
+                    url "https://html.duckduckgo.com/html/"
+                    type "to_markdown"
+
+                    params type="query" {
+                        query as="q"
+                    }
+                }
+            }
+        "#;
+        let parsed = config_kdl::from_kdl(text).unwrap();
+        let web = parsed.tools.web_search.as_ref().expect("web-search parsed");
+        assert_eq!(web.kind, WebSearchKind::ToMarkdown);
+        assert_eq!(web.params.kind, WebSearchParamKind::Query);
+        assert_eq!(web.params.map.get("query").map(String::as_str), Some("q"));
+
+        let text = config_kdl::to_kdl(&parsed).unwrap();
+        let reparsed = config_kdl::from_kdl(&text).unwrap();
+        assert_eq!(parsed, reparsed);
+    }
+
+    #[test]
+    fn web_search_params_defaults_per_kind() {
+        let parsed = config_kdl::from_kdl(
+            r#"
+            tools {
+                web-search {
+                    url "https://ollama.com/api/web_search"
+                    type "ollama"
+                }
+            }
+        "#,
+        )
+        .unwrap();
+        let web = parsed.tools.web_search.clone().unwrap();
+        assert_eq!(
+            web.params,
+            WebSearchParams::default_for(WebSearchKind::Ollama)
+        );
+        assert!(!web.enabled, "omitted enabled means off");
+        assert!(web.headers.is_empty());
+
+        let parsed = config_kdl::from_kdl(
+            r#"
+            tools {
+                web-search {
+                    url "https://html.duckduckgo.com/html/"
+                    type "to_markdown"
+                }
+            }
+        "#,
+        )
+        .unwrap();
+        let web = parsed.tools.web_search.clone().unwrap();
+        assert_eq!(
+            web.params,
+            WebSearchParams::default_for(WebSearchKind::ToMarkdown)
+        );
+
+        let text = config_kdl::to_kdl(&parsed).unwrap();
+        assert!(!text.contains("params"), "defaults omitted: {text}");
+        assert!(!text.contains("enabled"), "off flag omitted: {text}");
+    }
+
+    #[test]
+    fn web_search_duplicate_section_is_an_error() {
+        let err = config_kdl::from_kdl(
+            r#"
+            tools {
+                web-search {
+                    url "https://a.example"
+                    type "ollama"
+                }
+                web-search {
+                    url "https://b.example"
+                    type "to_markdown"
+                }
+            }
+        "#,
+        )
+        .unwrap_err();
+        let ConfigError::Parse(parse_err) = err else {
+            panic!("expected config parse error");
+        };
+        assert!(parse_err.message.contains("duplicate"), "{parse_err}");
+    }
+
+    #[test]
+    fn web_search_parse_errors() {
+        let cases: &[(&str, &str)] = &[
+            (
+                "tools { web-search { type \"ollama\" } }",
+                "requires a `url`",
+            ),
+            (
+                "tools { web-search { url \"https://a.example\" } }",
+                "requires a `type`",
+            ),
+            (
+                "tools { web-search { url \"ftp://a\"; type \"ollama\" } }",
+                "must start with http",
+            ),
+            (
+                "tools { web-search { url \"https://a\"; type \"bing\" } }",
+                "`ollama` or `to_markdown`",
+            ),
+            (
+                "tools { web-search { url \"https://a\"; type \"ollama\"; params type=\"form\" { query as=\"q\" } } }",
+                "`body-json` or `query`",
+            ),
+            (
+                "tools { web-search { url \"https://a\"; type \"ollama\"; params { answer as=\"a\" } } }",
+                "only `query`",
+            ),
+            (
+                "tools { web-search { url \"https://a\"; type \"ollama\"; params { query } } }",
+                "the remote parameter name",
+            ),
+            (
+                "tools { web-search { url \"https://a\"; type \"ollama\"; headers { \"Bad Header\" \"v\" } } }",
+                "header",
+            ),
+        ];
+        for (text, needle) in cases {
+            let err = config_kdl::from_kdl(text).unwrap_err();
+            let ConfigError::Parse(parse_err) = err else {
+                panic!("expected config parse error for {text}");
+            };
+            assert!(
+                parse_err.message.contains(needle),
+                "{needle:?} not in {parse_err}"
+            );
+        }
+    }
+
+    #[test]
+    fn web_search_full_config_round_trips() {
+        let mut config = Config::default();
+        config.tools.web_search = Some(WebSearchConfig {
+            enabled: true,
+            url: "https://ollama.com/api/web_search".to_string(),
+            kind: WebSearchKind::Ollama,
+            headers: BTreeMap::from([(
+                "Authorization".to_string(),
+                "Bearer ${OLLAMA_API_KEY}".to_string(),
+            )]),
+            params: WebSearchParams {
+                kind: WebSearchParamKind::BodyJson,
+                map: BTreeMap::from([("query".to_string(), "query".to_string())]),
+            },
+        });
+        let text = config_kdl::to_kdl(&config).unwrap();
+        let parsed = config_kdl::from_kdl(&text).unwrap();
+        assert_eq!(parsed, config);
+
+        config.tools.web_search.as_mut().unwrap().enabled = false;
+        let text = config_kdl::to_kdl(&config).unwrap();
+        assert!(!text.contains("enabled"), "off flag omitted: {text}");
+        let parsed = config_kdl::from_kdl(&text).unwrap();
+        assert_eq!(parsed, config);
+    }
+
+    #[test]
+    fn web_search_layer_replaces_wholesale() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global.kdl");
+        let top = dir.path().join("shuvarie.kdl");
+        std::fs::write(
+            &global,
+            r#"
+            tools {
+                web-search {
+                    enabled #true
+                    url "https://global.example"
+                    type "ollama"
+                }
+            }
+        "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &top,
+            r#"
+            tools {
+                web-search {
+                    url "https://top.example"
+                    type "to_markdown"
+                }
+            }
+        "#,
+        )
+        .unwrap();
+        let config = Config::load_chain(&[global, top]).unwrap();
+        let web = config.tools.web_search.expect("top layer wins");
+        assert_eq!(web.url, "https://top.example");
+        assert_eq!(web.kind, WebSearchKind::ToMarkdown);
+        assert!(!web.enabled);
     }
 }

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use shuvarie_llm::ProviderClient;
 use shuvarie_llm::TokenUsage;
 
+use crate::WebSearchConfig;
 use crate::lsp_manager::SharedManager;
 use crate::shell::Shell;
 use crate::tools::{self, FileLocks, ReadCache, ShellOutputTx};
@@ -24,6 +25,7 @@ pub fn build_workers(
     context_budget: Option<shuvarie_llm::ContextBudget>,
     shell_tx: ShellOutputTx,
     shell: Shell,
+    web_search: Option<&WebSearchConfig>,
 ) -> WorkerSet {
     let usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
     let workers = vec![
@@ -38,6 +40,7 @@ pub fn build_workers(
                 ReadCache::new(),
                 max_output_chars,
                 max_output_bytes,
+                web_search,
             ),
             Arc::clone(&usage),
             worker_max_turns,

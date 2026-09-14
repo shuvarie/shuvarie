@@ -6,7 +6,8 @@ use super::kdl_util::{child_nodes, node_error, parse_document};
 use super::{
     AgentConfig, Config, ConfigError, ContextConfig, EmbeddingConfig, LspConfigRepr,
     LspServerSpecRepr, RegistriesConfig, RegistryEntry, RetryConfig, ShellConfig, SidebarPref,
-    SkillsConfig, UiPrefs,
+    SkillsConfig, ToolsConfig, UiPrefs, WebSearchConfig, WebSearchKind, WebSearchParamKind,
+    WebSearchParams,
 };
 use crate::Result;
 
@@ -32,6 +33,7 @@ pub(crate) fn from_kdl_with_sections(contents: &str) -> Result<(Config, Vec<Stri
             "context" => config.context = parse_context(node, contents)?,
             "shell" => config.shell = parse_shell(node, contents)?,
             "registries" => config.registries = parse_registries(node, contents)?,
+            "tools" => config.tools = parse_tools(node, contents)?,
             "retry" => config.retry = parse_retry(node, contents)?,
             _ => {}
         }
@@ -459,6 +461,261 @@ fn parse_registry_entry(node: &KdlNode, input: &str) -> Result<RegistryEntry> {
     })
 }
 
+fn parse_tools(node: &KdlNode, input: &str) -> Result<ToolsConfig> {
+    let mut web_search = None;
+    for child in child_nodes(node) {
+        if child.name().value() == "web-search" {
+            set_once(
+                input,
+                child,
+                &mut web_search,
+                parse_web_search(child, input),
+            )?;
+        }
+    }
+    Ok(ToolsConfig { web_search })
+}
+
+fn parse_web_search(node: &KdlNode, input: &str) -> Result<Option<WebSearchConfig>> {
+    let mut enabled = None;
+    let mut url = None;
+    let mut kind = None;
+    let mut headers = None;
+    let mut params = None;
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "enabled" => set_once(input, child, &mut enabled, scalar_bool(input, child))?,
+            "url" => set_once(input, child, &mut url, scalar_string(input, child))?,
+            "type" => set_once(input, child, &mut kind, parse_web_search_kind(input, child))?,
+            "headers" => {
+                set_once(
+                    input,
+                    child,
+                    &mut headers,
+                    parse_web_search_headers(child, input),
+                )?;
+            }
+            "params" => set_once(
+                input,
+                child,
+                &mut params,
+                parse_web_search_params(child, input),
+            )?,
+            _ => {}
+        }
+    }
+    let Some(url) = url else {
+        return Err(node_error(
+            input,
+            node,
+            "`web-search` requires a `url`",
+            None,
+        ));
+    };
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(node_error(
+            input,
+            node,
+            "`web-search` url must start with http:// or https://",
+            None,
+        ));
+    }
+    let kind = kind.ok_or_else(|| {
+        node_error(
+            input,
+            node,
+            "`web-search` requires a `type` (\"ollama\" or \"to_markdown\")",
+            None,
+        )
+    })?;
+    let params = match params {
+        Some((param_kind, map)) => WebSearchParams {
+            kind: param_kind.unwrap_or_else(|| WebSearchParamKind::default_for(kind)),
+            map,
+        },
+        None => WebSearchParams::default_for(kind),
+    };
+    Ok(Some(WebSearchConfig {
+        enabled: enabled.unwrap_or(false),
+        url,
+        kind,
+        headers: headers.unwrap_or_default(),
+        params,
+    }))
+}
+
+fn parse_web_search_kind(input: &str, node: &KdlNode) -> Result<Option<WebSearchKind>> {
+    match scalar_string(input, node)? {
+        None => Ok(None),
+        Some(value) => match value.as_str() {
+            "ollama" => Ok(Some(WebSearchKind::Ollama)),
+            "to_markdown" => Ok(Some(WebSearchKind::ToMarkdown)),
+            other => Err(node_error(
+                input,
+                node,
+                format!("`type` must be `ollama` or `to_markdown`, found `{other}`"),
+                None,
+            )),
+        },
+    }
+}
+
+fn parse_web_search_headers(
+    node: &KdlNode,
+    input: &str,
+) -> Result<Option<BTreeMap<String, String>>> {
+    let mut headers = BTreeMap::new();
+    for child in child_nodes(node) {
+        let name = child.name().value().to_string();
+        if !is_header_token(&name) {
+            return Err(node_error(
+                input,
+                child,
+                format!("`{name}` is not a valid header name"),
+                None,
+            ));
+        }
+        let Some(value) = scalar_string(input, child)? else {
+            return Err(node_error(
+                input,
+                child,
+                format!("header `{name}` takes a single string value"),
+                None,
+            ));
+        };
+        if headers.insert(name.clone(), value).is_some() {
+            return Err(duplicate(input, child, &name));
+        }
+    }
+    Ok((!headers.is_empty()).then_some(headers))
+}
+
+fn is_header_token(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+/// The parsed `params` block: optional transport override plus the
+/// tool-argument → remote-parameter mapping.
+type WebSearchParamMapping = (Option<WebSearchParamKind>, BTreeMap<String, String>);
+
+fn parse_web_search_params(node: &KdlNode, input: &str) -> Result<Option<WebSearchParamMapping>> {
+    let mut kind = None;
+    let type_value = property_string(input, node, "type")?;
+    if let Some(value) = type_value {
+        kind = Some(match value.as_str() {
+            "body-json" => WebSearchParamKind::BodyJson,
+            "query" => WebSearchParamKind::Query,
+            other => {
+                return Err(node_error(
+                    input,
+                    node,
+                    format!("`params` type must be `body-json` or `query`, found `{other}`"),
+                    None,
+                ));
+            }
+        });
+    }
+    let mut map = BTreeMap::new();
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "query" => {
+                let remote = parse_param_remote(input, child)?;
+                if map.insert("query".to_string(), remote).is_some() {
+                    return Err(duplicate(input, child, "query"));
+                }
+            }
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!("unsupported parameter `{other}` (only `query` is supported)"),
+                    None,
+                ));
+            }
+        }
+    }
+    if map.is_empty() {
+        return Err(node_error(
+            input,
+            node,
+            "`params` requires a `query` mapping",
+            None,
+        ));
+    }
+    Ok(Some((kind, map)))
+}
+
+fn parse_param_remote(input: &str, child: &KdlNode) -> Result<String> {
+    if child.entries().iter().any(|entry| entry.name().is_none()) {
+        return Err(node_error(
+            input,
+            child,
+            format!("`{}` takes no positional arguments", child.name().value()),
+            None,
+        ));
+    }
+    for entry in child.entries() {
+        let name = entry.name().map(|n| n.value()).unwrap_or_default();
+        if name != "as" {
+            return Err(node_error(
+                input,
+                child,
+                format!("unknown property `{name}`"),
+                None,
+            ));
+        }
+    }
+    let Some(remote) = property_string(input, child, "as")? else {
+        return Err(node_error(
+            input,
+            child,
+            format!(
+                "`{}` requires `as=\"…\"` (the remote parameter name)",
+                child.name().value()
+            ),
+            None,
+        ));
+    };
+    Ok(remote)
+}
+
+/// The value of a single named property entry, when present.
+fn property_string(input: &str, node: &KdlNode, name: &str) -> Result<Option<String>> {
+    let mut found = None;
+    for entry in node.entries() {
+        if entry.name().is_some_and(|n| n.value() == name) {
+            if found.is_some() {
+                return Err(duplicate(input, node, name));
+            }
+            match entry.value() {
+                KdlValue::String(value) => found = Some(value.clone()),
+                _ => return Err(type_error(input, node, "a string")),
+            }
+        }
+    }
+    Ok(found)
+}
+
 pub(crate) fn to_kdl(config: &Config) -> Result<String> {
     let mut doc = KdlDocument::new();
     let sections = [
@@ -469,6 +726,7 @@ pub(crate) fn to_kdl(config: &Config) -> Result<String> {
         skills_node(&config.skills),
         context_node(&config.context),
         shell_node(&config.shell),
+        tools_node(&config.tools),
         registries_node(&config.registries),
         retry_node(&config.retry),
     ];
@@ -653,6 +911,49 @@ fn retry_node(cfg: &RetryConfig) -> Option<KdlNode> {
         children.push(int_node("max-retries", cfg.max_retries as i128));
     }
     section_node("retry", children)
+}
+
+fn tools_node(cfg: &ToolsConfig) -> Option<KdlNode> {
+    let web = cfg.web_search.as_ref()?;
+    section_node("tools", vec![web_search_node(web)])
+}
+
+fn web_search_node(cfg: &WebSearchConfig) -> KdlNode {
+    let mut children = Vec::new();
+    if cfg.enabled {
+        children.push(value_node("enabled", true));
+    }
+    children.push(value_node("url", cfg.url.as_str()));
+    children.push(value_node("type", cfg.kind.as_str()));
+    if !cfg.headers.is_empty() {
+        let mut headers = KdlNode::new("headers");
+        let mut body = KdlDocument::new();
+        for (name, value) in &cfg.headers {
+            body.nodes_mut().push(value_node(name, value.as_str()));
+        }
+        headers.set_children(body);
+        children.push(headers);
+    }
+    let defaults = WebSearchParams::default_for(cfg.kind);
+    if cfg.params != defaults {
+        let mut params = KdlNode::new("params");
+        if cfg.params.kind != defaults.kind {
+            params.push(KdlEntry::new_prop("type", cfg.params.kind.as_str()));
+        }
+        let mut body = KdlDocument::new();
+        for (arg, remote) in &cfg.params.map {
+            let mut child = KdlNode::new(arg.as_str());
+            child.push(KdlEntry::new_prop("as", remote.as_str()));
+            body.nodes_mut().push(child);
+        }
+        params.set_children(body);
+        children.push(params);
+    }
+    let mut node = KdlNode::new("web-search");
+    let mut body = KdlDocument::new();
+    body.nodes_mut().extend(children);
+    node.set_children(body);
+    node
 }
 
 fn registries_node(cfg: &RegistriesConfig) -> Option<KdlNode> {

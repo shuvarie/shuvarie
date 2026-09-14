@@ -5,9 +5,9 @@ use super::{DEFAULT_TIMEOUT_SECS, arg_value};
 
 const WEBFETCH_MAX_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 const WEBFETCH_MAX_TIMEOUT_SECS: u64 = 120;
-const WEBFETCH_BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
+pub(crate) const WEBFETCH_BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
 
-fn webfetch_accept_header(format: &str) -> &'static str {
+pub(crate) fn webfetch_accept_header(format: &str) -> &'static str {
     match format {
         "text" => "text/plain;q=1.0, text/markdown;q=0.9, text/html;q=0.8, */*;q=0.1",
         "html" => {
@@ -125,7 +125,7 @@ impl Tool for WebFetch {
     }
 }
 
-async fn webfetch_finish(
+pub(crate) async fn webfetch_finish(
     response: reqwest::Response,
     url: &str,
     format: &str,

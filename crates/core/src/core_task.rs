@@ -1479,6 +1479,21 @@ impl CoreCtx {
             Some(section) => format!("{AGENT_PREAMBLE}\n\n{section}"),
             None => AGENT_PREAMBLE.to_string(),
         };
+        let web_search = self
+            .config
+            .tools
+            .web_search
+            .as_ref()
+            .filter(|cfg| cfg.enabled);
+        let base = if web_search.is_some() {
+            format!(
+                "{base}\n\nWeb search is available through the `web_search` tool: use it for \
+                 current information and documentation beyond your training data, then read a \
+                 specific result page with `webfetch`."
+            )
+        } else {
+            base
+        };
         let preamble = crate::context::build_preamble(&base, &loaded_context);
         let question_gate = QuestionGate::new(self.question_tx.clone());
         let (shell_tx, mut shell_rx) = tokio::sync::mpsc::channel::<crate::tools::ShellChunk>(64);
@@ -1493,6 +1508,7 @@ impl CoreCtx {
             crate::tools::ShellOutputTx::new(shell_tx.clone()),
             self.shell.clone(),
             todo_state,
+            web_search,
         );
         let catalog_provider = crate::catalog::providers();
         let catalog_provider = self
@@ -1528,6 +1544,7 @@ impl CoreCtx {
             budget.clone(),
             crate::tools::ShellOutputTx::new(shell_tx),
             self.shell.clone(),
+            web_search,
         );
         let stream = client
             .stream(
