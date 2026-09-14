@@ -1,0 +1,8 @@
+permissions {
+  paths {
+    // Dev environment
+    allow "./.shuvarie-dev/"
+    // Cargo registry for checking out rustdocs
+    allow "~/.cargo/registry/"
+  }
+}
