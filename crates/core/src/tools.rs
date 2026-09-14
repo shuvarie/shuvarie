@@ -1,3 +1,4 @@
+mod delete_file;
 mod edit_file;
 mod glob;
 mod grep;
@@ -34,6 +35,8 @@ use run_shell::RunShell;
 use web_search::WebSearch;
 use webfetch::WebFetch;
 use write_file::WriteFile;
+
+use delete_file::DeleteFile;
 
 pub(crate) use run_shell::run_shell_command;
 pub use run_shell::{ShellChunk, ShellOutputTx};
@@ -177,6 +180,7 @@ pub fn all_tools(
             "apply_patch",
             crate::apply_patch::ApplyPatch::new(Some(lsp.clone()), locks.clone()),
         ),
+        shuvarie_llm::into_dynamic("delete_file", DeleteFile::new(locks.clone())),
         shuvarie_llm::into_dynamic("run_shell", RunShell::new(shell_tx.clone(), shell.clone())),
         shuvarie_llm::into_dynamic("list_dir", ListDir),
         shuvarie_llm::into_dynamic("grep", Grep),
@@ -250,6 +254,7 @@ pub fn edit_tools(
             "apply_patch",
             crate::apply_patch::ApplyPatch::new(Some(lsp.clone()), locks.clone()),
         ),
+        shuvarie_llm::into_dynamic("delete_file", DeleteFile::new(locks.clone())),
         shuvarie_llm::into_dynamic("lsp", Lsp::new(lsp)),
     ]
 }

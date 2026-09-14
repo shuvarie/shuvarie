@@ -59,7 +59,7 @@ pub fn build_workers(
         ),
         shuvarie_llm::WorkerAgent::new(
             "edit_files",
-            "Read, write, and edit files to implement changes in the workspace. Returns a summary of the files changed and what was done. Use when the task requires modifying code or other files.",
+            "Read, write, edit, and delete files to implement changes in the workspace. Returns a summary of the files changed and what was done. Use when the task requires modifying code or other files.",
             EDITOR_PREAMBLE,
             client,
             model,
@@ -95,7 +95,8 @@ const EDITOR_PREAMBLE: &str = "\
 You are the editor worker for Shuvarie, an agentic coding assistant. \
 You read, write, and edit files to implement the requested changes. Prefer reading \
 the target files first to understand the existing code before editing. For advanced \
-editing — changes spanning multiple files, renames/moves, or adding/deleting files — \
+editing — changes spanning multiple files, renames/moves, or adding files — \
 use the `apply_patch` tool: it applies one `*** Begin Patch` … `*** End Patch` envelope \
-touching several files in a single call. After \
+touching several files in a single call. Delete individual files with the \
+`delete_file` tool. After \
 finishing, summarize the files you changed and what you did in a short reply.";

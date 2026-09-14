@@ -147,9 +147,9 @@ fn push_tool_activity(out: &mut String, record: &ToolRecord) {
 
 /// Append ground-truth `<read-files>`/`<modified-files>` sections derived
 /// from the span's tool records: path-bearing read tools contribute the read
-/// list, and file changes from `write_file`/`edit_file` contribute the
-/// modified list. Paths are deduplicated in first-seen order; sections are
-/// omitted when empty.
+/// list, and file changes from `write_file`/`edit_file`/`delete_file`
+/// contribute the modified list. Paths are deduplicated in first-seen order;
+/// sections are omitted when empty.
 fn push_file_sections(out: &mut String, records: &[ToolRecord]) {
     let mut read: Vec<String> = Vec::new();
     let mut modified: Vec<String> = Vec::new();
@@ -160,7 +160,7 @@ fn push_file_sections(out: &mut String, records: &[ToolRecord]) {
                     push_unique(&mut read, path);
                 }
             }
-            "write_file" | "edit_file" => {
+            "write_file" | "edit_file" | "delete_file" => {
                 for path in changed_paths(&record.file_change) {
                     push_unique(&mut modified, path);
                 }
@@ -196,6 +196,7 @@ fn changed_paths(change: &Option<FileChange>) -> Vec<String> {
         Some(FileChange::Edit { path, .. }) | Some(FileChange::Write { path, .. }) => {
             vec![path.clone()]
         }
+        Some(FileChange::Delete { path, .. }) => vec![path.clone()],
         Some(FileChange::Patch { files }) => files
             .iter()
             .flat_map(|f| {

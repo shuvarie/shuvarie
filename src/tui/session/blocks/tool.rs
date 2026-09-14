@@ -362,6 +362,7 @@ impl ToolBlock {
                     FileChange::Patch { files, .. } => {
                         (files.len() == 1).then(|| files[0].path.as_str())
                     }
+                    FileChange::Delete { .. } => None,
                 };
                 if let Some(path) = path {
                     push_diagnostics_lines(&mut body, env, path);
@@ -816,6 +817,12 @@ fn push_file_change_rows(body: &mut BodyBuilder, change: &FileChange) {
             body.rows(BodySource::Numbered {
                 rows: TextRows::new(content.as_str()),
             });
+        }
+        FileChange::Delete { path, .. } => {
+            body.fixed(Line::from(vec![
+                Span::raw("  ── deleted: ").fg(theme::TEXT_MUTED),
+                Span::raw(path.clone()).fg(theme::ERROR),
+            ]));
         }
         FileChange::Patch { files, .. } => {
             for file in files {
@@ -1690,6 +1697,35 @@ mod tests {
             &full,
             &[0, 7, 90, 190, u32::from(full.area().height) - 1],
         );
+    }
+
+    #[test]
+    fn delete_file_change_renders_deleted_marker() {
+        let env = ChatEnv {
+            rev: 0,
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let mut block = ToolBlock::new(
+            "delete_file",
+            r#"{"path":"old.txt"}"#.to_string(),
+            None,
+            None,
+        );
+        block.update(ToolMessage::Finish {
+            ok: true,
+            output: "deleted old.txt".to_string(),
+            stderr: String::new(),
+            file_change: Some(FileChange::Delete {
+                path: "old.txt".to_string(),
+                original: Some("gone".to_string()),
+            }),
+            duration_ms: 5,
+        });
+        let text = block_text(&block, &env);
+        assert!(text.contains("delete_file old.txt"), "header/body: {text}");
+        assert!(text.contains("── deleted: old.txt"), "body: {text}");
+        assert!(!text.contains("gone"), "original content leaked: {text}");
+        assert_eq!(block.est().tool_rows, 2);
     }
 
     #[test]

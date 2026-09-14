@@ -17,6 +17,13 @@ pub enum FileChange {
         #[serde(default)]
         original: Option<String>,
     },
+    Delete {
+        path: String,
+        /// Content of the file before deletion (`None` when it could not be
+        /// read); undo restores it, redo removes the file.
+        #[serde(default)]
+        original: Option<String>,
+    },
     Patch {
         files: Vec<PatchFileChange>,
     },
@@ -49,7 +56,9 @@ pub struct PatchFileChange {
 impl FileChange {
     pub fn path(&self) -> &str {
         match self {
-            FileChange::Edit { path, .. } | FileChange::Write { path, .. } => path,
+            FileChange::Edit { path, .. }
+            | FileChange::Write { path, .. }
+            | FileChange::Delete { path, .. } => path,
             FileChange::Patch { files, .. } => files.first().map(|f| f.path.as_str()).unwrap_or(""),
         }
     }
@@ -58,6 +67,7 @@ impl FileChange {
         match self {
             FileChange::Edit { new, .. } => Some(new.clone()),
             FileChange::Write { content, .. } => Some(content.clone()),
+            FileChange::Delete { .. } => None,
             FileChange::Patch { files, .. } => files.iter().find_map(|f| f.new.clone()),
         }
     }
@@ -66,6 +76,7 @@ impl FileChange {
         match self {
             FileChange::Edit { original, .. } => Some(original.clone()),
             FileChange::Write { original, .. } => original.clone(),
+            FileChange::Delete { original, .. } => original.clone(),
             FileChange::Patch { files, .. } => files.iter().find_map(|f| f.original.clone()),
         }
     }
@@ -73,6 +84,8 @@ impl FileChange {
     /// The per-file records behind this change as `(path, original, new)`
     /// triples. Undo writes `original` back when present (otherwise removes
     /// the file); redo writes `new` when present (otherwise removes it). A
+    /// delete carries its `original` with `new` unset, so undo restores the
+    /// content and redo removes the file. A
     /// move expands into two triples: the source path restoring its original
     /// (no new) and the target path carrying the new content (no original),
     /// so undo deletes the target and redo deletes the source.
@@ -92,6 +105,9 @@ impl FileChange {
                 original,
             } => {
                 vec![(path, original.as_deref(), Some(content.as_str()))]
+            }
+            FileChange::Delete { path, original } => {
+                vec![(path, original.as_deref(), None)]
             }
             FileChange::Patch { files } => files
                 .iter()

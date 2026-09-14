@@ -163,6 +163,7 @@ pub(super) fn file_change_row_est(change: &FileChange) -> u32 {
     match change {
         FileChange::Edit { diff, .. } => 1 + diff.len() as u32,
         FileChange::Write { content, .. } => 1 + content.lines().count() as u32,
+        FileChange::Delete { .. } => 1,
         FileChange::Patch { files } => files
             .iter()
             .map(|file| {
