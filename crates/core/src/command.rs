@@ -82,4 +82,7 @@ pub enum Command {
         all: bool,
         filter: Option<String>,
     },
+    /// Fetch the hosted (Selune) provider registry on demand. Reports
+    /// [`Event::RegistryLoaded`] or [`Event::RegistryError`].
+    FetchRegistry,
 }

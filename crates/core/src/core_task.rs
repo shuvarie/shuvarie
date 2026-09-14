@@ -233,14 +233,20 @@ pub async fn run(
     let mut next_bash_id: u64 = 0;
 
     let mut clients: HashMap<String, ProviderClient> = HashMap::new();
-    // Refresh the provider catalog from the service (falling back to embedded)
-    // before wiring up clients, so pricing/context/embedding lookups see fresh
-    // data. Bounded so an unreachable catalog never blocks startup.
-    let refresh = tokio::task::spawn_blocking(crate::catalog::refresh);
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), refresh)
-        .await
-        .map(|r| r.unwrap_or_default())
-        .unwrap_or_default();
+    // Refresh the provider catalog from the hosted service before wiring up
+    // clients, so pricing/context/embedding lookups see fresh data. Only when
+    // the selune registry is remote-first and enabled: the offline-first
+    // default skips the fetch (the popups fetch on demand via Ctrl+O) and a
+    // disabled registry never fetches. Bounded so an unreachable catalog
+    // never blocks startup.
+    let selune_registry = config.registries.selune();
+    if !selune_registry.disabled && selune_registry.remote_first {
+        let refresh = tokio::task::spawn_blocking(crate::catalog::refresh);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), refresh)
+            .await
+            .map(|r| r.unwrap_or_default())
+            .unwrap_or_default();
+    }
     let embedding_setup = embeddings::setup(&config, &connections, &mut clients);
     if let Some(setup) = embedding_setup.clone() {
         let store_backfill = store.clone();
@@ -314,6 +320,24 @@ pub async fn run(
                 match cmd {
                     Command::Ping => {
                         let _ = ctx.event_tx.send(Event::Pong).await;
+                    }
+                    Command::FetchRegistry => {
+                        let fetch = tokio::task::spawn_blocking(crate::catalog::fetch_remote);
+                        let outcome =
+                            match tokio::time::timeout(std::time::Duration::from_secs(15), fetch)
+                                .await
+                            {
+                                Ok(Ok(Ok(providers))) => Ok(providers),
+                                Ok(Ok(Err(error))) => Err(error),
+                                Ok(Err(e)) => Err(e.to_string()),
+                                Err(_) => Err("registry fetch timed out".to_string()),
+                            };
+                        let _ = match outcome {
+                            Ok(providers) => {
+                                ctx.event_tx.send(Event::RegistryLoaded { providers }).await
+                            }
+                            Err(error) => ctx.event_tx.send(Event::RegistryError { error }).await,
+                        };
                     }
                     Command::ListModels { provider_name } => {
                         let client = match client_for(&mut ctx.clients, &mut ctx.connections, &provider_name) {

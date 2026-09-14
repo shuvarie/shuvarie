@@ -26,7 +26,8 @@ pub use question::{QuestionPrompt, QuestionRequest};
 pub use session::Session;
 pub use shuvarie_config::{
     Active, AgentConfig, Config, Connections, ContextConfig, EmbeddingConfig, LspConfigRepr,
-    LspServerSpecRepr, ProviderConfig, ShellConfig, SidebarPref, SkillsConfig, UiPrefs,
+    LspServerSpecRepr, ProviderConfig, RegistriesConfig, RegistryEntry, ShellConfig, SidebarPref,
+    SkillsConfig, UiPrefs,
 };
 pub use shuvarie_db::{MsgRole, SearchHit, SearchSource, SessionSummary, StoredScroll};
 pub use shuvarie_llm::{ChatMsg, Model, Role, TokenUsage};

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use ratatui::prelude::*;
-use shuvarie_core::{Connections, Event as CoreEvent, Model, UiPrefs};
+use shuvarie_core::{Connections, Event as CoreEvent, Model, RegistryEntry, UiPrefs};
 use termina::Event as TermEvent;
 use termina::event::{KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use tokio::sync::mpsc::Sender;
@@ -9,7 +9,9 @@ use tokio::sync::mpsc::Sender;
 use crate::tui::event::Event;
 use crate::tui::utils::ctrl;
 
-use super::add_provider::{AddProviderForm, AddProviderMessage, AddProviderOutcome};
+use super::add_provider::{
+    AddProviderForm, AddProviderMessage, AddProviderOutcome, AddProviderStage,
+};
 use super::command_menu::{CommandMenu, CommandMenuMessage};
 use super::commands::CommandAction;
 use super::components::TextAreaMessage;
@@ -17,6 +19,7 @@ use super::confirm_quit::{ConfirmQuit, ConfirmQuitEffect, ConfirmQuitMessage};
 use super::context::UpdateCtx;
 use super::history_search::{HistorySearch, HistorySearchEffect, HistorySearchMessage};
 use super::model_picker::{ModelPicker, ModelPickerEffect, ModelPickerMessage};
+use super::search::SearchMessage;
 use super::session::{
     BashMessage, ChatMessage, MouseKind, SessionEffect, SessionMessage, SessionScreen,
 };
@@ -60,6 +63,15 @@ pub enum AppMessage {
     TitlePopup(TitleMessage),
     ConfigSaved,
     ConfigError {
+        error: String,
+    },
+    /// The on-demand hosted registry fetch (from either selector popup)
+    /// succeeded.
+    RegistryLoaded {
+        providers: Vec<selune::Provider>,
+    },
+    /// The on-demand hosted registry fetch failed.
+    RegistryError {
         error: String,
     },
     ModelsLoaded {
@@ -133,6 +145,7 @@ pub struct App {
     pub title_popup: TitlePopup,
     pub warning: WarningPopup,
     pub models: HashMap<String, Vec<Model>>,
+    registry: RegistryEntry,
     pending_model_pick: Option<String>,
     quit: bool,
 }
@@ -154,6 +167,7 @@ fn catalog_context_length(connections: &Connections) -> Option<u64> {
 impl App {
     pub fn new(
         ui: UiPrefs,
+        registry: RegistryEntry,
         connections: Connections,
         cmd_tx: Sender<shuvarie_core::Command>,
         viewport_cols: u16,
@@ -204,6 +218,7 @@ impl App {
             title_popup: TitlePopup::new(),
             warning: WarningPopup::new(),
             models: HashMap::new(),
+            registry,
             pending_model_pick: None,
             quit: false,
         }
@@ -400,6 +415,10 @@ impl App {
                 }),
                 CoreEvent::ConfigSaved => Some(AppMessage::ConfigSaved),
                 CoreEvent::ConfigError { error } => Some(AppMessage::ConfigError { error }),
+                CoreEvent::RegistryLoaded { providers } => {
+                    Some(AppMessage::RegistryLoaded { providers })
+                }
+                CoreEvent::RegistryError { error } => Some(AppMessage::RegistryError { error }),
                 CoreEvent::SessionStarted => None,
                 CoreEvent::SessionCreated { id, title } => {
                     Some(AppMessage::SessionCreated { id, title })
@@ -636,10 +655,19 @@ impl App {
                 .as_ref()
                 .map(|_| AppMessage::AddProvider(AddProviderMessage::Paste(text.to_string()))),
             Overlay::Welcome
-            | Overlay::ModelPicker
             | Overlay::CommandMenu
             | Overlay::ConfirmQuit
             | Overlay::SessionPicker => None,
+            Overlay::ModelPicker => {
+                let flat = super::components::flatten_newlines(text);
+                let mut msg = None;
+                for c in flat.chars() {
+                    msg = Some(AppMessage::ModelPicker(ModelPickerMessage::Search(
+                        SearchMessage::Input(c),
+                    )));
+                }
+                msg
+            }
             Overlay::TitleEdit => Some(AppMessage::TitlePopup(TitleMessage::Paste(
                 text.to_string(),
             ))),
@@ -746,6 +774,9 @@ impl App {
                         AddProviderOutcome::Cancel => {
                             self.close_overlay();
                         }
+                        AddProviderOutcome::FetchRegistry => {
+                            self.ctx.send(shuvarie_core::Command::FetchRegistry);
+                        }
                         AddProviderOutcome::Submit {
                             kind,
                             catalog,
@@ -780,9 +811,25 @@ impl App {
             AppMessage::ModelPicker(m) => {
                 if let Some(effect) = self.model_picker.update(m) {
                     match effect {
-                        ModelPickerEffect::Selected { model } => {
+                        ModelPickerEffect::Selected { provider, model } => {
+                            if let Some(provider) = provider
+                                && self
+                                    .ctx
+                                    .connections
+                                    .active
+                                    .as_ref()
+                                    .map(|a| a.provider.as_str())
+                                    != Some(provider.as_str())
+                            {
+                                self.ctx.send(shuvarie_core::Command::SetActiveProvider {
+                                    name: provider,
+                                });
+                            }
                             self.ctx
                                 .send(shuvarie_core::Command::SetActiveModel { model });
+                        }
+                        ModelPickerEffect::FetchRegistry => {
+                            self.ctx.send(shuvarie_core::Command::FetchRegistry);
                         }
                         ModelPickerEffect::Close => {
                             if self
@@ -791,11 +838,10 @@ impl App {
                                 .active
                                 .as_ref()
                                 .is_none_or(|a| a.model.is_none())
-                                && let Some(first) = self.model_picker.models.first()
+                                && let Some(first) = self.model_picker.active_default_model()
                             {
-                                self.ctx.send(shuvarie_core::Command::SetActiveModel {
-                                    model: first.id.clone(),
-                                });
+                                self.ctx
+                                    .send(shuvarie_core::Command::SetActiveModel { model: first });
                             }
                         }
                     }
@@ -836,18 +882,7 @@ impl App {
             AppMessage::Welcome(m) => {
                 if let Some(effect) = self.welcome.update(m) {
                     match effect {
-                        WelcomeEffect::AddProvider => {
-                            let names: Vec<String> = self
-                                .ctx
-                                .connections
-                                .providers
-                                .values()
-                                .map(|p| p.name.clone())
-                                .collect();
-                            let providers = shuvarie_core::catalog::providers();
-                            self.add_provider_form = Some(AddProviderForm::new(providers, &names));
-                            self.overlay = Overlay::AddProvider;
-                        }
+                        WelcomeEffect::AddProvider => self.open_add_provider(),
                     }
                 }
             }
@@ -870,10 +905,17 @@ impl App {
                         }
                     }
                     Overlay::AddProvider => {
-                        if let Some(h) = add_provider_kind_list_height(area)
-                            && let Some(form) = &mut self.add_provider_form
-                        {
-                            form.update(AddProviderMessage::Resize { viewport_height: h });
+                        if let Some(form) = &mut self.add_provider_form {
+                            let heading_len = match form.stage {
+                                AddProviderStage::Select => Some(3),
+                                AddProviderStage::KindList => Some(1),
+                                AddProviderStage::Details => None,
+                            };
+                            if let Some(h) =
+                                heading_len.and_then(|h| add_provider_list_height(area, h))
+                            {
+                                form.update(AddProviderMessage::Resize { viewport_height: h });
+                            }
                         }
                     }
                     Overlay::SessionPicker => {
@@ -902,6 +944,31 @@ impl App {
                     form.error = Some(error);
                 }
             }
+            AppMessage::RegistryLoaded { providers } => match self.overlay {
+                Overlay::AddProvider => {
+                    if let Some(form) = &mut self.add_provider_form {
+                        form.update(AddProviderMessage::RegistryLoaded { providers });
+                    }
+                }
+                Overlay::ModelPicker => {
+                    self.model_picker
+                        .update(ModelPickerMessage::RegistryLoaded { providers });
+                }
+                _ => {}
+            },
+            AppMessage::RegistryError { error } => match self.overlay {
+                Overlay::AddProvider => {
+                    if let Some(form) = &mut self.add_provider_form {
+                        form.update(AddProviderMessage::RegistryError {
+                            error: error.clone(),
+                        });
+                    }
+                }
+                Overlay::ModelPicker => {
+                    self.model_picker.source.on_error(error);
+                }
+                _ => {}
+            },
             AppMessage::ModelsLoaded {
                 provider_name,
                 models,
@@ -913,13 +980,20 @@ impl App {
                             error: format!("{provider_name}: no models found"),
                         });
                     } else {
-                        self.model_picker.open(&models);
-                        self.overlay = Overlay::ModelPicker;
+                        self.models.insert(provider_name.clone(), models.clone());
+                        self.open_model_picker();
                     }
                     return None;
                 }
                 let empty = models.is_empty();
                 self.models.insert(provider_name.clone(), models);
+                if self.model_picker.open {
+                    self.model_picker
+                        .update(ModelPickerMessage::ProviderModels {
+                            provider_name: provider_name.clone(),
+                            models: self.models.get(&provider_name).cloned().unwrap_or_default(),
+                        });
+                }
                 if empty {
                     return None;
                 }
@@ -971,6 +1045,12 @@ impl App {
                     self.session.update(SessionMessage::ShowError {
                         error: format!("{provider_name}: {error}"),
                     });
+                } else if self.model_picker.open {
+                    self.model_picker
+                        .update(ModelPickerMessage::ProviderModels {
+                            provider_name,
+                            models: Vec::new(),
+                        });
                 } else if let Some(form) = &mut self.add_provider_form {
                     form.error = Some(format!("{provider_name}: {error}"));
                 }
@@ -1055,6 +1135,47 @@ impl App {
         }
     }
 
+    /// Opens the provider selector popup, seeding its registry source from
+    /// the `[registries] selune` entry.
+    fn open_add_provider(&mut self) {
+        let names: Vec<String> = self
+            .ctx
+            .connections
+            .providers
+            .values()
+            .map(|p| p.name.clone())
+            .collect();
+        let catalog_ids: Vec<String> = self
+            .ctx
+            .connections
+            .providers
+            .values()
+            .filter_map(|p| p.catalog_id().map(str::to_string))
+            .collect();
+        let form = AddProviderForm::new(&names, &catalog_ids, self.registry);
+        if form.needs_fetch() {
+            self.ctx.send(shuvarie_core::Command::FetchRegistry);
+        }
+        self.add_provider_form = Some(form);
+        self.overlay = Overlay::AddProvider;
+    }
+
+    /// Opens the model selector popup over every configured provider.
+    /// Catalog-less providers whose models are not cached yet get a live
+    /// `ListModels` fetch.
+    fn open_model_picker(&mut self) {
+        self.model_picker
+            .open(&self.ctx.connections, &self.models, self.registry);
+        if self.model_picker.needs_fetch() {
+            self.ctx.send(shuvarie_core::Command::FetchRegistry);
+        }
+        for provider_name in self.model_picker.pending_live_providers() {
+            self.ctx
+                .send(shuvarie_core::Command::ListModels { provider_name });
+        }
+        self.overlay = Overlay::ModelPicker;
+    }
+
     fn refresh_sessions(&mut self) {
         self.session_picker.loading = true;
         self.ctx.send(shuvarie_core::Command::ListSessions);
@@ -1101,32 +1222,10 @@ impl App {
     fn run_command(&mut self, action: CommandAction, args: Option<String>) -> Option<AppEffect> {
         match action {
             CommandAction::OpenModelSelect => {
-                let models = self
-                    .models
-                    .get(
-                        self.ctx
-                            .connections
-                            .active
-                            .as_ref()
-                            .map(|a| a.provider.as_str())
-                            .unwrap_or(""),
-                    )
-                    .cloned()
-                    .unwrap_or_default();
-                self.model_picker.open(&models);
-                self.overlay = Overlay::ModelPicker;
+                self.open_model_picker();
             }
             CommandAction::AddProvider => {
-                let names: Vec<String> = self
-                    .ctx
-                    .connections
-                    .providers
-                    .values()
-                    .map(|p| p.name.clone())
-                    .collect();
-                let providers = shuvarie_core::catalog::providers();
-                self.add_provider_form = Some(AddProviderForm::new(providers, &names));
-                self.overlay = Overlay::AddProvider;
+                self.open_add_provider();
             }
             CommandAction::OpenSessionPicker => {
                 self.session_picker.open(self.session.session_id);
@@ -1293,11 +1392,11 @@ fn command_menu_list_height(area: Rect) -> Option<u16> {
 }
 
 fn model_picker_list_height(area: Rect) -> Option<u16> {
-    overlay_inner_list_height(area, 55, 50, 1)
+    overlay_inner_list_height(area, 60, 60, 2)
 }
 
-fn add_provider_kind_list_height(area: Rect) -> Option<u16> {
-    overlay_inner_list_height(area, 50, 55, 3)
+fn add_provider_list_height(area: Rect, heading_len: u16) -> Option<u16> {
+    overlay_inner_list_height(area, 50, 55, heading_len)
 }
 
 fn session_picker_list_height(area: Rect) -> Option<u16> {
@@ -1316,6 +1415,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         App::new(
             UiPrefs::default(),
+            RegistryEntry::default(),
             connections,
             tx,
             120,
@@ -1329,6 +1429,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(16);
         let app = App::new(
             UiPrefs::default(),
+            RegistryEntry::default(),
             connections,
             tx,
             120,

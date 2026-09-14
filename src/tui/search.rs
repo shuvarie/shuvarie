@@ -8,6 +8,7 @@ use crate::tui::utils::ctrl;
 
 use super::theme;
 
+#[derive(Debug, PartialEq)]
 pub enum SearchMessage {
     Input(char),
     Backspace,

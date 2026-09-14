@@ -7,33 +7,112 @@ use shuvarie_llm::TokenUsage;
 const CACHE_READ_FACTOR: f64 = 0.1;
 const REASONING_FACTOR: f64 = 0.6;
 
-/// Process-global provider catalog. Initialized from the embedded providers and
-/// optionally refreshed from the catalog service at runtime (see [`refresh`]).
-fn state() -> &'static Mutex<Vec<Provider>> {
-    static STATE: OnceLock<Mutex<Vec<Provider>>> = OnceLock::new();
-    STATE.get_or_init(|| Mutex::new(selune::embedded::all()))
+/// Process-global provider catalog. The embedded snapshot is fixed at first
+/// use; the remote snapshot holds the latest successful hosted fetch (see
+/// [`fetch_remote`]). Metadata lookups ([`providers`]) see the remote snapshot
+/// once loaded, else the embedded one; the registry popups pick a source
+/// explicitly via [`registry_providers`].
+fn state() -> &'static Mutex<CatalogState> {
+    static STATE: OnceLock<Mutex<CatalogState>> = OnceLock::new();
+    STATE.get_or_init(|| {
+        Mutex::new(CatalogState {
+            embedded: selune::embedded::all(),
+            remote: None,
+        })
+    })
 }
 
-/// Snapshot of the currently active provider catalog.
+struct CatalogState {
+    embedded: Vec<Provider>,
+    remote: Option<Vec<Provider>>,
+}
+
+impl CatalogState {
+    fn effective(&self) -> Vec<Provider> {
+        self.remote.clone().unwrap_or_else(|| self.embedded.clone())
+    }
+}
+
+/// Snapshot of the currently effective provider catalog (remote once loaded,
+/// else embedded).
 pub fn providers() -> Vec<Provider> {
-    state().lock().unwrap().clone()
+    state()
+        .lock()
+        .expect("catalog mutex should not be poisoned")
+        .effective()
 }
 
-/// Replace the provider catalog with a fresh snapshot (used by the runtime
-/// refresh path).
-pub fn set_providers(providers: Vec<Provider>) {
-    *state().lock().unwrap() = providers;
+/// The offline embedded registry.
+pub fn embedded_registry() -> Vec<Provider> {
+    state()
+        .lock()
+        .expect("catalog mutex should not be poisoned")
+        .embedded
+        .clone()
+}
+
+/// The remote registry snapshot, when a hosted fetch has succeeded this
+/// session.
+pub fn remote_registry() -> Option<Vec<Provider>> {
+    state()
+        .lock()
+        .expect("catalog mutex should not be poisoned")
+        .remote
+        .clone()
+}
+
+/// Whether a remote registry snapshot is loaded.
+pub fn remote_registry_loaded() -> bool {
+    state()
+        .lock()
+        .expect("catalog mutex should not be poisoned")
+        .remote
+        .is_some()
+}
+
+/// Providers for the registry popups: the remote snapshot when `remote` is
+/// wanted (empty until a fetch succeeds), else the embedded one.
+pub fn registry_providers(remote: bool) -> Vec<Provider> {
+    if remote {
+        remote_registry().unwrap_or_default()
+    } else {
+        embedded_registry()
+    }
+}
+
+/// Store the remote registry snapshot.
+pub fn set_remote_registry(providers: Vec<Provider>) {
+    state()
+        .lock()
+        .expect("catalog mutex should not be poisoned")
+        .remote = Some(providers);
 }
 
 /// Fetch the provider catalog from the service, falling back to the current
-/// snapshot (i.e. embedded) on any failure. Returns the providers in effect.
+/// effective snapshot (i.e. embedded) on any failure. Returns the effective
+/// providers. Used by the bounded startup refresh; the on-demand path uses
+/// [`fetch_remote`], which surfaces errors instead.
 pub fn refresh() -> Vec<Provider> {
     match Client::new().get_providers() {
         Ok(providers) if !providers.is_empty() => {
-            set_providers(providers.clone());
+            set_remote_registry(providers.clone());
             providers
         }
         _ => providers(),
+    }
+}
+
+/// Fetch the hosted registry, storing a successful result as the remote
+/// snapshot. Unlike [`refresh`] there is no fallback: an empty or failed
+/// fetch is an error so the caller can report it.
+pub fn fetch_remote() -> Result<Vec<Provider>, String> {
+    match Client::new().get_providers() {
+        Ok(providers) if !providers.is_empty() => {
+            set_remote_registry(providers.clone());
+            Ok(providers)
+        }
+        Ok(_) => Err("the hosted registry returned no providers".to_string()),
+        Err(e) => Err(e.to_string()),
     }
 }
 

@@ -25,6 +25,7 @@ mod history_search;
 mod list;
 mod model_picker;
 mod question;
+mod registry;
 mod search;
 mod session;
 mod session_picker;
@@ -58,7 +59,14 @@ pub async fn run_tui(
     let mut rat = ratatui::Terminal::new(TerminaBackend::new(term))?;
     let connections = Connections::load().map_err(|e| io::Error::other(e.to_string()))?;
     let workspace = workspace::WorkspaceInfo::detect();
-    let app = App::new(config.ui, connections, cmd_tx, initial_cols, workspace);
+    let app = App::new(
+        config.ui,
+        config.registries.selune(),
+        connections,
+        cmd_tx,
+        initial_cols,
+        workspace,
+    );
 
     init_terminal(rat.backend_mut().terminal_mut())?;
 

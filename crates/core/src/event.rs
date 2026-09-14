@@ -15,6 +15,14 @@ pub enum Event {
         provider_name: String,
         error: String,
     },
+    /// The hosted registry fetch (on demand) succeeded.
+    RegistryLoaded {
+        providers: Vec<selune::Provider>,
+    },
+    /// The hosted registry fetch (on demand) failed.
+    RegistryError {
+        error: String,
+    },
     ConfigSaved,
     ConfigError {
         error: String,

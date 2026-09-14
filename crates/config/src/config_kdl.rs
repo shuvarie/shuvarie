@@ -5,7 +5,8 @@ use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use super::kdl_util::{child_nodes, node_error, parse_document};
 use super::{
     AgentConfig, Config, ConfigError, ContextConfig, EmbeddingConfig, LspConfigRepr,
-    LspServerSpecRepr, RetryConfig, ShellConfig, SidebarPref, SkillsConfig, UiPrefs,
+    LspServerSpecRepr, RegistriesConfig, RegistryEntry, RetryConfig, ShellConfig, SidebarPref,
+    SkillsConfig, UiPrefs,
 };
 use crate::Result;
 
@@ -30,6 +31,7 @@ pub(crate) fn from_kdl_with_sections(contents: &str) -> Result<(Config, Vec<Stri
             "skills" => config.skills = parse_skills(node, contents)?,
             "context" => config.context = parse_context(node, contents)?,
             "shell" => config.shell = parse_shell(node, contents)?,
+            "registries" => config.registries = parse_registries(node, contents)?,
             "retry" => config.retry = parse_retry(node, contents)?,
             _ => {}
         }
@@ -427,6 +429,36 @@ fn parse_retry(node: &KdlNode, input: &str) -> Result<RetryConfig> {
     Ok(config)
 }
 
+fn parse_registries(node: &KdlNode, input: &str) -> Result<RegistriesConfig> {
+    let mut entries = BTreeMap::new();
+    for child in child_nodes(node) {
+        let name = child.name().value().to_string();
+        let entry = parse_registry_entry(child, input)?;
+        if entries.insert(name.clone(), entry).is_some() {
+            return Err(duplicate(input, child, &name));
+        }
+    }
+    Ok(RegistriesConfig { entries })
+}
+
+fn parse_registry_entry(node: &KdlNode, input: &str) -> Result<RegistryEntry> {
+    let mut disabled = None;
+    let mut remote_first = None;
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "disabled" => set_once(input, child, &mut disabled, scalar_bool(input, child))?,
+            "remote-first" => {
+                set_once(input, child, &mut remote_first, scalar_bool(input, child))?;
+            }
+            _ => {}
+        }
+    }
+    Ok(RegistryEntry {
+        disabled: disabled.unwrap_or_default(),
+        remote_first: remote_first.unwrap_or_default(),
+    })
+}
+
 pub(crate) fn to_kdl(config: &Config) -> Result<String> {
     let mut doc = KdlDocument::new();
     let sections = [
@@ -437,6 +469,7 @@ pub(crate) fn to_kdl(config: &Config) -> Result<String> {
         skills_node(&config.skills),
         context_node(&config.context),
         shell_node(&config.shell),
+        registries_node(&config.registries),
         retry_node(&config.retry),
     ];
     for node in sections.into_iter().flatten() {
@@ -620,4 +653,30 @@ fn retry_node(cfg: &RetryConfig) -> Option<KdlNode> {
         children.push(int_node("max-retries", cfg.max_retries as i128));
     }
     section_node("retry", children)
+}
+
+fn registries_node(cfg: &RegistriesConfig) -> Option<KdlNode> {
+    let children = cfg
+        .entries
+        .iter()
+        .map(|(name, entry)| registry_entry_node(name, *entry))
+        .collect();
+    section_node("registries", children)
+}
+
+fn registry_entry_node(name: &str, entry: RegistryEntry) -> KdlNode {
+    let mut children = Vec::new();
+    if entry.disabled {
+        children.push(value_node("disabled", true));
+    }
+    if entry.remote_first {
+        children.push(value_node("remote-first", true));
+    }
+    let mut node = KdlNode::new(name);
+    if !children.is_empty() {
+        let mut body = KdlDocument::new();
+        body.nodes_mut().extend(children);
+        node.set_children(body);
+    }
+    node
 }

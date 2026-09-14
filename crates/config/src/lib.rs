@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 mod config_kdl;
@@ -55,8 +55,9 @@ fn read_layer(path: &std::path::Path) -> Result<Option<ConfigLayer>> {
 /// Merges `layer` into `config`. Per top-level section the layer either wins
 /// wholesale (its file defines the node) or is ignored entirely (it does
 /// not), so locally-set sections intentionally reset untouched fields of that
-/// section to defaults. `lsp.servers` is the exception: it merges key-by-key
-/// so a file adding one server doesn't shadow the rest.
+/// section to defaults. `lsp.servers` merges key-by-key so a file adding one
+/// server doesn't shadow the rest; `registries` merges key-by-key per
+/// registry name for the same reason.
 fn merge_layer(config: &mut Config, layer: &ConfigLayer) {
     for section in &layer.sections {
         match section.as_str() {
@@ -66,6 +67,11 @@ fn merge_layer(config: &mut Config, layer: &ConfigLayer) {
             "skills" => config.skills = layer.config.skills.clone(),
             "context" => config.context = layer.config.context.clone(),
             "shell" => config.shell = layer.config.shell.clone(),
+            "registries" => {
+                for (name, entry) in &layer.config.registries.entries {
+                    config.registries.entries.insert(name.clone(), *entry);
+                }
+            }
             "lsp" => {
                 config.lsp.disabled = layer.config.lsp.disabled;
                 for (lang, spec) in &layer.config.lsp.servers {
@@ -94,6 +100,8 @@ pub struct Config {
     pub shell: ShellConfig,
 
     pub retry: RetryConfig,
+
+    pub registries: RegistriesConfig,
 }
 
 fn default_max_turns() -> usize {
@@ -156,6 +164,41 @@ impl ContextConfig {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ShellConfig {
     pub path: Option<String>,
+}
+
+/// Registry sources for provider/model catalogs. `selune` is the built-in
+/// registry; further entries reserve names for user-defined registries and
+/// are preserved verbatim on rewrite.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RegistriesConfig {
+    pub entries: BTreeMap<String, RegistryEntry>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RegistryEntry {
+    /// Stored inverted in the file as `disabled #true`; omitted = enabled.
+    pub disabled: bool,
+
+    /// Prefer the remote (hosted) catalog over the embedded offline one.
+    pub remote_first: bool,
+}
+
+impl RegistryEntry {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl RegistriesConfig {
+    /// The entry for a registry name; unknown names get defaults.
+    pub fn entry(&self, name: &str) -> RegistryEntry {
+        self.entries.get(name).copied().unwrap_or_default()
+    }
+
+    /// The built-in registry's entry.
+    pub fn selune(&self) -> RegistryEntry {
+        self.entry("selune")
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -306,7 +349,7 @@ impl Config {
     /// `$cwd/.shuvarie/config.kdl`, then the global config. Every existing
     /// file is merged layer by layer: per top-level section the
     /// highest-priority file defining it wins wholesale (except
-    /// `lsp.servers`, which merges key-by-key). With no file present this
+    /// `lsp.servers` and `registries`, which merge key-by-key). With no file present this
     /// returns `Default`. Debug builds read the `-dev` suffixed names
     /// (`shuvarie-dev.kdl`, `.shuvarie-dev`, `~/.config/shuvarie-dev`).
     pub fn load() -> Result<Self> {
@@ -883,5 +926,184 @@ mod tests {
             panic!("expected config parse error");
         };
         assert_eq!(parse_err.line, 2);
+    }
+
+    #[test]
+    fn registries_section_parses() {
+        let text = r#"
+            registries {
+                selune {
+                    disabled #true
+                    remote-first #true
+                }
+            }
+        "#;
+        let parsed = config_kdl::from_kdl(text).unwrap();
+        assert!(parsed.registries.selune().disabled);
+        assert!(parsed.registries.selune().remote_first);
+        assert_eq!(parsed.registries.entries.len(), 1);
+    }
+
+    #[test]
+    fn registries_section_absent_is_default() {
+        let parsed = config_kdl::from_kdl("ui { frame-rate 30 }").unwrap();
+        assert_eq!(parsed.registries, RegistriesConfig::default());
+        assert!(!parsed.registries.entry("selune").disabled);
+        assert!(!parsed.registries.entry("selune").remote_first);
+    }
+
+    #[test]
+    fn registries_bare_nodes_parse_as_defaults() {
+        let text = r#"
+            registries {
+                selune
+                vendor-x {
+                }
+            }
+        "#;
+        let parsed = config_kdl::from_kdl(text).unwrap();
+        assert_eq!(parsed.registries.selune(), RegistryEntry::default());
+        assert_eq!(
+            parsed.registries.entry("vendor-x"),
+            RegistryEntry::default()
+        );
+    }
+
+    #[test]
+    fn registries_unknown_names_round_trip() {
+        let text = r#"
+            registries {
+                selune {
+                    remote-first #true
+                }
+                vendor-x {
+                    disabled #true
+                }
+                vendor-y
+            }
+        "#;
+        let parsed = config_kdl::from_kdl(text).unwrap();
+        assert_eq!(parsed.registries.entries.len(), 3);
+        assert!(parsed.registries.entry("vendor-x").disabled);
+
+        let out = config_kdl::to_kdl(&parsed).unwrap();
+        assert!(out.contains("registries"), "body: {out}");
+        assert!(out.contains("remote-first #true"), "body: {out}");
+        assert!(out.contains("vendor-x"), "body: {out}");
+        assert!(
+            out.contains("vendor-y"),
+            "default entry stays declared: {out}"
+        );
+        let reparsed = config_kdl::from_kdl(&out).unwrap();
+        assert_eq!(parsed, reparsed);
+    }
+
+    #[test]
+    fn registries_default_selune_omitted_on_save() {
+        let text = config_kdl::to_kdl(&Config::default()).unwrap();
+        assert!(!text.contains("registries"), "body: {text}");
+
+        let mut config = Config::default();
+        config.registries.entries.insert(
+            "selune".to_string(),
+            RegistryEntry {
+                disabled: false,
+                remote_first: true,
+            },
+        );
+        let text = config_kdl::to_kdl(&config).unwrap();
+        assert!(text.contains("selune {"), "body: {text}");
+        assert!(text.contains("remote-first #true"), "body: {text}");
+        assert!(!text.contains("disabled"), "default flag omitted: {text}");
+    }
+
+    #[test]
+    fn registries_duplicate_entry_is_an_error() {
+        for text in [
+            r"registries {
+                selune { disabled #true }
+                selune
+            }",
+            r"registries {
+                vendor-x
+                vendor-x { disabled #true }
+            }",
+        ] {
+            let err = config_kdl::from_kdl(text).unwrap_err();
+            let ConfigError::Parse(parse_err) = err else {
+                panic!("expected config parse error");
+            };
+            assert!(parse_err.message.contains("duplicate"), "{parse_err}");
+        }
+    }
+
+    #[test]
+    fn registries_chain_merges_keywise() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global.kdl");
+        let top = dir.path().join("shuvarie.kdl");
+
+        std::fs::write(
+            &global,
+            r#"
+            registries {
+                selune {
+                    remote-first #true
+                }
+                vendor-global {
+                    disabled #true
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &top,
+            r#"
+            registries {
+                vendor-top
+            }
+            "#,
+        )
+        .unwrap();
+
+        let config = Config::load_chain(&[global, top]).unwrap();
+        assert!(
+            config.registries.selune().remote_first,
+            "selune only global defines survives"
+        );
+        assert!(
+            config.registries.entries.contains_key("vendor-global"),
+            "unknown registry only global defines survives"
+        );
+        assert!(
+            config.registries.entries.contains_key("vendor-top"),
+            "unknown registry from the winning layer lands"
+        );
+    }
+
+    #[test]
+    fn registries_entry_lookup() {
+        let mut config = Config::default();
+        config.registries.entries.insert(
+            "selune".to_string(),
+            RegistryEntry {
+                disabled: true,
+                remote_first: false,
+            },
+        );
+        config.registries.entries.insert(
+            "vendor-x".to_string(),
+            RegistryEntry {
+                disabled: false,
+                remote_first: true,
+            },
+        );
+        assert!(config.registries.selune().disabled);
+        assert!(config.registries.entry("vendor-x").remote_first);
+        assert_eq!(
+            config.registries.entry("vendor-y"),
+            RegistryEntry::default()
+        );
     }
 }
