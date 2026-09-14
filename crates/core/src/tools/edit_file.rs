@@ -32,7 +32,12 @@ impl Tool for EditFile {
          non-overlapping region of the original file; all oldTexts are matched against the file as it \
          was before the call, not after earlier edits. If two changes affect the same block or nearby \
          lines, merge them into one edit instead of emitting overlapping edits. Do not include large \
-         unchanged regions just to connect distant changes."
+         unchanged regions just to connect distant changes. Each edit may be scoped with startLine \
+         (1-based, inclusive) and lineCount (defaults to 1): the oldText search then runs only within \
+         those lines, which disambiguates text repeated elsewhere in the file. With wholeLine toggled \
+         on an edit replaces the whole lines in its scope instead of matching oldText: omit oldText, \
+         give startLine (required) and the replacement lines as newText. An empty newText deletes \
+         the scoped lines; otherwise the replacement keeps the replaced block's trailing newline."
             .to_string()
     }
 
@@ -47,10 +52,13 @@ impl Tool for EditFile {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "oldText": { "type": "string", "description": "Exact text for one targeted replacement; must be unique in the original file" },
-                            "newText": { "type": "string", "description": "Replacement text for this targeted edit" }
+                            "oldText": { "type": "string", "description": "Exact text for one targeted replacement; must be unique within the edit's scope (the whole file when unscoped). Required unless wholeLine is true" },
+                            "newText": { "type": "string", "description": "Replacement text for this targeted edit" },
+                            "startLine": { "type": "integer", "minimum": 1, "description": "First line of the edit's scope (1-based, inclusive). Required for wholeLine edits" },
+                            "lineCount": { "type": "integer", "minimum": 1, "description": "Number of lines in the scope starting at startLine. Defaults to 1" },
+                            "wholeLine": { "type": "boolean", "description": "Replace the whole lines in scope with newText instead of matching oldText; oldText must be omitted" }
                         },
-                        "required": ["oldText", "newText"]
+                        "required": ["newText"]
                     },
                     "description": "One or more targeted replacements, each matched against the original file. Do not include overlapping or nested edits."
                 }
@@ -113,8 +121,11 @@ impl Tool for EditFile {
 }
 
 struct TextEdit {
-    old_text: String,
+    old_text: Option<String>,
     new_text: String,
+    start_line: Option<usize>,
+    line_count: Option<usize>,
+    whole_line: bool,
 }
 
 struct MatchedEdit {
@@ -125,17 +136,36 @@ struct MatchedEdit {
 }
 
 fn edit_from_value(value: &Value) -> Option<TextEdit> {
-    let old = value
-        .get("oldText")
-        .or_else(|| value.get("old"))
-        .and_then(Value::as_str)?;
     let new = value
         .get("newText")
         .or_else(|| value.get("new"))
         .and_then(Value::as_str)?;
+    let old = value
+        .get("oldText")
+        .or_else(|| value.get("old"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let whole_line = value
+        .get("wholeLine")
+        .or_else(|| value.get("whole_line"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let start_line = value
+        .get("startLine")
+        .or_else(|| value.get("start_line"))
+        .and_then(Value::as_u64)
+        .map(|v| v as usize);
+    let line_count = value
+        .get("lineCount")
+        .or_else(|| value.get("line_count"))
+        .and_then(Value::as_u64)
+        .map(|v| v as usize);
     Some(TextEdit {
-        old_text: old.to_string(),
+        old_text: old,
         new_text: new.to_string(),
+        start_line,
+        line_count,
+        whole_line,
     })
 }
 
@@ -145,7 +175,7 @@ fn parse_edits(args: &Value) -> Result<Vec<TextEdit>, String> {
         Some(Value::Array(items)) => {
             for (i, item) in items.iter().enumerate() {
                 edits.push(edit_from_value(item).ok_or_else(|| {
-                    format!("edits[{i}] must be an object with string oldText and newText")
+                    format!("edits[{i}] must be an object with a string newText")
                 })?);
             }
         }
@@ -156,17 +186,15 @@ fn parse_edits(args: &Value) -> Result<Vec<TextEdit>, String> {
             Ok(single) => {
                 return edit_from_value(&single)
                     .map(|edit| vec![edit])
-                    .ok_or_else(|| {
-                        "'edits' string did not contain string oldText/newText".to_string()
-                    });
+                    .ok_or_else(|| "'edits' string did not contain a string newText".to_string());
             }
             _ => return Err("'edits' string did not parse as a JSON array".into()),
         },
         Some(single @ Value::Object(_)) => {
-            edits
-                .push(edit_from_value(single).ok_or_else(|| {
-                    "'edits' object needs string oldText and newText".to_string()
-                })?);
+            edits.push(
+                edit_from_value(single)
+                    .ok_or_else(|| "'edits' object needs a string newText".to_string())?,
+            );
         }
         _ => {}
     }
@@ -210,58 +238,197 @@ fn restore_line_endings(text: &str, ending: &str) -> String {
     }
 }
 
+fn edit_label(single: bool, i: usize) -> String {
+    if single {
+        String::new()
+    } else {
+        format!("edits[{i}]: ")
+    }
+}
+
+fn scope_lines(edit: &TextEdit) -> Option<(usize, usize)> {
+    let start = edit.start_line?;
+    Some((
+        start,
+        start.saturating_add(edit.line_count.unwrap_or(1) - 1),
+    ))
+}
+
+fn scope_window(edit: &TextEdit, spans: &[(usize, usize)]) -> Option<(usize, usize)> {
+    let (first, last) = scope_lines(edit)?;
+    Some((spans[first - 1].0, spans[last - 1].1))
+}
+
+fn validate_edit(
+    edit: &TextEdit,
+    i: usize,
+    single: bool,
+    line_total: usize,
+    path: &str,
+) -> Result<(), String> {
+    let label = edit_label(single, i);
+    if edit.whole_line {
+        if edit.start_line.is_none() {
+            return Err(format!(
+                "{label}wholeLine edits require startLine (the first line to replace)."
+            ));
+        }
+        if edit.old_text.is_some() {
+            return Err(format!(
+                "{label}wholeLine edits replace whole lines; omit oldText and give the replacement as newText."
+            ));
+        }
+    } else {
+        let Some(old) = edit.old_text.as_deref() else {
+            return Err(format!(
+                "{label}oldText is required unless wholeLine is true."
+            ));
+        };
+        if old.is_empty() {
+            return Err(format!("{label}oldText must not be empty."));
+        }
+    }
+    if edit.line_count.is_some() && edit.start_line.is_none() {
+        return Err(format!("{label}lineCount requires startLine."));
+    }
+    let Some(start) = edit.start_line else {
+        return Ok(());
+    };
+    if start == 0 {
+        return Err(format!(
+            "{label}startLine is 1-based and must be at least 1."
+        ));
+    }
+    let count = edit.line_count.unwrap_or(1);
+    if count == 0 {
+        return Err(format!("{label}lineCount must be at least 1."));
+    }
+    let end = start.saturating_add(count - 1);
+    if end > line_total {
+        return Err(format!(
+            "{label}line range {start}-{end} is beyond the end of {path} ({line_total} lines)."
+        ));
+    }
+    Ok(())
+}
+
+fn whole_line_replacement(new_text: &str, had_trailing_newline: bool) -> String {
+    if new_text.is_empty() {
+        return String::new();
+    }
+    let mut replacement = new_text.to_string();
+    if had_trailing_newline && !replacement.ends_with('\n') {
+        replacement.push('\n');
+    }
+    replacement
+}
+
+fn cannot_find(edit: &TextEdit, path: &str) -> String {
+    match scope_lines(edit) {
+        Some((first, last)) => format!(
+            "Could not find the text in {path} within lines {first}-{last}. It must match the file content exactly, including all whitespace and newlines, and fit entirely inside the scoped lines."
+        ),
+        None => format!(
+            "Could not find the text in {path}. It must match the file content exactly, including all whitespace and newlines."
+        ),
+    }
+}
+
+fn not_unique(edit: &TextEdit, path: &str, count: usize) -> String {
+    match scope_lines(edit) {
+        Some((first, last)) => format!(
+            "Found {count} occurrences of the text in {path} within lines {first}-{last}. The text must be unique within the scope; narrow the scope or extend the surrounding lines to disambiguate."
+        ),
+        None => format!(
+            "Found {count} occurrences of the text in {path}. The text must be unique; include more surrounding lines or add a startLine/lineCount scope to disambiguate."
+        ),
+    }
+}
+
 fn apply_edits(base: &str, edits: &[TextEdit], path: &str) -> Result<String, String> {
     let single = edits.len() == 1;
+    let spans = line_spans(base);
     for (i, edit) in edits.iter().enumerate() {
-        if edit.old_text.is_empty() {
-            return Err(match single {
-                true => "oldText must not be empty.".into(),
-                false => format!("edits[{i}].oldText must not be empty."),
-            });
-        }
+        validate_edit(edit, i, single, spans.len(), path)?;
     }
     let mut used_fuzzy = false;
-    for edit in edits {
-        let (_, _, fuzzy) = fuzzy_find(base, &edit.old_text);
-        if fuzzy {
-            used_fuzzy = true;
+    let mut normalized: Option<String> = None;
+    for (i, edit) in edits.iter().enumerate() {
+        if edit.whole_line {
+            continue;
         }
+        let old = edit.old_text.as_deref().unwrap_or_default();
+        let exact = match scope_window(edit, &spans) {
+            Some((start, end)) => base[start..end].contains(old),
+            None => base.contains(old),
+        };
+        if exact {
+            continue;
+        }
+        let nbase = normalized.get_or_insert_with(|| normalize_for_fuzzy_match(base));
+        let nspans = line_spans(nbase);
+        let normalized_old = normalize_for_fuzzy_match(old);
+        let fuzzy = match scope_window(edit, &nspans) {
+            Some((start, end)) => nbase[start..end].contains(&normalized_old),
+            None => nbase.contains(&normalized_old),
+        };
+        if !fuzzy {
+            return Err(format!(
+                "{}{}",
+                edit_label(single, i),
+                cannot_find(edit, path)
+            ));
+        }
+        used_fuzzy = true;
     }
     let replacement_base = if used_fuzzy {
-        normalize_for_fuzzy_match(base)
+        normalized.expect("used fuzzy implies a normalized base")
     } else {
         base.to_string()
     };
+    let rspans = line_spans(&replacement_base);
     let mut matched: Vec<MatchedEdit> = Vec::new();
     for (i, edit) in edits.iter().enumerate() {
-        let (index, len, _) = fuzzy_find(&replacement_base, &edit.old_text);
-        let occurrences = count_fuzzy_occurrences(&replacement_base, &edit.old_text);
-        match (index, occurrences) {
-            (None, _) => {
-                return Err(match single {
-                    true => format!(
-                        "Could not find the text in {path}. It must match the file content exactly, including all whitespace and newlines."
-                    ),
-                    false => format!(
-                        "edits[{i}]: could not find the text in {path}. It must match the file content exactly, including all whitespace and newlines."
-                    ),
-                });
-            }
-            (Some(start), 1) => matched.push(MatchedEdit {
+        if edit.whole_line {
+            let (first, last) = scope_lines(edit).expect("validated scope");
+            let start = rspans[first - 1].0;
+            let end = rspans[last - 1].1;
+            let region = &base[spans[first - 1].0..spans[last - 1].1];
+            matched.push(MatchedEdit {
                 index: i,
                 start,
+                len: end - start,
+                new_text: whole_line_replacement(&edit.new_text, region.ends_with('\n')),
+            });
+            continue;
+        }
+        let old = edit.old_text.as_deref().unwrap_or_default();
+        let (search_start, hay) = match scope_window(edit, &rspans) {
+            Some((start, end)) => (start, &replacement_base[start..end]),
+            None => (0, replacement_base.as_str()),
+        };
+        let (index, len, _) = fuzzy_find(hay, old);
+        let occurrences = count_fuzzy_occurrences(hay, old);
+        match (index, occurrences) {
+            (None, _) => {
+                return Err(format!(
+                    "{}{}",
+                    edit_label(single, i),
+                    cannot_find(edit, path)
+                ));
+            }
+            (Some(offset), 1) => matched.push(MatchedEdit {
+                index: i,
+                start: search_start + offset,
                 len,
                 new_text: edit.new_text.clone(),
             }),
             (Some(_), n) => {
-                return Err(match single {
-                    true => format!(
-                        "Found {n} occurrences of the text in {path}. The text must be unique; include more surrounding lines to disambiguate."
-                    ),
-                    false => format!(
-                        "Found {n} occurrences of edits[{i}].oldText in {path}. Each oldText must be unique; include more surrounding lines to disambiguate."
-                    ),
-                });
+                return Err(format!(
+                    "{}{}",
+                    edit_label(single, i),
+                    not_unique(edit, path, n)
+                ));
             }
         }
     }
@@ -683,6 +850,313 @@ mod tests {
             std::fs::read_to_string("f.txt").unwrap(),
             "token ALPHA and token BETA\n"
         );
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn whole_line_edits_replace_scoped_lines() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("e.txt", "one\ntwo\nthree\nfour\n").unwrap();
+        EditFile::new(None, FileLocks::new(), crate::test_util::access())
+            .call(
+                &mut new_ctx(),
+                json!({
+                    "path": "e.txt",
+                    "edits": [
+                        { "wholeLine": true, "startLine": 2, "newText": "TWO" },
+                        { "wholeLine": true, "startLine": 3, "lineCount": 2, "newText": "III\nIV" }
+                    ]
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string("e.txt").unwrap(),
+            "one\nTWO\nIII\nIV\n"
+        );
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn whole_line_edits_delete_and_replace_last_line() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("e.txt", "one\ntwo\nthree\n").unwrap();
+        EditFile::new(None, FileLocks::new(), crate::test_util::access())
+            .call(
+                &mut new_ctx(),
+                json!({
+                    "path": "e.txt",
+                    "edits": [{ "wholeLine": true, "startLine": 2, "newText": "" }]
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string("e.txt").unwrap(), "one\nthree\n");
+        std::fs::write("last.txt", "one\nlast").unwrap();
+        EditFile::new(None, FileLocks::new(), crate::test_util::access())
+            .call(
+                &mut new_ctx(),
+                json!({
+                    "path": "last.txt",
+                    "edits": [{ "wholeLine": true, "startLine": 2, "newText": "final" }]
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string("last.txt").unwrap(), "one\nfinal");
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn whole_line_edits_reject_bad_arguments() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("e.txt", "one\ntwo\n").unwrap();
+        let tool = || EditFile::new(None, FileLocks::new(), crate::test_util::access());
+        let err = tool()
+            .call(
+                &mut new_ctx(),
+                json!({
+                    "path": "e.txt",
+                    "edits": [{ "wholeLine": true, "newText": "TWO" }]
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("wholeLine edits require startLine"),
+            "{}",
+            err
+        );
+        let err = tool()
+            .call(
+                &mut new_ctx(),
+                json!({
+                    "path": "e.txt",
+                    "edits": [{ "wholeLine": true, "startLine": 2, "oldText": "two", "newText": "TWO" }]
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("omit oldText"), "{}", err);
+        let err = tool()
+            .call(
+                &mut new_ctx(),
+                json!({
+                    "path": "e.txt",
+                    "edits": [{ "wholeLine": true, "startLine": 5, "newText": "FIVE" }]
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("beyond the end of e.txt (2 lines)"),
+            "{}",
+            err
+        );
+        let err = tool()
+            .call(
+                &mut new_ctx(),
+                json!({
+                    "path": "e.txt",
+                    "edits": [{ "oldText": "one", "lineCount": 2, "newText": "x" }]
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("lineCount requires startLine"),
+            "{}",
+            err
+        );
+        let err = tool()
+            .call(
+                &mut new_ctx(),
+                json!({
+                    "path": "e.txt",
+                    "edits": [{ "newText": "x" }]
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("oldText is required unless wholeLine is true"),
+            "{}",
+            err
+        );
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn scoped_text_edits_limit_search_and_disambiguate() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("e.txt", "alpha\nbeta gamma\nalpha beta\nalpha\n").unwrap();
+        EditFile::new(None, FileLocks::new(), crate::test_util::access())
+            .call(
+                &mut new_ctx(),
+                json!({
+                    "path": "e.txt",
+                    "edits": [{ "oldText": "alpha", "newText": "ALPHA", "startLine": 1, "lineCount": 1 }]
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string("e.txt").unwrap(),
+            "ALPHA\nbeta gamma\nalpha beta\nalpha\n"
+        );
+        let err = EditFile::new(None, FileLocks::new(), crate::test_util::access())
+            .call(
+                &mut new_ctx(),
+                json!({
+                    "path": "e.txt",
+                    "edits": [{ "oldText": "ALPHA", "newText": "nope", "startLine": 3, "lineCount": 1 }]
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("within lines 3-3"), "{}", err);
+        let err = EditFile::new(None, FileLocks::new(), crate::test_util::access())
+            .call(
+                &mut new_ctx(),
+                json!({
+                    "path": "e.txt",
+                    "edits": [{ "oldText": "alpha beta\nalpha", "newText": "x", "startLine": 3, "lineCount": 1 }]
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("within lines 3-3"), "{}", err);
+        std::fs::write("amb.txt", "a a\nb\n").unwrap();
+        let err = EditFile::new(None, FileLocks::new(), crate::test_util::access())
+            .call(
+                &mut new_ctx(),
+                json!({
+                    "path": "amb.txt",
+                    "edits": [{ "oldText": "a", "newText": "z", "startLine": 1 }]
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Found 2 occurrences of the text in amb.txt within lines 1-1"),
+            "{}",
+            err
+        );
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn scoped_text_edits_fuzzy_match_within_scope() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("e.txt", "alpha   \nbeta\ngamma\n").unwrap();
+        EditFile::new(None, FileLocks::new(), crate::test_util::access())
+            .call(
+                &mut new_ctx(),
+                json!({
+                    "path": "e.txt",
+                    "edits": [{ "oldText": "alpha\nbeta", "newText": "ONE\nTWO", "startLine": 1, "lineCount": 2 }]
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string("e.txt").unwrap(),
+            "ONE\nTWO\ngamma\n"
+        );
+        let err = EditFile::new(None, FileLocks::new(), crate::test_util::access())
+            .call(
+                &mut new_ctx(),
+                json!({
+                    "path": "e.txt",
+                    "edits": [{ "oldText": "ONE\nTWO", "newText": "x", "startLine": 2, "lineCount": 1 }]
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("within lines 2-2"), "{}", err);
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn mixed_edits_apply_together() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("e.txt", "alpha beta\ngamma delta\nepsilon\n").unwrap();
+        EditFile::new(None, FileLocks::new(), crate::test_util::access())
+            .call(
+                &mut new_ctx(),
+                json!({
+                    "path": "e.txt",
+                    "edits": [
+                        { "wholeLine": true, "startLine": 2, "newText": "GAMMA" },
+                        { "oldText": "alpha", "newText": "ALPHA" }
+                    ]
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string("e.txt").unwrap(),
+            "ALPHA beta\nGAMMA\nepsilon\n"
+        );
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn mixed_edits_reject_overlap_across_modes() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("e.txt", "alpha beta\ngamma\n").unwrap();
+        let err = EditFile::new(None, FileLocks::new(), crate::test_util::access())
+            .call(
+                &mut new_ctx(),
+                json!({
+                    "path": "e.txt",
+                    "edits": [
+                        { "wholeLine": true, "startLine": 1, "newText": "ALPHA" },
+                        { "oldText": "beta", "newText": "BETA" }
+                    ]
+                }),
+            )
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("edits[0] and edits[1] overlap"), "{}", msg);
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn whole_line_accepts_legacy_flat_args() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("e.txt", "one\ntwo\n").unwrap();
+        EditFile::new(None, FileLocks::new(), crate::test_util::access())
+            .call(
+                &mut new_ctx(),
+                json!({ "path": "e.txt", "wholeLine": true, "startLine": 2, "new": "TWO" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string("e.txt").unwrap(), "one\nTWO\n");
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn whole_line_noop_is_rejected() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("e.txt", "one\ntwo\n").unwrap();
+        let err = EditFile::new(None, FileLocks::new(), crate::test_util::access())
+            .call(
+                &mut new_ctx(),
+                json!({
+                    "path": "e.txt",
+                    "edits": [{ "wholeLine": true, "startLine": 2, "newText": "two" }]
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("No changes made"), "{}", err);
         drop(dir);
     }
 }
