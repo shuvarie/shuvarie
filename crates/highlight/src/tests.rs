@@ -21,7 +21,7 @@ fn is_blank(line: &Line<'static>) -> bool {
 }
 
 fn rows(lines: &[Line<'static>]) -> Vec<String> {
-    lines.iter().map(|l| joined(l)).collect()
+    lines.iter().map(joined).collect()
 }
 
 #[test]

@@ -5,9 +5,10 @@ use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use super::kdl_util::{child_nodes, node_error, parse_document};
 use super::{
     AgentConfig, Config, ConfigError, ContextConfig, EmbeddingConfig, LspConfigRepr,
-    LspServerSpecRepr, PathRule, PermissionsConfig, RegistriesConfig, RegistryEntry, RetryConfig,
-    RuleSet, ShellConfig, ShellPatternKind, ShellRule, SidebarPref, SkillsConfig, ToolsConfig,
-    UiPrefs, Verb, WebSearchConfig, WebSearchKind, WebSearchParamKind, WebSearchParams,
+    LspServerSpecRepr, Mode, PathRule, PermissionsConfig, RegistriesConfig, RegistryEntry,
+    RetryConfig, RuleSet, ShellConfig, ShellPatternKind, ShellRule, SidebarPref, SkillsConfig,
+    ToolsConfig, UiPrefs, Verb, WebSearchConfig, WebSearchKind, WebSearchParamKind,
+    WebSearchParams,
 };
 use crate::Result;
 
@@ -861,15 +862,32 @@ fn check_props(input: &str, node: &KdlNode, known: &[&str]) -> Result<()> {
 }
 
 fn parse_path_rules(node: &KdlNode, input: &str) -> Result<Vec<PathRule>> {
-    check_props(
-        input,
-        node,
-        &["except-hidden", "exact", "exclude-shell-pattern"],
-    )?;
+    check_props(input, node, &["except-hidden", "exact", "mode"])?;
     let verb = rule_verb(input, node)?;
     let except_hidden = prop_bool(input, node, "except-hidden")?;
     let exact = prop_bool(input, node, "exact")?;
-    let exclude_shell_pattern = prop_bool(input, node, "exclude-shell-pattern")?;
+    let mode_raw = property_string(input, node, "mode")?;
+    if mode_raw.is_some() && verb != Verb::Allow {
+        return Err(node_error(
+            input,
+            node,
+            "`mode` is only valid on `allow` rules",
+            None,
+        ));
+    }
+    let mode = match mode_raw.as_deref() {
+        None => Mode::Rw,
+        Some("rw") => Mode::Rw,
+        Some("ro") => Mode::Ro,
+        Some(other) => {
+            return Err(node_error(
+                input,
+                node,
+                format!("`mode` must be `ro` or `rw`, found `{other}`"),
+                None,
+            ));
+        }
+    };
     rule_patterns(input, node, "path")?
         .into_iter()
         .map(|path| {
@@ -878,7 +896,7 @@ fn parse_path_rules(node: &KdlNode, input: &str) -> Result<Vec<PathRule>> {
                 path,
                 except_hidden: except_hidden.unwrap_or_default(),
                 exact: exact.unwrap_or_default(),
-                exclude_shell_pattern: exclude_shell_pattern.unwrap_or_default(),
+                mode,
             })
         })
         .collect()
@@ -1173,14 +1191,7 @@ fn permissions_node(cfg: &PermissionsConfig) -> Option<KdlNode> {
         children.push(scope_node(
             "paths",
             &cfg.paths,
-            |rule| {
-                (
-                    rule.verb,
-                    rule.except_hidden,
-                    rule.exact,
-                    rule.exclude_shell_pattern,
-                )
-            },
+            |rule| (rule.verb, rule.except_hidden, rule.exact, rule.mode),
             path_rule_group,
         ));
     }
@@ -1236,8 +1247,8 @@ fn path_rule_group(rules: &[&PathRule]) -> KdlNode {
     if first.exact {
         node.push(KdlEntry::new_prop("exact", true));
     }
-    if first.exclude_shell_pattern {
-        node.push(KdlEntry::new_prop("exclude-shell-pattern", true));
+    if first.mode == Mode::Ro {
+        node.push(KdlEntry::new_prop("mode", "ro"));
     }
     for rule in rules {
         node.push(KdlEntry::new(rule.path.as_str()));

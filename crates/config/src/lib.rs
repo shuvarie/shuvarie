@@ -182,7 +182,7 @@ impl PermissionsConfig {
                     path: ".".to_string(),
                     except_hidden: true,
                     exact: false,
-                    exclude_shell_pattern: false,
+                    mode: Mode::Rw,
                 }],
             },
             shell: RuleSet {
@@ -223,9 +223,19 @@ pub struct PathRule {
     /// everything below it.
     pub exact: bool,
 
-    /// `#false` (default) also matches `run_shell` command text that contains
-    /// the path; `#true` keeps the rule out of shell command checks.
-    pub exclude_shell_pattern: bool,
+    /// `rw` (default) governs reads and writes alike; `ro` matches only read
+    /// requests.
+    pub mode: Mode,
+}
+
+/// Read/write scope of an `allow` path rule.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Mode {
+    /// The rule matches reads and writes.
+    #[default]
+    Rw,
+    /// The rule matches only reads; writes skip it.
+    Ro,
 }
 
 /// One `shell-patterns { … }` rule: `allow|ask|deny [props] "<pattern>"`. A
@@ -1651,7 +1661,7 @@ mod tests {
                     /-allow-all
                     allow except-hidden=#true "."
                     ask ".env"
-                    deny exact=#false exclude-shell-pattern=#false "~/.ssh"
+                    deny exact=#false "~/.ssh"
                 }
 
                 shell-patterns {
@@ -1677,7 +1687,6 @@ mod tests {
         assert_eq!(perms.paths.rules[2].verb, Verb::Deny);
         assert_eq!(perms.paths.rules[2].path, "~/.ssh");
         assert!(!perms.paths.rules[2].exact);
-        assert!(!perms.paths.rules[2].exclude_shell_pattern);
         assert_eq!(perms.shell.default, None);
         assert_eq!(perms.shell.rules.len(), 3);
         assert_eq!(perms.shell.rules[0].pattern, "rm");
@@ -1763,6 +1772,22 @@ mod tests {
                 "permissions { paths { allow-all { nested } } }",
                 "takes no children",
             ),
+            (
+                "permissions { paths { deny mode=\"ro\" \"x\" } }",
+                "only valid on `allow`",
+            ),
+            (
+                "permissions { paths { ask mode=\"rw\" \"x\" } }",
+                "only valid on `allow`",
+            ),
+            (
+                "permissions { paths { allow mode=\"bogus\" \"x\" } }",
+                "`ro` or `rw`",
+            ),
+            (
+                "permissions { shell-patterns { ask mode=\"ro\" \"x\" } }",
+                "unknown property",
+            ),
         ];
         for (text, needle) in cases {
             let err = config_kdl::from_kdl(text).unwrap_err();
@@ -1801,7 +1826,6 @@ mod tests {
             assert_eq!(rule.verb, Verb::Allow);
             assert!(rule.except_hidden);
             assert!(!rule.exact);
-            assert!(!rule.exclude_shell_pattern);
         }
         for rule in &perms.paths.rules[3..] {
             assert_eq!(rule.verb, Verb::Ask);
@@ -1824,6 +1848,51 @@ mod tests {
 
         let text = config_kdl::to_kdl(&parsed).unwrap();
         let reparsed = config_kdl::from_kdl(&text).unwrap();
+        assert_eq!(parsed, reparsed);
+    }
+
+    #[test]
+    fn permissions_mode_parses_defaults_and_round_trips() {
+        let text = r#"
+            permissions {
+                paths {
+                    allow mode="ro" "~/.ssh"
+                    allow mode="rw" "a"
+                    allow "b"
+                }
+            }
+        "#;
+        let parsed = config_kdl::from_kdl(text).unwrap();
+        let rules = &parsed.permissions.paths.rules;
+        assert_eq!(rules.len(), 3);
+        assert_eq!(rules[0].mode, Mode::Ro);
+        assert_eq!(rules[1].mode, Mode::Rw, "explicit rw");
+        assert_eq!(rules[2].mode, Mode::Rw, "omitted mode defaults to rw");
+
+        let out = config_kdl::to_kdl(&parsed).unwrap();
+        assert!(out.contains("allow mode=ro \"~/.ssh\""), "ro kept: {out}");
+        assert_eq!(out.matches("mode=").count(), 1, "rw omitted: {out}");
+        let reparsed = config_kdl::from_kdl(&out).unwrap();
+        assert_eq!(parsed, reparsed);
+    }
+
+    #[test]
+    fn permissions_mode_splits_serializer_groups() {
+        let text = r#"
+            permissions {
+                paths {
+                    allow mode="ro" "a" "b"
+                    allow "c"
+                    allow mode="ro" "d"
+                }
+            }
+        "#;
+        let parsed = config_kdl::from_kdl(text).unwrap();
+        let out = config_kdl::to_kdl(&parsed).unwrap();
+        assert!(out.contains("allow mode=ro a b"), "ro run grouped: {out}");
+        assert!(out.contains("allow c"), "rw stays its own node: {out}");
+        assert!(out.contains("allow mode=ro d"), "ro run split: {out}");
+        let reparsed = config_kdl::from_kdl(&out).unwrap();
         assert_eq!(parsed, reparsed);
     }
 

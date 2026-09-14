@@ -44,7 +44,7 @@ pub(crate) fn access() -> Access {
 /// fail fast as in [`access`]).
 pub(crate) fn access_for_config(config: &shuvarie_config::PermissionsConfig) -> Access {
     let permissions = std::sync::Arc::new(
-        crate::permissions::Permissions::build(
+        Permissions::build(
             config,
             &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         )
@@ -63,7 +63,7 @@ pub(crate) fn access_with_answering_gate(
     tokio::sync::mpsc::Receiver<crate::permissions::PermissionRequest>,
 ) {
     let permissions = std::sync::Arc::new(
-        crate::permissions::Permissions::build(
+        Permissions::build(
             config,
             &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         )

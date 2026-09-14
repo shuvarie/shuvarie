@@ -2,8 +2,8 @@ use std::path::{Component, Path, PathBuf};
 
 use regex::Regex;
 use shuvarie_config::{
-    PathRule as PathRuleConfig, PermissionsConfig, ShellPatternKind, ShellRule as ShellRuleConfig,
-    Verb,
+    Mode, PathRule as PathRuleConfig, PermissionsConfig, ShellPatternKind,
+    ShellRule as ShellRuleConfig, Verb,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -68,8 +68,8 @@ pub(crate) fn resolve_write(path: &str) -> Result<PathBuf, String> {
 }
 
 /// Which side of a file tool is being authorized. Only the app-owned read
-/// exemption (global skill dirs) is kind-sensitive; path rules otherwise
-/// govern reads and writes alike.
+/// exemption (global skill dirs) is kind-sensitive; path rules govern reads
+/// and writes alike unless the rule sets `mode="ro"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathKind {
     Read,
@@ -133,10 +133,9 @@ struct CompiledPathRule {
     verb: Verb,
     raw: String,
     path: PathBuf,
-    path_string: String,
     exact: bool,
     except_hidden: bool,
-    gates_shell: bool,
+    mode: Mode,
 }
 
 /// One compiled `shell-patterns` rule.
@@ -211,12 +210,16 @@ impl Permissions {
         })
     }
 
-    /// The decision for a canonicalized file path.
+    /// The decision for a canonicalized file path. `mode="ro"` rules match
+    /// only read requests; writes skip them and fall through to later rules.
     pub fn check_path(&self, kind: PathKind, path: &Path) -> Decision {
         if kind == PathKind::Read && self.read_exempt.iter().any(|root| path.starts_with(root)) {
             return Decision::Allow;
         }
         for rule in &self.paths {
+            if rule.mode == Mode::Ro && kind == PathKind::Write {
+                continue;
+            }
             if let Some(decision) = rule.check(path) {
                 return decision;
             }
@@ -231,9 +234,9 @@ impl Permissions {
         verb_decision(fallback, reason)
     }
 
-    /// The decision for a `run_shell` command line: shell-pattern rules
-    /// first, then path rules that bridge into shell text (those without
-    /// `exclude-shell-pattern` or `except-hidden`), then the fallback verbs.
+    /// The decision for a `run_shell` command line: only `shell-patterns`
+    /// rules decide commands — path rules never gate shell text — then the
+    /// fallback verbs.
     pub fn check_shell(&self, command: &str) -> Decision {
         let collapsed = collapse_whitespace(command);
         for rule in &self.shell {
@@ -241,17 +244,6 @@ impl Permissions {
                 return verb_decision(
                     rule.verb,
                     format!("shell-patterns: {} \"{}\"", rule.verb.as_str(), rule.raw),
-                );
-            }
-        }
-        for rule in &self.paths {
-            if !rule.gates_shell || rule.except_hidden || rule.raw.is_empty() {
-                continue;
-            }
-            if collapsed.contains(&rule.raw) || collapsed.contains(&rule.path_string) {
-                return verb_decision(
-                    rule.verb,
-                    format!("paths: {} \"{}\"", rule.verb.as_str(), rule.raw),
                 );
             }
         }
@@ -338,11 +330,10 @@ impl CompiledPathRule {
         Ok(Self {
             verb: rule.verb,
             raw: rule.path.clone(),
-            path_string: path.to_string_lossy().into_owned(),
             path,
             exact: rule.exact,
             except_hidden: rule.except_hidden,
-            gates_shell: !rule.exclude_shell_pattern,
+            mode: rule.mode,
         })
     }
 
@@ -560,7 +551,7 @@ fn normalize(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use shuvarie_config::{
-        PathRule, PermissionsConfig, RuleSet, ShellPatternKind, ShellRule, Verb,
+        Mode, PathRule, PermissionsConfig, RuleSet, ShellPatternKind, ShellRule, Verb,
     };
 
     fn builtin() -> Permissions {
@@ -601,7 +592,7 @@ mod tests {
             path: path.to_string(),
             except_hidden: false,
             exact: false,
-            exclude_shell_pattern: false,
+            mode: Mode::Rw,
         }
     }
 
@@ -722,7 +713,7 @@ mod tests {
                 path: "/ws/file".into(),
                 except_hidden: false,
                 exact: true,
-                exclude_shell_pattern: false,
+                mode: Mode::Rw,
             }],
             None,
             Vec::new(),
@@ -749,7 +740,7 @@ mod tests {
                 path: "/ws".into(),
                 except_hidden: true,
                 exact: false,
-                exclude_shell_pattern: false,
+                mode: Mode::Rw,
             }],
             None,
             Vec::new(),
@@ -884,49 +875,103 @@ mod tests {
     }
 
     #[test]
-    fn path_rules_bridge_into_shell_commands() {
-        let Some(home) = dirs::home_dir() else {
-            return;
-        };
-        let perms = Permissions::build(
-            &PermissionsConfig {
-                default: Some(Verb::Allow),
-                paths: RuleSet {
-                    default: None,
-                    rules: vec![
-                        path_rule(Verb::Deny, "~/.ssh"),
-                        PathRule {
-                            verb: Verb::Deny,
-                            path: "/tmp/secret".into(),
-                            except_hidden: false,
-                            exact: false,
-                            exclude_shell_pattern: true,
-                        },
-                    ],
+    fn path_rules_never_gate_shell_commands() {
+        let perms = config_scoped(
+            Some(Verb::Ask),
+            None,
+            vec![
+                PathRule {
+                    verb: Verb::Deny,
+                    path: "~/.ssh".into(),
+                    except_hidden: false,
+                    exact: false,
+                    mode: Mode::Rw,
                 },
-                shell: RuleSet::default(),
-            },
-            Path::new("/ws"),
-        )
-        .unwrap();
+                PathRule {
+                    verb: Verb::Allow,
+                    path: "/ws".into(),
+                    except_hidden: false,
+                    exact: false,
+                    mode: Mode::Ro,
+                },
+            ],
+            Some(Verb::Deny),
+            Vec::new(),
+        );
         assert_eq!(
             perms.check_shell("cat ~/.ssh/id_rsa"),
             Decision::Deny {
-                reason: "paths: deny \"~/.ssh\"".into()
-            }
+                reason: "shell-patterns fallback: deny-all".into()
+            },
+            "a path deny never bridges into shell text"
         );
         assert_eq!(
-            perms.check_shell(&format!("cat {}/.ssh/id_rsa", home.to_string_lossy())),
+            perms.check_shell("cat /ws/file"),
             Decision::Deny {
-                reason: "paths: deny \"~/.ssh\"".into()
-            }
+                reason: "shell-patterns fallback: deny-all".into()
+            },
+            "a ro file allowance never grants a command"
+        );
+    }
+
+    #[test]
+    fn mode_ro_rules_match_reads_but_skip_writes() {
+        let perms = config_scoped(
+            Some(Verb::Deny),
+            Some(Verb::Deny),
+            vec![PathRule {
+                verb: Verb::Allow,
+                path: "/ws".into(),
+                except_hidden: false,
+                exact: false,
+                mode: Mode::Ro,
+            }],
+            None,
+            Vec::new(),
         );
         assert_eq!(
-            perms.check_shell("cat /tmp/secret/key"),
-            Decision::Allow,
-            "exclude-shell-pattern keeps the rule out of shell checks"
+            perms.check_path(PathKind::Read, Path::new("/ws/file")),
+            Decision::Allow
         );
-        assert_eq!(perms.check_shell("cat /tmp/other"), Decision::Allow);
+        assert_eq!(
+            perms.check_path(PathKind::Write, Path::new("/ws/file")),
+            Decision::Deny {
+                reason: "paths fallback: deny-all".into()
+            },
+            "ro rules never decide writes"
+        );
+    }
+
+    #[test]
+    fn mode_ro_rules_fall_through_to_later_rules() {
+        let perms = config_scoped(
+            Some(Verb::Deny),
+            None,
+            vec![
+                PathRule {
+                    verb: Verb::Allow,
+                    path: "/ws".into(),
+                    except_hidden: false,
+                    exact: false,
+                    mode: Mode::Ro,
+                },
+                path_rule(Verb::Ask, "/ws"),
+            ],
+            None,
+            Vec::new(),
+        );
+        assert_eq!(
+            perms.check_path(PathKind::Read, Path::new("/ws/file")),
+            Decision::Allow,
+            "first matching ro rule wins for reads"
+        );
+        assert_eq!(
+            perms.check_path(PathKind::Write, Path::new("/ws/file")),
+            Decision::Ask {
+                reason: "paths: ask \"/ws\"".into()
+            },
+            "writes reach the next rule"
+        );
     }
 
     #[test]
