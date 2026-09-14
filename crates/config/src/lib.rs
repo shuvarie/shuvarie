@@ -57,7 +57,8 @@ fn read_layer(path: &std::path::Path) -> Result<Option<ConfigLayer>> {
 /// not), so locally-set sections intentionally reset untouched fields of that
 /// section to defaults. `lsp.servers` merges key-by-key so a file adding one
 /// server doesn't shadow the rest; `registries` merges key-by-key per
-/// registry name for the same reason.
+/// registry name for the same reason. `permissions` is stacked separately by
+/// [`stack_permissions`] once the whole chain has been read.
 fn merge_layer(config: &mut Config, layer: &ConfigLayer) {
     for section in &layer.sections {
         match section.as_str() {
@@ -73,7 +74,6 @@ fn merge_layer(config: &mut Config, layer: &ConfigLayer) {
                 }
             }
             "tools" => config.tools = layer.config.tools.clone(),
-            "permissions" => config.permissions = layer.config.permissions.clone(),
             "lsp" => {
                 config.lsp.disabled = layer.config.lsp.disabled;
                 for (lang, spec) in &layer.config.lsp.servers {
@@ -83,6 +83,31 @@ fn merge_layer(config: &mut Config, layer: &ConfigLayer) {
             _ => {}
         }
     }
+}
+
+/// Stacks the chain's `permissions` sections into one config, highest-priority
+/// layer first: the top-level default verb and each scope's bare `-all` verb
+/// come from the highest-priority layer that sets them, rule lists keep every
+/// layer's rules in chain order so the highest-priority layer's rules match
+/// first, and the built-in rules sit at the deepest end.
+fn stack_permissions(layers: &[PermissionsConfig]) -> PermissionsConfig {
+    let mut merged = PermissionsConfig {
+        default: None,
+        paths: RuleSet::default(),
+        shell: RuleSet::default(),
+    };
+    for layer in layers {
+        merged.default = merged.default.or(layer.default);
+        merged.paths.default = merged.paths.default.or(layer.paths.default);
+        merged.shell.default = merged.shell.default.or(layer.shell.default);
+        merged.paths.rules.extend(layer.paths.rules.iter().cloned());
+        merged.shell.rules.extend(layer.shell.rules.iter().cloned());
+    }
+    let builtin = PermissionsConfig::builtin();
+    merged.paths.rules.extend(builtin.paths.rules);
+    merged.default = merged.default.or(builtin.default);
+    merged.shell.default = merged.shell.default.or(builtin.shell.default);
+    merged
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -169,9 +194,10 @@ impl Default for PermissionsConfig {
 }
 
 impl PermissionsConfig {
-    /// The effective defaults used when the section is absent from every
-    /// config layer: ask all, allow inside the working directory except
-    /// hidden files, and allow all shell commands.
+    /// The built-in permission baseline, which sits at the deepest end of the
+    /// merged rule chain: ask all, allow inside the working directory except
+    /// hidden files, and allow all shell commands. Its verbs apply when no
+    /// config layer sets them.
     pub fn builtin() -> Self {
         Self {
             default: Some(Verb::Ask),
@@ -588,9 +614,12 @@ impl Config {
     /// `$cwd/.shuvarie/config.kdl`, then the global config. Every existing
     /// file is merged layer by layer: per top-level section the
     /// highest-priority file defining it wins wholesale (except
-    /// `lsp.servers` and `registries`, which merge key-by-key). With no file present this
-    /// returns `Default`. Debug builds read the `-dev` suffixed names
-    /// (`shuvarie-dev.kdl`, `.shuvarie-dev`, `~/.config/shuvarie-dev`).
+    /// `lsp.servers` and `registries`, which merge key-by-key, and
+    /// `permissions`, whose verbs take the highest-priority layer that sets
+    /// them while its rule lists stack highest-priority-first over the
+    /// built-in rules). With no file present this returns `Default`. Debug
+    /// builds read the `-dev` suffixed names (`shuvarie-dev.kdl`,
+    /// `.shuvarie-dev`, `~/.config/shuvarie-dev`).
     pub fn load() -> Result<Self> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let mut paths = Self::local_config_candidates(&cwd).to_vec();
@@ -600,11 +629,16 @@ impl Config {
 
     fn load_chain(paths: &[PathBuf]) -> Result<Self> {
         let mut config = Self::default();
+        let mut permissions = Vec::new();
         for path in paths {
             if let Some(layer) = read_layer(path)? {
+                if layer.sections.contains("permissions") {
+                    permissions.push(layer.config.permissions.clone());
+                }
                 merge_layer(&mut config, &layer);
             }
         }
+        config.permissions = stack_permissions(&permissions);
         Ok(config)
     }
 
@@ -1907,17 +1941,108 @@ mod tests {
     }
 
     #[test]
-    fn permissions_layer_replaces_wholesale() {
+    fn permissions_layers_stack_rules_most_specific_first() {
         let dir = tempfile::tempdir().unwrap();
         let global = dir.path().join("global.kdl");
         let top = dir.path().join("shuvarie.kdl");
-        std::fs::write(&global, "permissions { allow-all }").unwrap();
-        std::fs::write(&top, "permissions { paths { deny \".env\" } }").unwrap();
-        let config = Config::load_chain(&[global, top]).unwrap();
+        std::fs::write(
+            &global,
+            "permissions { paths { allow except-hidden=#true \".\" } }",
+        )
+        .unwrap();
+        std::fs::write(&top, "permissions { paths { deny \"secrets/\" } }").unwrap();
+        let config = Config::load_chain(&[top, global]).unwrap();
         let perms = &config.permissions;
-        assert_eq!(perms.default, None, "top layer replaces the whole section");
-        assert_eq!(perms.paths.rules.len(), 1);
-        assert_eq!(perms.paths.rules[0].path, ".env");
-        assert_eq!(perms.shell.default, None);
+        assert_eq!(perms.default, Some(Verb::Ask), "builtin verb survives");
+        let paths: Vec<(Verb, &str)> = perms
+            .paths
+            .rules
+            .iter()
+            .map(|rule| (rule.verb, rule.path.as_str()))
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                (Verb::Deny, "secrets/"),
+                (Verb::Allow, "."),
+                (Verb::Allow, ".")
+            ],
+            "local rules first, global second, builtin deepest"
+        );
+        assert_eq!(perms.paths.default, None);
+        assert_eq!(perms.shell.default, Some(Verb::Allow));
+    }
+
+    #[test]
+    fn permissions_local_section_follows_global_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global.kdl");
+        let top = dir.path().join("shuvarie.kdl");
+        std::fs::write(
+            &global,
+            "permissions { paths { allow except-hidden=#true \".\" } }",
+        )
+        .unwrap();
+        std::fs::write(&top, "permissions { ask-all }").unwrap();
+        let config = Config::load_chain(&[top, global]).unwrap();
+        let perms = &config.permissions;
+        assert_eq!(perms.default, Some(Verb::Ask));
+        let paths: Vec<(Verb, &str)> = perms
+            .paths
+            .rules
+            .iter()
+            .map(|rule| (rule.verb, rule.path.as_str()))
+            .collect();
+        assert_eq!(
+            paths,
+            vec![(Verb::Allow, "."), (Verb::Allow, ".")],
+            "the global allow rules survive a local section without rules"
+        );
+        assert_eq!(perms.shell.default, Some(Verb::Allow));
+    }
+
+    #[test]
+    fn permissions_local_rules_keep_the_builtin_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path().join("shuvarie.kdl");
+        std::fs::write(&top, "permissions { paths { deny \"secrets/\" } }").unwrap();
+        let config = Config::load_chain(&[top]).unwrap();
+        let paths: Vec<(Verb, &str)> = config
+            .permissions
+            .paths
+            .rules
+            .iter()
+            .map(|rule| (rule.verb, rule.path.as_str()))
+            .collect();
+        assert_eq!(
+            paths,
+            vec![(Verb::Deny, "secrets/"), (Verb::Allow, ".")],
+            "the builtin cwd allow stays beneath the local rules"
+        );
+        assert_eq!(config.permissions.shell.default, Some(Verb::Allow));
+    }
+
+    #[test]
+    fn permissions_verbs_take_the_most_specific_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global.kdl");
+        let top = dir.path().join("shuvarie.kdl");
+        std::fs::write(&global, "permissions { paths { allow-all } }").unwrap();
+        std::fs::write(&top, "permissions { paths { ask \"x\" } }").unwrap();
+        let config = Config::load_chain(&[top.clone(), global.clone()]).unwrap();
+        assert_eq!(
+            config.permissions.paths.default,
+            Some(Verb::Allow),
+            "the top file set no bare verb, the global one survives"
+        );
+        assert_eq!(config.permissions.paths.rules.len(), 2);
+
+        std::fs::write(&top, "permissions { paths { ask-all } }").unwrap();
+        let config = Config::load_chain(&[top, global]).unwrap();
+        assert_eq!(
+            config.permissions.paths.default,
+            Some(Verb::Ask),
+            "the top file's bare verb wins"
+        );
     }
 }
