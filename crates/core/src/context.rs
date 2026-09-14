@@ -1,19 +1,10 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use shuvarie_config::{Category, TrustGrants};
+
 const MAX_FILE_BYTES: usize = 64 * 1024;
 const MAX_TOTAL_BYTES: usize = 256 * 1024;
-
-/// Context-file candidates for one directory, in priority order: an
-/// `AGENTS.override.md` replaces the plain files in its directory, and
-/// `CLAUDE.md` is the fallback for projects written for other agents.
-const DIR_CANDIDATES: [&str; 5] = [
-    "AGENTS.override.md",
-    "AGENTS.md",
-    "AGENTS.MD",
-    "CLAUDE.md",
-    "CLAUDE.MD",
-];
 
 #[derive(Clone)]
 pub struct LoadedContext {
@@ -52,14 +43,18 @@ impl LoadedContext {
 /// filesystem root — at most one file per directory, outermost directory
 /// first. Cheap enough to re-run per request, so edits apply without a
 /// restart.
-pub fn load_agents_md(root: &Path) -> LoadedContext {
+pub fn load_agents_md(root: &Path, trust: &TrustGrants) -> LoadedContext {
     let global = shuvarie_config::config_dir().ok();
-    load_agents_md_from(root, global.as_deref())
+    load_agents_md_from(root, global.as_deref(), trust)
 }
 
-fn load_agents_md_from(root: &Path, global: Option<&Path>) -> LoadedContext {
+fn load_agents_md_from(root: &Path, global: Option<&Path>, trust: &TrustGrants) -> LoadedContext {
     let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    load_from_dirs(&context_dirs(&root, global), &root)
+    let mut dirs = context_dirs(&root, global);
+    if !trust.allows(Category::Contexts) {
+        dirs.retain(|dir| dir != &root);
+    }
+    load_from_dirs(&dirs, &root)
 }
 
 /// The directories whose context files are loaded, in order: the global
@@ -93,7 +88,7 @@ fn load_from_dirs(dirs: &[PathBuf], root: &Path) -> LoadedContext {
         if remaining == 0 {
             break;
         }
-        let Some(path) = DIR_CANDIDATES
+        let Some(path) = shuvarie_config::CONTEXT_FILE_CANDIDATES
             .iter()
             .map(|name| dir.join(name))
             .find(|candidate| candidate.is_file())
@@ -126,7 +121,10 @@ fn label_for(path: &Path, root: &Path) -> String {
     }
 }
 
-pub fn load_context_dir(root: &Path, budget: usize) -> LoadedContext {
+pub fn load_context_dir(root: &Path, budget: usize, trust: &TrustGrants) -> LoadedContext {
+    if !trust.allows(Category::Contexts) {
+        return LoadedContext::new(Vec::new(), String::new());
+    }
     let mut files: Vec<String> = Vec::new();
     let mut content = String::new();
     let mut remaining = budget;
@@ -159,9 +157,9 @@ pub fn load_context_dir(root: &Path, budget: usize) -> LoadedContext {
     LoadedContext::new(files, content)
 }
 
-pub fn load(root: &Path) -> LoadedContext {
-    let agents = load_agents_md(root);
-    let dir = load_context_dir(root, agents.remaining_budget());
+pub fn load(root: &Path, trust: &TrustGrants) -> LoadedContext {
+    let agents = load_agents_md(root, trust);
+    let dir = load_context_dir(root, agents.remaining_budget(), trust);
     agents.merged(dir)
 }
 
@@ -215,9 +213,9 @@ fn push_file(
     files.push(rel.to_string());
 }
 
-pub fn load_from_cwd() -> LoadedContext {
+pub fn load_from_cwd(trust: &TrustGrants) -> LoadedContext {
     match std::env::current_dir() {
-        Ok(cwd) => load(&cwd),
+        Ok(cwd) => load(&cwd, trust),
         Err(_) => LoadedContext::new(Vec::new(), String::new()),
     }
 }
@@ -313,7 +311,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         write(&root.join("AGENTS.md"), "project rules");
 
-        let ctx = load_agents_md_from(&root, Some(&global));
+        let ctx = load_agents_md_from(&root, Some(&global), &TrustGrants::all());
         assert_eq!(
             ctx.files.first(),
             Some(&global.join("AGENTS.md").to_string_lossy().into_owned())
@@ -332,7 +330,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         write(&base.join("proj/AGENTS.md"), "proj rules");
 
-        let ctx = load_agents_md_from(&root, None);
+        let ctx = load_agents_md_from(&root, None, &TrustGrants::all());
         let base_label = base.join("AGENTS.md").to_string_lossy().into_owned();
         let proj_label = base.join("proj/AGENTS.md").to_string_lossy().into_owned();
         let base_pos = ctx.files.iter().position(|f| f == &base_label).unwrap();
@@ -459,7 +457,7 @@ mod tests {
         std::fs::write(format!("{app_dir}/context/a.md"), "aye").unwrap();
         std::fs::write(format!("{app_dir}/context/skip.bin"), "\0binary").unwrap();
 
-        let ctx = load_from_cwd();
+        let ctx = load_from_cwd(&TrustGrants::all());
         assert!(ctx.files.ends_with(&[
             "AGENTS.md".to_string(),
             format!("{app_dir}/context/a.md"),
@@ -484,7 +482,7 @@ mod tests {
         let app_dir = shuvarie_config::WORKSPACE_DIR_NAME;
         std::fs::create_dir_all(format!("{app_dir}/context")).unwrap();
         std::fs::write(format!("{app_dir}/context/notes.md"), "notes").unwrap();
-        let ctx = load_from_cwd();
+        let ctx = load_from_cwd(&TrustGrants::all());
         assert!(
             ctx.files
                 .ends_with(&[format!("{app_dir}/context/notes.md")])
@@ -505,7 +503,7 @@ mod tests {
         assert!(agents.content.contains("project rules"));
         assert!(!agents.content.contains("aye"));
 
-        let dir_ctx = load_context_dir(dir.path(), agents.remaining_budget());
+        let dir_ctx = load_context_dir(dir.path(), agents.remaining_budget(), &TrustGrants::all());
         assert_eq!(dir_ctx.files, vec![format!("{app_dir}/context/a.md")]);
         assert!(dir_ctx.content.contains("aye"));
 
@@ -536,5 +534,31 @@ mod tests {
 
         let preamble = build_preamble("base", &LoadedContext::new(Vec::new(), String::new()));
         assert_eq!(preamble, "base");
+    }
+
+    #[test]
+    fn untrusted_context_skips_root_file_and_context_dir() {
+        let base = TempDir::new().unwrap();
+        let root = base.path().join("proj");
+        write(&base.path().join("AGENTS.md"), "outer rules");
+        write(&root.join("AGENTS.md"), "workspace rules");
+        write(
+            &root
+                .join(shuvarie_config::WORKSPACE_DIR_NAME)
+                .join("context/notes.md"),
+            "notes",
+        );
+
+        let denied = TrustGrants::none();
+        let ctx = load(&root, &denied);
+        assert_eq!(ctx.files.len(), 1);
+        assert!(ctx.content.contains("outer rules"));
+        assert!(!ctx.content.contains("workspace rules"));
+        assert!(!ctx.content.contains("notes"));
+
+        let granted = TrustGrants::all();
+        let ctx = load(&root, &granted);
+        assert!(ctx.content.contains("workspace rules"));
+        assert!(ctx.content.contains("notes"));
     }
 }

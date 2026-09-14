@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use shuvarie_core::{
-    Active, Command, Config, Connections, Event, ProviderConfig, Session, StartupSession, run,
+    Active, Command, Config, Connections, Event, ProviderConfig, Session, StartupSession,
+    TrustGrants, run,
 };
 use shuvarie_db::Store;
 
@@ -83,6 +84,7 @@ async fn ping_pong() {
             )
             .unwrap(),
         ),
+        TrustGrants::all(),
         cmd_rx,
         event_tx,
     ));
@@ -110,6 +112,7 @@ async fn add_provider_emits_saved() {
         None,
         Some(connections_path.clone()),
         permissions_for_tests(),
+        TrustGrants::all(),
         cmd_rx,
         event_tx,
     ));
@@ -168,6 +171,7 @@ async fn remove_provider_clears_active() {
         None,
         Some(connections_path.clone()),
         permissions_for_tests(),
+        TrustGrants::all(),
         cmd_rx,
         event_tx,
     ));
@@ -214,6 +218,7 @@ async fn send_message_without_active_provider_emits_error() {
             )
             .unwrap(),
         ),
+        TrustGrants::all(),
         cmd_rx,
         event_tx,
     ));
@@ -262,6 +267,7 @@ async fn cancel_with_no_active_stream_keeps_task_alive() {
             )
             .unwrap(),
         ),
+        TrustGrants::all(),
         cmd_rx,
         event_tx,
     ));
@@ -297,6 +303,7 @@ async fn send_while_streaming_is_steered() {
             )
             .unwrap(),
         ),
+        TrustGrants::all(),
         cmd_rx,
         event_tx,
     ));
@@ -350,6 +357,7 @@ async fn steered_recall_round_trip() {
             )
             .unwrap(),
         ),
+        TrustGrants::all(),
         cmd_rx,
         event_tx,
     ));
@@ -440,6 +448,7 @@ async fn cancel_dispatches_first_steered_prompt() {
             )
             .unwrap(),
         ),
+        TrustGrants::all(),
         cmd_rx,
         event_tx,
     ));
@@ -526,6 +535,7 @@ async fn new_session_clears_steered_queue() {
             )
             .unwrap(),
         ),
+        TrustGrants::all(),
         cmd_rx,
         event_tx,
     ));
@@ -611,6 +621,7 @@ async fn send_message_persists_session_and_messages() {
             )
             .unwrap(),
         ),
+        TrustGrants::all(),
         cmd_rx,
         event_tx,
     ));
@@ -671,6 +682,7 @@ async fn load_current_emits_session_loaded_on_startup() {
         None,
         None,
         permissions_for_tests(),
+        TrustGrants::all(),
         cmd_rx,
         event_tx,
     ));
@@ -717,6 +729,7 @@ async fn load_session_by_uuid_on_startup() {
         None,
         None,
         permissions_for_tests(),
+        TrustGrants::all(),
         cmd_rx,
         event_tx,
     ));
@@ -760,6 +773,7 @@ async fn load_missing_session_uuid_on_startup_errors() {
         None,
         None,
         permissions_for_tests(),
+        TrustGrants::all(),
         cmd_rx,
         event_tx,
     ));
@@ -808,6 +822,7 @@ async fn no_load_current_skips_session_loaded_on_startup() {
             )
             .unwrap(),
         ),
+        TrustGrants::all(),
         cmd_rx,
         event_tx,
     ));

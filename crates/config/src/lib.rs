@@ -6,8 +6,11 @@ mod connections;
 mod connections_kdl;
 mod error;
 mod kdl_util;
+mod trusts;
+mod trusts_kdl;
 
 pub use self::connections::{Active, Connections, ProviderConfig};
+pub use self::trusts::{Category, ScanItem, TrustFile, TrustGrants, WorkspaceScan, WorkspaceTrust};
 pub use error::{ConfigError, ConfigParseError, Result};
 
 const CONFIG_DIR_NAME: &str = if cfg!(debug_assertions) {
@@ -26,6 +29,17 @@ pub const WORKSPACE_DIR_NAME: &str = if cfg!(debug_assertions) {
 } else {
     ".shuvarie"
 };
+
+/// Context-file candidates for one directory, in priority order: an
+/// `AGENTS.override.md` replaces the plain files in its directory, and
+/// `CLAUDE.md` is the fallback for projects written for other agents.
+pub const CONTEXT_FILE_CANDIDATES: [&str; 5] = [
+    "AGENTS.override.md",
+    "AGENTS.md",
+    "AGENTS.MD",
+    "CLAUDE.md",
+    "CLAUDE.MD",
+];
 
 /// One parsed config file, plus the top-level section names its file
 /// actually defines — absent sections keep their defaults, so the node
@@ -627,6 +641,35 @@ impl Config {
         Self::load_chain(&paths)
     }
 
+    /// Like [`Self::load`], but the workspace config layers only load when
+    /// the `configs` trust category is granted; the global config always
+    /// loads. Used with the workspace-trust decision made at startup.
+    pub fn load_trusted(
+        cwd: &std::path::Path,
+        grants: &crate::trusts::TrustGrants,
+    ) -> Result<Self> {
+        Self::load_chain(&Self::trusted_chain_paths(
+            cwd,
+            grants,
+            &Self::config_path()?,
+        ))
+    }
+
+    /// The priority chain for a trust decision: the workspace config layers
+    /// only when `configs` is granted, then the global config.
+    fn trusted_chain_paths(
+        cwd: &std::path::Path,
+        grants: &crate::trusts::TrustGrants,
+        global: &std::path::Path,
+    ) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        if grants.allows(crate::trusts::Category::Configs) {
+            paths.extend(Self::local_config_candidates(cwd));
+        }
+        paths.push(global.to_path_buf());
+        paths
+    }
+
     fn load_chain(paths: &[PathBuf]) -> Result<Self> {
         let mut config = Self::default();
         let mut permissions = Vec::new();
@@ -1153,6 +1196,29 @@ mod tests {
             panic!("expected config parse error");
         };
         assert_eq!(parse_err.line, 2);
+    }
+
+    #[test]
+    fn trusted_chain_paths_skip_workspace_layers_when_configs_denied() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let global = cwd.join("global.kdl");
+
+        let paths = Config::trusted_chain_paths(
+            cwd,
+            &TrustGrants::from_categories([Category::Skills]),
+            &global,
+        );
+        assert_eq!(paths, vec![global.clone()]);
+
+        let paths = Config::trusted_chain_paths(cwd, &TrustGrants::all(), &global);
+        assert_eq!(
+            paths,
+            Config::local_config_candidates(cwd)
+                .into_iter()
+                .chain([global])
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

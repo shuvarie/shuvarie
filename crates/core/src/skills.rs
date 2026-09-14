@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use shuvarie_config::SkillsConfig;
+use shuvarie_config::{Category, SkillsConfig, TrustGrants};
 
 const MAX_NAME_LENGTH: usize = 64;
 const MAX_DESCRIPTION_LENGTH: usize = 1024;
@@ -34,16 +34,35 @@ pub struct Skills {
 }
 
 impl Skills {
-    pub fn load(workspace_root: &Path, config: &SkillsConfig) -> Skills {
+    /// Loads the skill roster; the workspace `.agents/skills` tree only
+    /// loads when the `skills` trust category is granted (global and
+    /// config-listed dirs are user-owned and always load).
+    pub fn load(workspace_root: &Path, config: &SkillsConfig, trust: &TrustGrants) -> Skills {
         if config.disabled {
             return Skills::default();
         }
-        Self::load_from(
+        let skills = Self::load_from(
             workspace_root,
             dirs::home_dir().as_deref(),
             shuvarie_config::config_dir().ok().as_deref(),
             config,
-        )
+        );
+        if trust.allows(Category::Skills) {
+            return skills;
+        }
+        let workspace_dir = workspace_root.join(".agents").join("skills");
+        Skills {
+            skills: skills
+                .skills
+                .into_iter()
+                .filter(|skill| !skill.path.starts_with(&workspace_dir))
+                .collect(),
+            warnings: skills
+                .warnings
+                .into_iter()
+                .filter(|warning| !warning.path.starts_with(&workspace_dir))
+                .collect(),
+        }
     }
 
     /// The walk behind [`Skills::load`], with injectable global locations so
@@ -641,8 +660,39 @@ mod tests {
             disabled: true,
             dirs: Vec::new(),
         };
-        let skills = Skills::load(&workspace, &config);
+        let skills = Skills::load(&workspace, &config, &TrustGrants::all());
         assert!(skills.skills.is_empty());
+        assert!(skills.warnings.is_empty());
+    }
+
+    #[test]
+    fn untrusted_skills_skip_the_workspace_dir() {
+        let dir = TempDir::new().unwrap();
+        let workspace = dir.path().join("workspace");
+        write_skill(
+            &workspace.join(".agents/skills"),
+            "workspace-skill",
+            "Workspace skill",
+            &[],
+        );
+        let home = dir.path().join("home");
+        write_skill(
+            &home.join(".agents/skills"),
+            "global-skill",
+            "Global skill",
+            &[],
+        );
+
+        let skills = Skills::load_from(&workspace, Some(&home), None, &SkillsConfig::default());
+        assert_eq!(skills.skills.len(), 2);
+
+        let skills = Skills::load(&workspace, &SkillsConfig::default(), &TrustGrants::all());
+        let names: HashSet<&str> = skills.skills.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains("workspace-skill"));
+
+        let skills = Skills::load(&workspace, &SkillsConfig::default(), &TrustGrants::none());
+        let names: HashSet<&str> = skills.skills.iter().map(|s| s.name.as_str()).collect();
+        assert!(!names.contains("workspace-skill"));
         assert!(skills.warnings.is_empty());
     }
 

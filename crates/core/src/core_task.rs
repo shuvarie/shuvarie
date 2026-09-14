@@ -19,7 +19,7 @@ use crate::question::{AnswerResponse, QuestionGate, QuestionRequest};
 use crate::session::{CONTINUE_PROMPT, Session};
 use crate::shell::Shell;
 use shuvarie_config::Config;
-use shuvarie_config::{Connections, ProviderConfig};
+use shuvarie_config::{Connections, ProviderConfig, TrustGrants};
 
 /// How a streamed turn ended, reported back to the run loop so it can decide
 /// whether to auto-continue after a context overflow.
@@ -183,6 +183,8 @@ struct CoreCtx {
     question_tx: Sender<QuestionRequest>,
     access: Access,
     config: Config,
+    /// The workspace trust decision made at startup: which categories load.
+    trust: TrustGrants,
     workspace_root: PathBuf,
     shell: Shell,
     /// Whether `Event::ContextLoaded` was already sent for the current
@@ -207,6 +209,7 @@ pub async fn run(
     config_path: Option<PathBuf>,
     connections_path: Option<PathBuf>,
     permissions: Arc<crate::permissions::Permissions>,
+    trust: TrustGrants,
     mut cmd_rx: Receiver<Command>,
     event_tx: Sender<Event>,
 ) {
@@ -289,7 +292,7 @@ pub async fn run(
     lock_beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     lock_beat.reset();
 
-    let skills = crate::skills::Skills::load(&workspace_root, &config.skills);
+    let skills = crate::skills::Skills::load(&workspace_root, &config.skills, &trust);
     let _ = event_tx
         .send(Event::SkillsLoaded {
             skills: skills.skills.clone(),
@@ -322,6 +325,7 @@ pub async fn run(
         question_tx,
         access,
         config,
+        trust,
         workspace_root,
         shell,
         context_announced: false,
@@ -974,8 +978,11 @@ pub async fn run(
                             .await;
                     }
                     Command::Reload => {
-                        ctx.skills =
-                            crate::skills::Skills::load(&ctx.workspace_root, &ctx.config.skills);
+                        ctx.skills = crate::skills::Skills::load(
+                            &ctx.workspace_root,
+                            &ctx.config.skills,
+                            &ctx.trust,
+                        );
                         let _ = ctx
                             .event_tx
                             .send(Event::SkillsLoaded {
@@ -1576,11 +1583,12 @@ impl CoreCtx {
             (guard.history_for_send(), guard.tool_records.clone())
         };
         let todo_state = crate::tools::todos::TodoState::from_records(&todo_records);
-        let agents_md = crate::context::load_agents_md(&self.workspace_root);
+        let agents_md = crate::context::load_agents_md(&self.workspace_root, &self.trust);
         let agents_budget = agents_md.remaining_budget();
         let loaded_context = agents_md.merged(crate::context::load_context_dir(
             &self.workspace_root,
             agents_budget,
+            &self.trust,
         ));
         if !loaded_context.is_empty() && !self.context_announced {
             self.context_announced = true;

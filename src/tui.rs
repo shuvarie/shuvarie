@@ -35,6 +35,7 @@ mod slash;
 mod spinner;
 mod theme;
 mod title;
+pub mod trust;
 mod utils;
 mod warning;
 mod welcome;

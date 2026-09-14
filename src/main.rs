@@ -1,10 +1,11 @@
 use clap::Parser;
 use tokio::sync::mpsc::channel;
 
-use crate::cli::show_resume_hint;
-
 mod cli;
+mod trust;
 mod tui;
+
+use crate::cli::show_resume_hint;
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
@@ -12,12 +13,12 @@ async fn main() -> color_eyre::Result<()> {
 
     let store = shuvarie_db::Store::open(&shuvarie_db::Store::default_path()).await?;
 
+    let Some(trust::Resolved { config, grants }) = trust::resolve(args.config.as_ref()).await?
+    else {
+        return Ok(());
+    };
     let (cmd_tx, cmd_rx) = channel::<shuvarie_core::Command>(64);
     let (event_tx, event_rx) = channel::<shuvarie_core::Event>(64);
-    let config = match args.config.as_deref() {
-        Some(path) => shuvarie_core::Config::load_explicit(path)?,
-        None => shuvarie_core::Config::load()?,
-    };
     let permissions = std::sync::Arc::new(
         shuvarie_core::permissions::Permissions::build(
             &config.permissions,
@@ -40,6 +41,7 @@ async fn main() -> color_eyre::Result<()> {
         args.config,
         None,
         permissions,
+        grants,
         cmd_rx,
         event_tx,
     ));
