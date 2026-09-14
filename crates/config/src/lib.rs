@@ -171,7 +171,7 @@ impl Default for PermissionsConfig {
 impl PermissionsConfig {
     /// The effective defaults used when the section is absent from every
     /// config layer: ask all, allow inside the working directory except
-    /// hidden files, and allow shell commands except `rm` and `sudo`.
+    /// hidden files, and allow all shell commands.
     pub fn builtin() -> Self {
         Self {
             default: Some(Verb::Ask),
@@ -187,20 +187,7 @@ impl PermissionsConfig {
             },
             shell: RuleSet {
                 default: Some(Verb::Allow),
-                rules: vec![
-                    ShellRule {
-                        verb: Verb::Ask,
-                        pattern: "rm".to_string(),
-                        kind: ShellPatternKind::Raw,
-                        interrupt: false,
-                    },
-                    ShellRule {
-                        verb: Verb::Ask,
-                        pattern: "sudo".to_string(),
-                        kind: ShellPatternKind::Raw,
-                        interrupt: false,
-                    },
-                ],
+                rules: vec![],
             },
         }
     }
@@ -1635,7 +1622,7 @@ mod tests {
         assert_eq!(parsed.permissions.paths.rules[0].verb, Verb::Allow);
         assert_eq!(parsed.permissions.paths.rules[0].path, ".");
         assert!(parsed.permissions.paths.rules[0].except_hidden);
-        assert_eq!(parsed.permissions.shell.rules.len(), 2);
+        assert_eq!(parsed.permissions.shell.rules.len(), 0);
         assert_eq!(parsed.permissions.shell.default, Some(Verb::Allow));
     }
 

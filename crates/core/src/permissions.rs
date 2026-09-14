@@ -975,20 +975,10 @@ mod tests {
     }
 
     #[test]
-    fn builtin_shell_asks_for_rm_and_sudo() {
+    fn builtin_shell_allows_all_commands() {
         let perms = builtin();
-        assert_eq!(
-            perms.check_shell("rm -rf target"),
-            Decision::Ask {
-                reason: "shell-patterns: ask \"rm\"".into()
-            }
-        );
-        assert_eq!(
-            perms.check_shell("sudo apt install"),
-            Decision::Ask {
-                reason: "shell-patterns: ask \"sudo\"".into()
-            }
-        );
+        assert_eq!(perms.check_shell("rm -rf target"), Decision::Allow);
+        assert_eq!(perms.check_shell("sudo apt install"), Decision::Allow);
         assert_eq!(perms.check_shell("cargo build"), Decision::Allow);
     }
 
