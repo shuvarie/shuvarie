@@ -209,6 +209,13 @@ pub enum Event {
         id: u64,
         questions: Vec<QuestionPrompt>,
     },
+    /// A tool call hit an `ask` permission rule and is paused until the user
+    /// answers; the TUI shows the `description` (the action plus the matched
+    /// rule) and replies with [`Command::PermissionDecide`].
+    PermissionRequested {
+        id: u64,
+        description: String,
+    },
     LspStatus {
         servers: Vec<shuvarie_lsp::LspStatus>,
     },

@@ -54,6 +54,16 @@ async fn recv_skills_loaded(event_rx: &mut tokio::sync::mpsc::Receiver<Event>) {
     );
 }
 
+fn permissions_for_tests() -> std::sync::Arc<shuvarie_core::permissions::Permissions> {
+    std::sync::Arc::new(
+        shuvarie_core::permissions::Permissions::build(
+            &empty_config().permissions,
+            &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        )
+        .unwrap(),
+    )
+}
+
 #[tokio::test]
 async fn ping_pong() {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
@@ -66,6 +76,13 @@ async fn ping_pong() {
         StartupSession::None,
         None,
         None,
+        std::sync::Arc::new(
+            shuvarie_core::permissions::Permissions::build(
+                &empty_config().permissions,
+                &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            )
+            .unwrap(),
+        ),
         cmd_rx,
         event_tx,
     ));
@@ -92,6 +109,7 @@ async fn add_provider_emits_saved() {
         StartupSession::None,
         None,
         Some(connections_path.clone()),
+        permissions_for_tests(),
         cmd_rx,
         event_tx,
     ));
@@ -149,6 +167,7 @@ async fn remove_provider_clears_active() {
         StartupSession::None,
         None,
         Some(connections_path.clone()),
+        permissions_for_tests(),
         cmd_rx,
         event_tx,
     ));
@@ -188,6 +207,13 @@ async fn send_message_without_active_provider_emits_error() {
         StartupSession::None,
         None,
         None,
+        std::sync::Arc::new(
+            shuvarie_core::permissions::Permissions::build(
+                &empty_config().permissions,
+                &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            )
+            .unwrap(),
+        ),
         cmd_rx,
         event_tx,
     ));
@@ -229,6 +255,13 @@ async fn cancel_with_no_active_stream_keeps_task_alive() {
         StartupSession::None,
         None,
         None,
+        std::sync::Arc::new(
+            shuvarie_core::permissions::Permissions::build(
+                &empty_config().permissions,
+                &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            )
+            .unwrap(),
+        ),
         cmd_rx,
         event_tx,
     ));
@@ -257,6 +290,13 @@ async fn send_while_streaming_is_steered() {
         StartupSession::None,
         None,
         None,
+        std::sync::Arc::new(
+            shuvarie_core::permissions::Permissions::build(
+                &empty_config().permissions,
+                &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            )
+            .unwrap(),
+        ),
         cmd_rx,
         event_tx,
     ));
@@ -303,6 +343,13 @@ async fn steered_recall_round_trip() {
         StartupSession::None,
         None,
         None,
+        std::sync::Arc::new(
+            shuvarie_core::permissions::Permissions::build(
+                &empty_config().permissions,
+                &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            )
+            .unwrap(),
+        ),
         cmd_rx,
         event_tx,
     ));
@@ -386,6 +433,13 @@ async fn cancel_dispatches_first_steered_prompt() {
         StartupSession::None,
         None,
         None,
+        std::sync::Arc::new(
+            shuvarie_core::permissions::Permissions::build(
+                &empty_config().permissions,
+                &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            )
+            .unwrap(),
+        ),
         cmd_rx,
         event_tx,
     ));
@@ -465,6 +519,13 @@ async fn new_session_clears_steered_queue() {
         StartupSession::None,
         None,
         None,
+        std::sync::Arc::new(
+            shuvarie_core::permissions::Permissions::build(
+                &empty_config().permissions,
+                &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            )
+            .unwrap(),
+        ),
         cmd_rx,
         event_tx,
     ));
@@ -543,6 +604,13 @@ async fn send_message_persists_session_and_messages() {
         StartupSession::None,
         None,
         None,
+        std::sync::Arc::new(
+            shuvarie_core::permissions::Permissions::build(
+                &empty_config().permissions,
+                &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            )
+            .unwrap(),
+        ),
         cmd_rx,
         event_tx,
     ));
@@ -602,6 +670,7 @@ async fn load_current_emits_session_loaded_on_startup() {
         StartupSession::MostRecent,
         None,
         None,
+        permissions_for_tests(),
         cmd_rx,
         event_tx,
     ));
@@ -647,6 +716,7 @@ async fn load_session_by_uuid_on_startup() {
         StartupSession::Session(target),
         None,
         None,
+        permissions_for_tests(),
         cmd_rx,
         event_tx,
     ));
@@ -689,6 +759,7 @@ async fn load_missing_session_uuid_on_startup_errors() {
         StartupSession::Session(uuid::Uuid::nil()),
         None,
         None,
+        permissions_for_tests(),
         cmd_rx,
         event_tx,
     ));
@@ -730,6 +801,13 @@ async fn no_load_current_skips_session_loaded_on_startup() {
         StartupSession::None,
         None,
         None,
+        std::sync::Arc::new(
+            shuvarie_core::permissions::Permissions::build(
+                &empty_config().permissions,
+                &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            )
+            .unwrap(),
+        ),
         cmd_rx,
         event_tx,
     ));

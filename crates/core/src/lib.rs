@@ -22,12 +22,14 @@ pub mod truncate;
 pub use command::Command;
 pub use core_task::{StartupSession, run};
 pub use event::Event;
+pub use permissions::{Access, Decision, PathKind, PermissionGate, PermissionRequest, Permissions};
 pub use question::{QuestionPrompt, QuestionRequest};
 pub use session::Session;
 pub use shuvarie_config::{
     Active, AgentConfig, Config, Connections, ContextConfig, EmbeddingConfig, LspConfigRepr,
-    LspServerSpecRepr, ProviderConfig, RegistriesConfig, RegistryEntry, ShellConfig, SidebarPref,
-    SkillsConfig, ToolsConfig, UiPrefs, WebSearchConfig,
+    LspServerSpecRepr, PathRule, PermissionsConfig, ProviderConfig, RegistriesConfig,
+    RegistryEntry, RuleSet, ShellConfig, ShellPatternKind, ShellRule, SidebarPref, SkillsConfig,
+    ToolsConfig, UiPrefs, Verb, WebSearchConfig,
 };
 pub use shuvarie_db::{MsgRole, SearchHit, SearchSource, SessionSummary, StoredScroll};
 pub use shuvarie_llm::{ChatMsg, Model, Role, TokenUsage};

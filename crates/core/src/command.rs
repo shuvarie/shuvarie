@@ -58,6 +58,12 @@ pub enum Command {
         /// `None` when the user dismissed the question.
         answers: Option<Vec<Vec<String>>>,
     },
+    /// The user's answer to a pending `ask` permission prompt (`id` from
+    /// [`crate::Event::PermissionRequested`]). A missing id is a no-op.
+    PermissionDecide {
+        id: u64,
+        allow: bool,
+    },
     UndoLastTurn,
     Redo,
     Replay,

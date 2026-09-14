@@ -18,6 +18,13 @@ async fn main() -> color_eyre::Result<()> {
         Some(path) => shuvarie_core::Config::load_explicit(path)?,
         None => shuvarie_core::Config::load()?,
     };
+    let permissions = std::sync::Arc::new(
+        shuvarie_core::permissions::Permissions::build(
+            &config.permissions,
+            &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        )
+        .map_err(|e| color_eyre::eyre::eyre!(e))?,
+    );
     let startup = if let Some(id) = args.session {
         shuvarie_core::StartupSession::Session(id)
     } else if args.current {
@@ -32,6 +39,7 @@ async fn main() -> color_eyre::Result<()> {
         startup,
         args.config,
         None,
+        permissions,
         cmd_rx,
         event_tx,
     ));

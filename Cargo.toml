@@ -65,6 +65,7 @@ dirs = "7"
 futures-util = { version = "0.3", default-features = false, features = ["std", "alloc"] }
 http = "1"
 kdl = "6.7"
+regex = "1"
 reqwest = "0.13"
 selune = { path = "vendor/selune", version = "0.1" }
 serde = { version = "1", features = ["derive"] }

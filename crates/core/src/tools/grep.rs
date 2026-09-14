@@ -7,13 +7,21 @@ use grep::searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkMatch
 use serde_json::{Value, json};
 use shuvarie_llm::{Tool, ToolContext, ToolExecutionError, ToolOutput};
 
-use crate::permissions::resolve_read;
+use crate::permissions::{Access, PathKind, resolve_read};
 
 use super::arg_value;
 
 const DEFAULT_MAX_RESULTS: usize = 200;
 
-pub(crate) struct Grep;
+pub(crate) struct Grep {
+    access: Access,
+}
+
+impl Grep {
+    pub(crate) fn new(access: Access) -> Self {
+        Self { access }
+    }
+}
 
 impl Tool for Grep {
     const NAME: &'static str = "grep";
@@ -46,6 +54,7 @@ impl Tool for Grep {
         args: Value,
     ) -> Result<ToolOutput, ToolExecutionError> {
         let result: Result<ToolOutput, String> = async move {
+            let access = self.access.clone();
             let pattern = arg_value(&args, "pattern")?;
             let path = args
                 .get("path")
@@ -62,6 +71,7 @@ impl Tool for Grep {
                 .unwrap_or(DEFAULT_MAX_RESULTS as u64)
                 .max(1) as usize;
             let abs = resolve_read(&path)?;
+            access.authorize_path(PathKind::Read, &abs, &path).await?;
 
             tokio::task::spawn_blocking(move || {
                 search(&abs, &path, &pattern, include.as_deref(), max)
@@ -214,7 +224,7 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::write("r.rs", "fn main() {}\n").unwrap();
         std::fs::write("r.txt", "hello fn world\n").unwrap();
-        let out = Grep
+        let out = Grep::new(crate::test_util::access())
             .call(&mut new_ctx(), json!({ "pattern": "fn", "include": ".rs" }))
             .await
             .unwrap();
@@ -229,7 +239,7 @@ mod tests {
         let (dir, _guard) = tempdir();
         let content: String = (0..10).map(|i| format!("line {i} fn\n")).collect();
         std::fs::write("lines.rs", content).unwrap();
-        let out = Grep
+        let out = Grep::new(crate::test_util::access())
             .call(&mut new_ctx(), json!({ "pattern": "fn", "max_results": 3 }))
             .await
             .unwrap();
@@ -249,7 +259,7 @@ mod tests {
         std::fs::write("kept.txt", "needle\n").unwrap();
         std::fs::create_dir(".hidden").unwrap();
         std::fs::write(".hidden/secret.txt", "needle\n").unwrap();
-        let out = Grep
+        let out = Grep::new(crate::test_util::access())
             .call(&mut new_ctx(), json!({ "pattern": "needle" }))
             .await
             .unwrap();
@@ -266,7 +276,7 @@ mod tests {
         std::fs::create_dir("src").unwrap();
         std::fs::write("src/a.rs", "needle\n").unwrap();
         std::fs::write("src/b.txt", "needle\n").unwrap();
-        let out = Grep
+        let out = Grep::new(crate::test_util::access())
             .call(
                 &mut new_ctx(),
                 json!({ "pattern": "needle", "include": "*.rs" }),
@@ -284,7 +294,7 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::write("bin.dat", b"\x00\nneedle\n" as &[u8]).unwrap();
         std::fs::write("text.dat", "needle\n").unwrap();
-        let out = Grep
+        let out = Grep::new(crate::test_util::access())
             .call(&mut new_ctx(), json!({ "pattern": "needle" }))
             .await
             .unwrap();
@@ -299,7 +309,7 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::write("a.txt", "needle\nother\n").unwrap();
         std::fs::write("b.txt", "needle\n").unwrap();
-        let out = Grep
+        let out = Grep::new(crate::test_util::access())
             .call(
                 &mut new_ctx(),
                 json!({ "pattern": "needle", "path": "a.txt" }),
@@ -316,7 +326,7 @@ mod tests {
     async fn grep_is_case_sensitive() {
         let (dir, _guard) = tempdir();
         std::fs::write("c.txt", "Needle\n").unwrap();
-        let none = Grep
+        let none = Grep::new(crate::test_util::access())
             .call(&mut new_ctx(), json!({ "pattern": "needle" }))
             .await
             .unwrap();
@@ -327,7 +337,7 @@ mod tests {
     #[tokio::test]
     async fn grep_reports_bad_pattern() {
         let (dir, _guard) = tempdir();
-        let err = Grep
+        let err = Grep::new(crate::test_util::access())
             .call(&mut new_ctx(), json!({ "pattern": "([" }))
             .await
             .unwrap_err();

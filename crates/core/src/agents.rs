@@ -25,6 +25,7 @@ pub fn build_workers(
     context_budget: Option<shuvarie_llm::ContextBudget>,
     shell_tx: ShellOutputTx,
     shell: Shell,
+    access: crate::permissions::Access,
     web_search: Option<&WebSearchConfig>,
 ) -> WorkerSet {
     let usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
@@ -40,6 +41,7 @@ pub fn build_workers(
                 ReadCache::new(),
                 max_output_chars,
                 max_output_bytes,
+                access.clone(),
                 web_search,
             ),
             Arc::clone(&usage),
@@ -52,7 +54,7 @@ pub fn build_workers(
             TESTER_PREAMBLE,
             client.clone(),
             model,
-            tools::command_tools(shell_tx.tagged("run_tests"), shell),
+            tools::command_tools(shell_tx.tagged("run_tests"), shell, access.clone()),
             Arc::clone(&usage),
             worker_max_turns,
             None,
@@ -69,6 +71,7 @@ pub fn build_workers(
                 ReadCache::new(),
                 max_output_chars,
                 max_output_bytes,
+                access.clone(),
             ),
             Arc::clone(&usage),
             worker_max_turns,

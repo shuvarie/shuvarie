@@ -1,5 +1,14 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
+use regex::Regex;
+use shuvarie_config::{
+    PathRule as PathRuleConfig, PermissionsConfig, ShellPatternKind, ShellRule as ShellRuleConfig,
+    Verb,
+};
+use tokio::sync::{mpsc, oneshot};
+
+/// Hidden components at the top of the workspace that stay exempt from the
+/// `except-hidden` filter: agent-owned skill dirs and the app's data dir.
 const HIDDEN_ROOT_EXEMPT: [&str; 2] = [".agents", shuvarie_config::WORKSPACE_DIR_NAME];
 
 pub(crate) fn workspace_root() -> Result<PathBuf, String> {
@@ -19,49 +28,22 @@ pub(crate) fn expand_home(path: &str) -> String {
     path.to_string()
 }
 
-fn hidden_component(rel: &Path) -> Option<String> {
-    for (i, comp) in rel.components().enumerate() {
-        let s = comp.as_os_str().to_string_lossy();
-        if s.starts_with('.') && s != "." && s != ".." {
-            if i == 0 && HIDDEN_ROOT_EXEMPT.contains(&&*s) {
-                continue;
-            }
-            return Some(s.into_owned());
-        }
-    }
-    None
-}
-
+/// Canonicalizes a read path (symlinks resolved). The permission engine, not
+/// this function, decides whether the path may be read.
 pub(crate) fn resolve_read(path: &str) -> Result<PathBuf, String> {
     let root = workspace_root()?;
     let joined = root.join(expand_home(path));
-    let canonical = joined.canonicalize().map_err(|e| format!("{path}: {e}"))?;
-    let rel = canonical.strip_prefix(&root).unwrap_or(&canonical);
-    let exempt_roots = crate::skills::global_skill_dirs(
-        dirs::home_dir().as_deref(),
-        shuvarie_config::config_dir().ok().as_deref(),
-    );
-    if let Some(comp) = hidden_component(rel)
-        && !under_global_skill_dirs(&canonical, &exempt_roots)
-    {
-        return Err(format!(
-            "'{path}' is under the hidden path '{comp}'; hidden files and directories cannot be read"
-        ));
-    }
-    Ok(canonical)
+    joined.canonicalize().map_err(|e| format!("{path}: {e}"))
 }
 
-fn under_global_skill_dirs(path: &Path, roots: &[PathBuf]) -> bool {
-    roots.iter().any(|root| path.starts_with(root))
-}
-
+/// Canonicalizes a write path, supporting targets that do not exist yet (the
+/// closest existing ancestor is canonicalized, missing components appended).
+/// The permission engine decides whether the target may be written.
 pub(crate) fn resolve_write(path: &str) -> Result<PathBuf, String> {
     let root = workspace_root()?;
     let joined = root.join(expand_home(path));
     if joined.exists() {
-        let abs = joined.canonicalize().map_err(|e| format!("{path}: {e}"))?;
-        check_write_target(&abs, &root, path)?;
-        return Ok(abs);
+        return joined.canonicalize().map_err(|e| format!("{path}: {e}"));
     }
     let mut existing = joined.clone();
     let mut missing: Vec<std::ffi::OsString> = Vec::new();
@@ -82,138 +64,931 @@ pub(crate) fn resolve_write(path: &str) -> Result<PathBuf, String> {
     for name in missing.iter().rev() {
         abs.push(name);
     }
-    check_write_target(&abs, &root, path)?;
     Ok(abs)
 }
 
-fn check_write_target(abs: &Path, root: &Path, display: &str) -> Result<(), String> {
-    let Ok(rel) = abs.strip_prefix(root) else {
-        return Err(format!(
-            "'{display}' resolves outside the working directory; writes outside the workspace are not permitted"
-        ));
-    };
-    if let Some(comp) = hidden_component(rel) {
-        return Err(format!(
-            "'{display}' is under the hidden path '{comp}'; hidden files and directories cannot be written"
-        ));
+/// Which side of a file tool is being authorized. Only the app-owned read
+/// exemption (global skill dirs) is kind-sensitive; path rules otherwise
+/// govern reads and writes alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathKind {
+    Read,
+    Write,
+}
+
+impl PathKind {
+    fn action(self) -> &'static str {
+        match self {
+            Self::Read => "reading",
+            Self::Write => "writing",
+        }
     }
-    Ok(())
+}
+
+/// What a permission check decided, naming the rule that decided it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Decision {
+    Allow,
+    Ask { reason: String },
+    Deny { reason: String },
+}
+
+/// A pending permission ask: what the tool wants to run plus how the core
+/// task answers it.
+pub struct PermissionRequest {
+    pub description: String,
+    pub respond: oneshot::Sender<bool>,
+}
+
+/// The channel the tools pause on for `ask` verdicts; the core task forwards
+/// requests to the TUI as [`crate::Event::PermissionRequested`] and resolves
+/// them with [`crate::Command::PermissionDecide`].
+#[derive(Clone)]
+pub struct PermissionGate {
+    tx: mpsc::Sender<PermissionRequest>,
+}
+
+impl PermissionGate {
+    pub fn new(tx: mpsc::Sender<PermissionRequest>) -> Self {
+        Self { tx }
+    }
+
+    /// Blocks until the user allows or denies. A closed channel or a dropped
+    /// responder is a denial.
+    pub async fn request(&self, description: String) -> Result<bool, String> {
+        let (respond, rx) = oneshot::channel();
+        self.tx
+            .send(PermissionRequest {
+                description,
+                respond,
+            })
+            .await
+            .map_err(|_| "permission channel closed".to_string())?;
+        Ok(rx.await.unwrap_or(false))
+    }
+}
+
+/// One compiled `paths` rule.
+struct CompiledPathRule {
+    verb: Verb,
+    raw: String,
+    path: PathBuf,
+    path_string: String,
+    exact: bool,
+    except_hidden: bool,
+    gates_shell: bool,
+}
+
+/// One compiled `shell-patterns` rule.
+struct CompiledShellRule {
+    verb: Verb,
+    raw: String,
+    matcher: ShellMatcher,
+    interrupt: bool,
+}
+
+#[derive(Clone)]
+enum ShellMatcher {
+    /// Literal text with word boundaries, matched against the command line
+    /// with whitespace runs collapsed.
+    Raw(String),
+    /// A regular expression, matched as written against the command line.
+    Regex(Regex),
+}
+
+/// Compiled `permissions` rules, built once at startup from config (or the
+/// built-in defaults when the section is absent). Rules evaluate in
+/// declaration order and the first match decides; unmatched requests fall
+/// back to the scope's bare verb, then the top-level verb, then `ask`.
+pub struct Permissions {
+    default: Verb,
+    paths_default: Option<Verb>,
+    shell_default: Option<Verb>,
+    paths: Vec<CompiledPathRule>,
+    shell: Vec<CompiledShellRule>,
+    /// App-owned skill directories outside the workspace that stay readable.
+    read_exempt: Vec<PathBuf>,
+}
+
+impl std::fmt::Debug for Permissions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Permissions")
+            .field("default", &self.default)
+            .field("paths_default", &self.paths_default)
+            .field("shell_default", &self.shell_default)
+            .field("path_rules", &self.paths.len())
+            .field("shell_rules", &self.shell.len())
+            .finish()
+    }
+}
+
+impl Permissions {
+    /// Compiles the config's permission rules against `workspace_root`.
+    /// Fails on an invalid `regex` pattern.
+    pub fn build(config: &PermissionsConfig, workspace_root: &Path) -> Result<Self, String> {
+        let paths = config
+            .paths
+            .rules
+            .iter()
+            .map(|rule| CompiledPathRule::build(rule, workspace_root))
+            .collect::<Result<Vec<_>, String>>()?;
+        let shell = config
+            .shell
+            .rules
+            .iter()
+            .map(CompiledShellRule::build)
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(Self {
+            default: config.default.unwrap_or(Verb::Ask),
+            paths_default: config.paths.default,
+            shell_default: config.shell.default,
+            paths,
+            shell,
+            read_exempt: crate::skills::global_skill_dirs(
+                dirs::home_dir().as_deref(),
+                shuvarie_config::config_dir().ok().as_deref(),
+            ),
+        })
+    }
+
+    /// The decision for a canonicalized file path.
+    pub fn check_path(&self, kind: PathKind, path: &Path) -> Decision {
+        if kind == PathKind::Read && self.read_exempt.iter().any(|root| path.starts_with(root)) {
+            return Decision::Allow;
+        }
+        for rule in &self.paths {
+            if let Some(decision) = rule.check(path) {
+                return decision;
+            }
+        }
+        let (fallback, reason) = match self.paths_default {
+            Some(verb) => (verb, format!("paths fallback: {}-all", verb.as_str())),
+            None => (
+                self.default,
+                format!("permissions default: {}-all", self.default.as_str()),
+            ),
+        };
+        verb_decision(fallback, reason)
+    }
+
+    /// The decision for a `run_shell` command line: shell-pattern rules
+    /// first, then path rules that bridge into shell text (those without
+    /// `exclude-shell-pattern` or `except-hidden`), then the fallback verbs.
+    pub fn check_shell(&self, command: &str) -> Decision {
+        let collapsed = collapse_whitespace(command);
+        for rule in &self.shell {
+            if rule.matches(command, &collapsed) {
+                return verb_decision(
+                    rule.verb,
+                    format!("shell-patterns: {} \"{}\"", rule.verb.as_str(), rule.raw),
+                );
+            }
+        }
+        for rule in &self.paths {
+            if !rule.gates_shell || rule.except_hidden || rule.raw.is_empty() {
+                continue;
+            }
+            if collapsed.contains(&rule.raw) || collapsed.contains(&rule.path_string) {
+                return verb_decision(
+                    rule.verb,
+                    format!("paths: {} \"{}\"", rule.verb.as_str(), rule.raw),
+                );
+            }
+        }
+        let (fallback, reason) = match self.shell_default {
+            Some(verb) => (
+                verb,
+                format!("shell-patterns fallback: {}-all", verb.as_str()),
+            ),
+            None => (
+                self.default,
+                format!("permissions default: {}-all", self.default.as_str()),
+            ),
+        };
+        verb_decision(fallback, reason)
+    }
+
+    /// Runs a permission check and, for `ask` decisions, pauses on `gate`
+    /// until the user answers. A denial (rule or user) is an error naming
+    /// the matched rule.
+    pub async fn authorize_path(
+        &self,
+        gate: &PermissionGate,
+        kind: PathKind,
+        path: &Path,
+        display: &str,
+    ) -> Result<(), String> {
+        match self.check_path(kind, path) {
+            Decision::Allow => Ok(()),
+            Decision::Deny { reason } => Err(format!("permission denied: {reason}")),
+            Decision::Ask { reason } => {
+                let description = format!("Allow {} `{display}`?\n{reason}", kind.action());
+                if gate.request(description).await.unwrap_or(false) {
+                    Ok(())
+                } else {
+                    Err(format!("permission denied by the user: {reason}"))
+                }
+            }
+        }
+    }
+
+    /// The `ask`-aware version of [`Self::check_shell`].
+    pub async fn authorize_shell(
+        &self,
+        gate: &PermissionGate,
+        command: &str,
+    ) -> Result<(), String> {
+        match self.check_shell(command) {
+            Decision::Allow => Ok(()),
+            Decision::Deny { reason } => Err(format!("permission denied: {reason}")),
+            Decision::Ask { reason } => {
+                let description = format!("Allow running this command?\n{command}\n{reason}");
+                if gate.request(description).await.unwrap_or(false) {
+                    Ok(())
+                } else {
+                    Err(format!("permission denied by the user: {reason}"))
+                }
+            }
+        }
+    }
+
+    /// The output watcher for `deny interrupt=#true` shell rules, if any are
+    /// configured.
+    pub fn output_interrupt(&self) -> Option<OutputInterrupt> {
+        let rules = self
+            .shell
+            .iter()
+            .filter(|rule| rule.interrupt && rule.verb == Verb::Deny)
+            .map(|rule| (rule.matcher.clone(), rule.raw.clone()))
+            .collect::<Vec<_>>();
+        (!rules.is_empty()).then_some(OutputInterrupt { rules })
+    }
+}
+
+impl CompiledPathRule {
+    fn build(rule: &PathRuleConfig, root: &Path) -> Result<Self, String> {
+        let expanded = expand_home(&rule.path);
+        let candidate = if Path::new(&expanded).is_absolute() {
+            PathBuf::from(&expanded)
+        } else {
+            root.join(&expanded)
+        };
+        let normalized = normalize(&candidate);
+        let path = std::fs::canonicalize(&normalized).unwrap_or(normalized);
+        Ok(Self {
+            verb: rule.verb,
+            raw: rule.path.clone(),
+            path_string: path.to_string_lossy().into_owned(),
+            path,
+            exact: rule.exact,
+            except_hidden: rule.except_hidden,
+            gates_shell: !rule.exclude_shell_pattern,
+        })
+    }
+
+    fn check(&self, path: &Path) -> Option<Decision> {
+        if !self.matches(path) {
+            return None;
+        }
+        Some(verb_decision(
+            self.verb,
+            format!("paths: {} \"{}\"", self.verb.as_str(), self.raw),
+        ))
+    }
+
+    fn matches(&self, path: &Path) -> bool {
+        let matched = if self.exact {
+            path == self.path
+        } else {
+            path.starts_with(&self.path)
+        };
+        if !matched {
+            return false;
+        }
+        if !self.except_hidden {
+            return true;
+        }
+        let rel = path.strip_prefix(&self.path).unwrap_or(path);
+        rel.components().enumerate().all(|(i, comp)| {
+            let s = comp.as_os_str().to_string_lossy();
+            !(s.starts_with('.') && s != "." && s != "..")
+                || (i == 0 && HIDDEN_ROOT_EXEMPT.contains(&&*s))
+        })
+    }
+}
+
+impl CompiledShellRule {
+    fn build(rule: &ShellRuleConfig) -> Result<Self, String> {
+        let matcher = match rule.kind {
+            ShellPatternKind::Raw => ShellMatcher::Raw(collapse_whitespace(&rule.pattern)),
+            ShellPatternKind::Regex => {
+                let re = Regex::new(&rule.pattern).map_err(|e| {
+                    format!(
+                        "invalid regex in shell-patterns rule \"{}\": {e}",
+                        rule.pattern
+                    )
+                })?;
+                ShellMatcher::Regex(re)
+            }
+        };
+        Ok(Self {
+            verb: rule.verb,
+            raw: rule.pattern.clone(),
+            matcher,
+            interrupt: rule.interrupt,
+        })
+    }
+
+    fn matches(&self, command: &str, collapsed: &str) -> bool {
+        match &self.matcher {
+            ShellMatcher::Raw(needle) => contains_word(collapsed, needle),
+            ShellMatcher::Regex(re) => re.is_match(command),
+        }
+    }
+}
+
+impl ShellMatcher {
+    fn matches_text(&self, text: &str) -> bool {
+        match self {
+            Self::Raw(needle) => text.contains(needle),
+            Self::Regex(re) => re.is_match(text),
+        }
+    }
+}
+
+/// The `deny interrupt=#true` watcher: reports the first rule whose pattern
+/// matches captured command output.
+pub struct OutputInterrupt {
+    rules: Vec<(ShellMatcher, String)>,
+}
+
+impl OutputInterrupt {
+    /// The matched rule's description, when the captured output trips one.
+    pub fn check(&self, text: &str) -> Option<String> {
+        self.rules.iter().find_map(|(matcher, raw)| {
+            matcher
+                .matches_text(text)
+                .then(|| format!("shell-patterns: deny \"{raw}\" (matched command output)"))
+        })
+    }
+}
+
+fn verb_decision(verb: Verb, reason: String) -> Decision {
+    match verb {
+        Verb::Allow => Decision::Allow,
+        Verb::Ask => Decision::Ask { reason },
+        Verb::Deny => Decision::Deny { reason },
+    }
+}
+
+/// The permission engine plus its ask gate, cloned into every gated tool as
+/// one handle.
+#[derive(Clone)]
+pub struct Access {
+    permissions: std::sync::Arc<Permissions>,
+    gate: PermissionGate,
+}
+
+impl Access {
+    pub fn new(permissions: std::sync::Arc<Permissions>, gate: PermissionGate) -> Self {
+        Self { permissions, gate }
+    }
+
+    /// Authorizes a canonicalized file path (see
+    /// [`Permissions::authorize_path`]).
+    pub async fn authorize_path(
+        &self,
+        kind: PathKind,
+        path: &Path,
+        display: &str,
+    ) -> Result<(), String> {
+        self.permissions
+            .authorize_path(&self.gate, kind, path, display)
+            .await
+    }
+
+    /// Authorizes a `run_shell` command line (see
+    /// [`Permissions::authorize_shell`]).
+    pub async fn authorize_shell(&self, command: &str) -> Result<(), String> {
+        self.permissions.authorize_shell(&self.gate, command).await
+    }
+
+    /// The `deny interrupt=#true` output watcher, if configured.
+    pub fn output_interrupt(&self) -> Option<OutputInterrupt> {
+        self.permissions.output_interrupt()
+    }
+}
+
+/// Collapses whitespace runs to single spaces so multi-word raw patterns
+/// tolerate the command's own spacing.
+fn collapse_whitespace(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut pending_space = false;
+    for c in text.chars() {
+        if c.is_whitespace() {
+            pending_space = true;
+        } else {
+            if pending_space && !out.is_empty() {
+                out.push(' ');
+            }
+            pending_space = false;
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Substring match flanked by non-alphanumeric ASCII (or the string edges),
+/// so `rm` matches `rm -rf` and `x;rm` but not `firm` or `rmrf`.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let mut start = 0;
+    while let Some(pos) = haystack[start..].find(needle) {
+        let at = start + pos;
+        let end = at + needle.len();
+        let left_ok = at == 0 || !haystack[..at].ends_with(|c: char| c.is_ascii_alphanumeric());
+        let right_ok = end == haystack.len()
+            || !haystack[end..].starts_with(|c: char| c.is_ascii_alphanumeric());
+        if left_ok && right_ok {
+            return true;
+        }
+        start = end;
+    }
+    false
+}
+
+/// Lexically resolves `.` and `..` (keeping `..` chains that climb past a
+/// relative path's start, and clamping at a filesystem root).
+fn normalize(path: &Path) -> PathBuf {
+    let mut parts: Vec<std::ffi::OsString> = Vec::new();
+    let mut absolute = false;
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => parts.push(prefix.as_os_str().to_os_string()),
+            Component::RootDir => {
+                absolute = true;
+                parts.clear();
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let popped = !parts.is_empty()
+                    && parts.last().is_some_and(|p| p != "..")
+                    && parts.pop().is_some();
+                if !popped && !absolute {
+                    parts.push("..".into());
+                }
+            }
+            Component::Normal(name) => parts.push(name.to_os_string()),
+        }
+    }
+    let mut out = PathBuf::new();
+    if absolute {
+        out.push("/");
+    }
+    for part in parts {
+        out.push(part);
+    }
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::lock_cwd;
-    use tempfile::TempDir;
+    use shuvarie_config::{
+        PathRule, PermissionsConfig, RuleSet, ShellPatternKind, ShellRule, Verb,
+    };
 
-    fn tempdir() -> (TempDir, crate::test_util::CwdGuard) {
-        let guard = lock_cwd();
-        let dir = TempDir::new().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
-        (dir, guard)
+    fn builtin() -> Permissions {
+        Permissions::build(&PermissionsConfig::builtin(), Path::new("/ws")).unwrap()
+    }
+
+    fn config(default: Option<Verb>, paths: Vec<PathRule>, shell: Vec<ShellRule>) -> Permissions {
+        config_scoped(default, None, paths, None, shell)
+    }
+
+    fn config_scoped(
+        default: Option<Verb>,
+        paths_default: Option<Verb>,
+        paths: Vec<PathRule>,
+        shell_default: Option<Verb>,
+        shell: Vec<ShellRule>,
+    ) -> Permissions {
+        Permissions::build(
+            &PermissionsConfig {
+                default,
+                paths: RuleSet {
+                    default: paths_default,
+                    rules: paths,
+                },
+                shell: RuleSet {
+                    default: shell_default,
+                    rules: shell,
+                },
+            },
+            Path::new("/ws"),
+        )
+        .unwrap()
+    }
+
+    fn path_rule(verb: Verb, path: &str) -> PathRule {
+        PathRule {
+            verb,
+            path: path.to_string(),
+            except_hidden: false,
+            exact: false,
+            exclude_shell_pattern: false,
+        }
+    }
+
+    fn shell_rule(verb: Verb, pattern: &str) -> ShellRule {
+        ShellRule {
+            verb,
+            pattern: pattern.to_string(),
+            kind: ShellPatternKind::Raw,
+            interrupt: false,
+        }
     }
 
     #[test]
-    fn read_blocks_hidden_paths() {
-        let (dir, _guard) = tempdir();
-        std::fs::create_dir_all(".git").unwrap();
-        std::fs::write(".git/config", "x").unwrap();
-        assert!(resolve_read(".git/config").unwrap_err().contains("hidden"));
-        assert!(resolve_read(".").is_ok());
-        drop(dir);
-    }
-
-    #[test]
-    fn read_permits_outside_workspace() {
-        let (dir, _guard) = tempdir();
-        let outside = dir
-            .path()
-            .parent()
-            .unwrap()
-            .join(format!("shuvarie-readable-{}", std::process::id()));
-        std::fs::write(&outside, "x").unwrap();
-        let rel = format!("../{}", outside.file_name().unwrap().to_string_lossy());
-        assert!(resolve_read(&rel).is_ok());
-        let _ = std::fs::remove_file(&outside);
-        drop(dir);
-    }
-
-    #[test]
-    fn write_blocks_hidden_and_outside() {
-        let (dir, _guard) = tempdir();
-        assert!(resolve_write(".env").unwrap_err().contains("hidden"));
-        assert!(
-            resolve_write("src/.hidden/f.txt")
-                .unwrap_err()
-                .contains("hidden")
-        );
-        let outside = dir
-            .path()
-            .parent()
-            .unwrap()
-            .join(format!("shuvarie-protected-{}", std::process::id()));
-        let rel = format!("../{}", outside.file_name().unwrap().to_string_lossy());
-        assert!(
-            resolve_write(&rel)
-                .unwrap_err()
-                .contains("outside the working directory"),
-            "{}",
-            resolve_write(&rel).unwrap_err()
-        );
-        assert!(resolve_write("src/f.txt").is_ok());
-        let _ = std::fs::remove_file(&outside);
-        drop(dir);
-    }
-
-    #[test]
-    fn global_skill_dirs_exempt_from_hidden_rule() {
-        let dir = TempDir::new().unwrap();
-        let home = dir.path().join("home");
-        let global_config = home.join(".config/shuvarie");
-        let roots = crate::skills::global_skill_dirs(Some(&home), Some(&global_config));
+    fn builtin_paths_allow_workspace_but_ask_hidden_and_outside() {
+        let perms = builtin();
         assert_eq!(
-            roots,
-            vec![global_config.join("skills"), home.join(".agents/skills"),]
+            perms.check_path(PathKind::Read, Path::new("/ws/src/main.rs")),
+            Decision::Allow
         );
-        assert!(under_global_skill_dirs(
-            &global_config.join("skills/ratatui/SKILL.md"),
-            &roots
-        ));
-        assert!(under_global_skill_dirs(
-            &home.join(".agents/skills/tokio/SKILL.md"),
-            &roots
-        ));
-        assert!(!under_global_skill_dirs(
-            &global_config.join("connections.kdl"),
-            &roots
-        ));
-        assert!(!under_global_skill_dirs(&home.join(".env"), &roots));
+        assert_eq!(
+            perms.check_path(PathKind::Write, Path::new("/ws/src/main.rs")),
+            Decision::Allow
+        );
+        assert_eq!(
+            perms.check_path(PathKind::Read, Path::new("/ws/.env")),
+            Decision::Ask {
+                reason: "permissions default: ask-all".into()
+            }
+        );
+        assert_eq!(
+            perms.check_path(PathKind::Read, Path::new("/etc/hosts")),
+            Decision::Ask {
+                reason: "permissions default: ask-all".into()
+            }
+        );
     }
 
     #[test]
-    fn dot_agents_and_app_dir_are_exempt() {
-        let (dir, _guard) = tempdir();
-        let app_dir = shuvarie_config::WORKSPACE_DIR_NAME;
-        std::fs::create_dir_all(".agents").unwrap();
-        std::fs::write(".agents/NOTE.md", "x").unwrap();
-        std::fs::create_dir_all(app_dir).unwrap();
-        std::fs::write(format!("{app_dir}/notes.md"), "x").unwrap();
-        assert!(resolve_read("./.agents/NOTE.md").is_ok());
-        assert!(resolve_read(&format!("./{app_dir}/notes.md")).is_ok());
-        assert!(resolve_write(".agents/skills/new/SKILL.md").is_ok());
-        assert!(resolve_write(&format!("{app_dir}/context/extra.md")).is_ok());
-        std::fs::create_dir_all(".agents/.secrets").unwrap();
-        std::fs::write(".agents/.secrets/key", "x").unwrap();
-        assert!(
-            resolve_read(".agents/.secrets/key")
-                .unwrap_err()
-                .contains("hidden")
+    fn builtin_keeps_root_exemptions_and_global_skill_reads() {
+        let perms = builtin();
+        assert_eq!(
+            perms.check_path(PathKind::Read, Path::new("/ws/.agents/skills/x")),
+            Decision::Allow
         );
-        assert!(
-            resolve_write(".agents/.secrets/key")
-                .unwrap_err()
-                .contains("hidden")
+        assert_eq!(
+            perms.check_path(
+                PathKind::Write,
+                Path::new(&format!(
+                    "/ws/{}/data.db",
+                    shuvarie_config::WORKSPACE_DIR_NAME
+                ))
+            ),
+            Decision::Allow
         );
-        drop(dir);
+        assert_eq!(
+            perms.check_path(PathKind::Read, Path::new("/ws/.agents/.secrets/key")),
+            Decision::Ask {
+                reason: "permissions default: ask-all".into()
+            }
+        );
+        assert_eq!(
+            perms.check_path(PathKind::Read, Path::new("/ws/sub/.agents/x")),
+            Decision::Ask {
+                reason: "permissions default: ask-all".into()
+            }
+        );
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        assert_eq!(
+            perms.check_path(PathKind::Read, &home.join(".agents/skills/tokio/SKILL.md")),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn first_match_wins_with_scope_fallback() {
+        let perms = config(
+            Some(Verb::Allow),
+            vec![
+                path_rule(Verb::Ask, "/ws/secrets/public"),
+                path_rule(Verb::Deny, "/ws/secrets"),
+            ],
+            vec![shell_rule(Verb::Ask, "make")],
+        );
+        assert_eq!(
+            perms.check_path(PathKind::Read, Path::new("/ws/secrets/key")),
+            Decision::Deny {
+                reason: "paths: deny \"/ws/secrets\"".into()
+            }
+        );
+        assert_eq!(
+            perms.check_path(PathKind::Read, Path::new("/ws/secrets/public/x")),
+            Decision::Ask {
+                reason: "paths: ask \"/ws/secrets/public\"".into()
+            }
+        );
+        assert_eq!(
+            perms.check_path(PathKind::Read, Path::new("/ws/other")),
+            Decision::Allow
+        );
+        assert_eq!(
+            perms.check_shell("make build"),
+            Decision::Ask {
+                reason: "shell-patterns: ask \"make\"".into()
+            }
+        );
+        assert_eq!(perms.check_shell("cargo test"), Decision::Allow);
+    }
+
+    #[test]
+    fn exact_rules_match_only_the_path_itself() {
+        let perms = config_scoped(
+            Some(Verb::Deny),
+            Some(Verb::Deny),
+            vec![PathRule {
+                verb: Verb::Allow,
+                path: "/ws/file".into(),
+                except_hidden: false,
+                exact: true,
+                exclude_shell_pattern: false,
+            }],
+            None,
+            Vec::new(),
+        );
+        assert_eq!(
+            perms.check_path(PathKind::Read, Path::new("/ws/file")),
+            Decision::Allow
+        );
+        assert_eq!(
+            perms.check_path(PathKind::Read, Path::new("/ws/file/sub")),
+            Decision::Deny {
+                reason: "paths fallback: deny-all".into()
+            }
+        );
+    }
+
+    #[test]
+    fn except_hidden_skips_rules_for_hidden_targets() {
+        let perms = config_scoped(
+            Some(Verb::Deny),
+            Some(Verb::Deny),
+            vec![PathRule {
+                verb: Verb::Allow,
+                path: "/ws".into(),
+                except_hidden: true,
+                exact: false,
+                exclude_shell_pattern: false,
+            }],
+            None,
+            Vec::new(),
+        );
+        assert_eq!(
+            perms.check_path(PathKind::Read, Path::new("/ws/x")),
+            Decision::Allow
+        );
+        assert_eq!(
+            perms.check_path(PathKind::Read, Path::new("/ws/.env")),
+            Decision::Deny {
+                reason: "paths fallback: deny-all".into()
+            }
+        );
+    }
+
+    #[test]
+    fn tilde_expands_at_build_time() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let perms = config_scoped(
+            Some(Verb::Deny),
+            Some(Verb::Deny),
+            vec![path_rule(Verb::Allow, "~/.ssh")],
+            None,
+            Vec::new(),
+        );
+        assert_eq!(
+            perms.check_path(PathKind::Read, &home.join(".ssh/id_rsa")),
+            Decision::Allow
+        );
+        assert_eq!(
+            perms.check_path(PathKind::Read, &home.join(".ssh/hosts/d")),
+            Decision::Allow
+        );
+        assert_eq!(
+            perms.check_path(PathKind::Read, &home.join(".sshrc")),
+            Decision::Deny {
+                reason: "paths fallback: deny-all".into()
+            }
+        );
+    }
+
+    #[test]
+    fn raw_shell_patterns_match_with_word_boundaries() {
+        let perms = config(
+            Some(Verb::Allow),
+            Vec::new(),
+            vec![
+                shell_rule(Verb::Ask, "rm"),
+                shell_rule(Verb::Deny, "git push --force"),
+            ],
+        );
+        for command in ["rm -rf /", "echo x;rm y", "sudo rm x"] {
+            assert_eq!(
+                perms.check_shell(command),
+                Decision::Ask {
+                    reason: "shell-patterns: ask \"rm\"".into()
+                },
+                "{command}"
+            );
+        }
+        assert_eq!(perms.check_shell("firm -rf /"), Decision::Allow);
+        assert_eq!(perms.check_shell("echo rmrf"), Decision::Allow);
+        assert_eq!(
+            perms.check_shell("git push --force origin main"),
+            Decision::Deny {
+                reason: "shell-patterns: deny \"git push --force\"".into()
+            }
+        );
+        assert_eq!(
+            perms.check_shell("git\tpush\n--force"),
+            Decision::Deny {
+                reason: "shell-patterns: deny \"git push --force\"".into()
+            }
+        );
+        assert_eq!(perms.check_shell("git push"), Decision::Allow);
+    }
+
+    #[test]
+    fn regex_rules_match_as_written() {
+        let perms = Permissions::build(
+            &PermissionsConfig {
+                default: Some(Verb::Allow),
+                paths: RuleSet::default(),
+                shell: RuleSet {
+                    default: None,
+                    rules: vec![ShellRule {
+                        verb: Verb::Deny,
+                        pattern: "rm (-rf|-fr|--force --recursive)".to_string(),
+                        kind: ShellPatternKind::Regex,
+                        interrupt: false,
+                    }],
+                },
+            },
+            Path::new("/ws"),
+        )
+        .unwrap();
+        for command in ["rm -rf /tmp", "rm --force --recursive /tmp"] {
+            assert_eq!(
+                perms.check_shell(command),
+                Decision::Deny {
+                    reason: "shell-patterns: deny \"rm (-rf|-fr|--force --recursive)\"".into()
+                },
+                "{command}"
+            );
+        }
+        assert_eq!(perms.check_shell("rm /tmp"), Decision::Allow);
+    }
+
+    #[test]
+    fn invalid_regex_fails_build() {
+        let err = Permissions::build(
+            &PermissionsConfig {
+                default: None,
+                paths: RuleSet::default(),
+                shell: RuleSet {
+                    default: None,
+                    rules: vec![ShellRule {
+                        verb: Verb::Deny,
+                        pattern: "rm (".to_string(),
+                        kind: ShellPatternKind::Regex,
+                        interrupt: false,
+                    }],
+                },
+            },
+            Path::new("/ws"),
+        )
+        .unwrap_err();
+        assert!(err.contains("invalid regex"), "{err}");
+    }
+
+    #[test]
+    fn path_rules_bridge_into_shell_commands() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let perms = Permissions::build(
+            &PermissionsConfig {
+                default: Some(Verb::Allow),
+                paths: RuleSet {
+                    default: None,
+                    rules: vec![
+                        path_rule(Verb::Deny, "~/.ssh"),
+                        PathRule {
+                            verb: Verb::Deny,
+                            path: "/tmp/secret".into(),
+                            except_hidden: false,
+                            exact: false,
+                            exclude_shell_pattern: true,
+                        },
+                    ],
+                },
+                shell: RuleSet::default(),
+            },
+            Path::new("/ws"),
+        )
+        .unwrap();
+        assert_eq!(
+            perms.check_shell("cat ~/.ssh/id_rsa"),
+            Decision::Deny {
+                reason: "paths: deny \"~/.ssh\"".into()
+            }
+        );
+        assert_eq!(
+            perms.check_shell(&format!("cat {}/.ssh/id_rsa", home.to_string_lossy())),
+            Decision::Deny {
+                reason: "paths: deny \"~/.ssh\"".into()
+            }
+        );
+        assert_eq!(
+            perms.check_shell("cat /tmp/secret/key"),
+            Decision::Allow,
+            "exclude-shell-pattern keeps the rule out of shell checks"
+        );
+        assert_eq!(perms.check_shell("cat /tmp/other"), Decision::Allow);
+    }
+
+    #[test]
+    fn builtin_shell_asks_for_rm_and_sudo() {
+        let perms = builtin();
+        assert_eq!(
+            perms.check_shell("rm -rf target"),
+            Decision::Ask {
+                reason: "shell-patterns: ask \"rm\"".into()
+            }
+        );
+        assert_eq!(
+            perms.check_shell("sudo apt install"),
+            Decision::Ask {
+                reason: "shell-patterns: ask \"sudo\"".into()
+            }
+        );
+        assert_eq!(perms.check_shell("cargo build"), Decision::Allow);
+    }
+
+    #[test]
+    fn output_interrupt_checks_deny_rules_only() {
+        let perms = Permissions::build(
+            &PermissionsConfig {
+                default: Some(Verb::Allow),
+                paths: RuleSet::default(),
+                shell: RuleSet {
+                    default: None,
+                    rules: vec![
+                        ShellRule {
+                            verb: Verb::Deny,
+                            pattern: "sudo".to_string(),
+                            kind: ShellPatternKind::Raw,
+                            interrupt: true,
+                        },
+                        ShellRule {
+                            verb: Verb::Ask,
+                            pattern: "secret".to_string(),
+                            kind: ShellPatternKind::Raw,
+                            interrupt: true,
+                        },
+                    ],
+                },
+            },
+            Path::new("/ws"),
+        )
+        .unwrap();
+        let interrupt = perms.output_interrupt().expect("watcher built");
+        assert_eq!(
+            interrupt.check("Password: \nsudo: permission denied"),
+            Some("shell-patterns: deny \"sudo\" (matched command output)".into())
+        );
+        assert_eq!(interrupt.check("plain output"), None);
+        assert!(builtin().output_interrupt().is_none());
+    }
+
+    #[test]
+    fn normalize_resolves_dot_components() {
+        assert_eq!(normalize(Path::new("/ws/./a/../b")), PathBuf::from("/ws/b"));
+        assert_eq!(normalize(Path::new("a/../b")), PathBuf::from("b"));
+        assert_eq!(normalize(Path::new("a/../../b")), PathBuf::from("../b"));
+        assert_eq!(normalize(Path::new("../a")), PathBuf::from("../a"));
+        assert_eq!(normalize(Path::new("/..")), PathBuf::from("/"));
     }
 }

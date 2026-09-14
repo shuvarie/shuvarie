@@ -14,6 +14,7 @@ use shuvarie_llm::{FileChange, ProviderClient, TokenUsage};
 use crate::command::Command;
 use crate::embeddings::{self, EmbeddingSetup};
 use crate::event::Event;
+use crate::permissions::{Access, PermissionGate, PermissionRequest};
 use crate::question::{AnswerResponse, QuestionGate, QuestionRequest};
 use crate::session::{CONTINUE_PROMPT, Session};
 use crate::shell::Shell;
@@ -180,6 +181,7 @@ struct CoreCtx {
     event_tx: Sender<Event>,
     stream_done_tx: Sender<StreamOutcome>,
     question_tx: Sender<QuestionRequest>,
+    access: Access,
     config: Config,
     workspace_root: PathBuf,
     shell: Shell,
@@ -204,6 +206,7 @@ pub async fn run(
     startup: StartupSession,
     config_path: Option<PathBuf>,
     connections_path: Option<PathBuf>,
+    permissions: Arc<crate::permissions::Permissions>,
     mut cmd_rx: Receiver<Command>,
     event_tx: Sender<Event>,
 ) {
@@ -230,6 +233,14 @@ pub async fn run(
     let (question_tx, mut question_rx) = tokio::sync::mpsc::channel::<QuestionRequest>(8);
     let mut pending_questions: HashMap<u64, oneshot::Sender<AnswerResponse>> = HashMap::new();
     let mut next_question_id: u64 = 0;
+
+    // Permission asks from the gated tools (`ask` verdicts): forwarded to
+    // the TUI as `Event::PermissionRequested`, resolved by
+    // `Command::PermissionDecide`.
+    let (permission_tx, mut permission_rx) = tokio::sync::mpsc::channel::<PermissionRequest>(8);
+    let mut pending_permissions: HashMap<u64, oneshot::Sender<bool>> = HashMap::new();
+    let mut next_permission_id: u64 = 0;
+    let access = Access::new(permissions, PermissionGate::new(permission_tx));
 
     // Bash-mode (`!`) runs, routed back to the TUI by id.
     let mut next_bash_id: u64 = 0;
@@ -305,6 +316,7 @@ pub async fn run(
         event_tx,
         stream_done_tx,
         question_tx,
+        access,
         config,
         workspace_root,
         shell,
@@ -485,6 +497,7 @@ pub async fn run(
                         release_active_lock(&mut ctx).await;
                         clear_steered(&mut steered, &ctx.steer, &ctx.event_tx).await;
                         dismiss_pending_questions(&mut pending_questions);
+                        dismiss_pending_permissions(&mut pending_permissions);
                         ctx.session = Some(Arc::new(Mutex::new(Session::new())));
                         let _ = ctx.event_tx.send(Event::SessionStarted).await;
                     }
@@ -499,6 +512,7 @@ pub async fn run(
                         release_active_lock(&mut ctx).await;
                         clear_steered(&mut steered, &ctx.steer, &ctx.event_tx).await;
                         dismiss_pending_questions(&mut pending_questions);
+                        dismiss_pending_permissions(&mut pending_permissions);
                         ctx.session = Some(Arc::new(Mutex::new(Session::new())));
                         let _ = ctx.event_tx.send(Event::SessionStarted).await;
                     }
@@ -552,6 +566,7 @@ pub async fn run(
                                 &cwd,
                                 None,
                                 &crate::tools::ShellOutputTx::full(chunk_tx),
+                                None,
                             )
                             .await;
                             let _ = pump.await;
@@ -593,6 +608,7 @@ pub async fn run(
                             } else {
                                 handle.abort();
                                 dismiss_pending_questions(&mut pending_questions);
+                                dismiss_pending_permissions(&mut pending_permissions);
                                 persist_interrupted_turn(
                                     ctx.turn_state.take(),
                                     &mut ctx.store,
@@ -655,6 +671,7 @@ pub async fn run(
                         }
                         clear_steered(&mut steered, &ctx.steer, &ctx.event_tx).await;
                         dismiss_pending_questions(&mut pending_questions);
+                        dismiss_pending_permissions(&mut pending_permissions);
                         match ctx.store.load_session(id).await {
                             Ok(stored) => {
                                 let loaded = Session::from_stored(stored);
@@ -804,6 +821,11 @@ pub async fn run(
                     Command::AnswerQuestion { id, answers } => {
                         if let Some(respond) = pending_questions.remove(&id) {
                             let _ = respond.send(answers);
+                        }
+                    }
+                    Command::PermissionDecide { id, allow } => {
+                        if let Some(respond) = pending_permissions.remove(&id) {
+                            let _ = respond.send(allow);
                         }
                     }
                     Command::UndoLastTurn => {
@@ -1061,6 +1083,18 @@ pub async fn run(
                     .send(Event::QuestionAsked {
                         id,
                         questions: req.questions,
+                    })
+                    .await;
+            }
+            permission = permission_rx.recv() => {
+                let Some(req) = permission else { break };
+                let id = next_permission_id;
+                next_permission_id = next_permission_id.wrapping_add(1);
+                pending_permissions.insert(id, req.respond);
+                let _ = ctx.event_tx
+                    .send(Event::PermissionRequested {
+                        id,
+                        description: req.description,
                     })
                     .await;
             }
@@ -1575,6 +1609,7 @@ impl CoreCtx {
             self.max_output_chars,
             self.max_output_bytes,
             question_gate,
+            self.access.clone(),
             crate::tools::ShellOutputTx::new(shell_tx.clone()),
             self.shell.clone(),
             todo_state,
@@ -1614,6 +1649,7 @@ impl CoreCtx {
             budget.clone(),
             crate::tools::ShellOutputTx::new(shell_tx),
             self.shell.clone(),
+            self.access.clone(),
             web_search,
         );
         let stream = client
@@ -1791,6 +1827,12 @@ fn dismiss_pending_questions(
     pending_questions: &mut HashMap<u64, oneshot::Sender<AnswerResponse>>,
 ) {
     pending_questions.clear();
+}
+
+/// Settle all pending permission asks as denied (dropping the responder makes
+/// the awaiting tool error out with a user-denied message).
+fn dismiss_pending_permissions(pending_permissions: &mut HashMap<u64, oneshot::Sender<bool>>) {
+    pending_permissions.clear();
 }
 
 fn client_for<'a>(

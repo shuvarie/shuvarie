@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use shuvarie_llm::{FileChange, Tool, ToolContext, ToolExecutionError, ToolOutput};
 
 use crate::lsp_manager::SharedManager;
-use crate::permissions::resolve_write;
+use crate::permissions::{Access, PathKind, resolve_write};
 
 use super::{FileLocks, ReadCache, arg_value};
 
@@ -14,14 +14,21 @@ pub(crate) struct WriteFile {
     read_cache: ReadCache,
     lsp: Option<SharedManager>,
     locks: FileLocks,
+    access: Access,
 }
 
 impl WriteFile {
-    pub(crate) fn new(read_cache: ReadCache, lsp: Option<SharedManager>, locks: FileLocks) -> Self {
+    pub(crate) fn new(
+        read_cache: ReadCache,
+        lsp: Option<SharedManager>,
+        locks: FileLocks,
+        access: Access,
+    ) -> Self {
         Self {
             read_cache,
             lsp,
             locks,
+            access,
         }
     }
 }
@@ -61,6 +68,7 @@ impl Tool for WriteFile {
         let read_cache = self.read_cache.clone();
         let lsp = self.lsp.clone();
         let locks = self.locks.clone();
+        let access = self.access.clone();
         let result: Result<ToolOutput, String> = async move {
             let path = arg_value(&args, "path")?;
             let content = arg_value(&args, "content")?;
@@ -70,6 +78,7 @@ impl Tool for WriteFile {
                 Some(other) => return Err(format!("invalid mode '{other}' (expected 'create' or 'overwrite')")),
             }
             let abs = resolve_write(&path)?;
+            access.authorize_path(PathKind::Write, &abs, &path).await?;
             let _file_lock = locks.lock(&abs).await;
             let exists = abs.exists();
             match mode {
@@ -140,7 +149,12 @@ mod tests {
     use crate::tools::read_file::ReadFile;
 
     fn write_file_tool(read_cache: ReadCache) -> WriteFile {
-        WriteFile::new(read_cache, None, FileLocks::new())
+        WriteFile::new(
+            read_cache,
+            None,
+            FileLocks::new(),
+            crate::test_util::access(),
+        )
     }
 
     #[tokio::test]
@@ -159,6 +173,32 @@ mod tests {
             ctx.result::<FileChange>(),
             Some(FileChange::Write { path, .. }) if path == "sub/deep/f.txt"
         ));
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn write_denied_by_rule_errors() {
+        let (dir, _guard) = tempdir();
+        let tool = WriteFile::new(
+            ReadCache::new(),
+            None,
+            FileLocks::new(),
+            crate::test_util::access_for_config(&shuvarie_config::PermissionsConfig {
+                default: Some(shuvarie_config::Verb::Deny),
+                paths: shuvarie_config::RuleSet::default(),
+                ..shuvarie_config::PermissionsConfig::builtin()
+            }),
+        );
+        let err = tool
+            .call(&mut new_ctx(), json!({ "path": "new.txt", "content": "x" }))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("permission denied"),
+            "{}",
+            err.to_string()
+        );
+        assert!(!std::fs::exists("new.txt").unwrap());
         drop(dir);
     }
 
@@ -203,7 +243,7 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string("f.txt").unwrap(), "old");
 
-        let reader = ReadFile::new(cache, 0, 0);
+        let reader = ReadFile::new(cache, 0, 0, crate::test_util::access());
         reader
             .call(&mut new_ctx(), json!({ "path": "f.txt" }))
             .await
@@ -223,7 +263,7 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::write("f.txt", "v1").unwrap();
         let cache = ReadCache::new();
-        let reader = ReadFile::new(cache.clone(), 0, 0);
+        let reader = ReadFile::new(cache.clone(), 0, 0, crate::test_util::access());
         reader
             .call(&mut new_ctx(), json!({ "path": "f.txt" }))
             .await
@@ -252,7 +292,7 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::write("bom.txt", "\u{FEFF}original").unwrap();
         let cache = ReadCache::new();
-        let reader = ReadFile::new(cache.clone(), 0, 0);
+        let reader = ReadFile::new(cache.clone(), 0, 0, crate::test_util::access());
         reader
             .call(&mut new_ctx(), json!({ "path": "bom.txt" }))
             .await

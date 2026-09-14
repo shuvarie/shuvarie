@@ -1,9 +1,17 @@
 use serde_json::{Value, json};
 use shuvarie_llm::{Tool, ToolContext, ToolExecutionError, ToolOutput};
 
-use crate::permissions::resolve_read;
+use crate::permissions::{Access, PathKind, resolve_read};
 
-pub(crate) struct ListDir;
+pub(crate) struct ListDir {
+    access: Access,
+}
+
+impl ListDir {
+    pub(crate) fn new(access: Access) -> Self {
+        Self { access }
+    }
+}
 
 impl Tool for ListDir {
     const NAME: &'static str = "list_dir";
@@ -35,6 +43,9 @@ impl Tool for ListDir {
         let result: Result<ToolOutput, String> = async move {
             let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
             let abs = resolve_read(path)?;
+            self.access
+                .authorize_path(PathKind::Read, &abs, path)
+                .await?;
             let entries = std::fs::read_dir(&abs).map_err(|e| format!("read_dir {path}: {e}"))?;
             let mut names: Vec<String> = Vec::new();
             for entry in entries {
@@ -69,7 +80,10 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::create_dir("zdir").unwrap();
         std::fs::write("afile", "").unwrap();
-        let out = ListDir.call(&mut new_ctx(), json!({})).await.unwrap();
+        let out = ListDir::new(crate::test_util::access())
+            .call(&mut new_ctx(), json!({}))
+            .await
+            .unwrap();
         let lines: Vec<&str> = out.as_text().unwrap().lines().collect();
         assert_eq!(lines, vec!["afile", "zdir/"]);
         drop(dir);

@@ -5,9 +5,9 @@ use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use super::kdl_util::{child_nodes, node_error, parse_document};
 use super::{
     AgentConfig, Config, ConfigError, ContextConfig, EmbeddingConfig, LspConfigRepr,
-    LspServerSpecRepr, RegistriesConfig, RegistryEntry, RetryConfig, ShellConfig, SidebarPref,
-    SkillsConfig, ToolsConfig, UiPrefs, WebSearchConfig, WebSearchKind, WebSearchParamKind,
-    WebSearchParams,
+    LspServerSpecRepr, PathRule, PermissionsConfig, RegistriesConfig, RegistryEntry, RetryConfig,
+    RuleSet, ShellConfig, ShellPatternKind, ShellRule, SidebarPref, SkillsConfig, ToolsConfig,
+    UiPrefs, Verb, WebSearchConfig, WebSearchKind, WebSearchParamKind, WebSearchParams,
 };
 use crate::Result;
 
@@ -34,6 +34,7 @@ pub(crate) fn from_kdl_with_sections(contents: &str) -> Result<(Config, Vec<Stri
             "shell" => config.shell = parse_shell(node, contents)?,
             "registries" => config.registries = parse_registries(node, contents)?,
             "tools" => config.tools = parse_tools(node, contents)?,
+            "permissions" => config.permissions = parse_permissions(node, contents)?,
             "retry" => config.retry = parse_retry(node, contents)?,
             _ => {}
         }
@@ -716,6 +717,252 @@ fn property_string(input: &str, node: &KdlNode, name: &str) -> Result<Option<Str
     Ok(found)
 }
 
+fn parse_permissions(node: &KdlNode, input: &str) -> Result<PermissionsConfig> {
+    let mut default = None;
+    let mut paths = None;
+    let mut shell = None;
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "allow-all" | "deny-all" | "ask-all" => {
+                let verb = parse_all_verb(input, child)?;
+                set_once(input, child, &mut default, Ok(Some(verb)))?;
+            }
+            "paths" => set_once(
+                input,
+                child,
+                &mut paths,
+                parse_scope(input, child, "paths", parse_path_rules).map(Some),
+            )?,
+            "shell-patterns" => set_once(
+                input,
+                child,
+                &mut shell,
+                parse_scope(input, child, "shell-patterns", parse_shell_rules).map(Some),
+            )?,
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!(
+                        "unknown node `{other}` in `permissions` (expected `allow-all`, \
+                         `deny-all`, `ask-all`, `paths`, or `shell-patterns`)"
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    Ok(PermissionsConfig {
+        default,
+        paths: paths.unwrap_or_default(),
+        shell: shell.unwrap_or_default(),
+    })
+}
+
+fn parse_scope<T>(
+    input: &str,
+    node: &KdlNode,
+    section: &str,
+    mut parse_rules: impl FnMut(&KdlNode, &str) -> Result<Vec<T>>,
+) -> Result<RuleSet<T>> {
+    let mut default = None;
+    let mut rules = Vec::new();
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "allow-all" | "deny-all" | "ask-all" => {
+                let verb = parse_all_verb(input, child)?;
+                set_once(input, child, &mut default, Ok(Some(verb)))?;
+            }
+            "allow" | "deny" | "ask" => rules.extend(parse_rules(child, input)?),
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!(
+                        "unknown node `{other}` in `{section}` (expected a permission verb or rule)"
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    Ok(RuleSet { default, rules })
+}
+
+fn parse_all_verb(input: &str, node: &KdlNode) -> Result<Verb> {
+    if !node.entries().is_empty() {
+        return Err(node_error(
+            input,
+            node,
+            format!("`{}` takes no arguments", node.name().value()),
+            None,
+        ));
+    }
+    if node.children().is_some() {
+        return Err(node_error(
+            input,
+            node,
+            format!("`{}` takes no children", node.name().value()),
+            None,
+        ));
+    }
+    match node.name().value() {
+        "allow-all" => Ok(Verb::Allow),
+        "deny-all" => Ok(Verb::Deny),
+        "ask-all" => Ok(Verb::Ask),
+        other => Err(node_error(
+            input,
+            node,
+            format!("`{other}` is not a permission verb"),
+            None,
+        )),
+    }
+}
+
+fn rule_verb(input: &str, node: &KdlNode) -> Result<Verb> {
+    match node.name().value() {
+        "allow" => Ok(Verb::Allow),
+        "deny" => Ok(Verb::Deny),
+        "ask" => Ok(Verb::Ask),
+        other => Err(node_error(
+            input,
+            node,
+            format!("`{other}` is not a permission verb"),
+            None,
+        )),
+    }
+}
+
+/// Rejects property entries outside `known` so typos fail loudly instead of
+/// being silently ignored.
+fn check_props(input: &str, node: &KdlNode, known: &[&str]) -> Result<()> {
+    for entry in node.entries() {
+        let Some(name) = entry.name() else {
+            continue;
+        };
+        if !known.contains(&name.value()) {
+            return Err(node_error(
+                input,
+                node,
+                format!(
+                    "unknown property `{}` (expected one of {})",
+                    name.value(),
+                    known
+                        .iter()
+                        .map(|p| format!("`{p}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parse_path_rules(node: &KdlNode, input: &str) -> Result<Vec<PathRule>> {
+    check_props(
+        input,
+        node,
+        &["except-hidden", "exact", "exclude-shell-pattern"],
+    )?;
+    let verb = rule_verb(input, node)?;
+    let except_hidden = prop_bool(input, node, "except-hidden")?;
+    let exact = prop_bool(input, node, "exact")?;
+    let exclude_shell_pattern = prop_bool(input, node, "exclude-shell-pattern")?;
+    rule_patterns(input, node, "path")?
+        .into_iter()
+        .map(|path| {
+            Ok(PathRule {
+                verb,
+                path,
+                except_hidden: except_hidden.unwrap_or_default(),
+                exact: exact.unwrap_or_default(),
+                exclude_shell_pattern: exclude_shell_pattern.unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+fn parse_shell_rules(node: &KdlNode, input: &str) -> Result<Vec<ShellRule>> {
+    check_props(input, node, &["pattern", "interrupt"])?;
+    let verb = rule_verb(input, node)?;
+    let kind = match property_string(input, node, "pattern")?.as_deref() {
+        None => ShellPatternKind::Raw,
+        Some("raw") => ShellPatternKind::Raw,
+        Some("regex") => ShellPatternKind::Regex,
+        Some(other) => {
+            return Err(node_error(
+                input,
+                node,
+                format!("`pattern` must be `raw` or `regex`, found `{other}`"),
+                None,
+            ));
+        }
+    };
+    let interrupt = prop_bool(input, node, "interrupt")?.unwrap_or_default();
+    rule_patterns(input, node, "pattern")?
+        .into_iter()
+        .map(|pattern| {
+            Ok(ShellRule {
+                verb,
+                pattern,
+                kind,
+                interrupt,
+            })
+        })
+        .collect()
+}
+
+/// The rule node's positional arguments: one rule per argument, all sharing
+/// the verb and properties (`allow "a" "b"` ≡ two `allow` rules).
+fn rule_patterns(input: &str, node: &KdlNode, what: &str) -> Result<Vec<String>> {
+    if node.children().is_some() {
+        return Err(node_error(
+            input,
+            node,
+            format!("`{}` takes no children", node.name().value()),
+            None,
+        ));
+    }
+    scalar_string_vec(input, node)?.ok_or_else(|| {
+        node_error(
+            input,
+            node,
+            format!(
+                "`{}` requires at least one {} argument",
+                node.name().value(),
+                what
+            ),
+            None,
+        )
+    })
+}
+
+/// The value of a single named boolean property entry, when present.
+fn prop_bool(input: &str, node: &KdlNode, name: &str) -> Result<Option<bool>> {
+    let mut found = None;
+    for entry in node.entries() {
+        if entry.name().is_some_and(|n| n.value() == name) {
+            if found.is_some() {
+                return Err(duplicate(input, node, name));
+            }
+            match entry.value() {
+                KdlValue::Bool(value) => found = Some(*value),
+                _ => {
+                    return Err(node_error(
+                        input,
+                        node,
+                        format!("`{name}` must be a boolean"),
+                        None,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(found)
+}
+
 pub(crate) fn to_kdl(config: &Config) -> Result<String> {
     let mut doc = KdlDocument::new();
     let sections = [
@@ -726,6 +973,7 @@ pub(crate) fn to_kdl(config: &Config) -> Result<String> {
         skills_node(&config.skills),
         context_node(&config.context),
         shell_node(&config.shell),
+        permissions_node(&config.permissions),
         tools_node(&config.tools),
         registries_node(&config.registries),
         retry_node(&config.retry),
@@ -911,6 +1159,105 @@ fn retry_node(cfg: &RetryConfig) -> Option<KdlNode> {
         children.push(int_node("max-retries", cfg.max_retries as i128));
     }
     section_node("retry", children)
+}
+
+fn permissions_node(cfg: &PermissionsConfig) -> Option<KdlNode> {
+    if *cfg == PermissionsConfig::default() {
+        return None;
+    }
+    let mut children = Vec::new();
+    if let Some(verb) = cfg.default {
+        children.push(verb_all_node(verb));
+    }
+    if cfg.paths.default.is_some() || !cfg.paths.rules.is_empty() {
+        children.push(scope_node(
+            "paths",
+            &cfg.paths,
+            |rule| {
+                (
+                    rule.verb,
+                    rule.except_hidden,
+                    rule.exact,
+                    rule.exclude_shell_pattern,
+                )
+            },
+            path_rule_group,
+        ));
+    }
+    if cfg.shell.default.is_some() || !cfg.shell.rules.is_empty() {
+        children.push(scope_node(
+            "shell-patterns",
+            &cfg.shell,
+            |rule| (rule.verb, rule.kind, rule.interrupt),
+            shell_rule_group,
+        ));
+    }
+    section_node("permissions", children)
+}
+
+fn scope_node<T, K: PartialEq>(
+    name: &str,
+    scope: &RuleSet<T>,
+    key: impl Fn(&T) -> K,
+    group_node: impl Fn(&[&T]) -> KdlNode,
+) -> KdlNode {
+    let mut children = Vec::new();
+    if let Some(verb) = scope.default {
+        children.push(verb_all_node(verb));
+    }
+    let mut run: Vec<&T> = Vec::new();
+    for rule in &scope.rules {
+        if run.first().is_some_and(|first| key(first) != key(rule)) {
+            children.push(group_node(&run));
+            run.clear();
+        }
+        run.push(rule);
+    }
+    if !run.is_empty() {
+        children.push(group_node(&run));
+    }
+    let mut node = KdlNode::new(name);
+    let mut body = KdlDocument::new();
+    body.nodes_mut().extend(children);
+    node.set_children(body);
+    node
+}
+
+fn verb_all_node(verb: Verb) -> KdlNode {
+    KdlNode::new(format!("{}-all", verb.as_str()))
+}
+
+fn path_rule_group(rules: &[&PathRule]) -> KdlNode {
+    let first = rules[0];
+    let mut node = KdlNode::new(first.verb.as_str());
+    if first.except_hidden {
+        node.push(KdlEntry::new_prop("except-hidden", true));
+    }
+    if first.exact {
+        node.push(KdlEntry::new_prop("exact", true));
+    }
+    if first.exclude_shell_pattern {
+        node.push(KdlEntry::new_prop("exclude-shell-pattern", true));
+    }
+    for rule in rules {
+        node.push(KdlEntry::new(rule.path.as_str()));
+    }
+    node
+}
+
+fn shell_rule_group(rules: &[&ShellRule]) -> KdlNode {
+    let first = rules[0];
+    let mut node = KdlNode::new(first.verb.as_str());
+    if first.kind == ShellPatternKind::Regex {
+        node.push(KdlEntry::new_prop("pattern", "regex"));
+    }
+    if first.interrupt {
+        node.push(KdlEntry::new_prop("interrupt", true));
+    }
+    for rule in rules {
+        node.push(KdlEntry::new(rule.pattern.as_str()));
+    }
+    node
 }
 
 fn tools_node(cfg: &ToolsConfig) -> Option<KdlNode> {

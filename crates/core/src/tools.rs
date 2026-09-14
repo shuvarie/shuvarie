@@ -21,6 +21,7 @@ use shuvarie_llm::{DiffLine, DiffLineKind, DynamicTool, Tool};
 
 use crate::WebSearchConfig;
 use crate::lsp_manager::SharedManager;
+use crate::permissions::Access;
 use crate::question::QuestionGate;
 use crate::shell::Shell;
 
@@ -161,6 +162,7 @@ pub fn all_tools(
     max_output_chars: usize,
     max_output_bytes: usize,
     question_gate: QuestionGate,
+    access: Access,
     shell_tx: ShellOutputTx,
     shell: Shell,
     todo_state: todos::TodoState,
@@ -169,22 +171,41 @@ pub fn all_tools(
     let mut tools = vec![
         shuvarie_llm::into_dynamic(
             "read_file",
-            ReadFile::new(read_cache.clone(), max_output_chars, max_output_bytes),
+            ReadFile::new(
+                read_cache.clone(),
+                max_output_chars,
+                max_output_bytes,
+                access.clone(),
+            ),
         ),
         shuvarie_llm::into_dynamic(
             "write_file",
-            WriteFile::new(read_cache.clone(), Some(lsp.clone()), locks.clone()),
+            WriteFile::new(
+                read_cache.clone(),
+                Some(lsp.clone()),
+                locks.clone(),
+                access.clone(),
+            ),
         ),
-        shuvarie_llm::into_dynamic("edit_file", EditFile::new(Some(lsp.clone()), locks.clone())),
+        shuvarie_llm::into_dynamic(
+            "edit_file",
+            EditFile::new(Some(lsp.clone()), locks.clone(), access.clone()),
+        ),
         shuvarie_llm::into_dynamic(
             "apply_patch",
-            crate::apply_patch::ApplyPatch::new(Some(lsp.clone()), locks.clone()),
+            crate::apply_patch::ApplyPatch::new(Some(lsp.clone()), locks.clone(), access.clone()),
         ),
-        shuvarie_llm::into_dynamic("delete_file", DeleteFile::new(locks.clone())),
-        shuvarie_llm::into_dynamic("run_shell", RunShell::new(shell_tx.clone(), shell.clone())),
-        shuvarie_llm::into_dynamic("list_dir", ListDir),
-        shuvarie_llm::into_dynamic("grep", Grep),
-        shuvarie_llm::into_dynamic("glob", Glob),
+        shuvarie_llm::into_dynamic(
+            "delete_file",
+            DeleteFile::new(locks.clone(), access.clone()),
+        ),
+        shuvarie_llm::into_dynamic(
+            "run_shell",
+            RunShell::new(shell_tx.clone(), shell.clone(), access.clone()),
+        ),
+        shuvarie_llm::into_dynamic("list_dir", ListDir::new(access.clone())),
+        shuvarie_llm::into_dynamic("grep", Grep::new(access.clone())),
+        shuvarie_llm::into_dynamic("glob", Glob::new(access.clone())),
         shuvarie_llm::into_dynamic("lsp", Lsp::new(lsp)),
         shuvarie_llm::into_dynamic("webfetch", WebFetch::new(max_output_chars)),
         shuvarie_llm::into_dynamic("question", Question::new(question_gate)),
@@ -204,16 +225,22 @@ pub fn read_tools(
     read_cache: ReadCache,
     max_output_chars: usize,
     max_output_bytes: usize,
+    access: Access,
     web_search: Option<&WebSearchConfig>,
 ) -> Vec<DynamicTool> {
     let mut tools = vec![
         shuvarie_llm::into_dynamic(
             "read_file",
-            ReadFile::new(read_cache, max_output_chars, max_output_bytes),
+            ReadFile::new(
+                read_cache,
+                max_output_chars,
+                max_output_bytes,
+                access.clone(),
+            ),
         ),
-        shuvarie_llm::into_dynamic("list_dir", ListDir),
-        shuvarie_llm::into_dynamic("grep", Grep),
-        shuvarie_llm::into_dynamic("glob", Glob),
+        shuvarie_llm::into_dynamic("list_dir", ListDir::new(access.clone())),
+        shuvarie_llm::into_dynamic("grep", Grep::new(access.clone())),
+        shuvarie_llm::into_dynamic("glob", Glob::new(access.clone())),
         shuvarie_llm::into_dynamic("lsp", Lsp::new(lsp)),
         shuvarie_llm::into_dynamic("webfetch", WebFetch::new(max_output_chars)),
     ];
@@ -226,10 +253,10 @@ pub fn read_tools(
     tools
 }
 
-pub fn command_tools(shell_tx: ShellOutputTx, shell: Shell) -> Vec<DynamicTool> {
+pub fn command_tools(shell_tx: ShellOutputTx, shell: Shell, access: Access) -> Vec<DynamicTool> {
     vec![shuvarie_llm::into_dynamic(
         "run_shell",
-        RunShell::new(shell_tx, shell),
+        RunShell::new(shell_tx, shell, access),
     )]
 }
 
@@ -239,22 +266,34 @@ pub fn edit_tools(
     read_cache: ReadCache,
     max_output_chars: usize,
     max_output_bytes: usize,
+    access: Access,
 ) -> Vec<DynamicTool> {
     vec![
         shuvarie_llm::into_dynamic(
             "read_file",
-            ReadFile::new(read_cache.clone(), max_output_chars, max_output_bytes),
+            ReadFile::new(
+                read_cache.clone(),
+                max_output_chars,
+                max_output_bytes,
+                access.clone(),
+            ),
         ),
         shuvarie_llm::into_dynamic(
             "write_file",
-            WriteFile::new(read_cache, Some(lsp.clone()), locks.clone()),
+            WriteFile::new(read_cache, Some(lsp.clone()), locks.clone(), access.clone()),
         ),
-        shuvarie_llm::into_dynamic("edit_file", EditFile::new(Some(lsp.clone()), locks.clone())),
+        shuvarie_llm::into_dynamic(
+            "edit_file",
+            EditFile::new(Some(lsp.clone()), locks.clone(), access.clone()),
+        ),
         shuvarie_llm::into_dynamic(
             "apply_patch",
-            crate::apply_patch::ApplyPatch::new(Some(lsp.clone()), locks.clone()),
+            crate::apply_patch::ApplyPatch::new(Some(lsp.clone()), locks.clone(), access.clone()),
         ),
-        shuvarie_llm::into_dynamic("delete_file", DeleteFile::new(locks.clone())),
+        shuvarie_llm::into_dynamic(
+            "delete_file",
+            DeleteFile::new(locks.clone(), access.clone()),
+        ),
         shuvarie_llm::into_dynamic("lsp", Lsp::new(lsp)),
     ]
 }
@@ -300,8 +339,8 @@ mod tests {
         let home = TempDir::new().unwrap();
         unsafe { std::env::set_var("HOME", home.path()) };
         std::fs::write(home.path().join("homefile.txt"), "x").unwrap();
-        let err = resolve_write("~/homefile.txt").unwrap_err();
-        assert!(err.contains("outside the working directory"), "{err}");
+        let abs = resolve_write("~/homefile.txt").unwrap();
+        assert_eq!(abs, home.path().join("homefile.txt"));
         match original_home {
             Some(home_path) => unsafe { std::env::set_var("HOME", home_path) },
             None => unsafe { std::env::remove_var("HOME") },
@@ -314,8 +353,9 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::create_dir_all(".git").unwrap();
         std::fs::write(".git/config", "x").unwrap();
-        assert!(resolve_read(".git/config").unwrap_err().contains("hidden"));
+        assert!(resolve_read(".git/config").is_ok());
         assert!(resolve_read(".").is_ok());
+        assert!(resolve_write("src/f.txt").is_ok());
 
         let outside = dir
             .path()
@@ -325,7 +365,7 @@ mod tests {
         std::fs::write(&outside, "x").unwrap();
         let rel = format!("../{}", outside.file_name().unwrap().to_string_lossy());
         assert!(resolve_read(&rel).is_ok());
-        assert!(resolve_write(&rel).is_err());
+        assert!(resolve_write(&rel).is_ok());
         let _ = std::fs::remove_file(&outside);
         drop(dir);
     }

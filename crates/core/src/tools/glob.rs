@@ -1,13 +1,21 @@
 use serde_json::{Value, json};
 use shuvarie_llm::{Tool, ToolContext, ToolExecutionError, ToolOutput};
 
-use crate::permissions::resolve_read;
+use crate::permissions::{Access, PathKind, resolve_read};
 
 use super::arg_value;
 
 const GLOB_MAX_RESULTS: usize = 100;
 
-pub(crate) struct Glob;
+pub(crate) struct Glob {
+    access: Access,
+}
+
+impl Glob {
+    pub(crate) fn new(access: Access) -> Self {
+        Self { access }
+    }
+}
 
 impl Tool for Glob {
     const NAME: &'static str = "glob";
@@ -38,9 +46,11 @@ impl Tool for Glob {
         args: Value,
     ) -> Result<ToolOutput, ToolExecutionError> {
         let result: Result<ToolOutput, String> = async move {
+            let access = self.access.clone();
             let pattern = arg_value(&args, "pattern")?;
             let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
             let abs = resolve_read(path)?;
+            access.authorize_path(PathKind::Read, &abs, path).await?;
             if abs.is_file() {
                 return Err(format!("glob path must be a directory: {path}"));
             }
@@ -104,7 +114,7 @@ mod tests {
         std::fs::write("src/a.rs", "").unwrap();
         std::fs::write("src/sub/b.rs", "").unwrap();
         std::fs::write("src/c.txt", "").unwrap();
-        let out = Glob
+        let out = Glob::new(crate::test_util::access())
             .call(&mut new_ctx(), json!({ "pattern": "**/*.rs" }))
             .await
             .unwrap();
@@ -123,7 +133,7 @@ mod tests {
         std::fs::write("kept.txt", "").unwrap();
         std::fs::create_dir(".hidden").unwrap();
         std::fs::write(".hidden/secret.txt", "").unwrap();
-        let out = Glob
+        let out = Glob::new(crate::test_util::access())
             .call(&mut new_ctx(), json!({ "pattern": "**/*.txt" }))
             .await
             .unwrap();
@@ -140,13 +150,13 @@ mod tests {
         for i in 0..150 {
             std::fs::write(format!("f{i}.txt"), "").unwrap();
         }
-        let out = Glob
+        let out = Glob::new(crate::test_util::access())
             .call(&mut new_ctx(), json!({ "pattern": "*.txt" }))
             .await
             .unwrap();
         let text = out.as_text().unwrap();
         assert!(text.contains("truncated"), "{text}");
-        let none = Glob
+        let none = Glob::new(crate::test_util::access())
             .call(&mut new_ctx(), json!({ "pattern": "*.zzz" }))
             .await
             .unwrap();
@@ -158,7 +168,7 @@ mod tests {
     async fn glob_rejects_file_path() {
         let (dir, _guard) = tempdir();
         std::fs::write("a.txt", "").unwrap();
-        let err = Glob
+        let err = Glob::new(crate::test_util::access())
             .call(
                 &mut new_ctx(),
                 json!({ "pattern": "*.txt", "path": "a.txt" }),

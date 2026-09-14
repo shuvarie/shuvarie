@@ -4,18 +4,19 @@ use serde_json::{Value, json};
 use shuvarie_llm::{FileChange, Tool, ToolContext, ToolExecutionError, ToolOutput};
 
 use crate::lsp_manager::SharedManager;
-use crate::permissions::resolve_read;
+use crate::permissions::{Access, PathKind, resolve_read};
 
 use super::{FileLocks, arg_value, compute_diff};
 
 pub(crate) struct EditFile {
     lsp: Option<SharedManager>,
     locks: FileLocks,
+    access: Access,
 }
 
 impl EditFile {
-    pub(crate) fn new(lsp: Option<SharedManager>, locks: FileLocks) -> Self {
-        Self { lsp, locks }
+    pub(crate) fn new(lsp: Option<SharedManager>, locks: FileLocks, access: Access) -> Self {
+        Self { lsp, locks, access }
     }
 }
 
@@ -65,10 +66,12 @@ impl Tool for EditFile {
     ) -> Result<ToolOutput, ToolExecutionError> {
         let lsp = self.lsp.clone();
         let locks = self.locks.clone();
+        let access = self.access.clone();
         let result: Result<ToolOutput, String> = async move {
             let path = arg_value(&args, "path")?;
             let edits = parse_edits(&args)?;
             let abs = resolve_read(&path)?;
+            access.authorize_path(PathKind::Write, &abs, &path).await?;
             let _file_lock = locks.lock(&abs).await;
             let raw = tokio::fs::read_to_string(&abs)
                 .await
@@ -442,7 +445,7 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::write("e.txt", "alpha beta\ngamma delta\n").unwrap();
         let mut ctx = new_ctx();
-        let out = EditFile::new(None, FileLocks::new())
+        let out = EditFile::new(None, FileLocks::new(), crate::test_util::access())
             .call(
                 &mut ctx,
                 json!({
@@ -471,7 +474,7 @@ mod tests {
     async fn edit_rejects_ambiguous_missing_empty_and_noop() {
         let (dir, _guard) = tempdir();
         std::fs::write("e.txt", "a b a").unwrap();
-        let err = EditFile::new(None, FileLocks::new())
+        let err = EditFile::new(None, FileLocks::new(), crate::test_util::access())
             .call(
                 &mut new_ctx(),
                 json!({ "path": "e.txt", "edits": [{ "oldText": "a", "newText": "x" }] }),
@@ -483,7 +486,7 @@ mod tests {
             "{}",
             err.to_string()
         );
-        let err = EditFile::new(None, FileLocks::new())
+        let err = EditFile::new(None, FileLocks::new(), crate::test_util::access())
             .call(
                 &mut new_ctx(),
                 json!({ "path": "e.txt", "edits": [{ "oldText": "zzz", "newText": "x" }] }),
@@ -491,7 +494,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("Could not find"));
-        let err = EditFile::new(None, FileLocks::new())
+        let err = EditFile::new(None, FileLocks::new(), crate::test_util::access())
             .call(
                 &mut new_ctx(),
                 json!({ "path": "e.txt", "edits": [{ "oldText": "", "newText": "x" }] }),
@@ -503,7 +506,7 @@ mod tests {
             "{}",
             err.to_string()
         );
-        let err = EditFile::new(None, FileLocks::new())
+        let err = EditFile::new(None, FileLocks::new(), crate::test_util::access())
             .call(
                 &mut new_ctx(),
                 json!({ "path": "e.txt", "edits": [{ "oldText": "a b", "newText": "a b" }] }),
@@ -522,7 +525,7 @@ mod tests {
     async fn edit_rejects_overlapping_edits() {
         let (dir, _guard) = tempdir();
         std::fs::write("e.txt", "abcd").unwrap();
-        let err = EditFile::new(None, FileLocks::new())
+        let err = EditFile::new(None, FileLocks::new(), crate::test_util::access())
             .call(
                 &mut new_ctx(),
                 json!({
@@ -549,7 +552,7 @@ mod tests {
     async fn edit_accepts_legacy_flat_and_string_edits() {
         let (dir, _guard) = tempdir();
         std::fs::write("e.txt", "hello world").unwrap();
-        EditFile::new(None, FileLocks::new())
+        EditFile::new(None, FileLocks::new(), crate::test_util::access())
             .call(
                 &mut new_ctx(),
                 json!({ "path": "e.txt", "old": "hello", "new": "hi" }),
@@ -557,7 +560,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string("e.txt").unwrap(), "hi world");
-        EditFile::new(None, FileLocks::new())
+        EditFile::new(None, FileLocks::new(), crate::test_util::access())
             .call(
                 &mut new_ctx(),
                 json!({ "path": "e.txt", "edits": { "oldText": "world", "newText": "there" } }),
@@ -565,7 +568,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string("e.txt").unwrap(), "hi there");
-        EditFile::new(None, FileLocks::new())
+        EditFile::new(None, FileLocks::new(), crate::test_util::access())
             .call(
                 &mut new_ctx(),
                 json!({ "path": "e.txt", "edits": "[{\"oldText\":\"there\",\"newText\":\"you\"}]" }),
@@ -580,7 +583,7 @@ mod tests {
     async fn edit_preserves_bom_and_crlf() {
         let (dir, _guard) = tempdir();
         std::fs::write("e.txt", "\u{FEFF}one\r\ntwo\r\n").unwrap();
-        EditFile::new(None, FileLocks::new())
+        EditFile::new(None, FileLocks::new(), crate::test_util::access())
             .call(
                 &mut new_ctx(),
                 json!({ "path": "e.txt", "edits": [{ "oldText": "one", "newText": "1\n2" }] }),
@@ -602,7 +605,7 @@ mod tests {
             "say \u{201C}hello\u{201D} ok\nplain line\n\u{2014}\u{2014}\n",
         )
         .unwrap();
-        EditFile::new(None, FileLocks::new())
+        EditFile::new(None, FileLocks::new(), crate::test_util::access())
             .call(
                 &mut new_ctx(),
                 json!({
@@ -617,7 +620,7 @@ mod tests {
             "say 'goodbye' ok\nplain line\n\u{2014}\u{2014}\n"
         );
         std::fs::write("ws.txt", "head   \nkeep  me\n").unwrap();
-        let err = EditFile::new(None, FileLocks::new())
+        let err = EditFile::new(None, FileLocks::new(), crate::test_util::access())
             .call(
                 &mut new_ctx(),
                 json!({
@@ -632,7 +635,7 @@ mod tests {
             "internal double spaces are not normalized: {}",
             err
         );
-        EditFile::new(None, FileLocks::new())
+        EditFile::new(None, FileLocks::new(), crate::test_util::access())
             .call(
                 &mut new_ctx(),
                 json!({
@@ -654,8 +657,8 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::write("f.txt", "token alpha and token beta\n").unwrap();
         let locks = FileLocks::new();
-        let tool_a = EditFile::new(None, locks.clone());
-        let tool_b = EditFile::new(None, locks);
+        let tool_a = EditFile::new(None, locks.clone(), crate::test_util::access());
+        let tool_b = EditFile::new(None, locks, crate::test_util::access());
         let (ra, rb) = tokio::join!(
             async {
                 tool_a

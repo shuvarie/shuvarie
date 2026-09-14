@@ -24,6 +24,7 @@ mod event;
 mod history_search;
 mod list;
 mod model_picker;
+mod permission;
 mod question;
 mod registry;
 mod search;

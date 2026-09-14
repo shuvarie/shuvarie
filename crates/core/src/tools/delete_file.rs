@@ -1,17 +1,18 @@
 use serde_json::{Value, json};
 use shuvarie_llm::{FileChange, Tool, ToolContext, ToolExecutionError, ToolOutput};
 
-use crate::permissions::resolve_write;
+use crate::permissions::{Access, PathKind, resolve_write};
 
 use super::FileLocks;
 
 pub(crate) struct DeleteFile {
     locks: FileLocks,
+    access: Access,
 }
 
 impl DeleteFile {
-    pub(crate) fn new(locks: FileLocks) -> Self {
-        Self { locks }
+    pub(crate) fn new(locks: FileLocks, access: Access) -> Self {
+        Self { locks, access }
     }
 }
 
@@ -45,9 +46,11 @@ impl Tool for DeleteFile {
         args: Value,
     ) -> Result<ToolOutput, ToolExecutionError> {
         let locks = self.locks.clone();
+        let access = self.access.clone();
         let result: Result<ToolOutput, String> = async move {
             let path = super::arg_value(&args, "path")?;
             let abs = resolve_write(&path)?;
+            access.authorize_path(PathKind::Write, &abs, &path).await?;
             let _file_lock = locks.lock(&abs).await;
             if abs.is_dir() {
                 return Err(format!(
@@ -76,7 +79,7 @@ mod tests {
     use crate::test_util::{new_ctx, tempdir};
 
     fn delete_file_tool() -> DeleteFile {
-        DeleteFile::new(FileLocks::new())
+        DeleteFile::new(FileLocks::new(), crate::test_util::access())
     }
 
     #[tokio::test]
@@ -127,20 +130,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_blocks_hidden_paths() {
+    async fn delete_asks_for_hidden_paths() {
         let (dir, _guard) = tempdir();
         std::fs::write(".env", "secret").unwrap();
         let err = delete_file_tool()
             .call(&mut new_ctx(), json!({ "path": ".env" }))
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("hidden"), "{}", err.to_string());
+        assert!(
+            err.to_string().contains("permission denied by the user"),
+            "{}",
+            err.to_string()
+        );
         assert_eq!(std::fs::read_to_string(".env").unwrap(), "secret");
         drop(dir);
     }
 
     #[tokio::test]
-    async fn delete_outside_workspace_fails() {
+    async fn delete_asks_outside_workspace() {
         let (dir, _guard) = tempdir();
         let outside = dir
             .path()
@@ -154,7 +161,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            err.to_string().contains("outside the working directory"),
+            err.to_string().contains("permission denied by the user"),
             "{}",
             err.to_string()
         );

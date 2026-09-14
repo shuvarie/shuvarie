@@ -73,6 +73,7 @@ fn merge_layer(config: &mut Config, layer: &ConfigLayer) {
                 }
             }
             "tools" => config.tools = layer.config.tools.clone(),
+            "permissions" => config.permissions = layer.config.permissions.clone(),
             "lsp" => {
                 config.lsp.disabled = layer.config.lsp.disabled;
                 for (lang, spec) in &layer.config.lsp.servers {
@@ -105,6 +106,153 @@ pub struct Config {
     pub registries: RegistriesConfig,
 
     pub tools: ToolsConfig,
+
+    pub permissions: PermissionsConfig,
+}
+
+/// A permission verdict for file paths and shell commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verb {
+    Allow,
+    Ask,
+    Deny,
+}
+
+impl Verb {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Ask => "ask",
+            Self::Deny => "deny",
+        }
+    }
+}
+
+/// A permission rule scope: an optional bare `-all` fallback verb (falling
+/// back to the top-level verb when unset) plus the rules in declaration
+/// order — the first matching rule decides.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuleSet<R> {
+    /// The scope's bare verb (`allow-all` / `ask-all` / `deny-all`).
+    pub default: Option<Verb>,
+    pub rules: Vec<R>,
+}
+
+impl<R> Default for RuleSet<R> {
+    fn default() -> Self {
+        Self {
+            default: None,
+            rules: Vec::new(),
+        }
+    }
+}
+
+/// `permissions { … }` — how tool actions are gated: a top-level fallback
+/// verb, path rules for the file tools, and shell-pattern rules for
+/// `run_shell`. The default (section absent everywhere) is [`Self::builtin`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PermissionsConfig {
+    /// The top-level bare verb; `None` falls back to `Ask`.
+    pub default: Option<Verb>,
+
+    /// `paths { … }` — rules matched against the canonicalized file path.
+    pub paths: RuleSet<PathRule>,
+
+    /// `shell-patterns { … }` — rules matched against `run_shell` commands.
+    pub shell: RuleSet<ShellRule>,
+}
+
+impl Default for PermissionsConfig {
+    fn default() -> Self {
+        Self::builtin()
+    }
+}
+
+impl PermissionsConfig {
+    /// The effective defaults used when the section is absent from every
+    /// config layer: ask all, allow inside the working directory except
+    /// hidden files, and allow shell commands except `rm` and `sudo`.
+    pub fn builtin() -> Self {
+        Self {
+            default: Some(Verb::Ask),
+            paths: RuleSet {
+                default: None,
+                rules: vec![PathRule {
+                    verb: Verb::Allow,
+                    path: ".".to_string(),
+                    except_hidden: true,
+                    exact: false,
+                    exclude_shell_pattern: false,
+                }],
+            },
+            shell: RuleSet {
+                default: Some(Verb::Allow),
+                rules: vec![
+                    ShellRule {
+                        verb: Verb::Ask,
+                        pattern: "rm".to_string(),
+                        kind: ShellPatternKind::Raw,
+                        interrupt: false,
+                    },
+                    ShellRule {
+                        verb: Verb::Ask,
+                        pattern: "sudo".to_string(),
+                        kind: ShellPatternKind::Raw,
+                        interrupt: false,
+                    },
+                ],
+            },
+        }
+    }
+}
+
+/// One `paths { … }` rule: `allow|ask|deny [props] "<path>"`. A rule node may
+/// carry several path arguments, one rule per argument sharing the verb and
+/// properties. Relative paths anchor at the working directory and `~` expands
+/// to the home directory.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathRule {
+    pub verb: Verb,
+    pub path: String,
+
+    /// Skip the rule when the matched path contains a hidden component below
+    /// the rule path — workspace-root `.agents` and the app dir stay exempt.
+    pub except_hidden: bool,
+
+    /// `#true` matches the exact path only; the default covers the path and
+    /// everything below it.
+    pub exact: bool,
+
+    /// `#false` (default) also matches `run_shell` command text that contains
+    /// the path; `#true` keeps the rule out of shell command checks.
+    pub exclude_shell_pattern: bool,
+}
+
+/// One `shell-patterns { … }` rule: `allow|ask|deny [props] "<pattern>"`. A
+/// rule node may carry several pattern arguments, one rule per argument
+/// sharing the verb and properties.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShellRule {
+    pub verb: Verb,
+    pub pattern: String,
+
+    /// How the pattern matches a command: `raw` (default) or `regex`.
+    pub kind: ShellPatternKind,
+
+    /// `deny` rules with `#true` kill a running command whose captured output
+    /// matches the pattern.
+    pub interrupt: bool,
+}
+
+/// How a shell pattern matches a command.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ShellPatternKind {
+    /// Literal text, flanked by non-alphanumeric characters (or the string
+    /// edges); multi-word patterns tolerate any whitespace runs.
+    #[default]
+    Raw,
+    /// A regular expression, matched as written against the command line.
+    Regex,
 }
 
 fn default_max_turns() -> usize {
@@ -1466,5 +1614,256 @@ mod tests {
         assert_eq!(web.url, "https://top.example");
         assert_eq!(web.kind, WebSearchKind::ToMarkdown);
         assert!(!web.enabled);
+    }
+
+    #[test]
+    fn permissions_section_absent_is_builtin() {
+        let parsed = config_kdl::from_kdl("").unwrap();
+        assert_eq!(parsed.permissions, PermissionsConfig::builtin());
+        assert_eq!(parsed.permissions.default, Some(Verb::Ask));
+        assert_eq!(parsed.permissions.paths.rules.len(), 1);
+        assert_eq!(parsed.permissions.paths.rules[0].verb, Verb::Allow);
+        assert_eq!(parsed.permissions.paths.rules[0].path, ".");
+        assert!(parsed.permissions.paths.rules[0].except_hidden);
+        assert_eq!(parsed.permissions.shell.rules.len(), 2);
+        assert_eq!(parsed.permissions.shell.default, Some(Verb::Allow));
+    }
+
+    #[test]
+    fn permissions_builtin_round_trips_as_absent() {
+        let config = Config::default();
+        let text = config_kdl::to_kdl(&config).unwrap();
+        assert!(!text.contains("permissions"), "builtin omitted: {text}");
+        let parsed = config_kdl::from_kdl(&text).unwrap();
+        assert_eq!(parsed, config);
+    }
+
+    #[test]
+    fn permissions_proposed_example_parses_and_round_trips() {
+        let text = r#"
+            permissions {
+                /-deny-all
+                /-ask-all
+
+                paths {
+                    ask-all
+                    /-deny-all
+                    /-allow-all
+                    allow except-hidden=#true "."
+                    ask ".env"
+                    deny exact=#false exclude-shell-pattern=#false "~/.ssh"
+                }
+
+                shell-patterns {
+                    /-allow-all
+                    /-deny-all
+                    /-ask-all
+                    ask "rm"
+                    ask pattern="regex" "rm (-rf|-fr|--force --recursive)"
+                    deny interrupt=#true "sudo"
+                }
+            }
+        "#;
+        let parsed = config_kdl::from_kdl(text).unwrap();
+        let perms = &parsed.permissions;
+        assert_eq!(perms.default, None, "no top-level bare verb declared");
+        assert_eq!(perms.paths.default, Some(Verb::Ask));
+        assert_eq!(perms.paths.rules.len(), 3);
+        assert_eq!(perms.paths.rules[0].verb, Verb::Allow);
+        assert!(perms.paths.rules[0].except_hidden);
+        assert_eq!(perms.paths.rules[0].path, ".");
+        assert_eq!(perms.paths.rules[1].verb, Verb::Ask);
+        assert_eq!(perms.paths.rules[1].path, ".env");
+        assert_eq!(perms.paths.rules[2].verb, Verb::Deny);
+        assert_eq!(perms.paths.rules[2].path, "~/.ssh");
+        assert!(!perms.paths.rules[2].exact);
+        assert!(!perms.paths.rules[2].exclude_shell_pattern);
+        assert_eq!(perms.shell.default, None);
+        assert_eq!(perms.shell.rules.len(), 3);
+        assert_eq!(perms.shell.rules[0].pattern, "rm");
+        assert_eq!(perms.shell.rules[0].kind, ShellPatternKind::Raw);
+        assert_eq!(
+            perms.shell.rules[1].pattern,
+            "rm (-rf|-fr|--force --recursive)"
+        );
+        assert_eq!(perms.shell.rules[1].kind, ShellPatternKind::Regex);
+        assert_eq!(perms.shell.rules[2].pattern, "sudo");
+        assert!(perms.shell.rules[2].interrupt);
+
+        let text = config_kdl::to_kdl(&parsed).unwrap();
+        let reparsed = config_kdl::from_kdl(&text).unwrap();
+        assert_eq!(parsed, reparsed);
+    }
+
+    #[test]
+    fn permissions_top_level_verb_and_scope_fallbacks() {
+        let text = r#"
+            permissions {
+                deny-all
+                paths {
+                    allow-all
+                }
+            }
+        "#;
+        let parsed = config_kdl::from_kdl(text).unwrap();
+        let perms = &parsed.permissions;
+        assert_eq!(perms.default, Some(Verb::Deny));
+        assert_eq!(perms.paths.default, Some(Verb::Allow));
+        assert!(perms.paths.rules.is_empty());
+        assert!(perms.shell.rules.is_empty());
+        assert_eq!(perms.shell.default, None, "shell inherits the top verb");
+
+        let out = config_kdl::to_kdl(&parsed).unwrap();
+        assert!(out.contains("deny-all"), "{out}");
+        assert!(out.contains("allow-all"), "{out}");
+        assert!(out.contains("paths"), "{out}");
+        assert!(
+            !out.contains("shell-patterns"),
+            "empty scope omitted: {out}"
+        );
+    }
+
+    #[test]
+    fn permissions_parse_errors() {
+        let cases: &[(&str, &str)] = &[
+            ("permissions { allow-all; deny-all }", "duplicate"),
+            ("permissions { paths { allow-all; ask-all } }", "duplicate"),
+            ("permissions { nonsense }", "unknown node"),
+            ("permissions { paths { nonsense } }", "unknown node"),
+            (
+                "permissions { paths { deny exact=5 \"x\" } }",
+                "must be a boolean",
+            ),
+            (
+                "permissions { paths { deny wat=#true \"x\" } }",
+                "unknown property",
+            ),
+            (
+                "permissions { shell-patterns { deny pattern=\"bogus\" \"x\" } }",
+                "`raw` or `regex`",
+            ),
+            (
+                "permissions { paths { deny } }",
+                "requires at least one path",
+            ),
+            (
+                "permissions { paths { allow 1 2 } }",
+                "list of string arguments",
+            ),
+            (
+                "permissions { paths { allow \"a\" { nested } } }",
+                "takes no children",
+            ),
+            (
+                "permissions { shell-patterns { ask } }",
+                "requires at least one pattern",
+            ),
+            ("permissions { allow-all \"junk\" }", "takes no arguments"),
+            (
+                "permissions { paths { allow-all { nested } } }",
+                "takes no children",
+            ),
+        ];
+        for (text, needle) in cases {
+            let err = config_kdl::from_kdl(text).unwrap_err();
+            let ConfigError::Parse(parse_err) = err else {
+                panic!("expected config parse error for {text}");
+            };
+            assert!(
+                parse_err.message.contains(needle),
+                "{needle:?} not in {parse_err}"
+            );
+        }
+    }
+
+    #[test]
+    fn permissions_multi_argument_rules_expand_in_order() {
+        let text = r#"
+            permissions {
+                paths {
+                    allow except-hidden=#true "." "../some_dir" "/some/other/dir"
+                    ask ".env" "~/.ssh"
+                }
+
+                shell-patterns {
+                    deny pattern="regex" "rm (-rf|-fr)" "git push --force"
+                    ask "rm" "sudo"
+                }
+            }
+        "#;
+        let parsed = config_kdl::from_kdl(text).unwrap();
+        let perms = &parsed.permissions;
+        assert_eq!(perms.paths.rules.len(), 5);
+        assert_eq!(perms.paths.rules[0].path, ".");
+        assert_eq!(perms.paths.rules[1].path, "../some_dir");
+        assert_eq!(perms.paths.rules[2].path, "/some/other/dir");
+        for rule in &perms.paths.rules[..3] {
+            assert_eq!(rule.verb, Verb::Allow);
+            assert!(rule.except_hidden);
+            assert!(!rule.exact);
+            assert!(!rule.exclude_shell_pattern);
+        }
+        for rule in &perms.paths.rules[3..] {
+            assert_eq!(rule.verb, Verb::Ask);
+            assert!(!rule.except_hidden);
+        }
+        assert_eq!(perms.shell.rules.len(), 4);
+        for rule in &perms.shell.rules[..2] {
+            assert_eq!(rule.verb, Verb::Deny);
+            assert_eq!(rule.kind, ShellPatternKind::Regex);
+            assert!(!rule.interrupt);
+        }
+        assert_eq!(perms.shell.rules[0].pattern, "rm (-rf|-fr)");
+        assert_eq!(perms.shell.rules[1].pattern, "git push --force");
+        for rule in &perms.shell.rules[2..] {
+            assert_eq!(rule.verb, Verb::Ask);
+            assert_eq!(rule.kind, ShellPatternKind::Raw);
+        }
+        assert_eq!(perms.shell.rules[2].pattern, "rm");
+        assert_eq!(perms.shell.rules[3].pattern, "sudo");
+
+        let text = config_kdl::to_kdl(&parsed).unwrap();
+        let reparsed = config_kdl::from_kdl(&text).unwrap();
+        assert_eq!(parsed, reparsed);
+    }
+
+    #[test]
+    fn permissions_serializer_groups_consecutive_rules() {
+        let text = r#"
+            permissions {
+                paths {
+                    allow "a" "b"
+                    ask "c"
+                    ask ".env" "d"
+                    allow "f"
+                    allow "g"
+                }
+            }
+        "#;
+        let parsed = config_kdl::from_kdl(text).unwrap();
+        let out = config_kdl::to_kdl(&parsed).unwrap();
+        assert!(out.contains("allow a b"), "grouped run: {out}");
+        assert!(out.contains("ask c .env d"), "mixed quoting: {out}");
+        assert!(
+            out.contains("allow f g"),
+            "second run stays separate: {out}"
+        );
+        let reparsed = config_kdl::from_kdl(&out).unwrap();
+        assert_eq!(parsed, reparsed);
+    }
+
+    #[test]
+    fn permissions_layer_replaces_wholesale() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global.kdl");
+        let top = dir.path().join("shuvarie.kdl");
+        std::fs::write(&global, "permissions { allow-all }").unwrap();
+        std::fs::write(&top, "permissions { paths { deny \".env\" } }").unwrap();
+        let config = Config::load_chain(&[global, top]).unwrap();
+        let perms = &config.permissions;
+        assert_eq!(perms.default, None, "top layer replaces the whole section");
+        assert_eq!(perms.paths.rules.len(), 1);
+        assert_eq!(perms.paths.rules[0].path, ".env");
+        assert_eq!(perms.shell.default, None);
     }
 }

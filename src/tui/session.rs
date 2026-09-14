@@ -13,6 +13,7 @@ use crate::tui::utils::{alt, alt_shift, ctrl};
 
 use super::commands::{self, CommandAction};
 use super::components::{TextArea, TextAreaEffect, TextAreaMessage};
+use super::permission::{PermissionEffect, PermissionMessage, PermissionUI};
 use super::question::{QuestionEffect, QuestionMessage, QuestionUI};
 use super::sidebar::{Sidebar, SidebarMessage};
 use super::slash::{SlashMenu, SlashMessage};
@@ -40,6 +41,13 @@ pub enum MouseKind {
 pub enum SessionMessage {
     Text(TextAreaMessage),
     Chat(ChatMessage),
+    /// A tool call paused on an `ask` permission rule; `id` routes the
+    /// decision back through [`SessionEffect::PermissionDecide`].
+    PermissionRequested {
+        id: u64,
+        description: String,
+    },
+    Permission(PermissionMessage),
     /// Left-button mouse activity at a terminal cell. Routed by zone: the
     /// input area, the bash popup (swallowed), then the chat history pane.
     Mouse {
@@ -198,6 +206,7 @@ fn workspace_footer_budget(footer_width: u16, hints_width: usize) -> Option<usiz
 pub struct SessionScreen {
     pub input: TextArea,
     pub question: QuestionUI,
+    pub permission: PermissionUI,
     slash: SlashMenu,
     pub chat: chat::Chat,
     /// Floating display-only window for the latest bash-mode run.
@@ -226,6 +235,7 @@ impl SessionScreen {
         Self {
             input: TextArea::with_max_height("Type a message", 8),
             question: QuestionUI::new(),
+            permission: PermissionUI::new(),
             slash: SlashMenu::new(),
             chat: chat::Chat::new(),
             bash: bash::BashPopup::new(),
@@ -314,6 +324,12 @@ impl SessionScreen {
     }
 
     pub fn map_event(&self, key: &KeyEvent) -> Option<SessionMessage> {
+        if self.permission.open {
+            return self
+                .permission
+                .map_event(key)
+                .map(SessionMessage::Permission);
+        }
         if self.question.open {
             return self.question.map_event(key).map(SessionMessage::Question);
         }
@@ -391,6 +407,9 @@ impl SessionScreen {
     /// question popup captures the paste for its custom-answer field; the
     /// bash popup and slash menu leave the paste to the input area.
     pub fn map_paste(&self, text: &str) -> Option<SessionMessage> {
+        if self.permission.open {
+            return None;
+        }
         if self.question.open {
             return Some(SessionMessage::Question(QuestionMessage::CustomPaste(
                 text.to_string(),
@@ -600,6 +619,25 @@ impl SessionScreen {
                 self.status = Some("Waiting for answer...".to_string());
                 None
             }
+            SessionMessage::PermissionRequested { id, description } => {
+                self.permission.open(id, description);
+                self.busy_kind = BusyKind::Waiting;
+                self.status = Some("Waiting for permission...".to_string());
+                None
+            }
+            SessionMessage::Permission(m) => {
+                if let Some(effect) = self.permission.update(m) {
+                    match effect {
+                        PermissionEffect::Decide { id, allow } => {
+                            self.permission.close();
+                            self.busy_kind = BusyKind::Tool;
+                            self.status = Some("Calling tool".to_string());
+                            return Some(SessionEffect::PermissionDecide { id, allow });
+                        }
+                    }
+                }
+                None
+            }
             SessionMessage::Question(m) => {
                 if let Some(effect) = self.question.update(m) {
                     match effect {
@@ -655,6 +693,7 @@ impl SessionScreen {
                 self.last_escape = None;
                 self.session_id = None;
                 self.session_title = None;
+                self.permission.close();
                 self.sidebar.update(SidebarMessage::SetUsage {
                     usage: TokenUsage::default(),
                     cost: 0.0,
@@ -672,6 +711,7 @@ impl SessionScreen {
                 self.status = None;
                 self.retry = None;
                 self.last_escape = None;
+                self.permission.close();
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
                 self.sidebar.update(SidebarMessage::SetContextRequest {
@@ -802,6 +842,7 @@ impl SessionScreen {
                 self.status = None;
                 self.retry = None;
                 self.last_escape = None;
+                self.permission.close();
             }
             _ => {}
         }
@@ -832,7 +873,7 @@ impl SessionScreen {
     fn handle_mouse(&mut self, kind: MouseKind, column: u16, row: u16) -> Option<SessionEffect> {
         let input_area = self.input_area.get();
         if input_area.contains(ratatui::layout::Position::new(column, row)) {
-            if !self.question.open {
+            if !self.question.open && !self.permission.open {
                 let msg = match kind {
                     MouseKind::Down => TextAreaMessage::MouseDown { column, row },
                     MouseKind::Drag => TextAreaMessage::MouseDrag { column, row },
@@ -878,7 +919,9 @@ impl SessionScreen {
             ),
         };
         let bash_mode = self.is_bash_mode();
-        let input_height = if self.question.open {
+        let input_height = if self.permission.open {
+            self.permission.desired_height(content_area.width as usize)
+        } else if self.question.open {
             self.question.desired_height(content_area.width as usize)
         } else {
             self.input.desired_height(content_area.width as usize)
@@ -929,7 +972,9 @@ impl SessionScreen {
         frame.render_widget(history_block, history_area);
         self.chat.view(frame, history_inner);
 
-        if self.question.open {
+        if self.permission.open {
+            self.permission.view(frame, input_area);
+        } else if self.question.open {
             self.question.view(frame, input_area);
         } else {
             let text_color = if bash_mode {
@@ -1088,6 +1133,11 @@ pub enum SessionEffect {
     AnswerQuestion {
         id: u64,
         answers: Option<Vec<Vec<String>>>,
+    },
+    /// Resolve a pending permission ask (`id` from `PermissionRequested`).
+    PermissionDecide {
+        id: u64,
+        allow: bool,
     },
     RunCommand {
         action: CommandAction,

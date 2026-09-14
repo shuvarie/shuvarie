@@ -4,6 +4,7 @@ use shuvarie_llm::{ShellStreams, Tool, ToolContext, ToolExecutionError, ToolOutp
 use std::path::Path;
 
 use super::{DEFAULT_TIMEOUT_SECS, arg_value, workspace_root};
+use crate::permissions::{Access, OutputInterrupt};
 use crate::shell::Shell;
 
 const MAX_COMMAND_OUTPUT: usize = 16 * 1024;
@@ -118,6 +119,9 @@ fn display_stream(bytes: &[u8]) -> String {
 pub(crate) struct ShellRun {
     pub status: std::process::ExitStatus,
     pub timed_out: bool,
+    /// Set when a `deny interrupt=#true` permission rule matched the captured
+    /// output and the command was killed.
+    pub interrupted: Option<String>,
     pub out: String,
     pub err: String,
     pub captured: String,
@@ -133,6 +137,7 @@ pub(crate) async fn run_shell_command(
     cwd: &Path,
     timeout_secs: Option<u64>,
     shell_tx: &ShellOutputTx,
+    interrupt: Option<&OutputInterrupt>,
 ) -> Result<ShellRun, String> {
     let mut builder = tokio::process::Command::new(&shell.path);
     shell.apply(&mut builder, command);
@@ -179,6 +184,26 @@ pub(crate) async fn run_shell_command(
                         } else {
                             out.extend_from_slice(&chunk);
                             cap_buffer(&mut out, capture_bytes);
+                        }
+                        if let Some(reason) = interrupt
+                            .and_then(|watch| watch.check(&String::from_utf8_lossy(&captured)))
+                        {
+                            if let Some(pgid) = pgid {
+                                kill_process_group(pgid);
+                            }
+                            let _ = child.kill().await;
+                            let status =
+                                child.wait().await.map_err(|e| format!("wait shell: {e}"))?;
+                            shell_tx.send_streams(&out, &err).await;
+                            guard.disarm();
+                            return Ok(ShellRun {
+                                status,
+                                timed_out: false,
+                                interrupted: Some(reason),
+                                out: shell_tx.display(&out),
+                                err: shell_tx.display(&err),
+                                captured: String::from_utf8_lossy(&captured).trim().to_string(),
+                            });
                         }
                         if last_emit.elapsed() >= interval {
                             last_emit = std::time::Instant::now();
@@ -228,6 +253,7 @@ pub(crate) async fn run_shell_command(
                 return Ok(ShellRun {
                     status,
                     timed_out: true,
+                    interrupted: None,
                     out: shell_tx.display(&out),
                     err: shell_tx.display(&err),
                     captured: String::from_utf8_lossy(&captured).trim().to_string(),
@@ -244,6 +270,7 @@ pub(crate) async fn run_shell_command(
     Ok(ShellRun {
         status,
         timed_out: false,
+        interrupted: None,
         out: shell_tx.display(&out),
         err: shell_tx.display(&err),
         captured: String::from_utf8_lossy(&captured).trim().to_string(),
@@ -281,11 +308,16 @@ impl Drop for KillGuard {
 pub(crate) struct RunShell {
     shell_tx: ShellOutputTx,
     shell: Shell,
+    access: Access,
 }
 
 impl RunShell {
-    pub(crate) fn new(shell_tx: ShellOutputTx, shell: Shell) -> Self {
-        Self { shell_tx, shell }
+    pub(crate) fn new(shell_tx: ShellOutputTx, shell: Shell, access: Access) -> Self {
+        Self {
+            shell_tx,
+            shell,
+            access,
+        }
     }
 }
 
@@ -298,7 +330,7 @@ impl Tool for RunShell {
 
     fn description(&self) -> String {
         format!(
-            "Run a shell command line in the workspace, executed through the resolved shell (`{}`). Pipes, redirects, and shell operators work naturally. Output streams live to the user while the command runs. Captured stdout and stderr (combined) are returned, capped at 16 KB. The command and its children are killed when it exceeds the timeout; if the command is expected to take longer and is not waiting for interactive input, retry with a larger timeout_secs value. The working directory can be set with `cwd`.",
+            "Run a shell command line in the workspace, executed through the resolved shell (`{}`). Pipes, redirects, and shell operators work naturally. Output streams live to the user while the command runs. Captured stdout and stderr (combined) are returned, capped at 16 KB. The command and its children are killed when it exceeds the timeout; if the command is expected to take longer and is not waiting for interactive input, retry with a larger timeout_secs value. The working directory can be set with `cwd`. Commands are permission-gated: a denied command fails with the matched rule named, and a run can be killed when its output trips a deny-with-interrupt rule.",
             self.shell.invocation()
         )
     }
@@ -321,6 +353,7 @@ impl Tool for RunShell {
         args: Value,
     ) -> Result<ToolOutput, ToolExecutionError> {
         let result: Result<ToolOutput, String> = async move {
+            let access = self.access.clone();
             let command = arg_value(&args, "command")?;
             let cwd = args.get("cwd").and_then(Value::as_str);
             let timeout_secs = args
@@ -341,14 +374,28 @@ impl Tool for RunShell {
                 }
                 None => workspace_root()?,
             };
+            access.authorize_shell(&command).await?;
+            let interrupt = access.output_interrupt();
             let run = run_shell_command(
                 &self.shell,
                 &command,
                 &cwd_abs,
                 Some(timeout_secs),
                 &self.shell_tx,
+                interrupt.as_ref(),
             )
             .await?;
+
+            if let Some(reason) = &run.interrupted {
+                ctx.insert_result(ShellStreams {
+                    stdout: format!("interrupted: {reason}\n{}", run.out),
+                    stderr: run.err,
+                });
+                return Err(format!(
+                    "shell command was killed: {reason}\n{}",
+                    run.captured
+                ));
+            }
 
             if run.timed_out {
                 let mut message = format!(
@@ -439,6 +486,7 @@ mod tests {
         RunShell::new(
             ShellOutputTx::new(tokio::sync::mpsc::channel(64).0),
             crate::shell::resolve(None).shell,
+            crate::test_util::access(),
         )
     }
 
@@ -518,7 +566,11 @@ mod tests {
     async fn run_shell_streams_output() {
         let (dir, _guard) = tempdir();
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-        let tool = RunShell::new(ShellOutputTx::new(tx), crate::shell::resolve(None).shell);
+        let tool = RunShell::new(
+            ShellOutputTx::new(tx),
+            crate::shell::resolve(None).shell,
+            crate::test_util::access(),
+        );
         let out = tool
             .call(
                 &mut new_ctx(),
@@ -545,6 +597,7 @@ mod tests {
         let tool = RunShell::new(
             ShellOutputTx::new(tx).tagged("run_tests"),
             crate::shell::resolve(None).shell,
+            crate::test_util::access(),
         );
         tool.call(&mut new_ctx(), json!({ "command": "echo tagged" }))
             .await
@@ -570,6 +623,7 @@ mod tests {
             dir.path(),
             None,
             &ShellOutputTx::new(tx),
+            None,
         )
         .await
         .unwrap();
@@ -597,6 +651,7 @@ mod tests {
             dir.path(),
             None,
             &ShellOutputTx::full(tokio::sync::mpsc::channel(64).0),
+            None,
         )
         .await
         .unwrap();
@@ -614,6 +669,7 @@ mod tests {
             dir.path(),
             None,
             &ShellOutputTx::new(tokio::sync::mpsc::channel(64).0),
+            None,
         )
         .await
         .unwrap();
@@ -632,6 +688,7 @@ mod tests {
             dir.path(),
             None,
             &ShellOutputTx::full(tx),
+            None,
         )
         .await;
         let mut full_chunk = false;
@@ -654,6 +711,7 @@ mod tests {
             dir.path(),
             None,
             &ShellOutputTx::new(tokio::sync::mpsc::channel(64).0),
+            None,
         )
         .await
         .unwrap();
@@ -731,6 +789,129 @@ mod tests {
             out.as_text().unwrap().contains("world"),
             "{}",
             out.as_text().unwrap()
+        );
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn run_shell_denies_deny_rule() {
+        let (dir, _guard) = tempdir();
+        let access = crate::test_util::access_for_config(&shuvarie_config::PermissionsConfig {
+            default: Some(shuvarie_config::Verb::Deny),
+            shell: shuvarie_config::RuleSet::default(),
+            ..shuvarie_config::PermissionsConfig::builtin()
+        });
+        let tool = RunShell::new(
+            ShellOutputTx::new(tokio::sync::mpsc::channel(64).0),
+            crate::shell::resolve(None).shell,
+            access,
+        );
+        let err = tool
+            .call(&mut new_ctx(), json!({ "command": "echo hi" }))
+            .await
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("permission denied"), "{message}");
+        assert!(
+            message.contains("permissions default: deny-all"),
+            "{message}"
+        );
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn run_shell_ask_allowed_and_denied_by_user() {
+        let (dir, _guard) = tempdir();
+        let (access, mut rx) =
+            crate::test_util::access_with_answering_gate(&shuvarie_config::PermissionsConfig {
+                default: Some(shuvarie_config::Verb::Ask),
+                shell: shuvarie_config::RuleSet::default(),
+                ..shuvarie_config::PermissionsConfig::builtin()
+            });
+        let tool = RunShell::new(
+            ShellOutputTx::new(tokio::sync::mpsc::channel(64).0),
+            crate::shell::resolve(None).shell,
+            access,
+        );
+        let ask = tokio::spawn(async move {
+            tool.call(&mut new_ctx(), json!({ "command": "echo asked" }))
+                .await
+        });
+        let request = rx.recv().await.unwrap();
+        assert!(request.description.contains("Allow running this command?"));
+        assert!(request.description.contains("echo asked"));
+        request.respond.send(true).unwrap();
+        let out = ask.await.unwrap().unwrap();
+        assert!(out.as_text().unwrap().contains("asked"));
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn run_shell_ask_denied_by_user() {
+        let (dir, _guard) = tempdir();
+        let (access, mut rx) =
+            crate::test_util::access_with_answering_gate(&shuvarie_config::PermissionsConfig {
+                default: Some(shuvarie_config::Verb::Ask),
+                shell: shuvarie_config::RuleSet::default(),
+                ..shuvarie_config::PermissionsConfig::builtin()
+            });
+        let tool = RunShell::new(
+            ShellOutputTx::new(tokio::sync::mpsc::channel(64).0),
+            crate::shell::resolve(None).shell,
+            access,
+        );
+        let ask = tokio::spawn(async move {
+            tool.call(&mut new_ctx(), json!({ "command": "echo asked" }))
+                .await
+        });
+        let request = rx.recv().await.unwrap();
+        request.respond.send(false).unwrap();
+        let err = ask.await.unwrap().unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("permission denied by the user"),
+            "{message}"
+        );
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn run_shell_interrupts_on_output_match() {
+        let (dir, _guard) = tempdir();
+        let access = crate::test_util::access_for_config(&shuvarie_config::PermissionsConfig {
+            default: Some(shuvarie_config::Verb::Allow),
+            shell: shuvarie_config::RuleSet {
+                default: Some(shuvarie_config::Verb::Allow),
+                rules: vec![shuvarie_config::ShellRule {
+                    verb: shuvarie_config::Verb::Deny,
+                    pattern: "secret-output".to_string(),
+                    kind: shuvarie_config::ShellPatternKind::Raw,
+                    interrupt: true,
+                }],
+            },
+            ..shuvarie_config::PermissionsConfig::builtin()
+        });
+        let tool = RunShell::new(
+            ShellOutputTx::new(tokio::sync::mpsc::channel(64).0),
+            crate::shell::resolve(None).shell,
+            access,
+        );
+        let started = std::time::Instant::now();
+        let err = tool
+            .call(
+                &mut new_ctx(),
+                json!({ "command": "printf 'secret-%s\\n' output; sleep 30", "timeout_secs": 30 }),
+            )
+            .await
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("killed") && message.contains("secret"),
+            "{message}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "interrupt must kill promptly"
         );
         drop(dir);
     }

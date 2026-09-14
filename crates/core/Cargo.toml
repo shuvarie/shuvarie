@@ -16,6 +16,7 @@ grep = "0.4"
 html-to-markdown-rs = { version = "3", default-features = false }
 ignore = "0.4"
 miette = "7"
+regex.workspace = true
 reqwest = { workspace = true, features = ["brotli", "deflate", "gzip", "zstd"] }
 serde.workspace = true
 serde_json.workspace = true

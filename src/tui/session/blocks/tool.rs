@@ -903,8 +903,9 @@ fn answer_for_question(output: &str, question: &str) -> String {
 }
 
 /// The terminal status of a tool result: `ok` succeeds; a `run_shell` call
-/// whose stdout leads with a `timeout Ns:` status line was killed by the
-/// shell timeout rather than failing on its own merits.
+/// whose stdout leads with a `timeout Ns:` or `interrupted: …` status line
+/// was killed (shell timeout / permission interrupt) rather than failing on
+/// its own merits.
 fn finish_status(ok: bool, name: &str, output: &str) -> ToolStatus {
     if ok {
         return ToolStatus::Ok;
@@ -912,17 +913,18 @@ fn finish_status(ok: bool, name: &str, output: &str) -> ToolStatus {
     if name == "run_shell"
         && split_status_line(output)
             .0
-            .is_some_and(|label| label.starts_with("timeout"))
+            .is_some_and(|label| label.starts_with("timeout") || label.starts_with("interrupted"))
     {
         return ToolStatus::Killed;
     }
     ToolStatus::Failed
 }
 
-/// Split a leading shell status line (`exit N:`, `timeout Ns:` or the legacy
-/// `shell exited with ...:`) off the persisted stdout text, returning the
-/// normalized label and the remaining body. Text whose first line does not
-/// parse as a status line — e.g. a streamed tail — is all body.
+/// Split a leading shell status line (`exit N:`, `timeout Ns:`, `interrupted:
+/// <reason>` or the legacy `shell exited with ...:`) off the persisted stdout
+/// text, returning the normalized label and the remaining body. Text whose
+/// first line does not parse as a status line — e.g. a streamed tail — is all
+/// body.
 fn split_status_line(text: &str) -> (Option<String>, &str) {
     let (first, rest) = match text.split_once('\n') {
         Some((first, rest)) => (first, rest),
@@ -940,6 +942,8 @@ fn split_status_line(text: &str) -> (Option<String>, &str) {
         .and_then(|s| s.strip_suffix(':'))
     {
         s.ends_with('s').then(|| format!("timeout {s}"))
+    } else if let Some(reason) = first.strip_prefix("interrupted: ") {
+        (!reason.is_empty()).then(|| "interrupted".to_string())
     } else {
         first
             .strip_prefix("shell exited with ")

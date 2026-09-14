@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use shuvarie_llm::{Tool, ToolContext, ToolExecutionError, ToolOutput};
 
-use crate::permissions::resolve_read;
+use crate::permissions::{Access, PathKind, resolve_read};
 
 use super::{ReadCache, arg_value};
 
@@ -14,6 +14,7 @@ pub(crate) struct ReadFile {
     read_cache: ReadCache,
     max_output_chars: usize,
     max_output_bytes: usize,
+    access: Access,
 }
 
 impl ReadFile {
@@ -21,11 +22,13 @@ impl ReadFile {
         read_cache: ReadCache,
         max_output_chars: usize,
         max_output_bytes: usize,
+        access: Access,
     ) -> Self {
         Self {
             read_cache,
             max_output_chars,
             max_output_bytes,
+            access,
         }
     }
 }
@@ -62,6 +65,7 @@ impl Tool for ReadFile {
         let read_cache = self.read_cache.clone();
         let max_output_chars = self.max_output_chars;
         let max_output_bytes = self.max_output_bytes;
+        let access = self.access.clone();
         let result: Result<ToolOutput, String> = async move {
             let path = arg_value(&args, "path")?;
             let offset = args.get("offset").and_then(Value::as_u64);
@@ -72,6 +76,7 @@ impl Tool for ReadFile {
                 )));
             }
             let abs = resolve_read(&path)?;
+            access.authorize_path(PathKind::Read, &abs, &path).await?;
             if abs.is_dir() {
                 return Err(format!("'{path}' is a directory, not a file"));
             }
@@ -156,7 +161,33 @@ mod tests {
     use crate::test_util::{new_ctx, tempdir};
 
     fn read_file_tool() -> ReadFile {
-        ReadFile::new(ReadCache::new(), 0, 0)
+        ReadFile::new(ReadCache::new(), 0, 0, crate::test_util::access())
+    }
+
+    #[tokio::test]
+    async fn read_denied_by_rule_errors() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("a.txt", "one\n").unwrap();
+        let tool = ReadFile::new(
+            ReadCache::new(),
+            0,
+            0,
+            crate::test_util::access_for_config(&shuvarie_config::PermissionsConfig {
+                default: Some(shuvarie_config::Verb::Deny),
+                paths: shuvarie_config::RuleSet::default(),
+                ..shuvarie_config::PermissionsConfig::builtin()
+            }),
+        );
+        let err = tool
+            .call(&mut new_ctx(), json!({ "path": "a.txt" }))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("permission denied"),
+            "{}",
+            err.to_string()
+        );
+        drop(dir);
     }
 
     #[tokio::test]
@@ -199,7 +230,7 @@ mod tests {
     async fn read_truncates_by_bytes() {
         let (dir, _guard) = tempdir();
         std::fs::write("bytes.txt", "abcdef\n").unwrap();
-        let tool = ReadFile::new(ReadCache::new(), 0, 3);
+        let tool = ReadFile::new(ReadCache::new(), 0, 3, crate::test_util::access());
         let out = tool
             .call(&mut new_ctx(), json!({ "path": "bytes.txt" }))
             .await
@@ -217,7 +248,7 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::write("dup.txt", "line\n").unwrap();
         let cache = ReadCache::new();
-        let tool = ReadFile::new(cache.clone(), 0, 0);
+        let tool = ReadFile::new(cache.clone(), 0, 0, crate::test_util::access());
         let first = tool
             .call(&mut new_ctx(), json!({ "path": "dup.txt" }))
             .await
@@ -253,7 +284,7 @@ mod tests {
         let (dir, _guard) = tempdir();
         let big = "x".repeat(10_000) + "\n";
         std::fs::write("big.txt", &big).unwrap();
-        let tool = ReadFile::new(ReadCache::new(), 100, 0);
+        let tool = ReadFile::new(ReadCache::new(), 100, 0, crate::test_util::access());
         let out = tool
             .call(&mut new_ctx(), json!({ "path": "big.txt" }))
             .await

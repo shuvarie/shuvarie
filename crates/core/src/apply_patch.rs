@@ -379,11 +379,16 @@ fn derive_new_contents(
 pub struct ApplyPatch {
     lsp: Option<SharedManager>,
     locks: FileLocks,
+    access: crate::permissions::Access,
 }
 
 impl ApplyPatch {
-    pub fn new(lsp: Option<SharedManager>, locks: FileLocks) -> Self {
-        Self { lsp, locks }
+    pub fn new(
+        lsp: Option<SharedManager>,
+        locks: FileLocks,
+        access: crate::permissions::Access,
+    ) -> Self {
+        Self { lsp, locks, access }
     }
 }
 
@@ -420,6 +425,7 @@ impl Tool for ApplyPatch {
     ) -> Result<ToolOutput, ToolExecutionError> {
         let lsp = self.lsp.clone();
         let locks = self.locks.clone();
+        let access = self.access.clone();
         let result: Result<ToolOutput, String> = async move {
             let patch_text = arg_value(&args, "patchText")?;
             let hunks = parse_patch(&patch_text)?;
@@ -428,20 +434,50 @@ impl Tool for ApplyPatch {
             }
 
             let mut lock_keys: Vec<std::path::PathBuf> = Vec::new();
+            let mut authorized: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
             for hunk in &hunks {
                 match hunk {
                     Hunk::Add { path, .. } => {
-                        lock_keys.push(resolve_write(path)?);
+                        let abs = resolve_write(path)?;
+                        if authorized.insert(abs.to_string_lossy().into_owned()) {
+                            access
+                                .authorize_path(crate::permissions::PathKind::Write, &abs, path)
+                                .await?;
+                        }
+                        lock_keys.push(abs);
                     }
                     Hunk::Delete { path, .. } => {
-                        lock_keys.push(resolve_write(path)?);
+                        let abs = resolve_write(path)?;
+                        if authorized.insert(abs.to_string_lossy().into_owned()) {
+                            access
+                                .authorize_path(crate::permissions::PathKind::Write, &abs, path)
+                                .await?;
+                        }
+                        lock_keys.push(abs);
                     }
                     Hunk::Update {
                         path, move_path, ..
                     } => {
-                        lock_keys.push(resolve_write(path)?);
+                        let abs = resolve_write(path)?;
+                        if authorized.insert(abs.to_string_lossy().into_owned()) {
+                            access
+                                .authorize_path(crate::permissions::PathKind::Write, &abs, path)
+                                .await?;
+                        }
+                        lock_keys.push(abs);
                         if let Some(target) = move_path {
-                            lock_keys.push(resolve_write(target)?);
+                            let target_abs = resolve_write(target)?;
+                            if authorized.insert(target_abs.to_string_lossy().into_owned()) {
+                                access
+                                    .authorize_path(
+                                        crate::permissions::PathKind::Write,
+                                        &target_abs,
+                                        target,
+                                    )
+                                    .await?;
+                            }
+                            lock_keys.push(target_abs);
                         }
                     }
                 }
@@ -746,7 +782,7 @@ mod tests {
 +fn new() {}
 *** Delete File: obsolete.txt
 *** End Patch"#;
-        let tool = ApplyPatch::new(None, FileLocks::new());
+        let tool = ApplyPatch::new(None, FileLocks::new(), crate::test_util::access());
         let mut ctx = ToolContext::default();
         let out = tool
             .call(&mut ctx, json!({ "patchText": patch }))
@@ -797,7 +833,7 @@ mod tests {
 +    let y = 3;
  }
 *** End Patch"#;
-        let tool = ApplyPatch::new(None, FileLocks::new());
+        let tool = ApplyPatch::new(None, FileLocks::new(), crate::test_util::access());
         let mut ctx = ToolContext::default();
         tool.call(&mut ctx, json!({ "patchText": patch }))
             .await
@@ -850,7 +886,7 @@ mod tests {
 +data
 +moved
 *** End Patch"#;
-        let tool = ApplyPatch::new(None, FileLocks::new());
+        let tool = ApplyPatch::new(None, FileLocks::new(), crate::test_util::access());
         let mut ctx = ToolContext::default();
         let err = tool
             .call(&mut ctx, json!({ "patchText": patch }))
@@ -896,7 +932,7 @@ mod tests {
 -three
 +3
 *** End Patch"#;
-        let tool = ApplyPatch::new(None, FileLocks::new());
+        let tool = ApplyPatch::new(None, FileLocks::new(), crate::test_util::access());
         let mut ctx = ToolContext::default();
         let err = tool
             .call(&mut ctx, json!({ "patchText": patch }))
