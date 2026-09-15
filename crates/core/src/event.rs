@@ -191,10 +191,10 @@ pub enum Event {
         id: uuid::Uuid,
     },
     /// The session forked: the active path now ends at a different node (an
-    /// `/undo` fork before the last user prompt, or a `/tree` fork). Carries
-    /// the reloaded session plus the forked-away user prompt to recall into
-    /// the input (`prompt: Some`) or `None` for popup forks and automatic
-    /// resumes (replay / interrupted retry).
+    /// `/undo` fork before the last user prompt, or a `/tree` fork before a
+    /// turn node). Carries the reloaded session plus the forked-away node's
+    /// content to recall into the input (`prompt: Some`) or `None` for
+    /// marker forks and automatic resumes (replay / interrupted retry).
     Forked {
         session: crate::Session,
         prompt: Option<String>,

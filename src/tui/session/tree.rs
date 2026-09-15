@@ -21,9 +21,9 @@ pub enum TreeMessage {
 }
 
 pub enum TreeEffect {
-    /// Fork at the selected node: user nodes fork before their prompt,
-    /// assistant nodes (and tool leaves, which resolve to their reply) fork
-    /// after it.
+    /// Fork at the selected row: turn rows (prompts, replies, and the tool
+    /// rows that resolve to their reply) fork before themselves, recalling
+    /// the node's content into the input; summary rows walk to themselves.
     Fork {
         node: u64,
         summarize: bool,

@@ -1501,13 +1501,14 @@ fn subtree_contains(
     false
 }
 
-/// Fork the session at a node: the active path is re-rooted at the fork tip
-/// (a user node forks *before* its prompt — its parent — while an assistant
-/// or tool node forks *after* its reply), optionally creating an LLM summary
-/// of the prefix before the fork point first. `node: None` walks to the
-/// active path's last user prompt and forks before it (`/undo`), yielding
-/// that prompt back for recall. Returns the recalled prompt, `None` when
-/// there was nothing to fork.
+/// Fork the session at a node: the active path is re-rooted *before* the
+/// node — its parent becomes the fork tip and the node's own content is
+/// returned for recall into the input — optionally creating an LLM summary
+/// of the prefix before the fork point first. Summary and system nodes are
+/// compaction markers rather than turns, so they walk to themselves without
+/// a recall. `node: None` walks to the active path's last user prompt
+/// (`/undo`). Returns the recalled content, `None` when there was nothing
+/// to fork.
 async fn fork_session(
     store: &mut Store,
     session_id: uuid::Uuid,
@@ -1522,30 +1523,29 @@ async fn fork_session(
         .map_err(|e| e.to_string())?;
     let by_id: HashMap<u64, &shuvarie_db::StoredMessage> =
         stored.messages.iter().map(|m| (m.id, m)).collect();
-    let (fork_tip, prompt): (Option<u64>, Option<String>) = match node_id {
+    let target = match node_id {
+        Some(id) => Some(id),
         None => {
             let chain = chain_of(&stored);
-            let user_id = chain
+            chain
                 .iter()
                 .rev()
                 .filter_map(|id| by_id.get(id).copied())
                 .find(|m| m.role == shuvarie_db::MsgRole::User)
-                .map(|m| m.id);
-            let Some(user_id) = user_id else {
-                return Ok(None);
-            };
-            let parent = by_id.get(&user_id).and_then(|m| m.parent_id);
-            let content = by_id.get(&user_id).map(|m| m.content.clone());
-            (parent, content)
-        }
-        Some(id) => {
-            let node = by_id.get(&id).ok_or("unknown node")?;
-            match node.role {
-                shuvarie_db::MsgRole::User => (node.parent_id, None),
-                _ => (Some(node.id), None),
-            }
+                .map(|m| m.id)
         }
     };
+    let Some(target) = target else {
+        return Ok(None);
+    };
+    let node = by_id.get(&target).ok_or("unknown node")?;
+    let (fork_tip, prompt): (Option<u64>, Option<String>) =
+        if node.summary || node.role == shuvarie_db::MsgRole::System {
+            (Some(node.id), None)
+        } else {
+            let recalled = (!node.content.trim().is_empty()).then(|| node.content.clone());
+            (node.parent_id, recalled)
+        };
 
     if summarize {
         let Some(tip) = fork_tip else {
@@ -1557,7 +1557,7 @@ async fn fork_session(
                 .map_err(|e| e.to_string())?;
             return Ok(prompt);
         };
-        // The prefix to summarize is the fork node's own ancestor chain
+        // The prefix to summarize is the fork tip's own ancestor chain
         // (root → tip), which works for nodes off the current path too.
         let tip_chain: Vec<u64> = {
             let mut ids = Vec::new();
@@ -1591,29 +1591,21 @@ async fn fork_session(
         let summary = crate::compaction::summarize(client, model, &head_text).await;
         let _ = event_tx.send(Event::CompactionFinished).await;
         let summary = summary.map_err(|e| format!("summarization failed: {e}"))?;
-        let parent = match node_id {
-            // Forking before a user prompt: the summary hangs from the fork
-            // tip and the prompt is reparented under it, staying pending.
-            Some(id)
-                if by_id
-                    .get(&id)
-                    .is_some_and(|m| m.role == shuvarie_db::MsgRole::User) =>
-            {
-                Some(tip)
-            }
-            // Forking after an assistant node: the reply is summarized away;
-            // the summary takes its place in the chain.
-            _ => by_id.get(&tip).and_then(|m| m.parent_id),
+        // Turn forks: the summary hangs from the fork tip — where the
+        // selected node hung — and the forked-away node is reparented under
+        // it. Marker forks walk to the marker itself: the new summary takes
+        // its place in the chain.
+        let marker = node.summary || node.role == shuvarie_db::MsgRole::System;
+        let (parent, reparent) = if marker {
+            (node.parent_id, None)
+        } else {
+            (Some(tip), Some(target))
         };
         let summary_msg = store
             .append_summary(session_id, parent, &summary)
             .await
             .map_err(|e| e.to_string())?;
-        if let Some(id) = node_id
-            && by_id
-                .get(&id)
-                .is_some_and(|m| m.role == shuvarie_db::MsgRole::User)
-        {
+        if let Some(id) = reparent {
             store
                 .set_message_parent(id, Some(summary_msg.id))
                 .await
@@ -4644,16 +4636,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fork_session_at_an_assistant_node_walks_to_its_tip() {
+    async fn fork_session_at_an_assistant_node_forks_before_it() {
         let (mut store, sid, ids) = chain_session().await;
         let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
         let prompt = fork_session(&mut store, sid, Some(ids[1]), false, None, &event_tx)
             .await
             .unwrap();
-        assert_eq!(prompt, None);
+        assert_eq!(prompt.as_deref(), Some("r1"), "the reply is recalled");
         let stored = store.load_session(sid).await.unwrap();
-        assert_eq!(stored.leaf_id, Some(ids[1]));
+        assert_eq!(
+            stored.leaf_id,
+            Some(ids[0]),
+            "the tip walks back before the reply"
+        );
     }
 
     #[tokio::test]
@@ -4661,11 +4657,47 @@ mod tests {
         let (mut store, sid, ids) = chain_session().await;
         let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
-        fork_session(&mut store, sid, Some(ids[2]), false, None, &event_tx)
+        let prompt = fork_session(&mut store, sid, Some(ids[2]), false, None, &event_tx)
             .await
             .unwrap();
+        assert_eq!(prompt.as_deref(), Some("two"), "the prompt is recalled");
         let stored = store.load_session(sid).await.unwrap();
-        assert_eq!(stored.leaf_id, Some(ids[1]));
+        assert_eq!(
+            stored.leaf_id,
+            Some(ids[1]),
+            "the tip walks back before the prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_session_at_the_root_prompt_starts_over() {
+        let (mut store, sid, ids) = chain_session().await;
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+
+        let prompt = fork_session(&mut store, sid, Some(ids[0]), false, None, &event_tx)
+            .await
+            .unwrap();
+        assert_eq!(prompt.as_deref(), Some("one"));
+        let stored = store.load_session(sid).await.unwrap();
+        assert_eq!(stored.leaf_id, None, "the active path is empty again");
+        assert_eq!(stored.messages.len(), 4, "every row stays in the tree");
+    }
+
+    #[tokio::test]
+    async fn fork_session_at_a_summary_node_walks_to_it() {
+        let (mut store, sid, ids) = chain_session().await;
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+        let summary = store
+            .append_summary(sid, Some(ids[1]), "the talk so far")
+            .await
+            .unwrap();
+
+        let prompt = fork_session(&mut store, sid, Some(summary.id), false, None, &event_tx)
+            .await
+            .unwrap();
+        assert_eq!(prompt, None, "summary markers carry no recall");
+        let stored = store.load_session(sid).await.unwrap();
+        assert_eq!(stored.leaf_id, Some(summary.id));
     }
 
     #[tokio::test]

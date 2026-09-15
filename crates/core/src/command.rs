@@ -65,10 +65,12 @@ pub enum Command {
         allow: bool,
     },
     /// Fork the session: with `node: None`, walk to the active path's last
-    /// user prompt and fork before it (`/undo`); with a node id, fork at
-    /// that node (user → before it, assistant/tool → after it). When
-    /// `summarize`, an LLM summary of the prefix before the fork point is
-    /// created first and the node is reparented under it.
+    /// user prompt (`/undo`); with a node id, walk to that node. Every turn
+    /// node forks *before* itself — its parent becomes the tip and its
+    /// content is recalled into the input — while summary/system nodes walk
+    /// to themselves. When `summarize`, an LLM summary of the prefix before
+    /// the fork point is created first and the forked-away node is
+    /// reparented under it.
     ForkSession {
         node: Option<u64>,
         summarize: bool,
