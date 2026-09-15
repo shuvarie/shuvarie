@@ -48,31 +48,38 @@ nullable = true
 
 [[schema.tables.columns]]
 id = { table = 0, index = 6 }
+name = "leaf_id"
+ty = "U64"
+storage_ty = { UnsignedInteger = 8 }
+nullable = true
+
+[[schema.tables.columns]]
+id = { table = 0, index = 7 }
 name = "created_at"
 ty = "String"
 storage_ty = "Text"
 
 [[schema.tables.columns]]
-id = { table = 0, index = 7 }
+id = { table = 0, index = 8 }
 name = "updated_at"
 ty = "String"
 storage_ty = "Text"
 
 [[schema.tables.columns]]
-id = { table = 0, index = 8 }
+id = { table = 0, index = 9 }
 name = "scroll_sticky"
 ty = "Bool"
 storage_ty = "Boolean"
 
 [[schema.tables.columns]]
-id = { table = 0, index = 9 }
+id = { table = 0, index = 10 }
 name = "scroll_turn"
 ty = "U64"
 storage_ty = { UnsignedInteger = 8 }
 nullable = true
 
 [[schema.tables.columns]]
-id = { table = 0, index = 10 }
+id = { table = 0, index = 11 }
 name = "scroll_row"
 ty = "U64"
 storage_ty = { UnsignedInteger = 8 }
@@ -112,78 +119,91 @@ storage_ty = "Blob"
 
 [[schema.tables.columns]]
 id = { table = 1, index = 2 }
+name = "parent_id"
+ty = "U64"
+storage_ty = { UnsignedInteger = 8 }
+nullable = true
+
+[[schema.tables.columns]]
+id = { table = 1, index = 3 }
 name = "seq"
 ty = "U64"
 storage_ty = { UnsignedInteger = 8 }
 
 [[schema.tables.columns]]
-id = { table = 1, index = 3 }
+id = { table = 1, index = 4 }
 name = "role"
 ty = "String"
 storage_ty = { Enum = { name = "msg_role", variants = [{ name = "system" }, { name = "user" }, { name = "assistant" }] } }
 
 [[schema.tables.columns]]
-id = { table = 1, index = 4 }
+id = { table = 1, index = 5 }
 name = "content"
 ty = "String"
 storage_ty = "Text"
 
 [[schema.tables.columns]]
-id = { table = 1, index = 5 }
+id = { table = 1, index = 6 }
 name = "reasoning"
 ty = "String"
 storage_ty = "Text"
 
 [[schema.tables.columns]]
-id = { table = 1, index = 6 }
+id = { table = 1, index = 7 }
+name = "text_segments"
+ty = "String"
+storage_ty = "Text"
+
+[[schema.tables.columns]]
+id = { table = 1, index = 8 }
 name = "interrupted"
 ty = "Bool"
 storage_ty = "Boolean"
 
 [[schema.tables.columns]]
-id = { table = 1, index = 7 }
+id = { table = 1, index = 9 }
 name = "input_tokens"
 ty = "U64"
 storage_ty = { UnsignedInteger = 8 }
 
 [[schema.tables.columns]]
-id = { table = 1, index = 8 }
+id = { table = 1, index = 10 }
 name = "output_tokens"
 ty = "U64"
 storage_ty = { UnsignedInteger = 8 }
 
 [[schema.tables.columns]]
-id = { table = 1, index = 9 }
+id = { table = 1, index = 11 }
 name = "total_tokens"
 ty = "U64"
 storage_ty = { UnsignedInteger = 8 }
 
 [[schema.tables.columns]]
-id = { table = 1, index = 10 }
+id = { table = 1, index = 12 }
 name = "cached_input_tokens"
 ty = "U64"
 storage_ty = { UnsignedInteger = 8 }
 
 [[schema.tables.columns]]
-id = { table = 1, index = 11 }
+id = { table = 1, index = 13 }
 name = "reasoning_tokens"
 ty = "U64"
 storage_ty = { UnsignedInteger = 8 }
 
 [[schema.tables.columns]]
-id = { table = 1, index = 12 }
+id = { table = 1, index = 14 }
 name = "cost"
 ty = "F64"
 storage_ty = { Float = 8 }
 
 [[schema.tables.columns]]
-id = { table = 1, index = 13 }
+id = { table = 1, index = 15 }
 name = "summary"
 ty = "Bool"
 storage_ty = "Boolean"
 
 [[schema.tables.columns]]
-id = { table = 1, index = 14 }
+id = { table = 1, index = 16 }
 name = "request_json"
 ty = "String"
 storage_ty = "Text"
@@ -201,6 +221,12 @@ id = { table = 1, index = 1 }
 name = "index_messages_by_session_id"
 on = 1
 columns = [{ column = { table = 1, index = 1 }, op = "Eq", scope = "Partition" }]
+
+[[schema.tables.indices]]
+id = { table = 1, index = 2 }
+name = "index_messages_by_parent_id"
+on = 1
+columns = [{ column = { table = 1, index = 2 }, op = "Eq", scope = "Partition" }]
 
 [[schema.tables]]
 id = 2
@@ -320,48 +346,48 @@ storage_ty = "Boolean"
 
 [[schema.tables.columns]]
 id = { table = 3, index = 8 }
+name = "killed"
+ty = "Bool"
+storage_ty = "Boolean"
+
+[[schema.tables.columns]]
+id = { table = 3, index = 9 }
 name = "worker"
 ty = "String"
 storage_ty = "Text"
 nullable = true
 
 [[schema.tables.columns]]
-id = { table = 3, index = 9 }
+id = { table = 3, index = 10 }
 name = "file_change_json"
 ty = "String"
 storage_ty = "Text"
 
 [[schema.tables.columns]]
-id = { table = 3, index = 10 }
+id = { table = 3, index = 11 }
 name = "original_content"
 ty = "String"
 storage_ty = "Text"
 nullable = true
 
 [[schema.tables.columns]]
-id = { table = 3, index = 11 }
+id = { table = 3, index = 12 }
 name = "new_content"
 ty = "String"
 storage_ty = "Text"
 nullable = true
 
 [[schema.tables.columns]]
-id = { table = 3, index = 12 }
+id = { table = 3, index = 13 }
 name = "stderr"
 ty = "String"
 storage_ty = "Text"
 
 [[schema.tables.columns]]
-id = { table = 3, index = 13 }
+id = { table = 3, index = 14 }
 name = "duration_ms"
 ty = "U64"
 storage_ty = { UnsignedInteger = 8 }
-
-[[schema.tables.columns]]
-id = { table = 3, index = 14 }
-name = "killed"
-ty = "Bool"
-storage_ty = "Boolean"
 
 [[schema.tables.indices]]
 id = { table = 3, index = 0 }
@@ -382,77 +408,3 @@ id = { table = 3, index = 2 }
 name = "index_tool_calls_by_message_id"
 on = 3
 columns = [{ column = { table = 3, index = 2 }, op = "Eq", scope = "Partition" }]
-
-[[schema.tables]]
-id = 4
-name = "undo_logs"
-primary_key = { columns = [{ table = 4, index = 0 }], index = { table = 4, index = 0 } }
-
-[[schema.tables.columns]]
-id = { table = 4, index = 0 }
-name = "id"
-ty = "U64"
-storage_ty = { UnsignedInteger = 4 }
-auto_increment = true
-
-[[schema.tables.columns]]
-id = { table = 4, index = 1 }
-name = "session_id"
-ty = "Bytes"
-storage_ty = "Blob"
-
-[[schema.tables.columns]]
-id = { table = 4, index = 2 }
-name = "turn_seq"
-ty = "U64"
-storage_ty = { UnsignedInteger = 8 }
-
-[[schema.tables.columns]]
-id = { table = 4, index = 3 }
-name = "user_content"
-ty = "String"
-storage_ty = "Text"
-
-[[schema.tables.columns]]
-id = { table = 4, index = 4 }
-name = "assistant_content"
-ty = "String"
-storage_ty = "Text"
-
-[[schema.tables.columns]]
-id = { table = 4, index = 5 }
-name = "reasoning"
-ty = "String"
-storage_ty = "Text"
-
-[[schema.tables.columns]]
-id = { table = 4, index = 6 }
-name = "usage_json"
-ty = "String"
-storage_ty = "Text"
-
-[[schema.tables.columns]]
-id = { table = 4, index = 7 }
-name = "tool_calls_json"
-ty = "String"
-storage_ty = "Text"
-
-[[schema.tables.columns]]
-id = { table = 4, index = 8 }
-name = "file_changes_json"
-ty = "String"
-storage_ty = "Text"
-
-[[schema.tables.indices]]
-id = { table = 4, index = 0 }
-name = "index_undo_logs_by_id"
-on = 4
-columns = [{ column = { table = 4, index = 0 }, op = "Eq", scope = "Partition" }]
-unique = true
-primary_key = true
-
-[[schema.tables.indices]]
-id = { table = 4, index = 1 }
-name = "index_undo_logs_by_session_id"
-on = 4
-columns = [{ column = { table = 4, index = 1 }, op = "Eq", scope = "Partition" }]

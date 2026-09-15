@@ -68,10 +68,14 @@ async fn append_and_load_messages_in_order() {
     let mut store = Store::open_in_memory().await.unwrap();
     let id = store.create_session("t", None, None).await.unwrap();
 
-    store.append_message(id, Role::User, "hello").await.unwrap();
+    store
+        .append_message(id, None, Role::User, "hello")
+        .await
+        .unwrap();
     store
         .append_assistant_message(
             id,
+            None,
             "hi there",
             &[],
             &[],
@@ -95,7 +99,10 @@ async fn append_and_load_messages_in_order() {
         )
         .await
         .unwrap();
-    store.append_message(id, Role::User, "again").await.unwrap();
+    store
+        .append_message(id, None, Role::User, "again")
+        .await
+        .unwrap();
 
     let loaded = store.load_session(id).await.unwrap();
     assert_eq!(loaded.messages.len(), 3);
@@ -120,10 +127,16 @@ async fn append_and_load_messages_in_order() {
 async fn role_round_trip() {
     let mut store = Store::open_in_memory().await.unwrap();
     let id = store.create_session("roles", None, None).await.unwrap();
-    store.append_message(id, Role::System, "sys").await.unwrap();
-    store.append_message(id, Role::User, "usr").await.unwrap();
     store
-        .append_message(id, Role::Assistant, "ast")
+        .append_message(id, None, Role::System, "sys")
+        .await
+        .unwrap();
+    store
+        .append_message(id, None, Role::User, "usr")
+        .await
+        .unwrap();
+    store
+        .append_message(id, None, Role::Assistant, "ast")
         .await
         .unwrap();
 
@@ -140,7 +153,7 @@ async fn most_recent_session_is_last_updated() {
     let old = store.create_session("old", None, None).await.unwrap();
     let new = store.create_session("new", None, None).await.unwrap();
     store
-        .append_message(old, Role::User, "touching old")
+        .append_message(old, None, Role::User, "touching old")
         .await
         .unwrap();
 
@@ -149,7 +162,7 @@ async fn most_recent_session_is_last_updated() {
     assert_eq!(recent.title, "old");
 
     store
-        .append_message(new, Role::User, "touching new")
+        .append_message(new, None, Role::User, "touching new")
         .await
         .unwrap();
     let recent = store.most_recent_session().await.unwrap().unwrap();
@@ -160,7 +173,10 @@ async fn most_recent_session_is_last_updated() {
 async fn reasoning_segments_round_trip_with_positions() {
     let mut store = Store::open_in_memory().await.unwrap();
     let id = store.create_session("think", None, None).await.unwrap();
-    store.append_message(id, Role::User, "do it").await.unwrap();
+    store
+        .append_message(id, None, Role::User, "do it")
+        .await
+        .unwrap();
 
     let segments = vec![
         ReasoningSegment {
@@ -177,6 +193,7 @@ async fn reasoning_segments_round_trip_with_positions() {
     let msg = store
         .append_assistant_message(
             id,
+            None,
             "done",
             &segments,
             &[],
@@ -213,7 +230,10 @@ async fn reasoning_segments_round_trip_with_positions() {
 async fn text_segments_round_trip_with_positions() {
     let mut store = Store::open_in_memory().await.unwrap();
     let id = store.create_session("runs", None, None).await.unwrap();
-    store.append_message(id, Role::User, "do it").await.unwrap();
+    store
+        .append_message(id, None, Role::User, "do it")
+        .await
+        .unwrap();
 
     let segments = vec![
         shuvarie_db::TextSegment {
@@ -228,6 +248,7 @@ async fn text_segments_round_trip_with_positions() {
     let msg = store
         .append_assistant_message(
             id,
+            None,
             "first run\n\nrun after two tools",
             &[],
             &segments,
@@ -264,7 +285,10 @@ async fn text_segments_round_trip_with_positions() {
 async fn delete_session_removes_messages() {
     let mut store = Store::open_in_memory().await.unwrap();
     let id = store.create_session("gone", None, None).await.unwrap();
-    store.append_message(id, Role::User, "x").await.unwrap();
+    store
+        .append_message(id, None, Role::User, "x")
+        .await
+        .unwrap();
 
     store.delete_session(id).await.unwrap();
     assert!(store.load_session(id).await.is_err());
@@ -290,7 +314,10 @@ async fn reopen_applies_migrations_and_preserves_data() {
             .create_session("persisted", Some("ollama"), Some("m1"))
             .await
             .unwrap();
-        store.append_message(id, Role::User, "hello").await.unwrap();
+        store
+            .append_message(id, None, Role::User, "hello")
+            .await
+            .unwrap();
         id
     };
 
@@ -307,7 +334,10 @@ async fn reopen_applies_migrations_and_preserves_data() {
 async fn set_scroll_persists_and_loads_without_touching_updated_at() {
     let mut store = Store::open_in_memory().await.unwrap();
     let id = store.create_session("t", None, None).await.unwrap();
-    store.append_message(id, Role::User, "hello").await.unwrap();
+    store
+        .append_message(id, None, Role::User, "hello")
+        .await
+        .unwrap();
     let before = store.list_sessions().await.unwrap()[0].updated_at_epoch_ms;
 
     store
@@ -345,7 +375,7 @@ async fn set_title_renames_without_touching_updated_at() {
     let first = store.create_session("first", None, None).await.unwrap();
     let second = store.create_session("second", None, None).await.unwrap();
     store
-        .append_message(first, Role::User, "bump first")
+        .append_message(first, None, Role::User, "bump first")
         .await
         .unwrap();
     let second_before = store
@@ -378,12 +408,13 @@ async fn search_finds_messages_across_sessions_ranked() {
     let s2 = store.create_session("sql", None, None).await.unwrap();
 
     store
-        .append_message(s1, Role::User, "how does tokio spawn tasks?")
+        .append_message(s1, None, Role::User, "how does tokio spawn tasks?")
         .await
         .unwrap();
     store
         .append_assistant_message(
             s1,
+            None,
             "tokio::spawn runs a task on the runtime",
             &[],
             &[],
@@ -395,7 +426,7 @@ async fn search_finds_messages_across_sessions_ranked() {
         .await
         .unwrap();
     store
-        .append_message(s2, Role::User, "how does sqlite index rows?")
+        .append_message(s2, None, Role::User, "how does sqlite index rows?")
         .await
         .unwrap();
 
@@ -418,7 +449,7 @@ async fn search_is_case_insensitive_and_empty_query_no_match() {
     let mut store = Store::open_in_memory().await.unwrap();
     let id = store.create_session("t", None, None).await.unwrap();
     store
-        .append_message(id, Role::User, "Rust borrow checker")
+        .append_message(id, None, Role::User, "Rust borrow checker")
         .await
         .unwrap();
 
@@ -436,7 +467,7 @@ async fn search_respects_limit_and_delete() {
     let id = store.create_session("t", None, None).await.unwrap();
     for i in 0..5 {
         store
-            .append_message(id, Role::User, &format!("request number {i}"))
+            .append_message(id, None, Role::User, &format!("request number {i}"))
             .await
             .unwrap();
     }
@@ -462,7 +493,7 @@ async fn upsert_embedding_roundtrip_and_upsert() {
     let mut store = Store::open_in_memory().await.unwrap();
     let id = store.create_session("t", None, None).await.unwrap();
     store
-        .append_message(id, Role::User, "how do I parse json?")
+        .append_message(id, None, Role::User, "how do I parse json?")
         .await
         .unwrap();
     let msg = store.load_session(id).await.unwrap();
@@ -485,8 +516,14 @@ async fn upsert_embedding_roundtrip_and_upsert() {
 async fn missing_embeddings_lists_only_unembedded() {
     let mut store = Store::open_in_memory().await.unwrap();
     let id = store.create_session("t", None, None).await.unwrap();
-    store.append_message(id, Role::User, "a").await.unwrap();
-    store.append_message(id, Role::User, "b").await.unwrap();
+    store
+        .append_message(id, None, Role::User, "a")
+        .await
+        .unwrap();
+    store
+        .append_message(id, None, Role::User, "b")
+        .await
+        .unwrap();
     let loaded = store.load_session(id).await.unwrap();
 
     store
@@ -508,11 +545,11 @@ async fn semantic_search_ranks_by_cosine() {
     let mut store = Store::open_in_memory().await.unwrap();
     let id = store.create_session("rust", None, None).await.unwrap();
     store
-        .append_message(id, Role::User, "tokio spawn")
+        .append_message(id, None, Role::User, "tokio spawn")
         .await
         .unwrap();
     store
-        .append_message(id, Role::User, "sqlite index")
+        .append_message(id, None, Role::User, "sqlite index")
         .await
         .unwrap();
     let loaded = store.load_session(id).await.unwrap();
@@ -550,8 +587,14 @@ async fn semantic_search_ranks_by_cosine() {
 async fn semantic_search_respects_limit_and_delete() {
     let mut store = Store::open_in_memory().await.unwrap();
     let id = store.create_session("t", None, None).await.unwrap();
-    store.append_message(id, Role::User, "alpha").await.unwrap();
-    store.append_message(id, Role::User, "beta").await.unwrap();
+    store
+        .append_message(id, None, Role::User, "alpha")
+        .await
+        .unwrap();
+    store
+        .append_message(id, None, Role::User, "beta")
+        .await
+        .unwrap();
     let loaded = store.load_session(id).await.unwrap();
     for (i, m) in loaded.messages.iter().enumerate() {
         store
@@ -743,8 +786,7 @@ async fn reopen_legacy_database_with_multiprocess_wal() {
                 shuvarie_db::Session,
                 shuvarie_db::Message,
                 shuvarie_db::MessageEmbedding,
-                shuvarie_db::ToolCall,
-                shuvarie_db::UndoLog
+                shuvarie_db::ToolCall
             ))
             .build(toasty_driver_turso::Turso::file(&path).experimental_index_method(true))
             .await
@@ -755,4 +797,153 @@ async fn reopen_legacy_database_with_multiprocess_wal() {
     let mut store = Store::open(&path).await.unwrap();
     store.create_session("legacy", None, None).await.unwrap();
     assert_eq!(store.list_sessions().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn tree_messages_round_trip_with_parents_and_leaf() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store.create_session("tree", None, None).await.unwrap();
+
+    let user = store
+        .append_message(id, None, Role::User, "first")
+        .await
+        .unwrap();
+    let assistant = store
+        .append_assistant_message(
+            id,
+            Some(user.id),
+            "reply",
+            &[],
+            &[],
+            false,
+            TokenUsage::default(),
+            0.0,
+            &TokenUsage::default(),
+        )
+        .await
+        .unwrap();
+    store.set_active_leaf(id, Some(assistant.id)).await.unwrap();
+
+    let loaded = store.load_session(id).await.unwrap();
+    assert_eq!(loaded.leaf_id, Some(assistant.id));
+    assert_eq!(loaded.messages[0].parent_id, None);
+    assert_eq!(loaded.messages[1].parent_id, Some(user.id));
+}
+
+#[tokio::test]
+async fn set_message_parent_reparents_and_persists() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store.create_session("fork", None, None).await.unwrap();
+    let first = store
+        .append_message(id, None, Role::User, "one")
+        .await
+        .unwrap();
+    let second = store
+        .append_message(id, None, Role::User, "two")
+        .await
+        .unwrap();
+    let summary = store
+        .append_summary(id, Some(first.id), "condensed")
+        .await
+        .unwrap();
+    store
+        .set_message_parent(second.id, Some(summary.id))
+        .await
+        .unwrap();
+
+    let loaded = store.load_session(id).await.unwrap();
+    assert_eq!(loaded.messages[1].parent_id, Some(summary.id));
+    assert!(loaded.messages[2].summary);
+    assert_eq!(loaded.messages[0].parent_id, None);
+}
+
+#[tokio::test]
+async fn delete_branch_removes_subtree_with_tool_calls() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store.create_session("branch", None, None).await.unwrap();
+    let root = store
+        .append_message(id, None, Role::User, "keep")
+        .await
+        .unwrap();
+    let kept = store
+        .append_assistant_message(
+            id,
+            Some(root.id),
+            "kept reply",
+            &[],
+            &[],
+            false,
+            TokenUsage::default(),
+            0.0,
+            &TokenUsage::default(),
+        )
+        .await
+        .unwrap();
+    let forked = store
+        .append_message(id, Some(root.id), Role::User, "forked away")
+        .await
+        .unwrap();
+    let forked_assistant = store
+        .append_assistant_message(
+            id,
+            Some(forked.id),
+            "forked reply",
+            &[],
+            &[],
+            false,
+            TokenUsage::default(),
+            0.0,
+            &TokenUsage::default(),
+        )
+        .await
+        .unwrap();
+    store
+        .append_tool_call(
+            id,
+            forked_assistant.id,
+            0,
+            "read_file",
+            "{}",
+            "out",
+            "",
+            true,
+            false,
+            None,
+            "",
+            None,
+            None,
+            0,
+        )
+        .await
+        .unwrap();
+    store.set_active_leaf(id, Some(kept.id)).await.unwrap();
+
+    let removed = store.delete_branch(id, forked.id).await.unwrap();
+    assert_eq!(removed, vec![forked.id, forked_assistant.id]);
+
+    let loaded = store.load_session(id).await.unwrap();
+    assert_eq!(loaded.messages.len(), 2, "kept root + kept assistant");
+    assert_eq!(loaded.leaf_id, Some(kept.id));
+    assert!(loaded.tool_calls.is_empty(), "subtree tool calls removed");
+}
+
+#[tokio::test]
+async fn set_active_leaf_is_clearable() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store.create_session("leaf", None, None).await.unwrap();
+    let user = store
+        .append_message(id, None, Role::User, "hi")
+        .await
+        .unwrap();
+    store.set_active_leaf(id, Some(user.id)).await.unwrap();
+    store.set_active_leaf(id, None).await.unwrap();
+    let loaded = store.load_session(id).await.unwrap();
+    assert_eq!(loaded.leaf_id, None);
+    let before = store.list_sessions().await.unwrap()[0].updated_at_epoch_ms;
+    store.set_active_leaf(id, Some(user.id)).await.unwrap();
+    assert_eq!(
+        store.list_sessions().await.unwrap()[0].updated_at_epoch_ms,
+        before,
+        "leaf writes must not reorder the session list"
+    );
 }

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,8 +12,7 @@ use toasty::stmt::Type;
 use crate::error::{DbError, Result};
 use crate::model::{
     Message, MessageEmbedding, MsgRole, ReasoningSegment, Session, SessionType, TextSegment,
-    ToolCall, UndoLog, encode_reasoning, encode_text_segments, parse_reasoning,
-    parse_text_segments,
+    ToolCall, encode_reasoning, encode_text_segments, parse_reasoning, parse_text_segments,
 };
 
 static MIGRATIONS: toasty::migration::MigrationSet = toasty::embed_migrations!();
@@ -55,6 +55,9 @@ pub struct StoredSession {
     pub title: String,
     pub provider: Option<String>,
     pub model: Option<String>,
+    /// Message id of the active branch's tip; the parent chain from it up to
+    /// the root is the active path.
+    pub leaf_id: Option<u64>,
     pub messages: Vec<StoredMessage>,
     pub tool_calls: Vec<StoredToolCall>,
     pub scroll: StoredScroll,
@@ -63,6 +66,8 @@ pub struct StoredSession {
 #[derive(Debug, Clone)]
 pub struct StoredMessage {
     pub id: u64,
+    /// Parent message id in the session tree; `None` for root prompts.
+    pub parent_id: Option<u64>,
     pub role: MsgRole,
     pub content: String,
     pub reasoning: Vec<ReasoningSegment>,
@@ -104,18 +109,6 @@ pub struct StoredToolCall {
     pub duration_ms: u64,
 }
 
-#[derive(Debug, Clone)]
-pub struct UndoEntry {
-    pub turn_seq: u64,
-    pub user_content: String,
-    pub assistant_content: String,
-    pub reasoning: Vec<ReasoningSegment>,
-    pub text_segments: Vec<TextSegment>,
-    pub usage: TokenUsage,
-    pub cost: f64,
-    pub tool_calls: Vec<StoredToolCall>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchSource {
     Fts,
@@ -146,6 +139,7 @@ impl From<Message> for StoredMessage {
     fn from(m: Message) -> Self {
         Self {
             id: m.id,
+            parent_id: m.parent_id,
             role: m.role,
             content: m.content,
             reasoning: parse_reasoning(&m.reasoning),
@@ -227,8 +221,7 @@ impl Store {
                 Session,
                 Message,
                 MessageEmbedding,
-                ToolCall,
-                UndoLog
+                ToolCall
             ))
             .build(driver)
             .await
@@ -290,6 +283,7 @@ impl Store {
             title: session.title,
             provider: session.provider,
             model: session.model,
+            leaf_id: session.leaf_id,
             messages,
             tool_calls,
             scroll,
@@ -314,6 +308,7 @@ impl Store {
             title: session.title,
             provider: session.provider,
             model: session.model,
+            leaf_id: session.leaf_id,
             messages,
             tool_calls,
             scroll,
@@ -365,12 +360,14 @@ impl Store {
     pub async fn append_message(
         &mut self,
         session_id: uuid::Uuid,
+        parent_id: Option<u64>,
         role: Role,
         content: &str,
     ) -> Result<StoredMessage> {
         let seq = self.next_seq(session_id).await?;
         let msg = toasty::create!(Message {
             session_id,
+            parent_id,
             seq,
             role: MsgRole::from(role),
             content: content.to_string(),
@@ -397,6 +394,7 @@ impl Store {
     pub async fn append_assistant_message(
         &mut self,
         session_id: uuid::Uuid,
+        parent_id: Option<u64>,
         content: &str,
         reasoning: &[ReasoningSegment],
         text_segments: &[TextSegment],
@@ -408,6 +406,7 @@ impl Store {
         let seq = self.next_seq(session_id).await?;
         let msg = toasty::create!(Message {
             session_id,
+            parent_id,
             seq,
             role: MsgRole::Assistant,
             content: content.to_string(),
@@ -463,11 +462,13 @@ impl Store {
     pub async fn append_summary(
         &mut self,
         session_id: uuid::Uuid,
+        parent_id: Option<u64>,
         content: &str,
     ) -> Result<StoredMessage> {
         let seq = self.next_seq(session_id).await?;
         let msg = toasty::create!(Message {
             session_id,
+            parent_id,
             seq,
             role: MsgRole::Assistant,
             content: content.to_string(),
@@ -488,6 +489,30 @@ impl Store {
         .map_err(|e| DbError::Query(e.to_string()))?;
         self.touch_session(session_id).await?;
         Ok(StoredMessage::from(msg))
+    }
+
+    /// Point the session's active branch at a (possibly new) tip. A raw
+    /// update bypasses the model's auto-timestamp, so `updated_at` is
+    /// untouched.
+    pub async fn set_active_leaf(&mut self, id: uuid::Uuid, leaf_id: Option<u64>) -> Result<()> {
+        toasty::sql::statement("UPDATE sessions SET leaf_id = ?1 WHERE id = ?2")
+            .bind_typed(leaf_id, db::Type::UnsignedInteger(8))
+            .bind_typed(id.as_bytes().to_vec(), db::Type::Blob)
+            .exec(&mut self.db)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Reparent a message under a new parent (branch building for forks and
+    /// compaction summaries).
+    pub async fn set_message_parent(&mut self, message_id: u64, parent: Option<u64>) -> Result<()> {
+        Message::update_by_id(message_id)
+            .parent_id(parent)
+            .exec(&mut self.db)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        Ok(())
     }
 
     pub async fn set_interrupted(&mut self, message_id: u64, interrupted: bool) -> Result<()> {
@@ -560,78 +585,61 @@ impl Store {
         Ok(rows.into_iter().map(StoredToolCall::from).collect())
     }
 
-    pub async fn truncate_undo_log(&mut self, session_id: uuid::Uuid) -> Result<()> {
-        UndoLog::filter_by_session_id(session_id)
-            .delete()
-            .exec(&mut self.db)
-            .await
-            .map_err(|e| DbError::Query(e.to_string()))?;
-        Ok(())
-    }
-
-    pub async fn append_undo_log(
+    /// Delete a branch: the message `root_id` and all of its descendants,
+    /// together with their tool calls and embeddings. Returns the deleted
+    /// message ids. The caller must ensure the active leaf is not inside the
+    /// subtree.
+    pub async fn delete_branch(
         &mut self,
         session_id: uuid::Uuid,
-        entry: &UndoEntry,
-    ) -> Result<()> {
-        let usage_json = serde_json::to_string(&entry.usage).unwrap_or_default();
-        let tool_calls_json = serialize_tool_calls(&entry.tool_calls);
-        let file_changes_json = serialize_file_changes(&entry.tool_calls);
-        toasty::create!(UndoLog {
-            session_id,
-            turn_seq: entry.turn_seq,
-            user_content: entry.user_content.clone(),
-            assistant_content: entry.assistant_content.clone(),
-            reasoning: encode_reasoning(&entry.reasoning),
-            text_segments: encode_text_segments(&entry.text_segments),
-            usage_json,
-            tool_calls_json,
-            file_changes_json,
-        })
-        .exec(&mut self.db)
-        .await
-        .map_err(|e| DbError::Query(e.to_string()))?;
-        Ok(())
-    }
-
-    pub async fn last_undo_log(&mut self, session_id: uuid::Uuid) -> Result<Option<UndoEntry>> {
-        let row = UndoLog::filter_by_session_id(session_id)
-            .latest_by(UndoLog::fields().id())
-            .first()
+        root_id: u64,
+    ) -> Result<Vec<u64>> {
+        let rows = toasty::sql::query("SELECT id, parent_id FROM messages WHERE session_id = ?1")
+            .bind_typed(session_id.as_bytes().to_vec(), db::Type::Blob)
+            .column_types([Type::I64, Type::I64])
             .exec(&mut self.db)
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        Ok(Some(UndoEntry {
-            turn_seq: row.turn_seq,
-            user_content: row.user_content,
-            assistant_content: row.assistant_content,
-            reasoning: parse_reasoning(&row.reasoning),
-            text_segments: parse_text_segments(&row.text_segments),
-            usage: serde_json::from_str(&row.usage_json).unwrap_or_default(),
-            cost: 0.0,
-            tool_calls: deserialize_tool_calls(&row.tool_calls_json),
-        }))
-    }
-
-    pub async fn pop_undo_log(&mut self, session_id: uuid::Uuid) -> Result<Option<UndoEntry>> {
-        let entry = self.last_undo_log(session_id).await?;
-        if entry.is_some() {
-            let row = UndoLog::filter_by_session_id(session_id)
-                .latest_by(UndoLog::fields().id())
-                .first()
+        let mut children: HashMap<u64, Vec<u64>> = HashMap::new();
+        for row in rows {
+            let toasty::stmt::Value::Record(fields) = row else {
+                continue;
+            };
+            let get_u64 = |i: usize| -> Option<u64> {
+                match &fields[i] {
+                    toasty::stmt::Value::I64(v) => Some(*v as u64),
+                    toasty::stmt::Value::U64(v) => Some(*v),
+                    _ => None,
+                }
+            };
+            if let (Some(id), parent) = (get_u64(0), get_u64(1)) {
+                children.entry(parent.unwrap_or(0)).or_default().push(id);
+            }
+        }
+        let mut subtree = Vec::new();
+        let mut queue = vec![root_id];
+        while let Some(id) = queue.pop() {
+            subtree.push(id);
+            if let Some(kids) = children.remove(&id) {
+                queue.extend(kids);
+            }
+        }
+        for id in &subtree {
+            ToolCall::filter_by_message_id(*id)
+                .delete()
                 .exec(&mut self.db)
                 .await
                 .map_err(|e| DbError::Query(e.to_string()))?;
-            if let Some(row) = row {
-                UndoLog::delete_by_id(&mut self.db, row.id)
-                    .await
-                    .map_err(|e| DbError::Query(e.to_string()))?;
-            }
+            MessageEmbedding::filter_by_message_id(*id)
+                .delete()
+                .exec(&mut self.db)
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?;
+            Message::delete_by_id(&mut self.db, *id)
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?;
         }
-        Ok(entry)
+        Ok(subtree)
     }
 
     pub async fn delete_session(&mut self, id: uuid::Uuid) -> Result<()> {
@@ -1177,117 +1185,4 @@ fn f32_blob(values: &[f32]) -> Vec<u8> {
         out.extend_from_slice(&v.to_le_bytes());
     }
     out
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct SerializableToolCall {
-    name: String,
-    args_json: String,
-    output: String,
-    #[serde(default)]
-    stderr: String,
-    ok: bool,
-    #[serde(default)]
-    killed: bool,
-    worker: Option<String>,
-    file_change_json: String,
-    original_content: Option<String>,
-    new_content: Option<String>,
-    #[serde(default)]
-    duration_ms: u64,
-}
-
-impl From<&StoredToolCall> for SerializableToolCall {
-    fn from(t: &StoredToolCall) -> Self {
-        Self {
-            name: t.name.clone(),
-            args_json: t.args_json.clone(),
-            output: t.output.clone(),
-            stderr: t.stderr.clone(),
-            ok: t.ok,
-            killed: t.killed,
-            worker: t.worker.clone(),
-            file_change_json: t.file_change_json.clone(),
-            original_content: t.original_content.clone(),
-            new_content: t.new_content.clone(),
-            duration_ms: t.duration_ms,
-        }
-    }
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct SerializableFileChange {
-    path: String,
-    original_content: Option<String>,
-    new_content: Option<String>,
-}
-
-fn serialize_tool_calls(tool_calls: &[StoredToolCall]) -> String {
-    let entries: Vec<SerializableToolCall> =
-        tool_calls.iter().map(SerializableToolCall::from).collect();
-    serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string())
-}
-
-fn serialize_file_changes(tool_calls: &[StoredToolCall]) -> String {
-    let mut entries = Vec::new();
-    for tc in tool_calls {
-        if tc.file_change_json.is_empty() {
-            continue;
-        }
-        entries.push(SerializableFileChange {
-            path: path_from_file_change_json(&tc.file_change_json),
-            original_content: tc.original_content.clone(),
-            new_content: tc.new_content.clone(),
-        });
-    }
-    serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string())
-}
-
-fn path_from_file_change_json(json: &str) -> String {
-    #[derive(serde::Deserialize)]
-    struct FcPath {
-        path: String,
-    }
-    #[derive(serde::Deserialize)]
-    #[serde(tag = "type", content = "path")]
-    enum FcEnvelope {
-        Edit { path: String },
-        Write { path: String },
-    }
-    if let Ok(env) = serde_json::from_str::<FcEnvelope>(json) {
-        return match env {
-            FcEnvelope::Edit { path } | FcEnvelope::Write { path } => path,
-        };
-    }
-    if let Ok(p) = serde_json::from_str::<FcPath>(json) {
-        return p.path;
-    }
-    String::new()
-}
-
-fn deserialize_tool_calls(json: &str) -> Vec<StoredToolCall> {
-    let Ok(entries) = serde_json::from_str::<Vec<SerializableToolCall>>(json) else {
-        return Vec::new();
-    };
-    entries
-        .into_iter()
-        .enumerate()
-        .map(|(seq, e)| StoredToolCall {
-            id: 0,
-            message_id: 0,
-            session_id: uuid::Uuid::nil(),
-            seq: seq as u64,
-            name: e.name,
-            args_json: e.args_json,
-            output: e.output,
-            stderr: e.stderr,
-            ok: e.ok,
-            killed: e.killed,
-            worker: e.worker,
-            file_change_json: e.file_change_json,
-            original_content: e.original_content,
-            new_content: e.new_content,
-            duration_ms: e.duration_ms,
-        })
-        .collect()
 }

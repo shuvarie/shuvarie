@@ -203,6 +203,9 @@ pub struct Session {
     pub parent_id: Option<uuid::Uuid>,
     #[belongs_to(key = parent_id, references = id)]
     pub parent: toasty::Deferred<Session>,
+    /// The message id of the active branch's tip; the chain from it up to the
+    /// root (via `messages.parent_id`) is the conversation's active path.
+    pub leaf_id: Option<u64>,
     #[auto]
     pub created_at: jiff::Timestamp,
     #[auto]
@@ -229,6 +232,14 @@ pub struct Message {
     pub session_id: uuid::Uuid,
     #[belongs_to(key = session_id, references = id)]
     pub session: toasty::Deferred<Session>,
+    /// Parent message in the session tree: `None` for root prompts, else the
+    /// id of the preceding node (user → assistant → user → …). A branch point
+    /// is a node with several children; the active path runs from
+    /// `sessions.leaf_id` up to the root.
+    #[index]
+    pub parent_id: Option<u64>,
+    #[belongs_to(key = parent_id, references = id)]
+    pub parent: toasty::Deferred<Message>,
     pub seq: u64,
     pub role: MsgRole,
     pub content: String,
@@ -278,23 +289,6 @@ pub struct ToolCall {
     pub new_content: Option<String>,
     pub stderr: String,
     pub duration_ms: u64,
-}
-
-#[derive(Debug, toasty::Model)]
-pub struct UndoLog {
-    #[key]
-    #[auto]
-    pub id: u64,
-    #[index]
-    pub session_id: uuid::Uuid,
-    pub turn_seq: u64,
-    pub user_content: String,
-    pub assistant_content: String,
-    pub reasoning: String,
-    pub text_segments: String,
-    pub usage_json: String,
-    pub tool_calls_json: String,
-    pub file_changes_json: String,
 }
 
 #[derive(Debug, toasty::Model)]

@@ -289,8 +289,8 @@ mod tests {
         menu.set_availability(CommandAction::UndoLastTurn, false);
         menu.sync("/re");
         let acts = actions(&menu);
-        assert!(acts.contains(&CommandAction::Redo));
         assert!(acts.contains(&CommandAction::Replay));
+        assert!(acts.contains(&CommandAction::Reload));
         menu.sync(":undo");
         assert!(
             actions(&menu).is_empty(),

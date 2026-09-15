@@ -836,78 +836,152 @@ pub async fn run(
                             let _ = respond.send(allow);
                         }
                     }
-                    Command::UndoLastTurn => {
+                    Command::ForkSession { node, summarize } => {
                         if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
                         }
                         pending_retry = None;
                         conn_retries = 0;
                         let Some(s) = &ctx.session else { continue; };
-                        let session_id = s.lock().await.id;
-                        let Some(sid) = session_id else { continue; };
-                        let last_user_content = s.lock().await.messages.iter().rev()
-                            .find(|m| m.role == shuvarie_llm::Role::User)
-                            .map(|m| m.content.clone());
-                        match undo_last_turn(&mut ctx.store, sid).await {
-                            Ok(true) => {
-                                if let Ok(stored) = ctx.store.load_session(sid).await {
-                                    let loaded = Session::from_stored(stored);
-                                    *s.lock().await = loaded.clone();
-                                    let _ = ctx.event_tx
-                                        .send(Event::TurnReverted {
-                                            session: loaded,
-                                            prompt: last_user_content,
-                                        })
+                        let Some(sid) = s.lock().await.id else { continue; };
+                        let summarizer = if summarize {
+                            let Some(active) = ctx.connections.active.clone() else {
+                                let _ = ctx
+                                    .event_tx
+                                    .send(Event::SessionError {
+                                        error: "no active provider to summarize".into(),
+                                    })
+                                    .await;
+                                continue;
+                            };
+                            let Some(model) = active.model.clone() else {
+                                let _ = ctx
+                                    .event_tx
+                                    .send(Event::SessionError {
+                                        error: "no active model to summarize".into(),
+                                    })
+                                    .await;
+                                continue;
+                            };
+                            match client_for(
+                                &mut ctx.clients,
+                                &mut ctx.connections,
+                                &active.provider,
+                            ) {
+                                Ok(c) => Some((c.clone(), model)),
+                                Err(e) => {
+                                    let _ = ctx
+                                        .event_tx
+                                        .send(Event::SessionError { error: e })
+                                        .await;
+                                    continue;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        match fork_session(
+                            &mut ctx.store,
+                            sid,
+                            node,
+                            summarize,
+                            summarizer.as_ref(),
+                            &ctx.event_tx,
+                        )
+                        .await
+                        {
+                            Ok(prompt) => {
+                                if let Err(e) = reload_and_emit(&mut ctx, sid, prompt).await {
+                                    let _ = ctx
+                                        .event_tx
+                                        .send(Event::SessionError { error: e })
                                         .await;
                                 }
                             }
-                            Ok(false) => {
-                                let _ = ctx.event_tx
-                                    .send(Event::SessionError {
-                                        error: "nothing to undo".into(),
-                                    })
-                                    .await;
-                            }
                             Err(e) => {
-                                let _ = ctx.event_tx
+                                let _ = ctx
+                                    .event_tx
                                     .send(Event::SessionError {
-                                        error: format!("undo failed: {e}"),
+                                        error: format!("fork failed: {e}"),
                                     })
                                     .await;
                             }
                         }
                     }
-                    Command::Redo => {
+                    Command::DeleteBranch { node } => {
                         if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
                         }
                         pending_retry = None;
                         conn_retries = 0;
                         let Some(s) = &ctx.session else { continue; };
-                        let session_id = s.lock().await.id;
-                        let Some(sid) = session_id else { continue; };
-                        match redo_turn(&mut ctx.store, sid).await {
-                            Ok(true) => {
-                                if let Ok(stored) = ctx.store.load_session(sid).await {
-                                    let loaded = Session::from_stored(stored);
-                                    *s.lock().await = loaded.clone();
-                                    let _ = ctx.event_tx
-                                        .send(Event::TurnRestored { session: loaded })
+                        let Some(sid) = s.lock().await.id else { continue; };
+                        match ctx.store.load_session(sid).await {
+                            Ok(stored) => {
+                                if subtree_contains(&stored, node, stored.leaf_id) {
+                                    let _ = ctx
+                                        .event_tx
+                                        .send(Event::SessionError {
+                                            error: "cannot delete the active branch".into(),
+                                        })
                                         .await;
+                                    continue;
+                                }
+                                if let Err(e) = ctx.store.delete_branch(sid, node).await {
+                                    let _ = ctx
+                                        .event_tx
+                                        .send(Event::SessionError {
+                                            error: format!("branch delete failed: {e}"),
+                                        })
+                                        .await;
+                                    continue;
+                                }
+                                match ctx.store.load_session(sid).await {
+                                    Ok(stored) => {
+                                        let _ = ctx
+                                            .event_tx
+                                            .send(Event::SessionTree {
+                                                session: Session::from_stored(stored),
+                                            })
+                                            .await;
+                                    }
+                                    Err(e) => {
+                                        let _ = ctx
+                                            .event_tx
+                                            .send(Event::SessionError {
+                                                error: e.to_string(),
+                                            })
+                                            .await;
+                                    }
                                 }
                             }
-                            Ok(false) => {
-                                let _ = ctx.event_tx
-                                    .send(Event::SessionError {
-                                        error: "nothing to redo".into(),
+                            Err(e) => {
+                                let _ = ctx
+                                    .event_tx
+                                    .send(Event::SessionError { error: e.to_string() })
+                                    .await;
+                            }
+                        }
+                    }
+                    Command::OpenTree => {
+                        if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
+                            continue;
+                        }
+                        let Some(s) = &ctx.session else { continue; };
+                        let Some(sid) = s.lock().await.id else { continue; };
+                        match ctx.store.load_session(sid).await {
+                            Ok(stored) => {
+                                let _ = ctx
+                                    .event_tx
+                                    .send(Event::SessionTree {
+                                        session: Session::from_stored(stored),
                                     })
                                     .await;
                             }
                             Err(e) => {
-                                let _ = ctx.event_tx
-                                    .send(Event::SessionError {
-                                        error: format!("redo failed: {e}"),
-                                    })
+                                let _ = ctx
+                                    .event_tx
+                                    .send(Event::SessionError { error: e.to_string() })
                                     .await;
                             }
                         }
@@ -922,34 +996,28 @@ pub async fn run(
                         let Some(s) = &ctx.session else { continue; };
                         let session_id = s.lock().await.id;
                         let Some(sid) = session_id else { continue; };
-                        let last_user_content = s.lock().await.messages.iter().rev()
-                            .find(|m| m.role == shuvarie_llm::Role::User)
-                            .map(|m| m.content.clone());
-                        match undo_last_turn(&mut ctx.store, sid).await {
-                            Ok(true) => {
-                                if let Ok(stored) = ctx.store.load_session(sid).await {
-                                    let loaded = Session::from_stored(stored);
-                                    *s.lock().await = loaded.clone();
-                                    let _ = ctx.event_tx
-                                        .send(Event::TurnReverted {
-                                            session: loaded,
-                                            prompt: None,
-                                        })
+                        let last_user_content = s.lock().await.last_user_node()
+                            .map(|n| n.content.clone());
+                        match fork_session(&mut ctx.store, sid, None, false, None, &ctx.event_tx)
+                            .await
+                        {
+                            Ok(_) => {
+                                if let Err(e) =
+                                    reload_and_emit(&mut ctx, sid, None).await
+                                {
+                                    let _ = ctx
+                                        .event_tx
+                                        .send(Event::SessionError { error: e })
                                         .await;
+                                    continue;
                                 }
                                 if let Some(content) = last_user_content {
                                     ctx.self_replay_send(content, true).await;
                                 }
                             }
-                            Ok(false) => {
-                                let _ = ctx.event_tx
-                                    .send(Event::SessionError {
-                                        error: "nothing to replay".into(),
-                                    })
-                                    .await;
-                            }
                             Err(e) => {
-                                let _ = ctx.event_tx
+                                let _ = ctx
+                                    .event_tx
                                     .send(Event::SessionError {
                                         error: format!("replay failed: {e}"),
                                     })
@@ -1294,132 +1362,215 @@ fn title_for(content: &str) -> String {
     }
 }
 
-async fn undo_last_turn(store: &mut Store, session_id: uuid::Uuid) -> Result<bool, String> {
-    let turn = store
-        .last_turn(session_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let Some((user_msg, assistant_msg)) = turn else {
-        return Ok(false);
-    };
-    let tool_calls = store
-        .tool_calls_for_message(assistant_msg.id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let usage = shuvarie_llm::TokenUsage {
-        input_tokens: assistant_msg.input_tokens,
-        output_tokens: assistant_msg.output_tokens,
-        total_tokens: assistant_msg.total_tokens,
-        cached_input_tokens: assistant_msg.cached_input_tokens,
-        reasoning_tokens: assistant_msg.reasoning_tokens,
-        ..Default::default()
-    };
-    let entry = shuvarie_db::UndoEntry {
-        turn_seq: assistant_msg.seq,
-        user_content: user_msg.content,
-        assistant_content: assistant_msg.content.clone(),
-        reasoning: assistant_msg.reasoning.clone(),
-        text_segments: assistant_msg.text_segments.clone(),
-        usage,
-        cost: assistant_msg.cost,
-        tool_calls: tool_calls.clone(),
-    };
-    store
-        .append_undo_log(session_id, &entry)
-        .await
-        .map_err(|e| e.to_string())?;
-    for tc in &tool_calls {
-        let change = parse_file_change(&tc.file_change_json);
-        let Some(change) = change else {
-            continue;
-        };
-        for (path, original, _new) in change.patch_files() {
-            if path.is_empty() {
-                continue;
-            }
-            if let Some(original) = original {
-                let _ = std::fs::write(path, original);
-            } else {
-                let _ = std::fs::remove_file(path);
-            }
+/// The active path's message ids, root → tip: the parent chain from the
+/// stored leaf (or the newest message when the leaf is unknown). The `seen`
+/// guard makes a corrupt parent cycle terminate.
+fn chain_of(stored: &shuvarie_db::StoredSession) -> Vec<u64> {
+    let by_id: std::collections::HashMap<u64, Option<u64>> = stored
+        .messages
+        .iter()
+        .map(|m| (m.id, m.parent_id))
+        .collect();
+    let mut leaf = stored
+        .leaf_id
+        .filter(|id| by_id.contains_key(id))
+        .or_else(|| stored.messages.iter().max_by_key(|m| m.seq).map(|m| m.id));
+    let mut ids = Vec::with_capacity(stored.messages.len());
+    let mut seen = std::collections::HashSet::new();
+    while let Some(id) = leaf {
+        if !seen.insert(id) {
+            break;
         }
+        ids.push(id);
+        leaf = by_id.get(&id).copied().flatten();
     }
-    store
-        .delete_tool_calls_for_message(assistant_msg.id)
-        .await
-        .map_err(|e| e.to_string())?;
-    store
-        .delete_message(assistant_msg.id)
-        .await
-        .map_err(|e| e.to_string())?;
-    store
-        .delete_message(user_msg.id)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(true)
+    ids.reverse();
+    ids
 }
 
-async fn redo_turn(store: &mut Store, session_id: uuid::Uuid) -> Result<bool, String> {
-    let entry = store
-        .pop_undo_log(session_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let Some(entry) = entry else {
-        return Ok(false);
+/// Whether `needle` (usually the active leaf) lies in the subtree rooted at
+/// `root_id`.
+fn subtree_contains(
+    stored: &shuvarie_db::StoredSession,
+    root_id: u64,
+    needle: Option<u64>,
+) -> bool {
+    let Some(needle) = needle else {
+        return false;
     };
-    let _user_msg = store
-        .append_message(session_id, shuvarie_llm::Role::User, &entry.user_content)
+    let mut children: HashMap<u64, Vec<u64>> = HashMap::new();
+    for m in &stored.messages {
+        if let Some(parent) = m.parent_id {
+            children.entry(parent).or_default().push(m.id);
+        }
+    }
+    let mut queue = vec![root_id];
+    while let Some(id) = queue.pop() {
+        if id == needle {
+            return true;
+        }
+        if let Some(kids) = children.remove(&id) {
+            queue.extend(kids);
+        }
+    }
+    false
+}
+
+/// Fork the session at a node: the active path is re-rooted at the fork tip
+/// (a user node forks *before* its prompt — its parent — while an assistant
+/// or tool node forks *after* its reply), optionally creating an LLM summary
+/// of the prefix before the fork point first. `node: None` walks to the
+/// active path's last user prompt and forks before it (`/undo`), yielding
+/// that prompt back for recall. Returns the recalled prompt, `None` when
+/// there was nothing to fork.
+async fn fork_session(
+    store: &mut Store,
+    session_id: uuid::Uuid,
+    node_id: Option<u64>,
+    summarize: bool,
+    summarizer: Option<&(ProviderClient, String)>,
+    event_tx: &Sender<Event>,
+) -> Result<Option<String>, String> {
+    let stored = store
+        .load_session(session_id)
         .await
         .map_err(|e| e.to_string())?;
-    let assistant_msg = store
-        .append_assistant_message(
-            session_id,
-            &entry.assistant_content,
-            &entry.reasoning,
-            &entry.text_segments,
-            false,
-            entry.usage,
-            entry.cost,
-            &TokenUsage::default(),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    for tc in &entry.tool_calls {
-        if let Some(change) = parse_file_change(&tc.file_change_json) {
-            for (path, _original, new) in change.patch_files() {
-                if path.is_empty() {
-                    continue;
-                }
-                if let Some(new) = new {
-                    let _ = std::fs::write(path, new);
-                }
+    let by_id: HashMap<u64, &shuvarie_db::StoredMessage> =
+        stored.messages.iter().map(|m| (m.id, m)).collect();
+    let (fork_tip, prompt): (Option<u64>, Option<String>) = match node_id {
+        None => {
+            let chain = chain_of(&stored);
+            let user_id = chain
+                .iter()
+                .rev()
+                .filter_map(|id| by_id.get(id).copied())
+                .find(|m| m.role == shuvarie_db::MsgRole::User)
+                .map(|m| m.id);
+            let Some(user_id) = user_id else {
+                return Ok(None);
+            };
+            let parent = by_id.get(&user_id).and_then(|m| m.parent_id);
+            let content = by_id.get(&user_id).map(|m| m.content.clone());
+            (parent, content)
+        }
+        Some(id) => {
+            let node = by_id.get(&id).ok_or("unknown node")?;
+            match node.role {
+                shuvarie_db::MsgRole::User => (node.parent_id, None),
+                _ => (Some(node.id), None),
             }
         }
-        let (fc_json, original, new) = (
-            tc.file_change_json.clone(),
-            tc.original_content.clone(),
-            tc.new_content.clone(),
-        );
-        let _ = store
-            .append_tool_call(
-                session_id,
-                assistant_msg.id,
-                tc.seq,
-                &tc.name,
-                &tc.args_json,
-                &tc.output,
-                &tc.stderr,
-                tc.ok,
-                tc.killed,
-                tc.worker.as_deref(),
-                &fc_json,
-                original.as_deref(),
-                new.as_deref(),
-                tc.duration_ms,
-            )
-            .await;
+    };
+
+    if summarize {
+        let Some(tip) = fork_tip else {
+            // Forking before the root prompt: nothing to summarize, the tree
+            // simply walks to an empty path.
+            store
+                .set_active_leaf(session_id, None)
+                .await
+                .map_err(|e| e.to_string())?;
+            return Ok(prompt);
+        };
+        // The prefix to summarize is the fork node's own ancestor chain
+        // (root → tip), which works for nodes off the current path too.
+        let tip_chain: Vec<u64> = {
+            let mut ids = Vec::new();
+            let mut cur = Some(tip);
+            let mut seen = std::collections::HashSet::new();
+            while let Some(id) = cur {
+                if !seen.insert(id) {
+                    break;
+                }
+                ids.push(id);
+                cur = by_id.get(&id).and_then(|m| m.parent_id);
+            }
+            ids.reverse();
+            ids
+        };
+        let prefix: Vec<shuvarie_db::StoredMessage> = tip_chain
+            .iter()
+            .filter_map(|id| by_id.get(id).map(|m| (*m).clone()))
+            .collect();
+        let chain_index: HashMap<u64, usize> = tip_chain
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, i))
+            .collect();
+        let records = span_tool_records(&stored, &chain_index, 0..prefix.len());
+        let head_text = crate::compaction::serialize_head(&prefix, &records, 0);
+        let Some((client, model)) = summarizer else {
+            return Err("summarization requested without an active provider".into());
+        };
+        let _ = event_tx.send(Event::CompactionStarted).await;
+        let summary = crate::compaction::summarize(client, model, &head_text).await;
+        let _ = event_tx.send(Event::CompactionFinished).await;
+        let summary = summary.map_err(|e| format!("summarization failed: {e}"))?;
+        let parent = match node_id {
+            // Forking before a user prompt: the summary hangs from the fork
+            // tip and the prompt is reparented under it, staying pending.
+            Some(id)
+                if by_id
+                    .get(&id)
+                    .is_some_and(|m| m.role == shuvarie_db::MsgRole::User) =>
+            {
+                Some(tip)
+            }
+            // Forking after an assistant node: the reply is summarized away;
+            // the summary takes its place in the chain.
+            _ => by_id.get(&tip).and_then(|m| m.parent_id),
+        };
+        let summary_msg = store
+            .append_summary(session_id, parent, &summary)
+            .await
+            .map_err(|e| e.to_string())?;
+        if let Some(id) = node_id
+            && by_id
+                .get(&id)
+                .is_some_and(|m| m.role == shuvarie_db::MsgRole::User)
+        {
+            store
+                .set_message_parent(id, Some(summary_msg.id))
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        store
+            .set_active_leaf(session_id, Some(summary_msg.id))
+            .await
+            .map_err(|e| e.to_string())?;
+    } else {
+        store
+            .set_active_leaf(session_id, fork_tip)
+            .await
+            .map_err(|e| e.to_string())?;
     }
-    Ok(true)
+    Ok(prompt)
+}
+
+/// Reload a session after a fork and emit [`Event::Forked`], swapping the
+/// in-memory session for the reloaded path.
+async fn reload_and_emit(
+    ctx: &mut CoreCtx,
+    session_id: uuid::Uuid,
+    prompt: Option<String>,
+) -> Result<(), String> {
+    let stored = ctx
+        .store
+        .load_session(session_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let loaded = Session::from_stored(stored);
+    if let Some(s) = &ctx.session {
+        *s.lock().await = loaded.clone();
+    }
+    let _ = ctx
+        .event_tx
+        .send(Event::Forked {
+            session: loaded,
+            prompt,
+        })
+        .await;
+    Ok(())
 }
 
 impl CoreCtx {
@@ -1483,14 +1634,16 @@ impl CoreCtx {
                     }
                 }
             }
-            let id = guard.id.unwrap();
+            let id = guard.id.expect("cannot be poisoned");
+            let parent = guard.leaf_id;
             let seq = guard.messages.len() - 1;
             let msg = self
                 .store
-                .append_message(id, guard.messages.last().unwrap().role, &content)
+                .append_message(id, parent, guard.messages.last().unwrap().role, &content)
                 .await;
             match msg {
                 Ok(msg) => {
+                    guard.leaf_id = Some(msg.id);
                     if let Some(setup) = &self.embedding_setup {
                         let store_idx = self.store.clone();
                         let setup_idx = setup.clone();
@@ -1543,10 +1696,14 @@ impl CoreCtx {
             guard.push_user(content.clone());
             let id = guard.id;
             if let Some(id) = id {
-                let _ = self
+                let parent = guard.leaf_id;
+                if let Ok(msg) = self
                     .store
-                    .append_message(id, guard.messages.last().unwrap().role, &content)
-                    .await;
+                    .append_message(id, parent, guard.messages.last().expect("cannot be poisoned").role, &content)
+                    .await
+                {
+                    guard.leaf_id = Some(msg.id);
+                }
             }
         }
         let Some(active) = self.connections.active.clone() else {
@@ -1722,49 +1879,43 @@ impl CoreCtx {
         );
     }
 
-    /// Delete the interrupted assistant turn (message + tool calls) and re-stream
-    /// from the last user message. Used by the auto-continue path after a context
-    /// overflow.
+    /// Delete the interrupted assistant tip (message + tool calls), walk the
+    /// leaf back to its parent (the user prompt), and re-stream from there.
+    /// Used by the auto-continue path after a context overflow and the
+    /// connection-retry resume. No undo-log entry — the retry rewrites the
+    /// same branch position.
     async fn resume_last_turn(&mut self) {
         let Some(s) = &self.session else {
             return;
         };
-        let (session_id, last_user_content) = {
-            let guard = s.lock().await;
-            let sid = guard.id;
-            let last_user = guard
-                .messages
-                .iter()
-                .rev()
-                .find(|m| m.role == shuvarie_llm::Role::User)
-                .map(|m| m.content.clone());
-            (sid, last_user)
-        };
-        let Some(sid) = session_id else {
+        let Some(sid) = s.lock().await.id else {
             return;
         };
-        let Some(content) = last_user_content else {
-            return;
+        if let Ok(stored) = self.store.load_session(sid).await
+            && let Some(leaf_id) = stored.leaf_id
+            && let Some(leaf) = stored.messages.iter().find(|m| m.id == leaf_id)
+            && leaf.role == shuvarie_db::MsgRole::Assistant
+        {
+            let _ = self.store.delete_tool_calls_for_message(leaf.id).await;
+            let _ = self.store.delete_message(leaf.id).await;
+            let _ = self.store.set_active_leaf(sid, leaf.parent_id).await;
+        }
+        let loaded = match self.store.load_session(sid).await {
+            Ok(stored) => Session::from_stored(stored),
+            Err(_) => return,
         };
-        if let Ok(Some((_user_msg, assistant_msg))) = self.store.last_turn(sid).await {
-            let _ = self
-                .store
-                .delete_tool_calls_for_message(assistant_msg.id)
-                .await;
-            let _ = self.store.delete_message(assistant_msg.id).await;
+        let content = loaded.messages.last().map(|m| m.content.clone());
+        *s.lock().await = loaded.clone();
+        let _ = self
+            .event_tx
+            .send(Event::Forked {
+                session: loaded,
+                prompt: None,
+            })
+            .await;
+        if let Some(content) = content {
+            self.self_replay_send(content, false).await;
         }
-        if let Ok(stored) = self.store.load_session(sid).await {
-            let loaded = Session::from_stored(stored);
-            *s.lock().await = loaded.clone();
-            let _ = self
-                .event_tx
-                .send(Event::TurnReverted {
-                    session: loaded,
-                    prompt: None,
-                })
-                .await;
-        }
-        self.self_replay_send(content, false).await;
     }
 }
 
@@ -2284,34 +2435,55 @@ async fn stream_stream_to_events(
                                 .into(),
                     })
                     .await;
-                // Run compaction: summarize the head of the stored session
-                // so the next turn sends [summary, tail] instead of the full
-                // history.
+                // Run compaction: summarize the head of the active path so
+                // the next turn sends [summary, tail] instead of the full
+                // history. The summary is inserted into the chain at the cut
+                // point and the first tail message reparented under it.
                 let mut compacted = false;
                 if let Some(sid) = session.lock().await.id
                     && let Ok(stored) = store.load_session(sid).await
-                    && let Some(plan) =
-                        crate::compaction::select_plan(&stored.messages, keep_recent_tokens)
                 {
-                    let head = &stored.messages[plan.start..plan.cut];
-                    let records = span_tool_records(&stored, plan.start..plan.cut);
-                    let head_text = crate::compaction::serialize_head(head, &records, plan.start);
-                    let _ = event_tx.send(Event::CompactionStarted).await;
-                    let summary = crate::compaction::summarize(&client, &model, &head_text).await;
-                    let _ = event_tx.send(Event::CompactionFinished).await;
-                    match summary {
-                        Ok(summary) => {
-                            if let Ok(msg) = store.append_summary(sid, &summary).await {
-                                session.lock().await.summary_seq = Some(msg.seq);
-                                compacted = true;
+                    let chain = chain_of(&stored);
+                    let by_id: HashMap<u64, &shuvarie_db::StoredMessage> =
+                        stored.messages.iter().map(|m| (m.id, m)).collect();
+                    let path: Vec<shuvarie_db::StoredMessage> = chain
+                        .iter()
+                        .filter_map(|id| by_id.get(id).map(|m| (*m).clone()))
+                        .collect();
+                    if let Some(plan) = crate::compaction::select_plan(&path, keep_recent_tokens) {
+                        let head = &path[plan.start..plan.cut];
+                        let chain_index: std::collections::HashMap<u64, usize> =
+                            chain.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+                        let records =
+                            span_tool_records(&stored, &chain_index, plan.start..plan.cut);
+                        let head_text =
+                            crate::compaction::serialize_head(head, &records, plan.start);
+                        let _ = event_tx.send(Event::CompactionStarted).await;
+                        let summary =
+                            crate::compaction::summarize(&client, &model, &head_text).await;
+                        let _ = event_tx.send(Event::CompactionFinished).await;
+                        match summary {
+                            Ok(summary) => {
+                                let parent = path[plan.cut - 1].id;
+                                if let Ok(msg) =
+                                    store.append_summary(sid, Some(parent), &summary).await
+                                {
+                                    if let Some(first_tail) = path.get(plan.cut) {
+                                        let _ = store
+                                            .set_message_parent(first_tail.id, Some(msg.id))
+                                            .await;
+                                    }
+                                    let _ = store.set_active_leaf(sid, Some(msg.id)).await;
+                                    compacted = true;
+                                }
                             }
-                        }
-                        Err(e) => {
-                            let _ = event_tx
-                                .send(Event::StreamError {
-                                    error: format!("compaction failed: {e}"),
-                                })
-                                .await;
+                            Err(e) => {
+                                let _ = event_tx
+                                    .send(Event::StreamError {
+                                        error: format!("compaction failed: {e}"),
+                                    })
+                                    .await;
+                            }
                         }
                     }
                 }
@@ -2374,6 +2546,7 @@ async fn stream_stream_to_events(
                 .insert(seq as u64, text_segments.clone());
         }
         guard.tool_records.append(&mut turn_tool_records);
+        let parent = guard.leaf_id;
         drop(guard);
         if let Some(id) = id {
             if let Some(msg_id) = assistant_message_id {
@@ -2389,7 +2562,6 @@ async fn stream_stream_to_events(
                         &usage,
                     )
                     .await;
-                let _ = store.truncate_undo_log(id).await;
                 if let Some(setup) = &embedding_setup {
                     let store_idx = store.clone();
                     let setup_idx = setup.clone();
@@ -2410,6 +2582,7 @@ async fn stream_stream_to_events(
                 match store
                     .append_assistant_message(
                         id,
+                        parent,
                         &text,
                         &reasoning,
                         &text_segments,
@@ -2421,6 +2594,7 @@ async fn stream_stream_to_events(
                     .await
                 {
                     Ok(msg) => {
+                        session.lock().await.leaf_id = Some(msg.id);
                         if let Some(setup) = &embedding_setup {
                             let store_idx = store.clone();
                             let setup_idx = setup.clone();
@@ -2460,30 +2634,25 @@ async fn stream_stream_to_events(
 }
 
 /// Tool records whose assistant message falls in the compaction span, with
-/// dense message indices matching the loaded session's message order so the
-/// transcript serializer can attach them to their messages.
+/// message indices matching the walked path slice so the transcript
+/// serializer can attach them to their messages.
 fn span_tool_records(
     stored: &shuvarie_db::StoredSession,
+    chain_index: &std::collections::HashMap<u64, usize>,
     span: std::ops::Range<usize>,
 ) -> Vec<crate::tool_record::ToolRecord> {
-    let id_to_index: std::collections::HashMap<u64, usize> = stored
-        .messages
-        .iter()
-        .enumerate()
-        .map(|(i, m)| (m.id, i))
-        .collect();
     stored
         .tool_calls
         .iter()
         .filter(|tc| {
-            id_to_index
+            chain_index
                 .get(&tc.message_id)
                 .is_some_and(|&idx| span.contains(&idx))
         })
         .map(|tc| {
             let mut record = crate::tool_record::ToolRecord::from_stored(tc.clone());
-            if let Some(idx) = id_to_index.get(&record.message_id) {
-                record.message_seq = *idx as u64;
+            if let Some(&idx) = chain_index.get(&record.message_id) {
+                record.message_seq = idx as u64;
             }
             record
         })
@@ -2501,14 +2670,17 @@ async fn ensure_assistant_row(
     if assistant_message_id.is_some() {
         return;
     }
-    let guard = session.lock().await;
-    let Some(id) = guard.id else {
+    let (id, parent) = {
+        let guard = session.lock().await;
+        (guard.id, guard.leaf_id)
+    };
+    let Some(id) = id else {
         return;
     };
-    drop(guard);
     if let Ok(msg) = store
         .append_assistant_message(
             id,
+            parent,
             "",
             reasoning,
             &[],
@@ -2521,6 +2693,7 @@ async fn ensure_assistant_row(
     {
         *assistant_message_id = Some(msg.id);
         *assistant_seq = msg.seq;
+        session.lock().await.leaf_id = Some(msg.id);
     }
 }
 
@@ -2532,13 +2705,6 @@ fn serialize_file_change(fc: &Option<FileChange>) -> (String, Option<String>, Op
         }
         None => (String::new(), None, None),
     }
-}
-
-fn parse_file_change(json: &str) -> Option<FileChange> {
-    if json.is_empty() {
-        return None;
-    }
-    serde_json::from_str::<FileChange>(json).ok()
 }
 
 /// Killed records for the tool calls of an interrupted turn that never
@@ -2667,10 +2833,12 @@ async fn persist_interrupted_turn(
             g.tool_records.extend(tool_records);
             g.tool_records.extend(killed);
         }
-    } else if (!text.is_empty() || !reasoning.is_empty())
-        && store
+    } else if !text.is_empty() || !reasoning.is_empty() {
+        let parent = { s.lock().await.leaf_id };
+        if let Ok(msg) = store
             .append_assistant_message(
                 id,
+                parent,
                 &text,
                 &reasoning,
                 &text_segments,
@@ -2680,18 +2848,19 @@ async fn persist_interrupted_turn(
                 &shuvarie_llm::TokenUsage::default(),
             )
             .await
-            .is_ok()
-    {
-        let mut g = s.lock().await;
-        g.push_assistant(text);
-        let seq = g.messages.len() - 1;
-        if !reasoning.is_empty() {
-            g.reasoning.insert(seq as u64, reasoning.clone());
+        {
+            let mut g = s.lock().await;
+            g.leaf_id = Some(msg.id);
+            g.push_assistant(text);
+            let seq = g.messages.len() - 1;
+            if !reasoning.is_empty() {
+                g.reasoning.insert(seq as u64, reasoning.clone());
+            }
+            if !text_segments.is_empty() {
+                g.text_segments.insert(seq as u64, text_segments);
+            }
+            g.interrupted.insert(seq as u64, true);
         }
-        if !text_segments.is_empty() {
-            g.text_segments.insert(seq as u64, text_segments);
-        }
-        g.interrupted.insert(seq as u64, true);
     }
 }
 
@@ -2733,9 +2902,11 @@ async fn persist_stream_error(
             )
             .await;
     } else if !text.is_empty() {
-        let _ = store
+        let parent = { session.lock().await.leaf_id };
+        if let Ok(msg) = store
             .append_assistant_message(
                 id,
+                parent,
                 &text,
                 pending_reasoning,
                 text_segments,
@@ -2744,7 +2915,10 @@ async fn persist_stream_error(
                 0.0,
                 &shuvarie_llm::TokenUsage::default(),
             )
-            .await;
+            .await
+        {
+            session.lock().await.leaf_id = Some(msg.id);
+        }
     }
     let mut g = session.lock().await;
     g.push_assistant(text);
@@ -4106,11 +4280,12 @@ mod tests {
             guard.push_user("go");
         }
         store
-            .append_message(id, shuvarie_llm::Role::User, "go")
+            .append_message(id, None, shuvarie_llm::Role::User, "go")
             .await
             .unwrap();
+        let user_row = store.load_session(id).await.unwrap().messages[0].id;
         let assistant = store
-            .append_message(id, shuvarie_llm::Role::Assistant, "")
+            .append_message(id, Some(user_row), shuvarie_llm::Role::Assistant, "")
             .await
             .unwrap();
 
@@ -4238,7 +4413,7 @@ mod tests {
             guard.push_user("go");
         }
         store
-            .append_message(id, shuvarie_llm::Role::User, "go")
+            .append_message(id, None, shuvarie_llm::Role::User, "go")
             .await
             .unwrap();
         let stream: shuvarie_llm::StreamStream = Box::pin(futures_util::stream::iter(vec![
@@ -4307,5 +4482,112 @@ mod tests {
             guard.text_segments.get(&1).map(Vec::as_slice),
             Some(assistant.text_segments.as_slice())
         );
+    }
+
+    async fn chain_session() -> (Store, uuid::Uuid, Vec<u64>) {
+        let mut store = Store::open_in_memory().await.unwrap();
+        let sid = store.create_session("fork", None, None).await.unwrap();
+        let user = store
+            .append_message(sid, None, shuvarie_llm::Role::User, "one")
+            .await
+            .unwrap();
+        let a1 = store
+            .append_message(sid, Some(user.id), shuvarie_llm::Role::Assistant, "r1")
+            .await
+            .unwrap();
+        let u2 = store
+            .append_message(sid, Some(a1.id), shuvarie_llm::Role::User, "two")
+            .await
+            .unwrap();
+        let a2 = store
+            .append_message(sid, Some(u2.id), shuvarie_llm::Role::Assistant, "r2")
+            .await
+            .unwrap();
+        store.set_active_leaf(sid, Some(a2.id)).await.unwrap();
+        (store, sid, vec![user.id, a1.id, u2.id, a2.id])
+    }
+
+    #[tokio::test]
+    async fn fork_session_undo_forks_before_the_last_user_prompt() {
+        let (mut store, sid, ids) = chain_session().await;
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+
+        let prompt = fork_session(&mut store, sid, None, false, None, &event_tx)
+            .await
+            .unwrap();
+        assert_eq!(prompt.as_deref(), Some("two"), "the prompt is recalled");
+
+        let stored = store.load_session(sid).await.unwrap();
+        assert_eq!(stored.leaf_id, Some(ids[1]), "the tip walks back to a1");
+        assert_eq!(
+            stored.messages.len(),
+            4,
+            "forking keeps every row in the tree"
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_session_at_an_assistant_node_walks_to_its_tip() {
+        let (mut store, sid, ids) = chain_session().await;
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+
+        let prompt = fork_session(&mut store, sid, Some(ids[1]), false, None, &event_tx)
+            .await
+            .unwrap();
+        assert_eq!(prompt, None);
+        let stored = store.load_session(sid).await.unwrap();
+        assert_eq!(stored.leaf_id, Some(ids[1]));
+    }
+
+    #[tokio::test]
+    async fn fork_session_at_a_user_node_forks_before_it() {
+        let (mut store, sid, ids) = chain_session().await;
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+
+        fork_session(&mut store, sid, Some(ids[2]), false, None, &event_tx)
+            .await
+            .unwrap();
+        let stored = store.load_session(sid).await.unwrap();
+        assert_eq!(stored.leaf_id, Some(ids[1]));
+    }
+
+    #[tokio::test]
+    async fn fork_session_without_summarizer_errors_on_summarize() {
+        let (mut store, sid, ids) = chain_session().await;
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+
+        let err = fork_session(&mut store, sid, Some(ids[2]), true, None, &event_tx)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("without an active provider"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_session_undo_on_a_root_only_session_starts_over() {
+        let mut store = Store::open_in_memory().await.unwrap();
+        let sid = store.create_session("solo", None, None).await.unwrap();
+        store
+            .append_message(sid, None, shuvarie_llm::Role::User, "only")
+            .await
+            .unwrap();
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+
+        let prompt = fork_session(&mut store, sid, None, false, None, &event_tx)
+            .await
+            .unwrap();
+        assert_eq!(prompt.as_deref(), Some("only"));
+        let stored = store.load_session(sid).await.unwrap();
+        assert_eq!(stored.leaf_id, None, "the active path is empty again");
+        assert_eq!(stored.messages.len(), 1, "the root prompt survives");
+    }
+
+    #[tokio::test]
+    async fn delete_branch_refuses_the_active_leaf() {
+        let (mut store, sid, ids) = chain_session().await;
+        let stored = store.load_session(sid).await.unwrap();
+        assert!(subtree_contains(&stored, ids[0], stored.leaf_id));
     }
 }

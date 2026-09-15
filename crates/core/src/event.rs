@@ -190,13 +190,18 @@ pub enum Event {
     SessionLocked {
         id: uuid::Uuid,
     },
-    TurnReverted {
+    /// The session forked: the active path now ends at a different node (an
+    /// `/undo` fork before the last user prompt, or a `/tree` fork). Carries
+    /// the reloaded session plus the forked-away user prompt to recall into
+    /// the input (`prompt: Some`) or `None` for popup forks and automatic
+    /// resumes (replay / interrupted retry).
+    Forked {
         session: crate::Session,
-        /// The undone user prompt, recalled into the input area; `None` when
-        /// the turn re-sends automatically (replay / interrupted resume).
         prompt: Option<String>,
     },
-    TurnRestored {
+    /// Reply to [`Command::OpenTree`]: the freshly loaded session tree for
+    /// the popup. Never touches the chat pane's state.
+    SessionTree {
         session: crate::Session,
     },
     SearchResults {

@@ -16,8 +16,7 @@ async fn main() -> anyhow::Result<()> {
         shuvarie_db::Session,
         shuvarie_db::Message,
         shuvarie_db::MessageEmbedding,
-        shuvarie_db::ToolCall,
-        shuvarie_db::UndoLog
+        shuvarie_db::ToolCall
     ));
     let db = builder
         .build(toasty_driver_turso::Turso::in_memory())

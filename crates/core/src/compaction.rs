@@ -270,6 +270,7 @@ mod tests {
     fn msg(role: MsgRole, content: &str) -> StoredMessage {
         StoredMessage {
             id: 0,
+            parent_id: None,
             role,
             content: content.to_string(),
             reasoning: Vec::new(),

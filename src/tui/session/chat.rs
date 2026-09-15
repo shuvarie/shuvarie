@@ -168,10 +168,7 @@ pub enum ChatMessage {
     Load {
         session: shuvarie_core::Session,
     },
-    TurnReverted {
-        session: shuvarie_core::Session,
-    },
-    TurnRestored {
+    Forked {
         session: shuvarie_core::Session,
     },
     Reset,
@@ -228,11 +225,12 @@ struct Scroll {
 }
 
 /// How [`Chat::apply_session`] seeds the viewport scroll: restore the
-/// persisted position (session load), pin to the top (turn reverted), or
-/// keep the current viewport (turn restored).
+/// persisted position (session load), pin to the top (fork), or keep the
+/// current viewport (unused).
 enum ScrollInit {
     Restore,
     Top,
+    #[allow(dead_code)]
     Keep,
 }
 
@@ -514,8 +512,7 @@ impl Chat {
                 self.commit_interrupted()
             }
             ChatMessage::Load { session } => self.apply_session(session, ScrollInit::Restore),
-            ChatMessage::TurnReverted { session } => self.apply_session(session, ScrollInit::Top),
-            ChatMessage::TurnRestored { session } => self.apply_session(session, ScrollInit::Keep),
+            ChatMessage::Forked { session } => self.apply_session(session, ScrollInit::Top),
             ChatMessage::Reset => {
                 *self.turns.borrow_mut() = Vec::new();
                 *self.in_flight.borrow_mut() = None;
@@ -1779,7 +1776,7 @@ fn materialize_blocks(session: &shuvarie_core::Session, idx: usize) -> Vec<Block
             };
             drain_reasoning(&mut blocks, &mut seg_i, 0);
             drain_text(&mut blocks, &mut run_i, 0);
-            if session.summary_seq.is_some_and(|seq| seq as usize == idx) {
+            if session.summaries.contains(&(idx as u64)) {
                 blocks.push(Block::Summary);
             }
             for (count, record) in session
@@ -1822,7 +1819,7 @@ fn build_turn_ests(session: &shuvarie_core::Session, interrupted: bool) -> Vec<T
                 .get(&(idx as u64))
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            let summary = session.summary_seq.is_some_and(|seq| seq as usize == idx);
+            let summary = session.summaries.contains(&(idx as u64));
             TurnEst::from_session_parts(
                 message.role,
                 &message.content,

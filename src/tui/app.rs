@@ -20,6 +20,7 @@ use super::context::UpdateCtx;
 use super::history_search::{HistorySearch, HistorySearchEffect, HistorySearchMessage};
 use super::model_picker::{ModelPicker, ModelPickerEffect, ModelPickerMessage};
 use super::search::SearchMessage;
+use super::session::tree::{TreeEffect, TreeMessage, TreePopup};
 use super::session::{
     BashMessage, ChatMessage, MouseKind, SessionEffect, SessionMessage, SessionScreen,
 };
@@ -42,6 +43,7 @@ pub enum Overlay {
     SessionPicker,
     HistorySearch,
     TitleEdit,
+    Tree,
 }
 
 pub enum AppMessage {
@@ -59,6 +61,7 @@ pub enum AppMessage {
     CommandMenu(CommandMenuMessage),
     Welcome(WelcomeMessage),
     SessionPicker(SessionPickerMessage),
+    Tree(TreeMessage),
     HistorySearch(HistorySearchMessage),
     TitlePopup(TitleMessage),
     ConfigSaved,
@@ -84,6 +87,10 @@ pub enum AppMessage {
     },
     SessionsLoaded {
         sessions: Vec<shuvarie_core::SessionSummary>,
+    },
+    /// The freshly loaded session tree for the `/tree` popup.
+    SessionTree {
+        session: shuvarie_core::Session,
     },
     SessionLoaded {
         id: uuid::Uuid,
@@ -143,6 +150,7 @@ pub struct App {
     pub add_provider_form: Option<AddProviderForm>,
     pub model_picker: ModelPicker,
     pub session_picker: SessionPicker,
+    pub tree_popup: TreePopup,
     pub history_search: HistorySearch,
     pub title_popup: TitlePopup,
     pub warning: WarningPopup,
@@ -216,6 +224,7 @@ impl App {
             add_provider_form: None,
             model_picker: ModelPicker::new(),
             session_picker: SessionPicker::new(),
+            tree_popup: TreePopup::new(),
             history_search: HistorySearch::new(),
             title_popup: TitlePopup::new(),
             warning: WarningPopup::new(),
@@ -349,6 +358,9 @@ impl App {
                                 .session_picker
                                 .map_event(&key)
                                 .map(AppMessage::SessionPicker);
+                        }
+                        Overlay::Tree => {
+                            return self.tree_popup.map_event(&key).map(AppMessage::Tree);
                         }
                         Overlay::HistorySearch => {
                             return self
@@ -602,17 +614,13 @@ impl App {
                 CoreEvent::SessionDeleted { id } => Some(AppMessage::SessionDeleted { id }),
                 CoreEvent::SessionLocked { .. } => Some(AppMessage::SessionLocked),
                 CoreEvent::SessionError { error } => Some(AppMessage::SessionError { error }),
-                CoreEvent::TurnReverted { session, prompt } => {
-                    Some(AppMessage::Session(SessionMessage::TurnReverted {
+                CoreEvent::Forked { session, prompt } => {
+                    Some(AppMessage::Session(SessionMessage::Forked {
                         session,
                         prompt,
                     }))
                 }
-                CoreEvent::TurnRestored { session } => {
-                    Some(AppMessage::Session(SessionMessage::TurnRestored {
-                        session,
-                    }))
-                }
+                CoreEvent::SessionTree { session } => Some(AppMessage::SessionTree { session }),
                 CoreEvent::SearchResults { hits } => {
                     Some(AppMessage::HistorySearch(HistorySearchMessage::Results {
                         hits,
@@ -666,7 +674,8 @@ impl App {
             Overlay::Welcome
             | Overlay::CommandMenu
             | Overlay::ConfirmQuit
-            | Overlay::SessionPicker => None,
+            | Overlay::SessionPicker
+            | Overlay::Tree => None,
             Overlay::ModelPicker => {
                 let flat = super::components::flatten_newlines(text);
                 let mut msg = None;
@@ -746,6 +755,14 @@ impl App {
                     }
                 }
             }
+            AppMessage::SessionTree { session } => {
+                if self.tree_popup.open {
+                    self.tree_popup.set_rows(&session);
+                } else {
+                    self.tree_popup.open(&session);
+                    self.overlay = Overlay::Tree;
+                }
+            }
             AppMessage::SessionPicker(m) => {
                 if let Some(effect) = self.session_picker.update(m) {
                     match effect {
@@ -766,6 +783,23 @@ impl App {
                         SessionPickerEffect::Close => {
                             self.close_overlay();
                         }
+                    }
+                }
+            }
+            AppMessage::Tree(m) => {
+                if let Some(effect) = self.tree_popup.update(m) {
+                    match effect {
+                        TreeEffect::Fork { node, summarize } => {
+                            self.close_overlay();
+                            self.ctx.send(shuvarie_core::Command::ForkSession {
+                                node: Some(node),
+                                summarize,
+                            });
+                        }
+                        TreeEffect::DeleteBranch { node } => {
+                            self.ctx.send(shuvarie_core::Command::DeleteBranch { node });
+                        }
+                        TreeEffect::Close => self.close_overlay(),
                     }
                 }
             }
@@ -946,7 +980,8 @@ impl App {
                     Overlay::None
                     | Overlay::Welcome
                     | Overlay::ConfirmQuit
-                    | Overlay::TitleEdit => {}
+                    | Overlay::TitleEdit
+                    | Overlay::Tree => {}
                 }
             }
             AppMessage::ConfigSaved => {
@@ -1232,9 +1267,9 @@ impl App {
         self.command_menu
             .set_availability(CommandAction::UndoLastTurn, has_messages);
         self.command_menu
-            .set_availability(CommandAction::Redo, has_messages);
-        self.command_menu
             .set_availability(CommandAction::Replay, has_messages);
+        self.command_menu
+            .set_availability(CommandAction::OpenTree, has_messages);
         let can_continue = self.session.can_continue();
         self.command_menu
             .set_availability(CommandAction::Continue, can_continue);
@@ -1258,6 +1293,15 @@ impl App {
                 self.refresh_sessions();
                 self.overlay = Overlay::SessionPicker;
             }
+            CommandAction::OpenTree => {
+                if self.session.session_id.is_none() {
+                    self.session.update(SessionMessage::ShowError {
+                        error: "no active session".into(),
+                    });
+                } else {
+                    self.ctx.send(shuvarie_core::Command::OpenTree);
+                }
+            }
             CommandAction::NewSession => {
                 self.save_scroll();
                 self.session.update(SessionMessage::Reset);
@@ -1276,10 +1320,10 @@ impl App {
                 }
             }
             CommandAction::UndoLastTurn => {
-                self.ctx.send(shuvarie_core::Command::UndoLastTurn);
-            }
-            CommandAction::Redo => {
-                self.ctx.send(shuvarie_core::Command::Redo);
+                self.ctx.send(shuvarie_core::Command::ForkSession {
+                    node: None,
+                    summarize: false,
+                });
             }
             CommandAction::Replay => {
                 self.ctx.send(shuvarie_core::Command::Replay);
@@ -1311,6 +1355,7 @@ impl App {
         self.add_provider_form = None;
         self.model_picker.close();
         self.session_picker.close();
+        self.tree_popup.close();
         self.history_search.close();
         self.confirm_quit.close();
         self.title_popup.close();
@@ -1375,6 +1420,7 @@ impl App {
         }
         self.model_picker.view(frame, area);
         self.session_picker.view(frame, area);
+        self.tree_popup.view(frame, area);
         self.history_search.view(frame, area);
         self.command_menu.view(frame, area);
         self.title_popup.view(frame, area);

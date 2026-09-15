@@ -849,11 +849,12 @@ async fn reload_reconstructs_tool_records_at_dense_message_indices() {
         .unwrap();
 
     let _user = store
-        .append_message(sid, shuvarie_llm::Role::User, "hello")
+        .append_message(sid, None, shuvarie_llm::Role::User, "hello")
         .await
         .unwrap();
+    let user_id = store.load_session(sid).await.unwrap().messages[0].id;
     let assistant = store
-        .append_message(sid, shuvarie_llm::Role::Assistant, "text")
+        .append_message(sid, Some(user_id), shuvarie_llm::Role::Assistant, "text")
         .await
         .unwrap();
     // `ToolCall.seq` is a per-message tool ordinal (0), not the message seq (1).
@@ -889,7 +890,7 @@ async fn reload_reconstructs_tool_records_at_dense_message_indices() {
 }
 
 #[tokio::test]
-async fn reload_after_redo_maps_tools_to_new_dense_indices() {
+async fn reload_after_resume_maps_tools_to_new_dense_indices() {
     let mut store = Store::open_in_memory().await.unwrap();
     let sid = store
         .create_session("t", Some("ollama"), Some("model"))
@@ -897,11 +898,12 @@ async fn reload_after_redo_maps_tools_to_new_dense_indices() {
         .unwrap();
 
     let _user = store
-        .append_message(sid, shuvarie_llm::Role::User, "hello")
+        .append_message(sid, None, shuvarie_llm::Role::User, "hello")
         .await
         .unwrap();
+    let user_id = store.load_session(sid).await.unwrap().messages[0].id;
     let first = store
-        .append_message(sid, shuvarie_llm::Role::Assistant, "old")
+        .append_message(sid, Some(user_id), shuvarie_llm::Role::Assistant, "old")
         .await
         .unwrap();
     store
@@ -911,14 +913,17 @@ async fn reload_after_redo_maps_tools_to_new_dense_indices() {
         .await
         .unwrap();
 
-    // Simulate redo: delete the assistant turn (tool calls + message), then
-    // re-append a fresh assistant row with a higher seq and its own tool call.
+    // Simulate an interrupted resume: delete the assistant turn (tool calls
+    // + message), walk the leaf back to the user prompt, then re-append a
+    // fresh assistant row with a higher seq and its own tool call.
     store.delete_tool_calls_for_message(first.id).await.unwrap();
     store.delete_message(first.id).await.unwrap();
+    store.set_active_leaf(sid, Some(user_id)).await.unwrap();
     let second = store
-        .append_message(sid, shuvarie_llm::Role::Assistant, "new")
+        .append_message(sid, Some(user_id), shuvarie_llm::Role::Assistant, "new")
         .await
         .unwrap();
+    store.set_active_leaf(sid, Some(second.id)).await.unwrap();
     store
         .append_tool_call(
             sid,

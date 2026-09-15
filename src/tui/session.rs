@@ -26,6 +26,7 @@ pub mod blocks;
 pub mod chat;
 pub mod md_cache;
 pub mod segment;
+pub mod tree;
 pub mod virtualizer;
 
 pub use bash::BashMessage;
@@ -131,14 +132,15 @@ pub enum SessionMessage {
         title: String,
         session: shuvarie_core::Session,
     },
-    TurnReverted {
+    /// The session forked: the active path ends at a different node now
+    /// (an `/undo` fork or a `/tree` fork); the chat pane rebuilds from the
+    /// reloaded session and the forked-away prompt may be recalled into the
+    /// input.
+    Forked {
         session: shuvarie_core::Session,
-        /// The undone user prompt, recalled into the input area; `None` when
-        /// the turn re-sends automatically (replay / interrupted resume).
+        /// The forked-away user prompt, recalled into the input area; `None`
+        /// when the fork re-sends automatically (replay / retry resume).
         prompt: Option<String>,
-    },
-    TurnRestored {
-        session: shuvarie_core::Session,
     },
     /// A user turn started streaming in the core: either an accepted submit
     /// or a dispatched steered prompt. Renders the user prompt and arms the
@@ -425,9 +427,9 @@ impl SessionScreen {
         self.slash
             .set_availability(CommandAction::UndoLastTurn, has_messages);
         self.slash
-            .set_availability(CommandAction::Redo, has_messages);
-        self.slash
             .set_availability(CommandAction::Replay, has_messages);
+        self.slash
+            .set_availability(CommandAction::OpenTree, has_messages);
         self.slash
             .set_availability(CommandAction::Continue, self.chat.last_turn_interrupted());
         self.slash
@@ -721,7 +723,7 @@ impl SessionScreen {
                 self.chat.update(ChatMessage::Load { session });
                 None
             }
-            SessionMessage::TurnReverted { session, prompt } => {
+            SessionMessage::Forked { session, prompt } => {
                 let usage = session.usage();
                 let cost = session.cost;
                 self.retry = None;
@@ -732,26 +734,12 @@ impl SessionScreen {
                     usage: session.last_usage,
                 });
                 self.sync_todos(shuvarie_core::tools::todos::replay(&session.tool_records));
-                self.chat.update(ChatMessage::TurnReverted { session });
+                self.chat.update(ChatMessage::Forked { session });
                 if let Some(prompt) = prompt {
                     self.input.stash_draft();
                     self.input.buffer.set(&prompt);
                     self.sync_slash();
                 }
-                None
-            }
-            SessionMessage::TurnRestored { session } => {
-                let usage = session.usage();
-                let cost = session.cost;
-                self.retry = None;
-                self.last_escape = None;
-                self.sidebar
-                    .update(SidebarMessage::SetUsage { usage, cost });
-                self.sidebar.update(SidebarMessage::SetContextRequest {
-                    usage: session.last_usage,
-                });
-                self.sync_todos(shuvarie_core::tools::todos::replay(&session.tool_records));
-                self.chat.update(ChatMessage::TurnRestored { session });
                 None
             }
             SessionMessage::TurnStarted { content, steered } => {
@@ -1581,7 +1569,7 @@ mod tests {
         screen.update(SessionMessage::CompactionStarted);
         screen.update(SessionMessage::CompactionFinished);
 
-        screen.update(SessionMessage::TurnReverted {
+        screen.update(SessionMessage::Forked {
             session: shuvarie_core::Session::new(),
             prompt: None,
         });
@@ -1661,7 +1649,7 @@ mod tests {
             max_attempts: 10,
             delay_ms: 5_000,
         });
-        screen.update(SessionMessage::TurnReverted {
+        screen.update(SessionMessage::Forked {
             session: shuvarie_core::Session::new(),
             prompt: None,
         });
@@ -1775,7 +1763,7 @@ mod tests {
         let mut screen = SessionScreen::new();
         screen.input.width.set(40);
         screen.input.buffer.set("in-progress draft");
-        screen.update(SessionMessage::TurnReverted {
+        screen.update(SessionMessage::Forked {
             session: shuvarie_core::Session::new(),
             prompt: Some("undone prompt".into()),
         });
@@ -1784,7 +1772,7 @@ mod tests {
         assert_eq!(screen.input.buffer.value, "in-progress draft");
 
         screen.input.buffer.set("other draft");
-        screen.update(SessionMessage::TurnReverted {
+        screen.update(SessionMessage::Forked {
             session: shuvarie_core::Session::new(),
             prompt: None,
         });

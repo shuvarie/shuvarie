@@ -64,8 +64,23 @@ pub enum Command {
         id: u64,
         allow: bool,
     },
-    UndoLastTurn,
-    Redo,
+    /// Fork the session: with `node: None`, walk to the active path's last
+    /// user prompt and fork before it (`/undo`); with a node id, fork at
+    /// that node (user → before it, assistant/tool → after it). When
+    /// `summarize`, an LLM summary of the prefix before the fork point is
+    /// created first and the node is reparented under it.
+    ForkSession {
+        node: Option<u64>,
+        summarize: bool,
+    },
+    /// Delete a branch of the session tree: the node and all of its
+    /// descendants (must not contain the active leaf).
+    DeleteBranch {
+        node: u64,
+    },
+    /// Load the active session's tree for the `/tree` popup; reports
+    /// [`crate::Event::SessionTree`].
+    OpenTree,
     Replay,
     Continue,
     Reload,
