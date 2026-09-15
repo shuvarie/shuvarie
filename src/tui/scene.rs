@@ -6,6 +6,7 @@ use termina::event::{KeyCode, KeyEvent};
 use super::theme;
 use crate::tui::add_provider::centered_rect;
 use crate::tui::list::scroll_offset_for;
+use crate::tui::utils::ctrl;
 use shuvarie_core::scenes::SceneListEntry;
 
 pub enum SceneMessage {
@@ -89,6 +90,13 @@ impl ScenePicker {
     }
 
     pub fn map_event(&self, key: &KeyEvent) -> Option<SceneMessage> {
+        if ctrl(key) {
+            return match key.code {
+                KeyCode::Char('n') => Some(SceneMessage::Next),
+                KeyCode::Char('p') => Some(SceneMessage::Prev),
+                _ => None,
+            };
+        }
         match key.code {
             KeyCode::Escape => Some(SceneMessage::Close),
             KeyCode::Down | KeyCode::Char('j') => Some(SceneMessage::Next),
@@ -342,5 +350,34 @@ mod tests {
             Some(SceneMessage::Close)
         ));
         assert!(picker.map_event(&key(KeyCode::Char('x'))).is_none());
+    }
+
+    #[test]
+    fn ctrl_n_and_ctrl_p_walk_the_entries() {
+        let picker = ScenePicker::new();
+        assert!(matches!(
+            picker.map_event(&KeyEvent::new(KeyCode::Char('n'), Modifiers::CONTROL)),
+            Some(SceneMessage::Next)
+        ));
+        assert!(matches!(
+            picker.map_event(&KeyEvent::new(KeyCode::Char('p'), Modifiers::CONTROL)),
+            Some(SceneMessage::Prev)
+        ));
+        let mut picker = ScenePicker::new();
+        picker.open(entries(), None, false);
+        picker.update(SceneMessage::Next);
+        assert_eq!(picker.selected, 1);
+        picker.update(SceneMessage::Prev);
+        assert_eq!(picker.selected, 0);
+    }
+
+    #[test]
+    fn ctrl_keys_do_not_leak_plain_verbs() {
+        let picker = ScenePicker::new();
+        assert!(
+            picker
+                .map_event(&KeyEvent::new(KeyCode::Char('x'), Modifiers::CONTROL))
+                .is_none()
+        );
     }
 }

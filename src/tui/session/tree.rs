@@ -9,6 +9,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::theme;
 use crate::tui::add_provider::centered_rect;
 use crate::tui::list::scroll_offset_for;
+use crate::tui::utils::ctrl;
 
 pub enum TreeMessage {
     Next,
@@ -136,6 +137,13 @@ impl TreePopup {
             return match key.code {
                 KeyCode::Enter => Some(TreeMessage::Delete),
                 KeyCode::Escape => Some(TreeMessage::CancelDelete),
+                _ => None,
+            };
+        }
+        if ctrl(key) {
+            return match key.code {
+                KeyCode::Char('n') => Some(TreeMessage::Next),
+                KeyCode::Char('p') => Some(TreeMessage::Prev),
                 _ => None,
             };
         }
@@ -427,6 +435,7 @@ fn elide(s: &str, max_width: usize) -> String {
 mod tests {
     use super::*;
     use shuvarie_core::session::TreeNode;
+    use termina::event::Modifiers;
 
     fn node(
         id: u64,
@@ -557,5 +566,74 @@ mod tests {
             Some(TreeEffect::DeleteBranch { node }) => assert_eq!(node, 2),
             other => panic!("expected delete effect, got {other:?}"),
         }
+    }
+
+    fn key(code: KeyCode, modifiers: Modifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    #[test]
+    fn ctrl_n_and_ctrl_p_walk_the_rows() {
+        let session = session_with(
+            vec![
+                node(1, None, Role::User, 0, "ask", true),
+                node(2, Some(1), Role::Assistant, 1, "reply", true),
+                node(3, Some(2), Role::User, 2, "other", false),
+            ],
+            2,
+        );
+        let mut popup = popup_for(&session);
+        assert_eq!(popup.selected, 1, "opens on the path tail");
+        assert!(matches!(
+            popup.map_event(&key(KeyCode::Char('n'), Modifiers::CONTROL)),
+            Some(TreeMessage::Next)
+        ));
+        popup.update(TreeMessage::Next);
+        assert_eq!(popup.selected, 2);
+        assert!(matches!(
+            popup.map_event(&key(KeyCode::Char('p'), Modifiers::CONTROL)),
+            Some(TreeMessage::Prev)
+        ));
+        popup.update(TreeMessage::Prev);
+        assert_eq!(popup.selected, 1);
+    }
+
+    #[test]
+    fn ctrl_keys_do_not_fire_actions_or_delete() {
+        let session = session_with(
+            vec![
+                node(1, None, Role::User, 0, "ask", true),
+                node(2, Some(1), Role::Assistant, 1, "off", false),
+            ],
+            1,
+        );
+        let popup = popup_for(&session);
+        assert!(
+            popup
+                .map_event(&key(KeyCode::Char('d'), Modifiers::CONTROL))
+                .is_none(),
+            "Ctrl+D is not the delete verb"
+        );
+        assert!(
+            popup
+                .map_event(&key(KeyCode::Char('s'), Modifiers::CONTROL))
+                .is_none(),
+            "Ctrl+S is not the summarize toggle"
+        );
+        assert!(
+            popup
+                .map_event(&key(KeyCode::Char('x'), Modifiers::CONTROL))
+                .is_none(),
+        );
+        let mut popup = popup_for(&session);
+        popup.selected = 1;
+        popup.update(TreeMessage::Delete);
+        assert!(popup.confirm_delete);
+        assert!(
+            popup
+                .map_event(&key(KeyCode::Char('n'), Modifiers::CONTROL))
+                .is_none(),
+            "the delete confirmation accepts only Enter and Esc"
+        );
     }
 }
