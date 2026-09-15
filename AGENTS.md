@@ -28,7 +28,7 @@ The TUI follows `map_event → message → update → return`. The root `App` co
 
 New components follow the same shape (message enum + `new` + `view` + `update` when needed), composed in `App` with a grouped `AppMessage` variant. Core events (`shuvarie_core::Event`) are mapped to `AppMessage` variants in `App::map_event`.
 
-Startup loads config + connections and the working-directory store (`.shuvarie/data.db` for release and `.shuvarie-dev/data.db` for debug); the TUI opens on the Session route — the first message lazily creates the session row; with no providers configured a Welcome overlay shows.
+Startup (after the `-d`/`--dir DIR` flag, when given, has switched the process working directory — default is the launch cwd) loads config + connections and the working-directory store (`.shuvarie/data.db` for release and `.shuvarie-dev/data.db` for debug); the TUI opens on the Session route — the first message lazily creates the session row; with no providers configured a Welcome overlay shows.
 
 ### Async runtime: Tokio
 

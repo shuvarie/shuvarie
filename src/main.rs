@@ -11,6 +11,12 @@ use crate::cli::show_resume_hint;
 async fn main() -> color_eyre::Result<()> {
     let args = cli::Cli::parse();
 
+    if let Some(dir) = args.dir.as_deref() {
+        std::env::set_current_dir(dir).map_err(|e| {
+            color_eyre::eyre::eyre!("failed to set working directory to {}: {e}", dir.display())
+        })?;
+    }
+
     let store = shuvarie_db::Store::open(&shuvarie_db::Store::default_path()).await?;
 
     let Some(trust::Resolved {

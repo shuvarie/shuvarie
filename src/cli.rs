@@ -26,6 +26,9 @@ pub struct Cli {
     /// Use a certain config file
     #[arg(long, value_name = "FILE")]
     pub config: Option<PathBuf>,
+    /// Run in a certain directory
+    #[arg(short, long, value_name = "DIR")]
+    pub dir: Option<PathBuf>,
 }
 
 pub fn show_resume_hint(session_id: Uuid) {
