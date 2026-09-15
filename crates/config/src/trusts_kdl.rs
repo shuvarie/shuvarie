@@ -1,4 +1,5 @@
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
+use std::collections::BTreeSet;
 
 use super::kdl_util::{autoformat, node_error, parse_document};
 use super::trusts::{Category, TrustFile, TrustGrants, WorkspaceTrust};
@@ -26,7 +27,8 @@ fn from_document(doc: &KdlDocument, input: &str) -> Result<TrustFile> {
                 if file.default_grants.is_some() {
                     return Err(node_error(input, node, "duplicate `trust` node", None));
                 }
-                file.default_grants = Some(parse_grants(node, input)?);
+                let granted = parse_grants(node, input)?;
+                file.default_grants = Some(granted.grants);
             }
             "path" => parse_workspace(node, input, &mut file)?,
             other => {
@@ -43,8 +45,9 @@ fn from_document(doc: &KdlDocument, input: &str) -> Result<TrustFile> {
 }
 
 /// The categories granted by a `trust` block's children: bare `all`,
-/// `contexts`, `skills`, and `configs` nodes, any mix.
-fn parse_grants(node: &KdlNode, input: &str) -> Result<TrustGrants> {
+/// `contexts`, `skills`, and `configs` nodes, any mix, plus the `asked`
+/// record of previously-offered categories (`asked { contexts … }`).
+fn parse_grants(node: &KdlNode, input: &str) -> Result<Granted> {
     let children = node
         .children()
         .ok_or_else(|| node_error(input, node, "`trust` requires a block", None))?;
@@ -57,7 +60,12 @@ fn parse_grants(node: &KdlNode, input: &str) -> Result<TrustGrants> {
         ));
     }
     let mut grants = TrustGrants::default();
+    let mut asked = Default::default();
     for child in children.nodes() {
+        if child.name().value() == "asked" {
+            asked = parse_asked(child, input)?;
+            continue;
+        }
         if !child.entries().is_empty() || child.children().is_some() {
             return Err(node_error(
                 input,
@@ -96,7 +104,56 @@ fn parse_grants(node: &KdlNode, input: &str) -> Result<TrustGrants> {
         }
         grants = TrustGrants::from_categories(grants.categories().chain(std::iter::once(category)));
     }
-    Ok(grants)
+    Ok(Granted { grants, asked })
+}
+
+/// The categories a `trust` block already offered: `asked { contexts … }`.
+fn parse_asked(node: &KdlNode, input: &str) -> Result<BTreeSet<Category>> {
+    let children = node
+        .children()
+        .ok_or_else(|| node_error(input, node, "`asked` requires a block", None))?;
+    if !node.entries().is_empty() {
+        return Err(node_error(
+            input,
+            node,
+            "`asked` does not take arguments",
+            None,
+        ));
+    }
+    let mut asked = BTreeSet::new();
+    for child in children.nodes() {
+        if !child.entries().is_empty() || child.children().is_some() {
+            return Err(node_error(
+                input,
+                child,
+                format!("`{}` takes no arguments", child.name().value()),
+                None,
+            ));
+        }
+        let Some(category) = Category::parse(child.name().value()) else {
+            return Err(node_error(
+                input,
+                child,
+                format!("unknown trust category `{}`", child.name().value()),
+                Some("expected `contexts`, `skills`, or `configs`".into()),
+            ));
+        };
+        if !asked.insert(category) {
+            return Err(node_error(
+                input,
+                child,
+                format!("duplicate `{}` in `asked` block", category.as_str()),
+                None,
+            ));
+        }
+    }
+    Ok(asked)
+}
+
+/// What a `trust` block parses into: the grants plus the asked record.
+struct Granted {
+    grants: TrustGrants,
+    asked: BTreeSet<Category>,
 }
 
 fn parse_workspace(node: &KdlNode, input: &str, file: &mut TrustFile) -> Result<()> {
@@ -132,6 +189,7 @@ fn parse_workspace(node: &KdlNode, input: &str, file: &mut TrustFile) -> Result<
         ));
     };
     let mut grants = TrustGrants::default();
+    let mut asked = BTreeSet::new();
     let mut saw_trust = false;
     if let Some(children) = node.children() {
         for child in children.nodes() {
@@ -152,27 +210,35 @@ fn parse_workspace(node: &KdlNode, input: &str, file: &mut TrustFile) -> Result<
                 ));
             }
             saw_trust = true;
-            grants = parse_grants(child, input)?;
+            let granted = parse_grants(child, input)?;
+            grants = granted.grants;
+            asked = granted.asked;
         }
     }
     if file.workspaces.iter().any(|w| w.path == path) {
         return Err(node_error(input, node, "duplicate `path` record", None));
     }
-    file.workspaces.push(WorkspaceTrust { path, grants });
+    file.workspaces.push(WorkspaceTrust {
+        path,
+        grants,
+        asked,
+    });
     Ok(())
 }
 
 pub(crate) fn to_kdl(file: &TrustFile) -> Result<String> {
     let mut doc = KdlDocument::new();
     if let Some(default_grants) = &file.default_grants {
-        doc.nodes_mut().push(grants_node(default_grants));
+        doc.nodes_mut()
+            .push(grants_node(default_grants, &Default::default()));
     }
     for workspace in &file.workspaces {
         let mut node = KdlNode::new("path");
         node.push(KdlEntry::new(workspace.path.as_str()));
-        if !workspace.grants.is_empty() {
+        if !workspace.grants.is_empty() || !workspace.asked.is_empty() {
             let mut body = KdlDocument::new();
-            body.nodes_mut().push(grants_node(&workspace.grants));
+            body.nodes_mut()
+                .push(grants_node(&workspace.grants, &workspace.asked));
             node.set_children(body);
         }
         doc.nodes_mut().push(node);
@@ -181,7 +247,7 @@ pub(crate) fn to_kdl(file: &TrustFile) -> Result<String> {
     Ok(format!("{FILE_HEADER}{doc}"))
 }
 
-fn grants_node(grants: &TrustGrants) -> KdlNode {
+fn grants_node(grants: &TrustGrants, asked: &BTreeSet<Category>) -> KdlNode {
     let mut node = KdlNode::new("trust");
     let mut body = KdlDocument::new();
     if grants.covers_all() {
@@ -190,6 +256,15 @@ fn grants_node(grants: &TrustGrants) -> KdlNode {
         for category in grants.categories() {
             body.nodes_mut().push(KdlNode::new(category.as_str()));
         }
+    }
+    if !asked.is_empty() {
+        let mut asked_node = KdlNode::new("asked");
+        let mut asked_body = KdlDocument::new();
+        for category in asked {
+            asked_body.nodes_mut().push(KdlNode::new(category.as_str()));
+        }
+        asked_node.set_children(asked_body);
+        body.nodes_mut().push(asked_node);
     }
     node.set_children(body);
     node
@@ -276,6 +351,7 @@ mod tests {
             workspaces: vec![WorkspaceTrust {
                 path: "/tmp/x".into(),
                 grants: TrustGrants::from_categories(ALL_CATEGORIES),
+                asked: Default::default(),
             }],
         };
         let saved = to_kdl(&file).unwrap();
@@ -367,5 +443,62 @@ mod tests {
         };
         assert!(e.line >= 1);
         assert!(e.column >= 1);
+    }
+
+    #[test]
+    fn asked_record_round_trips() {
+        let text = r#"
+            path "/tmp/partial" {
+                trust {
+                    contexts
+                    skills
+                    asked {
+                        contexts
+                        skills
+                        configs
+                    }
+                }
+            }
+            path "/tmp/rejected" {
+                trust {
+                    asked {
+                        configs
+                    }
+                }
+            }
+        "#;
+        let parsed = from_kdl(text).unwrap();
+        assert_eq!(
+            parsed.workspaces[0].asked,
+            [Category::Contexts, Category::Skills, Category::Configs,]
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(
+            parsed.workspaces[1].asked,
+            [Category::Configs].into_iter().collect()
+        );
+
+        let saved = to_kdl(&parsed).unwrap();
+        let reparsed = from_kdl(&saved).unwrap();
+        assert_eq!(parsed, reparsed);
+    }
+
+    #[test]
+    fn rejects_bad_asked_blocks() {
+        let err = from_kdl("path \"a\" { trust { asked } }").unwrap_err();
+        assert!(
+            err.to_string().contains("`asked` requires a block"),
+            "{err}"
+        );
+
+        let err = from_kdl("path \"a\" { trust { asked \"x\" {} } }").unwrap_err();
+        assert!(err.to_string().contains("does not take arguments"), "{err}");
+
+        let err = from_kdl("path \"a\" { trust { asked { context } } }").unwrap_err();
+        assert!(err.to_string().contains("unknown trust category"), "{err}");
+
+        let err = from_kdl("path \"a\" { trust { asked {\n skills\n skills\n} } }").unwrap_err();
+        assert!(err.to_string().contains("duplicate `skills`"), "{err}");
     }
 }

@@ -210,23 +210,27 @@ fn scene_set_from_levels(
     global_layer: Option<SceneSource>,
     local_layers: Vec<SceneSource>,
     global_dir: &std::path::Path,
-    dropin_dir: Option<&std::path::Path>,
-) -> Result<SceneSet> {
+    dropin_dirs: &[PathBuf],
+) -> SceneSet {
     let mut global_sources = Vec::new();
     if let Some(layer) = global_layer {
         global_sources.push(layer);
     }
-    global_sources.extend(load_scene_dir_in(global_dir)?);
+    let (dir_sources, mut warnings) = load_scene_dir_in(global_dir, false);
+    global_sources.extend(dir_sources);
     let mut local_sources = local_layers;
-    if let Some(dir) = dropin_dir {
-        local_sources.extend(load_scene_dir_in(dir)?);
+    for dir in dropin_dirs {
+        let (dir_sources, dir_warnings) = load_scene_dir_in(dir, true);
+        local_sources.extend(dir_sources);
+        warnings.extend(dir_warnings);
     }
-    let (global, mut warnings) = merge_level("global config", &global_sources);
+    let (global, global_warnings) = merge_level("global config", &global_sources);
+    warnings.extend(global_warnings);
     let (local, local_warnings) = merge_level("local config", &local_sources);
     warnings.extend(local_warnings);
     let mut scenes = global;
     scenes.stack(local);
-    Ok(SceneSet { scenes, warnings })
+    SceneSet { scenes, warnings }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -656,6 +660,13 @@ pub struct SceneSource {
     pub label: String,
 
     pub scenes: ScenesConfig,
+
+    /// Whether the source belongs to the workspace (local) level; `false` is
+    /// the global config's layer. Levels decide override order and same-level
+    /// conflicts, so the flag is recorded at load time — deriving it from the
+    /// chain position would misclassify a local layer as the global one when
+    /// the global config file does not exist.
+    pub local: bool,
 }
 
 /// The runtime scene set [`Config::load_scenes`] builds: the merged scene
@@ -1040,16 +1051,32 @@ fn scene_dir_files(dir: &std::path::Path) -> Vec<PathBuf> {
 }
 
 /// Loads the sorted `*.kdl` scene drop-ins of `dir` as level sources, one per
-/// top-level `scenes` node (a missing or non-directory `dir` yields none).
-fn load_scene_dir_in(dir: &std::path::Path) -> Result<Vec<SceneSource>> {
+/// top-level `scenes` node (a missing or non-directory `dir` yields none). A
+/// file that fails to read or parse is skipped with a warning instead of
+/// failing the load.
+fn load_scene_dir_in(dir: &std::path::Path, local: bool) -> (Vec<SceneSource>, Vec<String>) {
     let mut sources = Vec::new();
+    let mut warnings = Vec::new();
     for file in scene_dir_files(dir) {
-        let contents = std::fs::read_to_string(&file)?;
-        let blocks = config_kdl::scenes_from_document(&contents)?;
         let base = file
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("scene.kdl");
+        let skip = |error: String| format!("{SCENE_DIR_NAME}/{base}: {error} (file skipped)");
+        let contents = match std::fs::read_to_string(&file) {
+            Ok(contents) => contents,
+            Err(error) => {
+                warnings.push(skip(error.to_string()));
+                continue;
+            }
+        };
+        let blocks = match config_kdl::scenes_from_document(&contents) {
+            Ok(blocks) => blocks,
+            Err(error) => {
+                warnings.push(skip(error.to_string()));
+                continue;
+            }
+        };
         let numbered = blocks.len() > 1;
         for (idx, scenes) in blocks.into_iter().enumerate() {
             let label = if numbered {
@@ -1057,10 +1084,14 @@ fn load_scene_dir_in(dir: &std::path::Path) -> Result<Vec<SceneSource>> {
             } else {
                 format!("{SCENE_DIR_NAME}/{base}")
             };
-            sources.push(SceneSource { label, scenes });
+            sources.push(SceneSource {
+                label,
+                scenes,
+                local,
+            });
         }
     }
-    Ok(sources)
+    (sources, warnings)
 }
 
 impl Config {
@@ -1089,8 +1120,11 @@ impl Config {
     /// `.shuvarie-dev`, `~/.config/shuvarie-dev`).
     pub fn load() -> Result<Self> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let mut paths = Self::local_config_candidates(&cwd).to_vec();
-        paths.push(Self::config_path()?);
+        let mut paths = Self::local_config_candidates(&cwd)
+            .into_iter()
+            .map(|path| (path, true))
+            .collect::<Vec<_>>();
+        paths.push((Self::config_path()?, false));
         Self::load_chain(&paths)
     }
 
@@ -1114,12 +1148,16 @@ impl Config {
         cwd: &std::path::Path,
         grants: &crate::trusts::TrustGrants,
         global: &std::path::Path,
-    ) -> Vec<PathBuf> {
+    ) -> Vec<(PathBuf, bool)> {
         let mut paths = Vec::new();
         if grants.allows(crate::trusts::Category::Configs) {
-            paths.extend(Self::local_config_candidates(cwd));
+            paths.extend(
+                Self::local_config_candidates(cwd)
+                    .into_iter()
+                    .map(|path| (path, true)),
+            );
         }
-        paths.push(global.to_path_buf());
+        paths.push((global.to_path_buf(), false));
         paths
     }
 
@@ -1128,31 +1166,41 @@ impl Config {
         Ok(config_dir()?.join(SCENE_DIR_NAME))
     }
 
+    /// The workspace-root `scene.d` drop-in dir (next to `shuvarie.kdl`).
+    pub fn root_scene_dir(cwd: &std::path::Path) -> PathBuf {
+        cwd.join(SCENE_DIR_NAME)
+    }
+
     /// The workspace `scene.d` drop-in dir.
     pub fn workspace_scene_dir(cwd: &std::path::Path) -> PathBuf {
         cwd.join(WORKSPACE_DIR_NAME).join(SCENE_DIR_NAME)
     }
 
     /// Loads the `*.kdl` scene drop-ins of `dir` as one level (sorted by
-    /// filename; a missing or empty dir yields an empty set).
-    pub fn load_scene_dir(dir: &std::path::Path) -> Result<SceneSet> {
-        let (scenes, warnings) = merge_level("scene dir", &load_scene_dir_in(dir)?);
-        Ok(SceneSet { scenes, warnings })
+    /// filename; a missing or empty dir yields an empty set; a file that
+    /// fails to read or parse is skipped with a warning).
+    pub fn load_scene_dir(dir: &std::path::Path) -> SceneSet {
+        let (sources, mut warnings) = load_scene_dir_in(dir, false);
+        let (scenes, merge_warnings) = merge_level("scene dir", &sources);
+        warnings.extend(merge_warnings);
+        SceneSet { scenes, warnings }
     }
 
     /// The runtime scene set for an app run, built from two levels. The
-    /// global level is the global config layer (the chain's last source, or
-    /// the whole `config` when no chain was recorded) plus the global
-    /// `scene.d` drop-ins. The local level is the chain's local layers — or
-    /// the explicit `--config` file as the single layer — plus the workspace
-    /// `scene.d` drop-ins, which load only when the `configs` trust category
-    /// is granted and no explicit config was named; with an explicit config
-    /// the drop-in dir next to that file is used. Within a level a scene
-    /// name must be unique: a name defined by more than one source is a
-    /// conflict reported in `SceneSet::warnings` and neither copy loads.
-    /// Across levels the local level overrides the global one field-wise per
-    /// scene name, and the built-in Default scene stays the fallback when a
-    /// name resolves nowhere.
+    /// global level is the chain's global config layer (recorded per source
+    /// at load time) plus the global `scene.d` drop-ins. The local level is
+    /// the chain's local layers — or the explicit `--config` file as the
+    /// single layer, replacing the global config layer — plus the workspace
+    /// `scene.d` drop-ins (the workspace-root `./scene.d` first, then the
+    /// nested `<WORKSPACE_DIR_NAME>/scene.d`), which load only when the
+    /// `configs` trust category is granted and no explicit config was named;
+    /// with an explicit config the drop-in dir next to that file is used.
+    /// A drop-in file that fails to read or parse is skipped with a warning.
+    /// Within a level a scene name must be unique: a name defined by more
+    /// than one source is a conflict reported in `SceneSet::warnings` and
+    /// neither copy loads. Across levels the local level overrides the
+    /// global one field-wise per scene name, and the built-in Default scene
+    /// stays the fallback when a name resolves nowhere.
     pub fn load_scenes(
         config: &Config,
         cwd: &std::path::Path,
@@ -1164,42 +1212,48 @@ impl Config {
             sources.push(SceneSource {
                 label: "config.kdl".to_string(),
                 scenes: config.scenes.clone(),
+                local: false,
             });
         }
-        let (global_layer, local_layers) = if explicit.is_some() {
-            (None, sources)
+        let (local_layers, mut global_layers): (Vec<SceneSource>, Vec<SceneSource>) =
+            sources.into_iter().partition(|source| source.local);
+        if explicit.is_some() {
+            global_layers.clear();
+        }
+        let global_layer = global_layers.pop();
+        let granted = explicit.is_none() && grants.allows(crate::trusts::Category::Configs);
+        let dropin_dirs: Vec<PathBuf> = if explicit.is_some() {
+            vec![
+                explicit
+                    .map(|path| {
+                        path.parent()
+                            .unwrap_or_else(|| std::path::Path::new("."))
+                            .join(SCENE_DIR_NAME)
+                    })
+                    .unwrap_or_default(),
+            ]
+        } else if granted {
+            vec![Self::root_scene_dir(cwd), Self::workspace_scene_dir(cwd)]
         } else {
-            match sources.split_last() {
-                Some((last, rest)) => (Some(last.clone()), rest.to_vec()),
-                None => (None, Vec::new()),
-            }
+            Vec::new()
         };
-        let workspace = (explicit.is_none() && grants.allows(crate::trusts::Category::Configs))
-            .then(|| Self::workspace_scene_dir(cwd));
-        let dropin_dir = explicit
-            .map(|path| {
-                path.parent()
-                    .unwrap_or_else(|| std::path::Path::new("."))
-                    .join(SCENE_DIR_NAME)
-            })
-            .or(workspace);
-        scene_set_from_levels(
+        Ok(scene_set_from_levels(
             global_layer,
             local_layers,
             &Self::global_scene_dir()?,
-            dropin_dir.as_deref(),
-        )
+            &dropin_dirs,
+        ))
     }
-
-    fn load_chain(paths: &[PathBuf]) -> Result<Self> {
+    fn load_chain(paths: &[(PathBuf, bool)]) -> Result<Self> {
         let mut config = Self::default();
         let mut permissions = Vec::new();
         let mut scene_sources = Vec::new();
-        for path in paths {
+        for (path, local) in paths {
             if let Some(layer) = read_layer(path)? {
                 scene_sources.push(SceneSource {
                     label: scene_source_label(path),
                     scenes: layer.config.scenes.clone(),
+                    local: *local,
                 });
                 if layer.sections.contains("permissions") {
                     permissions.push(layer.config.permissions.clone());
@@ -1224,6 +1278,7 @@ impl Config {
                 config.scene_sources = vec![SceneSource {
                     label: scene_source_label(path),
                     scenes: config.scenes.clone(),
+                    local: true,
                 }];
                 Ok(config)
             }
@@ -1622,7 +1677,7 @@ mod tests {
         )
         .unwrap();
 
-        let config = Config::load_chain(&[global, inner, top]).unwrap();
+        let config = Config::load_chain(&[(global, false), (inner, true), (top, true)]).unwrap();
         assert_eq!(config.ui.frame_rate, 90);
         assert_eq!(
             config.context.reserved, 111,
@@ -1681,7 +1736,7 @@ mod tests {
         )
         .unwrap();
 
-        let config = Config::load_chain(&[global, top]).unwrap();
+        let config = Config::load_chain(&[(global, false), (top, true)]).unwrap();
         assert!(
             config.lsp.disabled,
             "whole-section flag comes from the top file"
@@ -1706,7 +1761,9 @@ mod tests {
         let global = dir.path().join("global.kdl");
         std::fs::write(&global, "ui { frame-rate 24 }").unwrap();
 
-        let config = Config::load_chain(&[dir.path().join("shuvarie.kdl"), global]).unwrap();
+        let config =
+            Config::load_chain(&[(dir.path().join("shuvarie.kdl"), true), (global, false)])
+                .unwrap();
         assert_eq!(config.ui.frame_rate, 24);
     }
 
@@ -1714,9 +1771,9 @@ mod tests {
     fn chain_no_files_is_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let paths = vec![
-            dir.path().join("shuvarie.kdl"),
-            dir.path().join(".shuvarie/config.kdl"),
-            dir.path().join("global.kdl"),
+            (dir.path().join("shuvarie.kdl"), true),
+            (dir.path().join(".shuvarie/config.kdl"), true),
+            (dir.path().join("global.kdl"), false),
         ];
         assert_eq!(Config::load_chain(&paths).unwrap(), Config::default());
     }
@@ -1727,7 +1784,7 @@ mod tests {
         let top = dir.path().join("shuvarie.kdl");
         std::fs::write(&top, "ui {\n    frame-rate \"sixty\"\n}").unwrap();
 
-        let err = Config::load_chain(&[top]).unwrap_err();
+        let err = Config::load_chain(&[(top, true)]).unwrap_err();
         let ConfigError::Parse(parse_err) = err else {
             panic!("expected config parse error");
         };
@@ -1745,14 +1802,15 @@ mod tests {
             &TrustGrants::from_categories([Category::Skills]),
             &global,
         );
-        assert_eq!(paths, vec![global.clone()]);
+        assert_eq!(paths, vec![(global.clone(), false)]);
 
         let paths = Config::trusted_chain_paths(cwd, &TrustGrants::all(), &global);
         assert_eq!(
             paths,
             Config::local_config_candidates(cwd)
                 .into_iter()
-                .chain([global])
+                .map(|path| (path, true))
+                .chain([(global, false)])
                 .collect::<Vec<_>>()
         );
     }
@@ -1942,7 +2000,7 @@ mod tests {
         )
         .unwrap();
 
-        let config = Config::load_chain(&[global, top]).unwrap();
+        let config = Config::load_chain(&[(global, false), (top, true)]).unwrap();
         assert!(
             config.registries.selune().remote_first,
             "selune only global defines survives"
@@ -2238,7 +2296,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        let config = Config::load_chain(&[global, top]).unwrap();
+        let config = Config::load_chain(&[(global, false), (top, true)]).unwrap();
         let web = config.tools.web_search.expect("top layer wins");
         assert_eq!(web.url, "https://top.example");
         assert_eq!(web.kind, WebSearchKind::ToMarkdown);
@@ -2553,7 +2611,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(&top, "permissions { paths { deny \"secrets/\" } }").unwrap();
-        let config = Config::load_chain(&[top, global]).unwrap();
+        let config = Config::load_chain(&[(top, true), (global, false)]).unwrap();
         let perms = &config.permissions;
         assert_eq!(perms.default, Some(Verb::Ask), "builtin verb survives");
         let paths: Vec<(Verb, &str)> = perms
@@ -2586,7 +2644,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(&top, "permissions { ask-all }").unwrap();
-        let config = Config::load_chain(&[top, global]).unwrap();
+        let config = Config::load_chain(&[(top, true), (global, false)]).unwrap();
         let perms = &config.permissions;
         assert_eq!(perms.default, Some(Verb::Ask));
         let paths: Vec<(Verb, &str)> = perms
@@ -2608,7 +2666,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let top = dir.path().join("shuvarie.kdl");
         std::fs::write(&top, "permissions { paths { deny \"secrets/\" } }").unwrap();
-        let config = Config::load_chain(&[top]).unwrap();
+        let config = Config::load_chain(&[(top, true)]).unwrap();
         let paths: Vec<(Verb, &str)> = config
             .permissions
             .paths
@@ -2631,7 +2689,7 @@ mod tests {
         let top = dir.path().join("shuvarie.kdl");
         std::fs::write(&global, "permissions { paths { allow-all } }").unwrap();
         std::fs::write(&top, "permissions { paths { ask \"x\" } }").unwrap();
-        let config = Config::load_chain(&[top.clone(), global.clone()]).unwrap();
+        let config = Config::load_chain(&[(top.clone(), true), (global.clone(), false)]).unwrap();
         assert_eq!(
             config.permissions.paths.default,
             Some(Verb::Allow),
@@ -2640,7 +2698,7 @@ mod tests {
         assert_eq!(config.permissions.paths.rules.len(), 2);
 
         std::fs::write(&top, "permissions { paths { ask-all } }").unwrap();
-        let config = Config::load_chain(&[top, global]).unwrap();
+        let config = Config::load_chain(&[(top, true), (global, false)]).unwrap();
         assert_eq!(
             config.permissions.paths.default,
             Some(Verb::Ask),
@@ -2932,7 +2990,7 @@ Now we're in Plan mode: plan first, no edits.
         )
         .unwrap();
 
-        let config = Config::load_chain(&[top, global]).unwrap();
+        let config = Config::load_chain(&[(top, true), (global, false)]).unwrap();
         assert_eq!(config.scenes.default.as_deref(), Some("Plan"));
         assert!(config.scenes.scenes.contains_key("Only-Global"));
         let plan = config.scenes.scene("Plan").unwrap();
@@ -2971,7 +3029,7 @@ Now we're in Plan mode: plan first, no edits.
         std::fs::write(scene_dir.join("30-notes.txt"), "not kdl").unwrap();
         std::fs::create_dir_all(scene_dir.join("40-subdir.kdl")).unwrap();
 
-        let scenes = Config::load_scene_dir(&scene_dir).unwrap().scenes;
+        let scenes = Config::load_scene_dir(&scene_dir).scenes;
         assert_eq!(scenes.scenes.len(), 2);
         assert_eq!(
             scenes.scene("Plan").unwrap().description.as_deref(),
@@ -2983,8 +3041,55 @@ Now we're in Plan mode: plan first, no edits.
         );
 
         assert_eq!(
-            Config::load_scene_dir(&dir.path().join("missing")).unwrap(),
+            Config::load_scene_dir(&dir.path().join("missing")),
             SceneSet::default()
+        );
+    }
+
+    #[test]
+    fn scene_dir_parse_error_warns_and_skips() {
+        let dir = tempfile::tempdir().unwrap();
+        let scene_dir = dir.path().join(SCENE_DIR_NAME);
+        std::fs::create_dir_all(&scene_dir).unwrap();
+        std::fs::write(
+            scene_dir.join("10-plan.kdl"),
+            r#"scenes { scene name="Plan" { tools { disable-all } } }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            scene_dir.join("20-typo.kdl"),
+            r#"scenes { scene name="Typo" { tools { disabled-all } } }"#,
+        )
+        .unwrap();
+
+        let set = Config::load_scene_dir(&scene_dir);
+        assert!(set.scenes.scene("Plan").is_some(), "valid drop-ins load");
+        assert!(set.scenes.scene("Typo").is_none(), "broken file skipped");
+        assert_eq!(set.warnings.len(), 1, "warnings: {:?}", set.warnings);
+        assert!(set.warnings[0].contains("scene.d/20-typo.kdl"));
+        assert!(set.warnings[0].contains("(file skipped)"));
+    }
+
+    #[test]
+    fn dropin_warnings_survive_the_level_merge() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global");
+        let dropins = dir.path().join("dropins");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::create_dir_all(&dropins).unwrap();
+        std::fs::write(
+            dropins.join("10-bad.kdl"),
+            r#"scenes { scene name="Bad" { tools { disabled-all } } }"#,
+        )
+        .unwrap();
+
+        let set = scene_set_from_levels(None, Vec::new(), &global, &[dropins]);
+        assert!(
+            set.warnings.iter().any(|warning| {
+                warning.contains("scene.d/10-bad.kdl") && warning.contains("(file skipped)")
+            }),
+            "warnings: {:?}",
+            set.warnings
         );
     }
 
@@ -3010,7 +3115,7 @@ Now we're in Plan mode: plan first, no edits.
         )
         .unwrap();
 
-        let set = Config::load_scene_dir(&scene_dir).unwrap();
+        let set = Config::load_scene_dir(&scene_dir);
         assert!(set.scenes.scene("Plan").is_none(), "neither copy loads");
         assert!(set.scenes.scene("Keep").is_some(), "unaffected scenes load");
         assert_eq!(set.warnings.len(), 1, "warnings: {:?}", set.warnings);
@@ -3038,10 +3143,10 @@ Now we're in Plan mode: plan first, no edits.
             scenes: scenes(
                 "scenes {\n    scene name=\"A\" {\n        description \"global\"\n        tools { ask-all }\n    }\n}",
             ),
+            local: false,
         };
 
-        let set = scene_set_from_levels(Some(global_layer), Vec::new(), &global, Some(&workspace))
-            .unwrap();
+        let set = scene_set_from_levels(Some(global_layer), Vec::new(), &global, &[workspace]);
         let a = set.scenes.scene("A").unwrap();
         assert_eq!(a.description.as_deref(), Some("global"), "global field");
         assert_eq!(
@@ -3071,9 +3176,10 @@ Now we're in Plan mode: plan first, no edits.
         let global_layer = SceneSource {
             label: "config.kdl".to_string(),
             scenes: scenes(r#"scenes { scene name="Plan" { tools { ask-all } } }"#),
+            local: false,
         };
 
-        let set = scene_set_from_levels(Some(global_layer), Vec::new(), &global, None).unwrap();
+        let set = scene_set_from_levels(Some(global_layer), Vec::new(), &global, &[]);
         assert!(
             set.scenes.scene("Plan").is_none(),
             "neither global copy loads"
@@ -3098,15 +3204,17 @@ Now we're in Plan mode: plan first, no edits.
         let global_layer = SceneSource {
             label: "config.kdl".to_string(),
             scenes: scenes(r#"scenes { scene name="Plan" { description "g2" } }"#),
+            local: false,
         };
         let local = SceneSource {
             label: "shuvarie.kdl".to_string(),
             scenes: scenes(
                 r#"scenes { scene name="Plan" { system-prompts { prelude "local" } } }"#,
             ),
+            local: true,
         };
 
-        let set = scene_set_from_levels(Some(global_layer), vec![local], &global, None).unwrap();
+        let set = scene_set_from_levels(Some(global_layer), vec![local], &global, &[]);
         let plan = set.scenes.scene("Plan").unwrap();
         assert_eq!(
             plan.description.as_deref(),
@@ -3125,20 +3233,22 @@ Now we're in Plan mode: plan first, no edits.
         let top = SceneSource {
             label: "shuvarie.kdl".to_string(),
             scenes: scenes(r#"scenes { scene name="Plan" { description "a" } }"#),
+            local: true,
         };
         let nested = SceneSource {
             label: ".shuvarie/config.kdl".to_string(),
             scenes: scenes(
                 "scenes {\n    scene name=\"Plan\" { description \"b\" }\n    scene name=\"Keep\"\n}",
             ),
+            local: true,
         };
         let global_layer = SceneSource {
             label: "config.kdl".to_string(),
             scenes: ScenesConfig::default(),
+            local: false,
         };
 
-        let set =
-            scene_set_from_levels(Some(global_layer), vec![top, nested], &global, None).unwrap();
+        let set = scene_set_from_levels(Some(global_layer), vec![top, nested], &global, &[]);
         assert!(set.scenes.scene("Plan").is_none());
         assert!(set.scenes.scene("Keep").is_some());
         assert!(
@@ -3161,19 +3271,16 @@ Now we're in Plan mode: plan first, no edits.
         let global_layer = SceneSource {
             label: "config.kdl".to_string(),
             scenes: scenes(r#"scenes { default "Global" }"#),
+            local: false,
         };
         let local_layer = SceneSource {
             label: "shuvarie.kdl".to_string(),
             scenes: scenes(r#"scenes { default "Local" }"#),
+            local: true,
         };
 
-        let set = scene_set_from_levels(
-            Some(global_layer),
-            vec![local_layer],
-            &global,
-            Some(&workspace),
-        )
-        .unwrap();
+        let set =
+            scene_set_from_levels(Some(global_layer), vec![local_layer], &global, &[workspace]);
         assert_eq!(
             set.scenes.default.as_deref(),
             Some("Local"),
@@ -3191,5 +3298,143 @@ Now we're in Plan mode: plan first, no edits.
         assert_eq!(config.scene_sources.len(), 1);
         assert_eq!(config.scene_sources[0].label, "my.kdl");
         assert!(config.scene_sources[0].scenes.scene("A").is_some());
+    }
+
+    /// Serializes tests that redirect the global config dir via
+    /// `XDG_CONFIG_HOME` (process-global env, read by `config_dir()`).
+    fn global_dir_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|err| err.into_inner())
+    }
+
+    /// An end-to-end startup against an isolated global config dir: a
+    /// workspace config layer plus a workspace scene.d drop-in must land in
+    /// the local level when `configs` is granted, and the global config's
+    /// scene must not shadow the local one.
+    #[test]
+    fn local_scenes_load_end_to_end_when_configs_are_granted() {
+        let _lock = global_dir_lock();
+        let global_home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        // SAFETY: serialized behind `global_dir_lock`.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", global_home.path()) };
+        let cfg_dir = global_home.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join("config.kdl"),
+            "scenes { scene name=\"Plan\" { description \"global\" } }",
+        )
+        .unwrap();
+        let ws_dir = workspace.path().join(WORKSPACE_DIR_NAME);
+        std::fs::create_dir_all(ws_dir.join("scene.d")).unwrap();
+        std::fs::write(
+            ws_dir.join("config.kdl"),
+            "scenes { scene name=\"Plan\" { description \"local\" } }",
+        )
+        .unwrap();
+        std::fs::write(
+            ws_dir.join("scene.d").join("draft.kdl"),
+            "scenes { scene name=\"Draft\" { description \"drop-in\" } }",
+        )
+        .unwrap();
+
+        let grants = crate::trusts::TrustGrants::from_categories([
+            crate::trusts::Category::Configs,
+            crate::trusts::Category::Contexts,
+        ]);
+        let config = Config::load_trusted(workspace.path(), &grants).unwrap();
+        let set = Config::load_scenes(&config, workspace.path(), &grants, None).unwrap();
+        // SAFETY: restoring the test process env.
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+
+        let plan = set.scenes.scene("Plan").unwrap();
+        assert_eq!(plan.description.as_deref(), Some("local"), "local wins");
+        assert_eq!(
+            set.scenes.scene("Draft").unwrap().description.as_deref(),
+            Some("drop-in")
+        );
+        assert!(set.warnings.is_empty());
+    }
+
+    /// Without the global config file the local layers must still form the
+    /// local level: two workspace files defining the same scene name are a
+    /// same-level conflict, not a cross-level override.
+    /// A workspace-root `./scene.d` loads as a local source too — the same
+    /// level as the nested `<WORKSPACE_DIR_NAME>/scene.d`, so a scene name
+    /// defined in both is a same-level conflict and neither copy loads.
+    #[test]
+    fn root_scene_dir_loads_as_a_local_source() {
+        let _lock = global_dir_lock();
+        let global_home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let ws_dir = workspace.path().join(WORKSPACE_DIR_NAME);
+        std::fs::create_dir_all(ws_dir.join("scene.d")).unwrap();
+        std::fs::create_dir_all(workspace.path().join("scene.d")).unwrap();
+        std::fs::write(
+            workspace.path().join("scene.d").join("root.kdl"),
+            "scenes {\n    scene name=\"Plan\" { description \"root\" }\n    scene name=\"Only-Root\"\n}",
+        )
+        .unwrap();
+        std::fs::write(
+            ws_dir.join("scene.d").join("nested.kdl"),
+            "scenes {\n    scene name=\"Plan\" { description \"nested\" }\n    scene name=\"Only-Nested\"\n}",
+        )
+        .unwrap();
+
+        let grants =
+            crate::trusts::TrustGrants::from_categories([crate::trusts::Category::Configs]);
+        // SAFETY: isolated global dir for this test.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", global_home.path()) };
+        let config = Config::load_trusted(workspace.path(), &grants).unwrap();
+        let set = Config::load_scenes(&config, workspace.path(), &grants, None).unwrap();
+        // SAFETY: restoring the test process env.
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+
+        assert!(
+            set.scenes.scene("Plan").is_none(),
+            "same name across local scene.d dirs conflicts"
+        );
+        assert!(set.scenes.scene("Only-Root").is_some());
+        assert!(set.scenes.scene("Only-Nested").is_some());
+        assert_eq!(set.warnings.len(), 1, "warnings: {:?}", set.warnings);
+        assert!(set.warnings[0].contains("scene.d/root.kdl"));
+        assert!(set.warnings[0].contains("scene.d/nested.kdl"));
+    }
+
+    #[test]
+    fn local_layers_conflict_even_without_a_global_config() {
+        let _lock = global_dir_lock();
+        let global_home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        // SAFETY: serialized behind `global_dir_lock`.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", global_home.path()) };
+        let ws_dir = workspace.path().join(WORKSPACE_DIR_NAME);
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        std::fs::write(
+            workspace.path().join(LOCAL_CONFIG_FILE_NAME),
+            "scenes { scene name=\"Plan\" { description \"top\" } }",
+        )
+        .unwrap();
+        std::fs::write(
+            ws_dir.join("config.kdl"),
+            "scenes { scene name=\"Plan\" { description \"nested\" } }",
+        )
+        .unwrap();
+
+        let grants =
+            crate::trusts::TrustGrants::from_categories([crate::trusts::Category::Configs]);
+        let config = Config::load_trusted(workspace.path(), &grants).unwrap();
+        let set = Config::load_scenes(&config, workspace.path(), &grants, None).unwrap();
+        // SAFETY: restoring the test process env.
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+
+        assert!(
+            set.scenes.scene("Plan").is_none(),
+            "same-name local layers conflict"
+        );
+        assert_eq!(set.warnings.len(), 1, "warnings: {:?}", set.warnings);
+        assert!(set.warnings[0].contains("local config"));
+        assert!(set.warnings[0].contains(LOCAL_CONFIG_FILE_NAME));
+        assert!(set.warnings[0].contains(".shuvarie-dev/config.kdl"));
     }
 }

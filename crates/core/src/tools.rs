@@ -394,7 +394,88 @@ mod tests {
     use super::*;
     use crate::permissions::{resolve_read, resolve_write};
     use crate::test_util::tempdir;
+    use shuvarie_config::{SceneToolVerb, SceneToolsConfig, ToolOverride};
     use tempfile::TempDir;
+
+    /// The full roster built for one scene, as the core task does per turn.
+    fn roster(scene: &ToolScene) -> Vec<String> {
+        let (question_tx, _question_rx) = tokio::sync::mpsc::channel(1);
+        let (shell_tx, _shell_rx) = tokio::sync::mpsc::channel(1);
+        let lsp = std::sync::Arc::new(tokio::sync::Mutex::new(shuvarie_lsp::LspManager::new(
+            std::path::PathBuf::from("."),
+            false,
+            Default::default(),
+        )));
+        all_tools(
+            lsp,
+            FileLocks::new(),
+            ReadCache::new(),
+            100,
+            100,
+            QuestionGate::new(question_tx),
+            crate::test_util::access(),
+            ShellOutputTx::new(shell_tx),
+            crate::shell::resolve(None).shell,
+            todos::TodoState::from_records(&[]),
+            scene,
+            None,
+        )
+        .into_iter()
+        .map(|tool| tool.name().to_string())
+        .collect()
+    }
+
+    #[test]
+    fn the_default_scene_builds_every_tool() {
+        let names = roster(&ToolScene::default());
+        for expected in [
+            "read_file",
+            "write_file",
+            "edit_file",
+            "apply_patch",
+            "delete_file",
+            "run_shell",
+            "list_dir",
+            "grep",
+            "glob",
+            "lsp",
+            "webfetch",
+            "question",
+            "todo",
+        ] {
+            assert!(
+                names.contains(&expected.into()),
+                "missing {expected}: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn disable_all_leaves_only_reenabled_tools() {
+        let mut tools = SceneToolsConfig {
+            verb: Some(SceneToolVerb::DisableAll),
+            ..SceneToolsConfig::default()
+        };
+        tools.tools.insert(
+            "read_file".into(),
+            ToolOverride {
+                disabled: Some(false),
+                ask: None,
+            },
+        );
+        let names = roster(&ToolScene::build(Some(&tools)));
+        assert_eq!(names, vec!["read_file".to_string()]);
+    }
+
+    #[test]
+    fn disable_all_with_no_reenabled_tools_builds_an_empty_roster() {
+        let tools = SceneToolsConfig {
+            verb: Some(SceneToolVerb::DisableAll),
+            ..SceneToolsConfig::default()
+        };
+        let names = roster(&ToolScene::build(Some(&tools)));
+        assert!(names.is_empty(), "roster: {names:?}");
+    }
 
     #[test]
     fn diff_computes_line_numbers_and_ellipsis() {

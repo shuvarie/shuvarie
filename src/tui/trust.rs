@@ -24,9 +24,15 @@ pub enum TrustPromptOutcome {
 
 /// The one-screen workspace trust prompt, drawn directly on the terminal
 /// before the TUI starts. All categories start checked; `Enter` confirms the
-/// checked ones, `Esc` rejects for this session only.
-pub async fn run_prompt(scan: &WorkspaceScan, cwd: &Path) -> io::Result<TrustPromptOutcome> {
-    let mut model = TrustPrompt::new(scan, cwd);
+/// checked ones, `Esc` rejects for this session only. With `new_items` the
+/// prompt only presents the candidates that appeared after the workspace's
+/// recorded decision.
+pub async fn run_prompt(
+    scan: &WorkspaceScan,
+    cwd: &Path,
+    new_items: bool,
+) -> io::Result<TrustPromptOutcome> {
+    let mut model = TrustPrompt::new(scan, cwd, new_items);
     let mut term = PlatformTerminal::new()?;
     term.enter_raw_mode()?;
 
@@ -91,10 +97,13 @@ pub struct TrustPrompt {
     items: Vec<(Category, String)>,
     checked: Vec<bool>,
     selected: usize,
+    /// A follow-up prompt: only the candidates that appeared after the
+    /// workspace's recorded decision.
+    new_items: bool,
 }
 
 impl TrustPrompt {
-    pub fn new(scan: &WorkspaceScan, cwd: &Path) -> Self {
+    pub fn new(scan: &WorkspaceScan, cwd: &Path, new_items: bool) -> Self {
         let items: Vec<(Category, String)> = scan
             .items
             .iter()
@@ -106,6 +115,7 @@ impl TrustPrompt {
             items,
             checked,
             selected: 0,
+            new_items,
         }
     }
 
@@ -147,7 +157,12 @@ impl TrustPrompt {
         }
         let popup = centered_rect(64, 44, area);
         frame.render_widget(Clear, popup);
-        let block = theme::overlay_block("Workspace trust");
+        let title = if self.new_items {
+            "Workspace trust — new files"
+        } else {
+            "Workspace trust"
+        };
+        let block = theme::overlay_block(title);
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
 

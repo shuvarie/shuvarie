@@ -83,6 +83,16 @@ impl TrustGrants {
     pub fn covers_all(&self) -> bool {
         self.all || ALL_CATEGORIES.iter().all(|c| self.categories.contains(c))
     }
+
+    /// The union of two grant sets: `all` subsumes everything, otherwise the
+    /// named categories of both.
+    pub fn union(self, other: TrustGrants) -> TrustGrants {
+        if self.all || other.all {
+            Self::all()
+        } else {
+            Self::from_categories(self.categories.iter().copied().chain(other.categories))
+        }
+    }
 }
 
 /// One `path` record: the typed path literal from the file plus its grants.
@@ -91,6 +101,12 @@ impl TrustGrants {
 pub struct WorkspaceTrust {
     pub path: String,
     pub grants: TrustGrants,
+
+    /// The categories a trust prompt has already offered for this workspace,
+    /// granted or not: a follow-up prompt only asks about categories that are
+    /// neither granted nor asked before, so candidates that appear after the
+    /// recorded decision (new config files, scene dirs) prompt exactly once.
+    pub asked: BTreeSet<Category>,
 }
 
 /// `trusts.kdl` — the workspace trust decisions: an optional global default
@@ -139,15 +155,21 @@ impl TrustFile {
     /// Record paths match by canonicalized target, so `~`, trailing slashes
     /// and `.` components do not affect the match.
     pub fn lookup(&self, cwd: &Path) -> Option<&TrustGrants> {
+        Self::lookup_record(self, cwd).map(|record| &record.grants)
+    }
+
+    /// The full record for `cwd` (grants plus the asked categories), or
+    /// `None` when no record matches.
+    pub fn lookup_record<'a>(&'a self, cwd: &Path) -> Option<&'a WorkspaceTrust> {
         let cwd = canonical(cwd);
         self.workspaces
             .iter()
             .find(|workspace| resolve_record_path(&workspace.path) == Some(cwd.clone()))
-            .map(|workspace| &workspace.grants)
     }
 
     /// Sets the grants for `cwd`, replacing the first matching record's
-    /// grants (keeping its typed path) or appending a new record.
+    /// grants (keeping its typed path and asked categories) or appending a
+    /// new record.
     pub fn upsert(&mut self, cwd: &Path, grants: TrustGrants) {
         let cwd = canonical(cwd);
         for workspace in &mut self.workspaces {
@@ -159,7 +181,21 @@ impl TrustFile {
         self.workspaces.push(WorkspaceTrust {
             path: cwd.to_string_lossy().into_owned(),
             grants,
+            asked: Default::default(),
         });
+    }
+
+    /// Records the categories a prompt offered for `cwd` (extending the
+    /// existing record's asked set; a no-op without a record).
+    pub fn mark_asked(&mut self, cwd: &Path, asked: impl IntoIterator<Item = Category>) {
+        let cwd = canonical(cwd);
+        if let Some(record) = self
+            .workspaces
+            .iter_mut()
+            .find(|workspace| resolve_record_path(&workspace.path) == Some(cwd.clone()))
+        {
+            record.asked.extend(asked);
+        }
     }
 }
 
@@ -256,6 +292,10 @@ fn config_detail(cwd: &Path) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if cwd.join(LOCAL_CONFIG_FILE_NAME).exists() {
         parts.push(LOCAL_CONFIG_FILE_NAME.to_string());
+    }
+    if let Some(count) = kdl_file_count(&cwd.join(SCENE_DIR_NAME)) {
+        let plural = if count == 1 { "file" } else { "files" };
+        parts.push(format!("{SCENE_DIR_NAME} ({count} {plural})"));
     }
     let workspace_config = cwd.join(WORKSPACE_DIR_NAME).join(CONFIG_FILE_NAME);
     if workspace_config.exists() {
@@ -460,6 +500,7 @@ mod tests {
         file.workspaces.push(WorkspaceTrust {
             path: format!("{}/./", cwd.to_string_lossy()),
             grants: TrustGrants::from_categories([Category::Skills]),
+            asked: Default::default(),
         });
         assert!(file.lookup(&cwd).unwrap().allows(Category::Skills));
         assert!(!file.lookup(&cwd).unwrap().allows(Category::Configs));
@@ -492,10 +533,12 @@ mod tests {
                 WorkspaceTrust {
                     path: "/home/user/proj".into(),
                     grants: TrustGrants::from_categories([Category::Contexts, Category::Configs]),
+                    asked: Default::default(),
                 },
                 WorkspaceTrust {
                     path: "/home/user/other".into(),
                     grants: TrustGrants::none(),
+                    asked: Default::default(),
                 },
             ],
         };
