@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use super::{CONFIG_FILE_NAME, LOCAL_CONFIG_FILE_NAME, WORKSPACE_DIR_NAME};
+use super::{CONFIG_FILE_NAME, LOCAL_CONFIG_FILE_NAME, SCENE_DIR_NAME, WORKSPACE_DIR_NAME};
 use crate::Result;
 
 pub const TRUSTS_FILE_NAME: &str = "trusts.kdl";
@@ -261,7 +261,26 @@ fn config_detail(cwd: &Path) -> Option<String> {
     if workspace_config.exists() {
         parts.push(format!("{WORKSPACE_DIR_NAME}/{CONFIG_FILE_NAME}"));
     }
+    if let Some(count) = kdl_file_count(&cwd.join(WORKSPACE_DIR_NAME).join(SCENE_DIR_NAME)) {
+        let plural = if count == 1 { "file" } else { "files" };
+        parts.push(format!(
+            "{WORKSPACE_DIR_NAME}/{SCENE_DIR_NAME} ({count} {plural})"
+        ));
+    }
     (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// The number of `*.kdl` file entries in `dir`, or `None` when there are none.
+fn kdl_file_count(dir: &Path) -> Option<usize> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let count = entries
+        .flatten()
+        .filter(|entry| {
+            let path = entry.path();
+            path.is_file() && path.extension().is_some_and(|ext| ext == "kdl")
+        })
+        .count();
+    (count > 0).then_some(count)
 }
 
 /// The workspace context file or context dir contents, if any.
@@ -379,6 +398,29 @@ mod tests {
         assert_eq!(
             item(&scan, Category::Contexts).detail,
             format!("{WORKSPACE_DIR_NAME}/context (1 file)")
+        );
+    }
+
+    #[test]
+    fn scan_lists_workspace_scene_drops_under_configs() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let scene_dir = cwd.join(WORKSPACE_DIR_NAME).join(SCENE_DIR_NAME);
+        std::fs::create_dir_all(&scene_dir).unwrap();
+        std::fs::write(scene_dir.join("plan.kdl"), "scenes {}").unwrap();
+        std::fs::write(scene_dir.join("notes.txt"), "not kdl").unwrap();
+
+        let scan = WorkspaceScan::detect(cwd, false);
+        assert_eq!(
+            item(&scan, Category::Configs).detail,
+            format!("{WORKSPACE_DIR_NAME}/{SCENE_DIR_NAME} (1 file)")
+        );
+
+        std::fs::write(scene_dir.join("other.kdl"), "scenes {}").unwrap();
+        let scan = WorkspaceScan::detect(cwd, false);
+        assert_eq!(
+            item(&scan, Category::Configs).detail,
+            format!("{WORKSPACE_DIR_NAME}/{SCENE_DIR_NAME} (2 files)")
         );
     }
 

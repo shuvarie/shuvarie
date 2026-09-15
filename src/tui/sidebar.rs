@@ -25,6 +25,7 @@ const PATH_LINE_COLS: usize = 26;
 pub struct Sidebar {
     pub version_bar: VersionBar,
     workspace: WorkspaceInfo,
+    scene: Option<String>,
     context: ContextDisplay,
     pub lsp_servers: Vec<LspStatus>,
     pub lsp_enabled: bool,
@@ -83,6 +84,11 @@ pub enum SidebarMessage {
     SetWorkspace {
         workspace: WorkspaceInfo,
     },
+    /// The session's current scene (`None` = the built-in Default scene,
+    /// which hides the scene line).
+    SetScene {
+        name: Option<String>,
+    },
     /// Applies the `[ui] sidebar` pref and clears any manual override.
     SetPref {
         pref: SidebarPref,
@@ -103,6 +109,7 @@ impl Sidebar {
         Self {
             version_bar: VersionBar::new(HorizontalAlignment::Left),
             workspace: WorkspaceInfo::default(),
+            scene: None,
             context: ContextDisplay::new(),
             lsp_servers: Vec::new(),
             lsp_enabled: true,
@@ -149,6 +156,9 @@ impl Sidebar {
             }
             SidebarMessage::SetWorkspace { workspace } => {
                 self.workspace = workspace;
+            }
+            SidebarMessage::SetScene { name } => {
+                self.scene = name;
             }
             SidebarMessage::SetPref { pref } => {
                 self.pref = pref;
@@ -241,7 +251,12 @@ impl Sidebar {
     /// Path and branch on one line for the collapsed mode's footer, in the
     /// style of [`WorkspaceInfo::compact_spans`], truncated to `max_width`.
     pub fn workspace_line(&self, max_width: usize) -> Line<'static> {
-        Line::from(self.workspace.compact_spans(max_width))
+        let mut spans = self.workspace.compact_spans(max_width);
+        if let Some(scene) = &self.scene {
+            spans.push(Span::raw("  ⌗ ").fg(theme::TEXT_MUTED));
+            spans.push(Span::raw(scene.clone()).fg(theme::TEXT));
+        }
+        Line::from(truncate_spans(spans, max_width))
     }
 
     fn build_lines(&self) -> Vec<Line<'static>> {
@@ -250,6 +265,14 @@ impl Sidebar {
         let workspace_lines = self.workspace.section_lines(PATH_LINE_COLS);
         if !workspace_lines.is_empty() {
             lines.extend(workspace_lines);
+            lines.push(Line::from(""));
+        }
+
+        if let Some(scene) = &self.scene {
+            lines.push(Line::from(vec![
+                Span::raw("⌗ ").fg(theme::TEXT_MUTED),
+                Span::raw(scene.clone()).fg(theme::TEXT),
+            ]));
             lines.push(Line::from(""));
         }
 
@@ -1054,5 +1077,63 @@ mod tests {
 
         let sidebar = Sidebar::new();
         assert!(sidebar.workspace_line(80).spans.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod scene_tests {
+    use super::*;
+
+    fn text<'a, I: IntoIterator<Item = &'a Line<'static>>>(lines: I) -> String {
+        lines
+            .into_iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.clone())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn set_scene_renders_a_scene_line_below_the_workspace() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::SetWorkspace {
+            workspace: WorkspaceInfo {
+                path: "/home/user/repos/proj".into(),
+                home: Some("/home/user".into()),
+                branch: None,
+            },
+        });
+        sidebar.update(SidebarMessage::SetScene {
+            name: Some("Plan".into()),
+        });
+        let body = text(sidebar.rendered_lines());
+        assert!(body.contains("⌗ Plan"), "body: {body}");
+
+        // The built-in Default hides the line.
+        sidebar.update(SidebarMessage::SetScene { name: None });
+        let body = text(sidebar.rendered_lines());
+        assert!(!body.contains("⌗"), "body: {body}");
+    }
+
+    #[test]
+    fn scene_appears_on_the_collapsed_workspace_line() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::SetWorkspace {
+            workspace: WorkspaceInfo {
+                path: "~/proj".into(),
+                home: None,
+                branch: None,
+            },
+        });
+        sidebar.update(SidebarMessage::SetScene {
+            name: Some("Plan".into()),
+        });
+        let line = sidebar.workspace_line(200);
+        let rendered: String = line.spans.iter().map(|s| s.content.clone()).collect();
+        assert!(rendered.contains("⌗ Plan"), "line: {rendered}");
     }
 }

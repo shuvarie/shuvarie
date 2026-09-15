@@ -13,7 +13,11 @@ async fn main() -> color_eyre::Result<()> {
 
     let store = shuvarie_db::Store::open(&shuvarie_db::Store::default_path()).await?;
 
-    let Some(trust::Resolved { config, grants }) = trust::resolve(args.config.as_ref()).await?
+    let Some(trust::Resolved {
+        config,
+        grants,
+        scenes,
+    }) = trust::resolve(args.config.as_ref()).await?
     else {
         return Ok(());
     };
@@ -42,6 +46,7 @@ async fn main() -> color_eyre::Result<()> {
         None,
         permissions,
         grants,
+        scenes,
         cmd_rx,
         event_tx,
     ));

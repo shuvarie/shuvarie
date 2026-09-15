@@ -299,8 +299,10 @@ impl Permissions {
         kind: PathKind,
         path: &Path,
         display: &str,
+        scene_ask: Option<&str>,
     ) -> Result<(), String> {
-        match self.check_path(kind, path) {
+        let decision = compose_scene_ask(scene_ask, self.check_path(kind, path));
+        match decision {
             Decision::Allow => Ok(()),
             Decision::Deny { reason } => {
                 cut.trigger();
@@ -320,14 +322,35 @@ impl Permissions {
         }
     }
 
+    /// Asks once through `gate` (a scene's own confirmation, outside the
+    /// permission rules). A rejection cuts the turn and errors like a rule
+    /// denial.
+    pub async fn confirm_scene(
+        &self,
+        gate: &PermissionGate,
+        cut: &DenyCut,
+        reason: &str,
+    ) -> Result<(), String> {
+        match gate.request(reason.to_string()).await {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                cut.trigger();
+                Err(format!("denied by the user: {reason}"))
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     /// The `ask`-aware version of [`Self::check_shell`].
     pub async fn authorize_shell(
         &self,
         gate: &PermissionGate,
         cut: &DenyCut,
         command: &str,
+        scene_ask: Option<&str>,
     ) -> Result<(), String> {
-        match self.check_shell(command) {
+        let decision = compose_scene_ask(scene_ask, self.check_shell(command));
+        match decision {
             Decision::Allow => Ok(()),
             Decision::Deny { reason } => {
                 cut.trigger();
@@ -476,6 +499,18 @@ fn verb_decision(verb: Verb, reason: String) -> Decision {
     }
 }
 
+/// The scene overlay composed with a permission verdict: an `allow` becomes
+/// an ask when the scene demands one; `ask` and `deny` stay (the scene
+/// restricts but never loosens the permission engine).
+fn compose_scene_ask(scene_ask: Option<&str>, decision: Decision) -> Decision {
+    match (scene_ask, decision) {
+        (Some(reason), Decision::Allow) => Decision::Ask {
+            reason: reason.to_string(),
+        },
+        (_, decision) => decision,
+    }
+}
+
 /// The permission engine plus its ask gate and deny-cut signal, cloned into
 /// every gated tool as one handle.
 #[derive(Clone)]
@@ -483,6 +518,10 @@ pub struct Access {
     permissions: std::sync::Arc<Permissions>,
     gate: PermissionGate,
     deny_cut: DenyCut,
+    /// The scene's force-ask overlay for one tool: `Some(reason)` turns an
+    /// `allow` verdict into an ask before it is granted. Set per tool at
+    /// roster-build time (`Access::for_tool`); `None` = no scene overlay.
+    scene_ask: Option<String>,
 }
 
 impl Access {
@@ -495,7 +534,27 @@ impl Access {
             permissions,
             gate,
             deny_cut,
+            scene_ask: None,
         }
+    }
+
+    /// Clones the access for one tool, applying the scene's ask overlay: a
+    /// scene `ask` turns an `allow` into an ask. Denials stay denials — the
+    /// scene restricts but never loosens the permission engine.
+    pub fn for_tool(&self, tool: &str, scene: &crate::scenes::ToolScene) -> Self {
+        Self {
+            scene_ask: scene
+                .forces_ask(tool)
+                .then(|| format!("scene requires confirmation for `{tool}`")),
+            ..self.clone()
+        }
+    }
+
+    /// The scene's ask overlay for this tool, if any (drives the `ask-first`
+    /// wrappers for tools that do not authorize through the permission
+    /// engine).
+    pub fn scene_ask_reason(&self) -> Option<&str> {
+        self.scene_ask.as_deref()
     }
 
     /// Authorizes a canonicalized file path (see
@@ -507,7 +566,14 @@ impl Access {
         display: &str,
     ) -> Result<(), String> {
         self.permissions
-            .authorize_path(&self.gate, &self.deny_cut, kind, path, display)
+            .authorize_path(
+                &self.gate,
+                &self.deny_cut,
+                kind,
+                path,
+                display,
+                self.scene_ask.as_deref(),
+            )
             .await
     }
 
@@ -515,7 +581,20 @@ impl Access {
     /// [`Permissions::authorize_shell`]).
     pub async fn authorize_shell(&self, command: &str) -> Result<(), String> {
         self.permissions
-            .authorize_shell(&self.gate, &self.deny_cut, command)
+            .authorize_shell(
+                &self.gate,
+                &self.deny_cut,
+                command,
+                self.scene_ask.as_deref(),
+            )
+            .await
+    }
+
+    /// Asks once (a scene's own confirmation, outside the permission rules).
+    /// A rejection cuts the turn and errors like a rule denial.
+    pub async fn confirm_scene(&self, reason: &str) -> Result<(), String> {
+        self.permissions
+            .confirm_scene(&self.gate, &self.deny_cut, reason)
             .await
     }
 
@@ -1074,7 +1153,7 @@ mod tests {
 
         let cut1 = cut.clone();
         let err = perms
-            .authorize_shell(&gate, &cut1, "sudo apt install")
+            .authorize_shell(&gate, &cut1, "sudo apt install", None)
             .await
             .unwrap_err();
         assert!(err.contains("shell-patterns: deny"), "{err}");
@@ -1093,6 +1172,7 @@ mod tests {
                     PathKind::Read,
                     Path::new("/etc/hosts"),
                     "/etc/hosts",
+                    None,
                 )
                 .await
         });
@@ -1114,6 +1194,7 @@ mod tests {
                     PathKind::Read,
                     Path::new("/etc/hosts"),
                     "/etc/hosts",
+                    None,
                 )
                 .await
         });

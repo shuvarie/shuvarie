@@ -79,6 +79,8 @@ pub struct Session {
     pub nodes: Vec<TreeNode>,
     /// DB id of the active path's tip: the parent new appends hang from.
     pub leaf_id: Option<u64>,
+    /// The session's active scene; `None` = the built-in default scene.
+    pub scene: Option<String>,
     /// Usage of the most recent main-stream request, restored from storage so
     /// a loaded session can re-seed the sidebar's context anchor and read/
     /// cache-hit metrics. Not maintained by the live turn loop (which reports
@@ -172,6 +174,7 @@ impl Session {
             id: Some(stored.id),
             title: Some(stored.title),
             leaf_id: stored.leaf_id,
+            scene: stored.scene,
             scroll: stored.scroll,
             ..Self::default()
         };
@@ -237,6 +240,7 @@ impl Session {
         self.summaries.clear();
         self.nodes.clear();
         self.leaf_id = None;
+        self.scene = None;
         self.last_usage = None;
         self.scroll = StoredScroll::default();
     }
@@ -340,6 +344,7 @@ mod tests {
 
     fn stored_session(messages: Vec<shuvarie_db::StoredMessage>) -> shuvarie_db::StoredSession {
         shuvarie_db::StoredSession {
+            scene: None,
             id: uuid::Uuid::now_v7(),
             title: "t".into(),
             provider: None,

@@ -417,6 +417,8 @@ impl SessionScreen {
         self.slash
             .set_availability(CommandAction::OpenTree, has_messages);
         self.slash
+            .set_availability(CommandAction::OpenScenePicker, !self.chat.is_streaming());
+        self.slash
             .set_availability(CommandAction::EditTitle, self.session_id.is_some());
         let buffer = self.input.buffer.value.clone();
         self.slash.sync(&buffer);

@@ -6,6 +6,7 @@ pub enum CommandAction {
     AddProvider,
     OpenSessionPicker,
     OpenTree,
+    OpenScenePicker,
     NewSession,
     EditTitle,
     UndoLastTurn,
@@ -16,11 +17,12 @@ pub enum CommandAction {
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 11] = [
+    pub const ALL: [CommandAction; 12] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::OpenSessionPicker,
         CommandAction::OpenTree,
+        CommandAction::OpenScenePicker,
         CommandAction::NewSession,
         CommandAction::EditTitle,
         CommandAction::UndoLastTurn,
@@ -36,6 +38,7 @@ impl CommandAction {
             CommandAction::AddProvider => "provider",
             CommandAction::OpenSessionPicker => "sessions",
             CommandAction::OpenTree => "tree",
+            CommandAction::OpenScenePicker => "scene",
             CommandAction::NewSession => "new",
             CommandAction::EditTitle => "title",
             CommandAction::UndoLastTurn => "undo",
@@ -49,7 +52,10 @@ impl CommandAction {
     /// Whether the command accepts free-form arguments after its name
     /// (e.g. `/title My title`).
     pub fn takes_args(self) -> bool {
-        matches!(self, CommandAction::EditTitle)
+        matches!(
+            self,
+            CommandAction::EditTitle | CommandAction::OpenScenePicker
+        )
     }
 }
 
@@ -91,6 +97,12 @@ pub fn default_commands() -> Vec<CommandEntry> {
             name: "Session tree",
             description: "Walk the tree, fork from a node",
             action: CommandAction::OpenTree,
+            available: true,
+        },
+        CommandEntry {
+            name: "Switch scene",
+            description: "Pick the scene the agent runs under",
+            action: CommandAction::OpenScenePicker,
             available: true,
         },
         CommandEntry {

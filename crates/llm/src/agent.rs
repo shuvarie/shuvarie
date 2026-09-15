@@ -68,6 +68,11 @@ impl WorkerAgent {
         &self.name
     }
 
+    /// The worker's system prompt, as passed to each request.
+    pub fn preamble(&self) -> &str {
+        &self.preamble
+    }
+
     pub fn description(&self) -> &str {
         &self.description
     }

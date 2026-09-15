@@ -81,6 +81,12 @@ pub enum Command {
     /// Load the active session's tree for the `/tree` popup; reports
     /// [`crate::Event::SessionTree`].
     OpenTree,
+    /// Switch the active session's scene (`None` = the built-in default
+    /// scene). Refused with [`crate::Event::SceneError`] while a stream is
+    /// busy or the name does not resolve.
+    SwitchScene {
+        name: Option<String>,
+    },
     Replay,
     Reload,
     /// Recall the most recently steered prompt into the input area. `stacked`

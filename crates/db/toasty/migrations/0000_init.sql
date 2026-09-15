@@ -62,6 +62,7 @@ CREATE TABLE "sessions" (
     "title" TEXT NOT NULL,
     "provider" TEXT,
     "model" TEXT,
+    "scene" TEXT,
     "session_type" TEXT NOT NULL CHECK ("session_type" IN ('main', 'worker')),
     "parent_id" BLOB,
     "leaf_id" INTEGER,

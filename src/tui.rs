@@ -27,6 +27,7 @@ mod model_picker;
 mod permission;
 mod question;
 mod registry;
+mod scene;
 mod search;
 mod session;
 mod session_picker;

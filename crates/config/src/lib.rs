@@ -30,6 +30,10 @@ pub const WORKSPACE_DIR_NAME: &str = if cfg!(debug_assertions) {
     ".shuvarie"
 };
 
+/// The `scene.d` drop-in dir name, next to each config directory: a global
+/// `<config_dir>/scene.d` and a workspace `<WORKSPACE_DIR_NAME>/scene.d`.
+pub const SCENE_DIR_NAME: &str = "scene.d";
+
 /// Context-file candidates for one directory, in priority order: an
 /// `AGENTS.override.md` replaces the plain files in its directory, and
 /// `CLAUDE.md` is the fallback for projects written for other agents.
@@ -71,8 +75,9 @@ fn read_layer(path: &std::path::Path) -> Result<Option<ConfigLayer>> {
 /// not), so locally-set sections intentionally reset untouched fields of that
 /// section to defaults. `lsp.servers` merges key-by-key so a file adding one
 /// server doesn't shadow the rest; `registries` merges key-by-key per
-/// registry name for the same reason. `permissions` is stacked separately by
-/// [`stack_permissions`] once the whole chain has been read.
+/// registry name for the same reason. `permissions` and `scenes` are stacked
+/// separately by [`stack_permissions`] / [`stack_scenes`] once the whole
+/// chain has been read.
 fn merge_layer(config: &mut Config, layer: &ConfigLayer) {
     for section in &layer.sections {
         match section.as_str() {
@@ -124,6 +129,106 @@ fn stack_permissions(layers: &[PermissionsConfig]) -> PermissionsConfig {
     merged
 }
 
+/// Stacks the chain's `scenes` sections into one config, lowest-priority
+/// layer first: `default` comes from the highest layer that sets it, and each
+/// scene merges field-wise per scene name so a layer can extend a scene
+/// defined elsewhere without hiding it. This is the save-faithful merge for
+/// [`Config::scenes`]; the runtime scene set ([`Config::load_scenes`])
+/// instead resolves the chain's layers through `scene_sources`, where
+/// same-level duplicates conflict.
+fn stack_scenes(layers: &[ScenesConfig]) -> ScenesConfig {
+    let mut merged = ScenesConfig::default();
+    for layer in layers.iter().rev() {
+        merged.stack(layer.clone());
+    }
+    merged
+}
+
+/// Merges one level's sources (highest priority first): `default` comes from
+/// the highest-priority source that sets it, and a scene name defined by more
+/// than one source of the level is a conflict — the scene is dropped
+/// entirely and a warning names every defining source.
+fn merge_level(level: &str, sources: &[SceneSource]) -> (ScenesConfig, Vec<String>) {
+    let mut merged = ScenesConfig::default();
+    let mut defined: std::collections::BTreeMap<String, String> = Default::default();
+    let mut conflicts: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for source in sources {
+        if merged.default.is_none() {
+            merged.default = source.scenes.default.clone();
+        }
+        for (name, scene) in &source.scenes.scenes {
+            match defined.get(name) {
+                None => {
+                    defined.insert(name.clone(), source.label.clone());
+                    merged.scenes.insert(name.clone(), scene.clone());
+                }
+                Some(first) => {
+                    merged.scenes.remove(name);
+                    let labels = conflicts.entry(name.clone()).or_default();
+                    if labels.is_empty() {
+                        labels.push(first.clone());
+                    }
+                    labels.push(source.label.clone());
+                }
+            }
+        }
+    }
+    let warnings = conflicts
+        .into_iter()
+        .map(|(name, labels)| {
+            format!(
+                "scene `{name}` is defined multiple times in the {level} ({labels}); loading none of them",
+                labels = labels.join(", ")
+            )
+        })
+        .collect();
+    (merged, warnings)
+}
+
+/// The display label of a config file in scene-conflict warnings: the file
+/// name, prefixed with the workspace dir when it lives inside one.
+fn scene_source_label(path: &std::path::Path) -> String {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config");
+    match path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|parent| parent.to_str())
+    {
+        Some(parent) if parent == WORKSPACE_DIR_NAME => format!("{parent}/{name}"),
+        _ => name.to_string(),
+    }
+}
+
+/// Merges the two levels into the runtime scene set: the global config layer
+/// plus the global drop-ins form the global level, the local config layers
+/// plus the workspace drop-ins form the local level, and the local level
+/// then overrides the global one field-wise per scene name.
+fn scene_set_from_levels(
+    global_layer: Option<SceneSource>,
+    local_layers: Vec<SceneSource>,
+    global_dir: &std::path::Path,
+    dropin_dir: Option<&std::path::Path>,
+) -> Result<SceneSet> {
+    let mut global_sources = Vec::new();
+    if let Some(layer) = global_layer {
+        global_sources.push(layer);
+    }
+    global_sources.extend(load_scene_dir_in(global_dir)?);
+    let mut local_sources = local_layers;
+    if let Some(dir) = dropin_dir {
+        local_sources.extend(load_scene_dir_in(dir)?);
+    }
+    let (global, mut warnings) = merge_level("global config", &global_sources);
+    let (local, local_warnings) = merge_level("local config", &local_sources);
+    warnings.extend(local_warnings);
+    let mut scenes = global;
+    scenes.stack(local);
+    Ok(SceneSet { scenes, warnings })
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Config {
     pub ui: UiPrefs,
@@ -147,6 +252,19 @@ pub struct Config {
     pub tools: ToolsConfig,
 
     pub permissions: PermissionsConfig,
+
+    /// `scenes { … }` — the named scenes defined by the config chain,
+    /// already stacked. The runtime scene set additionally layers the
+    /// `scene.d` drop-in dirs on top and resolves same-level conflicts
+    /// (see [`Self::load_scenes`]).
+    pub scenes: ScenesConfig,
+
+    /// The config chain's `scenes` per layer, highest priority first (the
+    /// local layers, then the global one; an explicit `--config` file is the
+    /// single layer). [`Self::load_scenes`] needs the layers to tell the
+    /// global level from the local one and to detect same-level conflicts;
+    /// `scenes` above stays the plain chain merge for save fidelity.
+    pub scene_sources: Vec<SceneSource>,
 }
 
 /// A permission verdict for file paths and shell commands.
@@ -480,6 +598,302 @@ impl RegistriesConfig {
     }
 }
 
+/// `scenes { … }` — the named scenes: per-scene system prompts, injected
+/// wrapper prompts, and the tool roster. The built-in default scene is code,
+/// not config; this section only defines named scenes on top of it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ScenesConfig {
+    /// The scene for new sessions (`default "Plan"`). `None` keeps the
+    /// built-in default scene.
+    pub default: Option<String>,
+
+    /// The defined scenes, keyed by name.
+    pub scenes: BTreeMap<String, SceneConfig>,
+}
+
+impl ScenesConfig {
+    /// Parses a standalone `scenes` document (the same format as the config
+    /// section, as used by `scene.d` drop-ins). Top-level `scenes` nodes
+    /// stack field-wise; same-level conflicts are only decided across
+    /// sources, by [`Config::load_scenes`].
+    pub fn from_kdl(contents: &str) -> crate::Result<Self> {
+        let mut scenes = Self::default();
+        for source in crate::config_kdl::scenes_from_document(contents)? {
+            scenes.stack(source);
+        }
+        Ok(scenes)
+    }
+
+    /// Stacks `higher` over `self`: `default` comes from the highest layer
+    /// that sets it, and each scene merges field-wise per scene name so a
+    /// layer can extend a scene defined elsewhere without hiding it.
+    pub fn stack(&mut self, higher: ScenesConfig) {
+        if higher.default.is_some() {
+            self.default = higher.default;
+        }
+        for (name, scene) in higher.scenes {
+            match self.scenes.get_mut(&name) {
+                Some(lower) => lower.merge(scene),
+                None => {
+                    self.scenes.insert(name, scene);
+                }
+            }
+        }
+    }
+
+    /// The scene with the given name.
+    pub fn scene(&self, name: &str) -> Option<&SceneConfig> {
+        self.scenes.get(name)
+    }
+}
+
+/// One config source's `scenes` section, with the display label used in
+/// same-level conflict warnings.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SceneSource {
+    /// Display label: `shuvarie.kdl`, `.shuvarie/config.kdl`, `config.kdl`,
+    /// or `scene.d/<file>`.
+    pub label: String,
+
+    pub scenes: ScenesConfig,
+}
+
+/// The runtime scene set [`Config::load_scenes`] builds: the merged scene
+/// config plus one warning per same-level conflict (a scene name defined by
+/// more than one source of the same level loads neither copy).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SceneSet {
+    pub scenes: ScenesConfig,
+
+    pub warnings: Vec<String>,
+}
+
+/// One named scene.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SceneConfig {
+    /// Free-text shown in the scene picker.
+    pub description: Option<String>,
+
+    /// Per-worker overrides.
+    pub subagents: SubagentsConfig,
+
+    /// System-prompt pieces injected around the conversation.
+    pub system_prompts: SystemPromptsConfig,
+
+    /// Reserved for the per-provider thinking toggle (not wired yet).
+    pub thinking: Option<bool>,
+
+    /// Tool availability inside the scene.
+    pub tools: SceneToolsConfig,
+}
+
+impl SceneConfig {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    fn merge(&mut self, higher: SceneConfig) {
+        if higher.description.is_some() {
+            self.description = higher.description;
+        }
+        if higher.thinking.is_some() {
+            self.thinking = higher.thinking;
+        }
+        self.subagents.merge(higher.subagents);
+        self.system_prompts.merge(higher.system_prompts);
+        self.tools.merge(higher.tools);
+    }
+}
+
+/// `subagents { … }` inside a scene: a whole-roster kill switch plus
+/// per-worker overrides keyed by worker name.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SubagentsConfig {
+    pub disabled: bool,
+    pub workers: BTreeMap<String, SubagentConfig>,
+}
+
+impl SubagentsConfig {
+    fn is_default(&self) -> bool {
+        !self.disabled && self.workers.is_empty()
+    }
+
+    fn merge(&mut self, higher: SubagentsConfig) {
+        self.disabled |= higher.disabled;
+        for (name, worker) in higher.workers {
+            self.workers.entry(name).or_default().merge(worker);
+        }
+    }
+}
+
+/// One `subagents { <name> { … } }` entry: per-worker prompt, thinking, and
+/// tool overrides, or the worker dropped from the roster entirely.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SubagentConfig {
+    pub disabled: bool,
+
+    /// Reserved for the per-provider thinking toggle (not wired yet).
+    pub thinking: Option<bool>,
+
+    pub system_prompts: SystemPromptsConfig,
+
+    pub tools: SceneToolsConfig,
+}
+
+impl SubagentConfig {
+    fn merge(&mut self, higher: SubagentConfig) {
+        self.disabled |= higher.disabled;
+        if higher.thinking.is_some() {
+            self.thinking = higher.thinking;
+        }
+        self.system_prompts.merge(higher.system_prompts);
+        self.tools.merge(higher.tools);
+    }
+}
+
+/// `system-prompts { … }`: the scene's system-prompt pieces. `prelude`
+/// replaces the built-in agent preamble, `interlude` is injected at a
+/// mid-session scene switch, and the `before-each`/`after-each` hooks wrap
+/// every user prompt / assistant reply / turn.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SystemPromptsConfig {
+    pub prelude: Option<String>,
+    pub interlude: Option<String>,
+    pub before_each: Option<Hooks>,
+    pub after_each: Option<Hooks>,
+}
+
+impl SystemPromptsConfig {
+    fn is_default(&self) -> bool {
+        self.prelude.is_none()
+            && self.interlude.is_none()
+            && self.before_each.is_none()
+            && self.after_each.is_none()
+    }
+
+    fn merge(&mut self, higher: SystemPromptsConfig) {
+        if higher.prelude.is_some() {
+            self.prelude = higher.prelude;
+        }
+        if higher.interlude.is_some() {
+            self.interlude = higher.interlude;
+        }
+        match (self.before_each.as_mut(), higher.before_each) {
+            (Some(lower), Some(higher)) => lower.merge(higher),
+            (None, higher) => self.before_each = higher,
+            _ => {}
+        }
+        match (self.after_each.as_mut(), higher.after_each) {
+            (Some(lower), Some(higher)) => lower.merge(higher),
+            (None, higher) => self.after_each = higher,
+            _ => {}
+        }
+    }
+}
+
+/// `before-each` / `after-each` hook texts: a system message around each user
+/// prompt, each assistant reply, or each turn as a whole.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Hooks {
+    pub user_prompt: Option<String>,
+    pub assistant_prompt: Option<String>,
+    pub turn: Option<String>,
+}
+
+impl Hooks {
+    fn is_default(&self) -> bool {
+        self.user_prompt.is_none() && self.assistant_prompt.is_none() && self.turn.is_none()
+    }
+
+    fn merge(&mut self, higher: Hooks) {
+        if higher.user_prompt.is_some() {
+            self.user_prompt = higher.user_prompt;
+        }
+        if higher.assistant_prompt.is_some() {
+            self.assistant_prompt = higher.assistant_prompt;
+        }
+        if higher.turn.is_some() {
+            self.turn = higher.turn;
+        }
+    }
+}
+
+/// `tools { … }` inside a scene: an at-most-one `-all` verb plus per-tool
+/// overrides.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SceneToolsConfig {
+    /// `enable-all` / `ask-all` / `disable-all`; `None` keeps the built-in
+    /// behavior (everything enabled, gated by the global permissions).
+    pub verb: Option<SceneToolVerb>,
+
+    /// Overrides keyed by tool name.
+    pub tools: BTreeMap<String, ToolOverride>,
+}
+
+impl SceneToolsConfig {
+    fn is_default(&self) -> bool {
+        self.verb.is_none() && self.tools.is_empty()
+    }
+
+    fn merge(&mut self, higher: SceneToolsConfig) {
+        if higher.verb.is_some() {
+            self.verb = higher.verb;
+        }
+        for (name, tool) in higher.tools {
+            match self.tools.get_mut(&name) {
+                Some(lower) => lower.merge(tool),
+                None => {
+                    self.tools.insert(name, tool);
+                }
+            }
+        }
+    }
+}
+
+/// The scene-wide tool verb: `enable-all` (everything enabled), `ask-all`
+/// (everything asks), or `disable-all` (only explicitly re-enabled tools).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SceneToolVerb {
+    EnableAll,
+    AskAll,
+    DisableAll,
+}
+
+impl SceneToolVerb {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EnableAll => "enable-all",
+            Self::AskAll => "ask-all",
+            Self::DisableAll => "disable-all",
+        }
+    }
+}
+
+/// One `tool "name" { … }` override: drop the tool from the roster and/or
+/// force an ask verdict for it. Both fields are three-valued so an omitted
+/// field means "not specified by this entry" (layer merging keeps the lower
+/// layer's value).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolOverride {
+    /// `None` = unspecified, `Some(false)` = explicitly enabled (re-enabling
+    /// under `disable-all`), `Some(true)` = disabled.
+    pub disabled: Option<bool>,
+
+    /// `None` = unspecified, `Some(true)` = the tool always asks first.
+    pub ask: Option<bool>,
+}
+
+impl ToolOverride {
+    fn merge(&mut self, higher: ToolOverride) {
+        if higher.disabled.is_some() {
+            self.disabled = higher.disabled;
+        }
+        if higher.ask.is_some() {
+            self.ask = higher.ask;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SkillsConfig {
     pub disabled: bool,
@@ -610,6 +1024,45 @@ pub fn config_dir() -> Result<PathBuf> {
     Ok(dir.join(CONFIG_DIR_NAME))
 }
 
+/// The sorted `*.kdl` scene drop-ins of `dir` (a missing or non-directory
+/// `dir` yields none).
+fn scene_dir_files(dir: &std::path::Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "kdl"))
+        .collect();
+    files.sort();
+    files
+}
+
+/// Loads the sorted `*.kdl` scene drop-ins of `dir` as level sources, one per
+/// top-level `scenes` node (a missing or non-directory `dir` yields none).
+fn load_scene_dir_in(dir: &std::path::Path) -> Result<Vec<SceneSource>> {
+    let mut sources = Vec::new();
+    for file in scene_dir_files(dir) {
+        let contents = std::fs::read_to_string(&file)?;
+        let blocks = config_kdl::scenes_from_document(&contents)?;
+        let base = file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("scene.kdl");
+        let numbered = blocks.len() > 1;
+        for (idx, scenes) in blocks.into_iter().enumerate() {
+            let label = if numbered {
+                format!("{SCENE_DIR_NAME}/{base} (block {})", idx + 1)
+            } else {
+                format!("{SCENE_DIR_NAME}/{base}")
+            };
+            sources.push(SceneSource { label, scenes });
+        }
+    }
+    Ok(sources)
+}
+
 impl Config {
     pub fn config_path() -> Result<PathBuf> {
         Ok(config_dir()?.join(CONFIG_FILE_NAME))
@@ -670,11 +1123,84 @@ impl Config {
         paths
     }
 
+    /// The global `scene.d` drop-in dir.
+    pub fn global_scene_dir() -> Result<PathBuf> {
+        Ok(config_dir()?.join(SCENE_DIR_NAME))
+    }
+
+    /// The workspace `scene.d` drop-in dir.
+    pub fn workspace_scene_dir(cwd: &std::path::Path) -> PathBuf {
+        cwd.join(WORKSPACE_DIR_NAME).join(SCENE_DIR_NAME)
+    }
+
+    /// Loads the `*.kdl` scene drop-ins of `dir` as one level (sorted by
+    /// filename; a missing or empty dir yields an empty set).
+    pub fn load_scene_dir(dir: &std::path::Path) -> Result<SceneSet> {
+        let (scenes, warnings) = merge_level("scene dir", &load_scene_dir_in(dir)?);
+        Ok(SceneSet { scenes, warnings })
+    }
+
+    /// The runtime scene set for an app run, built from two levels. The
+    /// global level is the global config layer (the chain's last source, or
+    /// the whole `config` when no chain was recorded) plus the global
+    /// `scene.d` drop-ins. The local level is the chain's local layers — or
+    /// the explicit `--config` file as the single layer — plus the workspace
+    /// `scene.d` drop-ins, which load only when the `configs` trust category
+    /// is granted and no explicit config was named; with an explicit config
+    /// the drop-in dir next to that file is used. Within a level a scene
+    /// name must be unique: a name defined by more than one source is a
+    /// conflict reported in `SceneSet::warnings` and neither copy loads.
+    /// Across levels the local level overrides the global one field-wise per
+    /// scene name, and the built-in Default scene stays the fallback when a
+    /// name resolves nowhere.
+    pub fn load_scenes(
+        config: &Config,
+        cwd: &std::path::Path,
+        grants: &crate::trusts::TrustGrants,
+        explicit: Option<&std::path::Path>,
+    ) -> Result<SceneSet> {
+        let mut sources = config.scene_sources.clone();
+        if sources.is_empty() {
+            sources.push(SceneSource {
+                label: "config.kdl".to_string(),
+                scenes: config.scenes.clone(),
+            });
+        }
+        let (global_layer, local_layers) = if explicit.is_some() {
+            (None, sources)
+        } else {
+            match sources.split_last() {
+                Some((last, rest)) => (Some(last.clone()), rest.to_vec()),
+                None => (None, Vec::new()),
+            }
+        };
+        let workspace = (explicit.is_none() && grants.allows(crate::trusts::Category::Configs))
+            .then(|| Self::workspace_scene_dir(cwd));
+        let dropin_dir = explicit
+            .map(|path| {
+                path.parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .join(SCENE_DIR_NAME)
+            })
+            .or(workspace);
+        scene_set_from_levels(
+            global_layer,
+            local_layers,
+            &Self::global_scene_dir()?,
+            dropin_dir.as_deref(),
+        )
+    }
+
     fn load_chain(paths: &[PathBuf]) -> Result<Self> {
         let mut config = Self::default();
         let mut permissions = Vec::new();
+        let mut scene_sources = Vec::new();
         for path in paths {
             if let Some(layer) = read_layer(path)? {
+                scene_sources.push(SceneSource {
+                    label: scene_source_label(path),
+                    scenes: layer.config.scenes.clone(),
+                });
                 if layer.sections.contains("permissions") {
                     permissions.push(layer.config.permissions.clone());
                 }
@@ -682,6 +1208,9 @@ impl Config {
             }
         }
         config.permissions = stack_permissions(&permissions);
+        let layers: Vec<ScenesConfig> = scene_sources.iter().map(|s| s.scenes.clone()).collect();
+        config.scenes = stack_scenes(&layers);
+        config.scene_sources = scene_sources;
         Ok(config)
     }
 
@@ -690,7 +1219,14 @@ impl Config {
     /// explicitly (`--config`).
     pub fn load_explicit(path: &std::path::Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
-            Ok(contents) => config_kdl::from_kdl(&contents),
+            Ok(contents) => {
+                let mut config = config_kdl::from_kdl(&contents)?;
+                config.scene_sources = vec![SceneSource {
+                    label: scene_source_label(path),
+                    scenes: config.scenes.clone(),
+                }];
+                Ok(config)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 Err(ConfigError::Io(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
@@ -2110,5 +2646,550 @@ mod tests {
             Some(Verb::Ask),
             "the top file's bare verb wins"
         );
+    }
+
+    fn scenes(text: &str) -> ScenesConfig {
+        config_kdl::from_kdl(text).unwrap().scenes
+    }
+
+    fn config_with_scenes(sc: ScenesConfig) -> Config {
+        Config {
+            scenes: sc,
+            ..Config::default()
+        }
+    }
+
+    fn scene_example() -> &'static str {
+        r#"
+            scenes {
+                default "Plan"
+                scene name="Plan" {
+                    description "Plan before acting"
+                    subagents {
+                        disabled #true
+                        editor {
+                            system-prompts {
+                                prelude """
+You are a helpful editor, working on the manuscript.
+You polish prose before publishing.
+"""
+                                interlude """
+Now we're in Plan mode: plan first, no edits.
+"""
+                            }
+                            thinking #false
+                            tools {
+                                enable-all
+                                tool "edit_file" {
+                                    disabled #true
+                                }
+                            }
+                        }
+                    }
+                    system-prompts {
+                        prelude """
+You are a helpful tool, working in Plan mode.
+You plan before acting.
+"""
+                        interlude """
+Now we're in Plan mode: plan first, no edits.
+"""
+                        before-each {
+                            user-prompt "before user"
+                            assistant-prompt "before assistant"
+                            turn "before turn"
+                        }
+                        after-each {
+                            turn "after turn"
+                        }
+                    }
+                    thinking #false
+                    tools {
+                        disable-all
+                        tool "write_file" "edit_file" {
+                            disabled #true
+                            ask #false
+                        }
+                        tool "run_shell" {
+                            ask #true
+                        }
+                    }
+                }
+                scene name="Build" {
+                    tools {
+                        tool "run_shell" {
+                            disabled #true
+                        }
+                    }
+                }
+            }
+        "#
+    }
+
+    #[test]
+    fn scenes_absent_by_default() {
+        let parsed = config_kdl::from_kdl("ui { frame-rate 30 }").unwrap();
+        assert_eq!(parsed.scenes, ScenesConfig::default());
+        assert_eq!(parsed.scenes.default, None);
+        assert!(parsed.scenes.scenes.is_empty());
+        assert!(
+            !config_kdl::to_kdl(&Config::default())
+                .unwrap()
+                .contains("scenes")
+        );
+    }
+
+    #[test]
+    fn scenes_full_example_parses() {
+        let parsed = scenes(scene_example());
+        assert_eq!(parsed.default.as_deref(), Some("Plan"));
+        assert_eq!(parsed.scenes.len(), 2);
+
+        let plan = parsed.scene("Plan").unwrap();
+        assert_eq!(plan.description.as_deref(), Some("Plan before acting"));
+        assert!(plan.subagents.disabled);
+        assert_eq!(plan.subagents.workers.len(), 1, "workers key by node name");
+        let editor = plan.subagents.workers.get("editor").unwrap();
+        assert_eq!(
+            editor.system_prompts.prelude.as_deref(),
+            Some(
+                "You are a helpful editor, working on the manuscript.\nYou polish prose before publishing."
+            )
+        );
+        assert_eq!(
+            editor.system_prompts.interlude.as_deref(),
+            Some("Now we're in Plan mode: plan first, no edits.")
+        );
+        assert_eq!(editor.thinking, Some(false));
+        assert_eq!(editor.tools.verb, Some(SceneToolVerb::EnableAll));
+        assert_eq!(
+            editor.tools.tools.get("edit_file").map(|t| t.disabled),
+            Some(Some(true))
+        );
+        assert_eq!(
+            plan.system_prompts.prelude.as_deref(),
+            Some("You are a helpful tool, working in Plan mode.\nYou plan before acting.")
+        );
+        assert_eq!(
+            plan.system_prompts.interlude.as_deref(),
+            Some("Now we're in Plan mode: plan first, no edits.")
+        );
+        let before = plan.system_prompts.before_each.as_ref().unwrap();
+        assert_eq!(before.user_prompt.as_deref(), Some("before user"));
+        assert_eq!(before.assistant_prompt.as_deref(), Some("before assistant"));
+        assert_eq!(before.turn.as_deref(), Some("before turn"));
+        let after = plan.system_prompts.after_each.as_ref().unwrap();
+        assert_eq!(after.turn.as_deref(), Some("after turn"));
+        assert_eq!(after.user_prompt, None);
+        assert_eq!(plan.thinking, Some(false));
+        assert_eq!(plan.tools.verb, Some(SceneToolVerb::DisableAll));
+        let write = plan.tools.tools.get("write_file").unwrap();
+        assert_eq!(write.disabled, Some(true));
+        assert_eq!(write.ask, Some(false));
+        assert_eq!(
+            plan.tools.tools.get("edit_file").map(|t| t.ask),
+            Some(Some(false))
+        );
+        assert_eq!(
+            plan.tools.tools.get("run_shell").map(|t| t.ask),
+            Some(Some(true))
+        );
+
+        let build = parsed.scene("Build").unwrap();
+        assert_eq!(
+            build.tools.tools.get("run_shell").map(|t| t.disabled),
+            Some(Some(true))
+        );
+    }
+
+    #[test]
+    fn scenes_round_trip_with_multiline_prompts() {
+        let parsed = scenes(scene_example());
+        let out = config_kdl::to_kdl(&config_with_scenes(parsed.clone())).unwrap();
+        assert!(out.contains("\"\"\""), "multiline prompts stay raw: {out}");
+        let reparsed = config_kdl::from_kdl(&out).unwrap();
+        assert_eq!(parsed, reparsed.scenes);
+    }
+
+    #[test]
+    fn scenes_bare_scene_stays_declared() {
+        let parsed = scenes(r#"scenes { scene name="Only" }"#);
+        assert!(parsed.scene("Only").unwrap().is_default());
+        let out = config_kdl::to_kdl(&config_with_scenes(parsed.clone())).unwrap();
+        assert!(out.contains("scene name=Only"), "body: {out}");
+        assert_eq!(config_kdl::from_kdl(&out).unwrap().scenes, parsed);
+    }
+
+    #[test]
+    fn scenes_default_round_trips() {
+        let parsed = scenes(r#"scenes { default "Build" }"#);
+        assert_eq!(parsed.default.as_deref(), Some("Build"));
+        let out = config_kdl::to_kdl(&config_with_scenes(parsed)).unwrap();
+        assert!(out.contains("default Build"), "body: {out}");
+    }
+
+    #[test]
+    fn scenes_parse_errors() {
+        let cases: &[(&str, &str)] = &[
+            ("scenes {\n    scene { }\n}", "requires a `name`"),
+            ("scenes { scene name=\"\" }", "must name a scene"),
+            ("scenes { default \"\" }", "must name a scene"),
+            (
+                "scenes {\n    scene name=\"A\" { description \"x\" }\n    scene name=\"A\"\n}",
+                "duplicate",
+            ),
+            ("scenes { bogus }", "unknown node"),
+            ("scenes { scene name=\"A\" { bogus } }", "unknown node"),
+            (
+                "scenes {\n    scene name=\"A\" {\n        tools {\n            enable-all\n            ask-all\n        }\n    }\n}",
+                "duplicate",
+            ),
+            (
+                "scenes { scene name=\"A\" { tools { tool \"x\" { } } } }",
+                "requires `disabled` or `ask`",
+            ),
+            (
+                "scenes {\n    scene name=\"A\" {\n        tools {\n            tool \"x\" { disabled #true }\n            tool \"x\" { ask #true }\n        }\n    }\n}",
+                "duplicate",
+            ),
+            (
+                "scenes { scene name=\"A\" { tools { tool 42 { disabled #true } } } }",
+                "tool name",
+            ),
+            (
+                "scenes { scene name=\"A\" { tools { tool { disabled #true } } } }",
+                "at least one tool name",
+            ),
+            (
+                "scenes {\n    scene name=\"A\" {\n        tools {\n            enable-all { disabled #true }\n        }\n    }\n}",
+                "takes no children",
+            ),
+            (
+                "scenes { scene name=\"A\" { system-prompts { prelude \"  \" } } }",
+                "must not be empty",
+            ),
+            (
+                "scenes {\n    scene name=\"A\" {\n        subagents {\n            editor\n            editor\n        }\n    }\n}",
+                "duplicate",
+            ),
+            (
+                "scenes { scene name=\"A\" { subagents { editor { bogus } } } }",
+                "unknown node",
+            ),
+            (
+                "scenes { scene name=\"A\" { subagents { editor name=\"x\" } } }",
+                "takes no arguments",
+            ),
+            (
+                "scenes { scene name=\"A\" { system-prompts { bogus \"x\" } } }",
+                "unknown node",
+            ),
+            (
+                "scenes { scene name=\"A\" { before-each { turn \"x\" } } }",
+                "unknown node",
+            ),
+        ];
+        for (text, needle) in cases {
+            let err = config_kdl::from_kdl(text).unwrap_err();
+            let ConfigError::Parse(parse_err) = err else {
+                panic!("expected config parse error for {text}");
+            };
+            assert!(
+                parse_err.message.contains(needle),
+                "{needle:?} not in {parse_err}"
+            );
+        }
+    }
+
+    #[test]
+    fn scenes_chain_merges_fieldwise() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global.kdl");
+        let top = dir.path().join("shuvarie.kdl");
+        std::fs::write(
+            &global,
+            r#"
+            scenes {
+                scene name="Plan" {
+                    description "global plan"
+                    system-prompts { prelude "global prelude" }
+                }
+                scene name="Only-Global"
+            }
+        "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &top,
+            r#"
+            scenes {
+                default "Plan"
+                scene name="Plan" {
+                    tools { disable-all }
+                }
+            }
+        "#,
+        )
+        .unwrap();
+
+        let config = Config::load_chain(&[top, global]).unwrap();
+        assert_eq!(config.scenes.default.as_deref(), Some("Plan"));
+        assert!(config.scenes.scenes.contains_key("Only-Global"));
+        let plan = config.scenes.scene("Plan").unwrap();
+        assert_eq!(plan.description.as_deref(), Some("global plan"));
+        assert_eq!(
+            plan.system_prompts.prelude.as_deref(),
+            Some("global prelude")
+        );
+        assert_eq!(plan.tools.verb, Some(SceneToolVerb::DisableAll));
+    }
+
+    #[test]
+    fn scene_dir_loads_sorted_kdl_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let scene_dir = dir.path().join(SCENE_DIR_NAME);
+        std::fs::create_dir_all(&scene_dir).unwrap();
+        std::fs::write(
+            scene_dir.join("10-build.kdl"),
+            r#"
+            scenes {
+                scene name="Build" { description "from drop-in" }
+            }
+            ignored { whatever #true }
+        "#,
+        )
+        .unwrap();
+        std::fs::write(
+            scene_dir.join("20-plan.kdl"),
+            r#"
+            scenes {
+                scene name="Plan" { description "from drop-in" }
+            }
+        "#,
+        )
+        .unwrap();
+        std::fs::write(scene_dir.join("30-notes.txt"), "not kdl").unwrap();
+        std::fs::create_dir_all(scene_dir.join("40-subdir.kdl")).unwrap();
+
+        let scenes = Config::load_scene_dir(&scene_dir).unwrap().scenes;
+        assert_eq!(scenes.scenes.len(), 2);
+        assert_eq!(
+            scenes.scene("Plan").unwrap().description.as_deref(),
+            Some("from drop-in")
+        );
+        assert_eq!(
+            scenes.scene("Build").unwrap().description.as_deref(),
+            Some("from drop-in")
+        );
+
+        assert_eq!(
+            Config::load_scene_dir(&dir.path().join("missing")).unwrap(),
+            SceneSet::default()
+        );
+    }
+
+    #[test]
+    fn scene_dir_duplicates_conflict_and_load_neither() {
+        let dir = tempfile::tempdir().unwrap();
+        let scene_dir = dir.path().join(SCENE_DIR_NAME);
+        std::fs::create_dir_all(&scene_dir).unwrap();
+        std::fs::write(
+            scene_dir.join("10-plan.kdl"),
+            r#"scenes { scene name="Plan" { description "one" } }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            scene_dir.join("20-plan.kdl"),
+            r#"scenes { scene name="Plan" { tools { ask-all } }
+ scene name="Keep" }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            scene_dir.join("30-blocks.kdl"),
+            r#"scenes { scene name="Plan" { description "block" } }"#,
+        )
+        .unwrap();
+
+        let set = Config::load_scene_dir(&scene_dir).unwrap();
+        assert!(set.scenes.scene("Plan").is_none(), "neither copy loads");
+        assert!(set.scenes.scene("Keep").is_some(), "unaffected scenes load");
+        assert_eq!(set.warnings.len(), 1, "warnings: {:?}", set.warnings);
+        assert!(set.warnings[0].contains("`Plan`"));
+        assert!(set.warnings[0].contains("scene.d/10-plan.kdl"));
+        assert!(set.warnings[0].contains("scene.d/20-plan.kdl"));
+        assert!(set.warnings[0].contains("scene.d/30-blocks.kdl"));
+    }
+
+    #[test]
+    fn scene_levels_local_overrides_global_fieldwise() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global");
+        let workspace = dir.path().join("ws");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(global.join("a.kdl"), "scenes {\n    scene name=\"B\"\n}").unwrap();
+        std::fs::write(
+            workspace.join("z.kdl"),
+            r#"scenes { scene name="A" { system-prompts { prelude "local" } } }"#,
+        )
+        .unwrap();
+        let global_layer = SceneSource {
+            label: "config.kdl".to_string(),
+            scenes: scenes(
+                "scenes {\n    scene name=\"A\" {\n        description \"global\"\n        tools { ask-all }\n    }\n}",
+            ),
+        };
+
+        let set = scene_set_from_levels(Some(global_layer), Vec::new(), &global, Some(&workspace))
+            .unwrap();
+        let a = set.scenes.scene("A").unwrap();
+        assert_eq!(a.description.as_deref(), Some("global"), "global field");
+        assert_eq!(
+            a.system_prompts.prelude.as_deref(),
+            Some("local"),
+            "the local field wins"
+        );
+        assert_eq!(
+            a.tools.verb,
+            Some(SceneToolVerb::AskAll),
+            "a global-only field falls through"
+        );
+        assert!(set.scenes.scene("B").is_some(), "global drop-in scene");
+        assert!(set.warnings.is_empty(), "cross-level names do not conflict");
+    }
+
+    #[test]
+    fn same_level_duplicates_conflict_and_load_neither() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::write(
+            global.join("plan.kdl"),
+            "scenes {\n    scene name=\"Plan\" { system-prompts { prelude \"g\" } }\n    scene name=\"Only-Global\"\n}",
+        )
+        .unwrap();
+        let global_layer = SceneSource {
+            label: "config.kdl".to_string(),
+            scenes: scenes(r#"scenes { scene name="Plan" { tools { ask-all } } }"#),
+        };
+
+        let set = scene_set_from_levels(Some(global_layer), Vec::new(), &global, None).unwrap();
+        assert!(
+            set.scenes.scene("Plan").is_none(),
+            "neither global copy loads"
+        );
+        assert!(set.scenes.scene("Only-Global").is_some());
+        assert_eq!(set.warnings.len(), 1, "warnings: {:?}", set.warnings);
+        assert!(set.warnings[0].contains("global config"));
+        assert!(set.warnings[0].contains("config.kdl"));
+        assert!(set.warnings[0].contains("scene.d/plan.kdl"));
+    }
+
+    #[test]
+    fn a_local_scene_survives_a_global_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::write(
+            global.join("plan.kdl"),
+            r#"scenes { scene name="Plan" { description "g1" } }"#,
+        )
+        .unwrap();
+        let global_layer = SceneSource {
+            label: "config.kdl".to_string(),
+            scenes: scenes(r#"scenes { scene name="Plan" { description "g2" } }"#),
+        };
+        let local = SceneSource {
+            label: "shuvarie.kdl".to_string(),
+            scenes: scenes(
+                r#"scenes { scene name="Plan" { system-prompts { prelude "local" } } }"#,
+            ),
+        };
+
+        let set = scene_set_from_levels(Some(global_layer), vec![local], &global, None).unwrap();
+        let plan = set.scenes.scene("Plan").unwrap();
+        assert_eq!(
+            plan.description.as_deref(),
+            None,
+            "the conflicted global copies contribute nothing"
+        );
+        assert_eq!(plan.system_prompts.prelude.as_deref(), Some("local"));
+        assert_eq!(set.warnings.len(), 1);
+    }
+
+    #[test]
+    fn local_config_layers_conflict_within_the_local_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global");
+        std::fs::create_dir_all(&global).unwrap();
+        let top = SceneSource {
+            label: "shuvarie.kdl".to_string(),
+            scenes: scenes(r#"scenes { scene name="Plan" { description "a" } }"#),
+        };
+        let nested = SceneSource {
+            label: ".shuvarie/config.kdl".to_string(),
+            scenes: scenes(
+                "scenes {\n    scene name=\"Plan\" { description \"b\" }\n    scene name=\"Keep\"\n}",
+            ),
+        };
+        let global_layer = SceneSource {
+            label: "config.kdl".to_string(),
+            scenes: ScenesConfig::default(),
+        };
+
+        let set =
+            scene_set_from_levels(Some(global_layer), vec![top, nested], &global, None).unwrap();
+        assert!(set.scenes.scene("Plan").is_none());
+        assert!(set.scenes.scene("Keep").is_some());
+        assert!(
+            set.warnings[0].contains("local config"),
+            "{:#?}",
+            set.warnings
+        );
+        assert!(set.warnings[0].contains("shuvarie.kdl"));
+        assert!(set.warnings[0].contains(".shuvarie/config.kdl"));
+    }
+
+    #[test]
+    fn level_default_takes_the_highest_priority_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global");
+        let workspace = dir.path().join("ws");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("a.kdl"), r#"scenes { default "Dropin" }"#).unwrap();
+        let global_layer = SceneSource {
+            label: "config.kdl".to_string(),
+            scenes: scenes(r#"scenes { default "Global" }"#),
+        };
+        let local_layer = SceneSource {
+            label: "shuvarie.kdl".to_string(),
+            scenes: scenes(r#"scenes { default "Local" }"#),
+        };
+
+        let set = scene_set_from_levels(
+            Some(global_layer),
+            vec![local_layer],
+            &global,
+            Some(&workspace),
+        )
+        .unwrap();
+        assert_eq!(
+            set.scenes.default.as_deref(),
+            Some("Local"),
+            "config layers over drop-ins within the level, local over global"
+        );
+    }
+
+    #[test]
+    fn explicit_config_records_a_single_scene_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("my.kdl");
+        std::fs::write(&path, r#"scenes { scene name="A" { description "x" } }"#).unwrap();
+
+        let config = Config::load_explicit(&path).unwrap();
+        assert_eq!(config.scene_sources.len(), 1);
+        assert_eq!(config.scene_sources[0].label, "my.kdl");
+        assert!(config.scene_sources[0].scenes.scene("A").is_some());
     }
 }

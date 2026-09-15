@@ -198,6 +198,8 @@ pub struct Session {
     pub title: String,
     pub provider: Option<String>,
     pub model: Option<String>,
+    /// The session's active scene; `None` = the built-in default scene.
+    pub scene: Option<String>,
     pub session_type: SessionType,
     #[index]
     pub parent_id: Option<uuid::Uuid>,

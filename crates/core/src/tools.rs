@@ -17,12 +17,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
-use shuvarie_llm::{DiffLine, DiffLineKind, DynamicTool, Tool};
+use shuvarie_llm::{DiffLine, DiffLineKind, DynamicTool, Tool, ToolExecutionError, ToolOutput};
 
 use crate::WebSearchConfig;
 use crate::lsp_manager::SharedManager;
 use crate::permissions::Access;
 use crate::question::QuestionGate;
+use crate::scenes::ToolScene;
 use crate::shell::Shell;
 
 use edit_file::EditFile;
@@ -45,6 +46,52 @@ pub use run_shell::{ShellChunk, ShellOutputTx};
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 type ReadKey = (String, Option<u64>, Option<u64>);
+
+/// Builds one roster tool under the scene: disabled tools are skipped, and a
+/// scene `ask` on a tool that does not authorize through the permission
+/// engine wraps the call in a confirmation prompt (the gated tools get the
+/// same overlay through `Access::for_tool` instead). `gated` marks tools
+/// whose calls authorize via `Access`.
+fn scene_tool<T>(
+    name: &'static str,
+    scene: &ToolScene,
+    access: &Access,
+    gated: bool,
+    build: impl FnOnce(Access) -> T,
+) -> Option<DynamicTool>
+where
+    T: Tool<Args = serde_json::Value, Output = ToolOutput, Error = ToolExecutionError> + 'static,
+{
+    if !scene.allows(name) {
+        return None;
+    }
+    let access = access.for_tool(name, scene);
+    let ask_reason = (!gated)
+        .then(|| access.scene_ask_reason().map(str::to_string))
+        .flatten();
+    let tool = build(access.clone());
+    if let Some(reason) = ask_reason {
+        let tool = Arc::new(tool);
+        Some(DynamicTool::new(
+            name,
+            tool.description(),
+            tool.parameters(),
+            move |ctx, args| {
+                let tool = Arc::clone(&tool);
+                let access = access.clone();
+                let reason = reason.to_string();
+                Box::pin(async move {
+                    if let Err(err) = access.confirm_scene(&reason).await {
+                        return Err(ToolExecutionError::other(err));
+                    }
+                    tool.call(ctx, args).await
+                })
+            },
+        ))
+    } else {
+        Some(shuvarie_llm::into_dynamic(name, tool))
+    }
+}
 
 /// Per-turn dedupe cache for `read_file`: tracks `(path, offset, limit)` keys
 /// that have already been returned to the model this turn, plus a set of all
@@ -184,55 +231,65 @@ pub fn all_tools(
     shell_tx: ShellOutputTx,
     shell: Shell,
     todo_state: todos::TodoState,
+    scene: &ToolScene,
     web_search: Option<&WebSearchConfig>,
 ) -> Vec<DynamicTool> {
-    let mut tools = vec![
-        shuvarie_llm::into_dynamic(
-            "read_file",
-            ReadFile::new(
-                read_cache.clone(),
-                max_output_chars,
-                max_output_bytes,
-                access.clone(),
-            ),
-        ),
-        shuvarie_llm::into_dynamic(
-            "write_file",
-            WriteFile::new(
-                read_cache.clone(),
-                Some(lsp.clone()),
-                locks.clone(),
-                access.clone(),
-            ),
-        ),
-        shuvarie_llm::into_dynamic(
-            "edit_file",
-            EditFile::new(Some(lsp.clone()), locks.clone(), access.clone()),
-        ),
-        shuvarie_llm::into_dynamic(
-            "apply_patch",
-            crate::apply_patch::ApplyPatch::new(Some(lsp.clone()), locks.clone(), access.clone()),
-        ),
-        shuvarie_llm::into_dynamic(
-            "delete_file",
-            DeleteFile::new(locks.clone(), access.clone()),
-        ),
-        shuvarie_llm::into_dynamic(
-            "run_shell",
-            RunShell::new(shell_tx.clone(), shell.clone(), access.clone()),
-        ),
-        shuvarie_llm::into_dynamic("list_dir", ListDir::new(access.clone())),
-        shuvarie_llm::into_dynamic("grep", Grep::new(access.clone())),
-        shuvarie_llm::into_dynamic("glob", Glob::new(access.clone())),
-        shuvarie_llm::into_dynamic("lsp", Lsp::new(lsp)),
-        shuvarie_llm::into_dynamic("webfetch", WebFetch::new(max_output_chars)),
-        shuvarie_llm::into_dynamic("question", Question::new(question_gate)),
-        shuvarie_llm::into_dynamic(todos::Todo::NAME, todos::Todo::new(todo_state)),
-    ];
+    let mut tools = Vec::new();
+    tools.extend(scene_tool("read_file", scene, &access, true, |access| {
+        ReadFile::new(
+            read_cache.clone(),
+            max_output_chars,
+            max_output_bytes,
+            access,
+        )
+    }));
+    tools.extend(scene_tool("write_file", scene, &access, true, |access| {
+        WriteFile::new(read_cache.clone(), Some(lsp.clone()), locks.clone(), access)
+    }));
+    tools.extend(scene_tool("edit_file", scene, &access, true, |access| {
+        EditFile::new(Some(lsp.clone()), locks.clone(), access)
+    }));
+    tools.extend(scene_tool("apply_patch", scene, &access, true, |access| {
+        crate::apply_patch::ApplyPatch::new(Some(lsp.clone()), locks.clone(), access)
+    }));
+    tools.extend(scene_tool("delete_file", scene, &access, true, |access| {
+        DeleteFile::new(locks.clone(), access)
+    }));
+    tools.extend(scene_tool("run_shell", scene, &access, true, |access| {
+        RunShell::new(shell_tx.clone(), shell.clone(), access)
+    }));
+    tools.extend(scene_tool("list_dir", scene, &access, true, |access| {
+        ListDir::new(access)
+    }));
+    tools.extend(scene_tool("grep", scene, &access, true, |access| {
+        Grep::new(access)
+    }));
+    tools.extend(scene_tool("glob", scene, &access, true, |access| {
+        Glob::new(access)
+    }));
+    tools.extend(scene_tool("lsp", scene, &access, false, |_access| {
+        Lsp::new(lsp.clone())
+    }));
+    tools.extend(scene_tool("webfetch", scene, &access, false, |_access| {
+        WebFetch::new(max_output_chars)
+    }));
+    tools.extend(scene_tool("question", scene, &access, false, |_access| {
+        Question::new(question_gate)
+    }));
+    tools.extend(scene_tool(
+        todos::Todo::NAME,
+        scene,
+        &access,
+        false,
+        |_access| todos::Todo::new(todo_state),
+    ));
     if let Some(config) = web_search {
-        tools.push(shuvarie_llm::into_dynamic(
+        tools.extend(scene_tool(
             WebSearch::NAME,
-            WebSearch::new(config, max_output_chars),
+            scene,
+            &access,
+            false,
+            |_access| WebSearch::new(config, max_output_chars),
         ));
     }
     tools
@@ -244,38 +301,56 @@ pub fn read_tools(
     max_output_chars: usize,
     max_output_bytes: usize,
     access: Access,
+    scene: &ToolScene,
     web_search: Option<&WebSearchConfig>,
 ) -> Vec<DynamicTool> {
-    let mut tools = vec![
-        shuvarie_llm::into_dynamic(
-            "read_file",
-            ReadFile::new(
-                read_cache,
-                max_output_chars,
-                max_output_bytes,
-                access.clone(),
-            ),
-        ),
-        shuvarie_llm::into_dynamic("list_dir", ListDir::new(access.clone())),
-        shuvarie_llm::into_dynamic("grep", Grep::new(access.clone())),
-        shuvarie_llm::into_dynamic("glob", Glob::new(access.clone())),
-        shuvarie_llm::into_dynamic("lsp", Lsp::new(lsp)),
-        shuvarie_llm::into_dynamic("webfetch", WebFetch::new(max_output_chars)),
-    ];
+    let mut tools = Vec::new();
+    tools.extend(scene_tool("read_file", scene, &access, true, |access| {
+        ReadFile::new(
+            read_cache.clone(),
+            max_output_chars,
+            max_output_bytes,
+            access,
+        )
+    }));
+    tools.extend(scene_tool("list_dir", scene, &access, true, |access| {
+        ListDir::new(access)
+    }));
+    tools.extend(scene_tool("grep", scene, &access, true, |access| {
+        Grep::new(access)
+    }));
+    tools.extend(scene_tool("glob", scene, &access, true, |access| {
+        Glob::new(access)
+    }));
+    tools.extend(scene_tool("lsp", scene, &access, false, |_access| {
+        Lsp::new(lsp.clone())
+    }));
+    tools.extend(scene_tool("webfetch", scene, &access, false, |_access| {
+        WebFetch::new(max_output_chars)
+    }));
     if let Some(config) = web_search {
-        tools.push(shuvarie_llm::into_dynamic(
+        tools.extend(scene_tool(
             WebSearch::NAME,
-            WebSearch::new(config, max_output_chars),
+            scene,
+            &access,
+            false,
+            |_access| WebSearch::new(config, max_output_chars),
         ));
     }
     tools
 }
 
-pub fn command_tools(shell_tx: ShellOutputTx, shell: Shell, access: Access) -> Vec<DynamicTool> {
-    vec![shuvarie_llm::into_dynamic(
-        "run_shell",
-        RunShell::new(shell_tx, shell, access),
-    )]
+pub fn command_tools(
+    shell_tx: ShellOutputTx,
+    shell: Shell,
+    access: Access,
+    scene: &ToolScene,
+) -> Vec<DynamicTool> {
+    scene_tool("run_shell", scene, &access, true, |access| {
+        RunShell::new(shell_tx, shell, access)
+    })
+    .into_iter()
+    .collect()
 }
 
 pub fn edit_tools(
@@ -285,35 +360,33 @@ pub fn edit_tools(
     max_output_chars: usize,
     max_output_bytes: usize,
     access: Access,
+    scene: &ToolScene,
 ) -> Vec<DynamicTool> {
-    vec![
-        shuvarie_llm::into_dynamic(
-            "read_file",
-            ReadFile::new(
-                read_cache.clone(),
-                max_output_chars,
-                max_output_bytes,
-                access.clone(),
-            ),
-        ),
-        shuvarie_llm::into_dynamic(
-            "write_file",
-            WriteFile::new(read_cache, Some(lsp.clone()), locks.clone(), access.clone()),
-        ),
-        shuvarie_llm::into_dynamic(
-            "edit_file",
-            EditFile::new(Some(lsp.clone()), locks.clone(), access.clone()),
-        ),
-        shuvarie_llm::into_dynamic(
-            "apply_patch",
-            crate::apply_patch::ApplyPatch::new(Some(lsp.clone()), locks.clone(), access.clone()),
-        ),
-        shuvarie_llm::into_dynamic(
-            "delete_file",
-            DeleteFile::new(locks.clone(), access.clone()),
-        ),
-        shuvarie_llm::into_dynamic("lsp", Lsp::new(lsp)),
-    ]
+    let mut tools = Vec::new();
+    tools.extend(scene_tool("read_file", scene, &access, true, |access| {
+        ReadFile::new(
+            read_cache.clone(),
+            max_output_chars,
+            max_output_bytes,
+            access,
+        )
+    }));
+    tools.extend(scene_tool("write_file", scene, &access, true, |access| {
+        WriteFile::new(read_cache, Some(lsp.clone()), locks.clone(), access)
+    }));
+    tools.extend(scene_tool("edit_file", scene, &access, true, |access| {
+        EditFile::new(Some(lsp.clone()), locks.clone(), access)
+    }));
+    tools.extend(scene_tool("apply_patch", scene, &access, true, |access| {
+        crate::apply_patch::ApplyPatch::new(Some(lsp.clone()), locks.clone(), access)
+    }));
+    tools.extend(scene_tool("delete_file", scene, &access, true, |access| {
+        DeleteFile::new(locks.clone(), access)
+    }));
+    tools.extend(scene_tool("lsp", scene, &access, false, |_access| {
+        Lsp::new(lsp)
+    }));
+    tools
 }
 
 #[cfg(test)]

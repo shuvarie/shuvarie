@@ -144,6 +144,75 @@ fn is_busy(ctx: &CoreCtx, pending_retry: Option<&PendingRetry>) -> bool {
     ctx.active_stream.as_ref().is_some_and(|h| !h.is_finished()) || pending_retry.is_some()
 }
 
+/// Switches the active session's scene: refuses while a turn is busy, while
+/// the name does not resolve to a configured scene (`None` = the built-in
+/// Default), and — once the session has messages — for scenes without an
+/// interlude: the injected prompt is what tells the model the scene changed,
+/// so an interlude-less scene can only start a session. A switch before the
+/// first message picks the scene the session will start under (recording it
+/// even when no session exists yet). Persists the new value and reports
+/// `SceneChanged`.
+async fn switch_scene(
+    ctx: &mut CoreCtx,
+    pending_retry: Option<&PendingRetry>,
+    name: Option<String>,
+) -> Option<String> {
+    if is_busy(ctx, pending_retry) {
+        return Some("a turn is in flight; wait for it to finish".to_string());
+    }
+    let switchable = match &name {
+        Some(name) => match ctx.scenes.scene(name) {
+            Some(config) => crate::scenes::is_switchable(config),
+            None => return Some(format!("unknown scene `{name}`")),
+        },
+        None => false,
+    };
+    let Some(s) = &ctx.session else {
+        // Before the first turn: only a concrete scene needs recording — an
+        // unpicked session would apply `scenes.default` at its first turn.
+        let scene = name?;
+        let session = Arc::new(Mutex::new(Session::new()));
+        session.lock().await.scene = Some(scene.clone());
+        ctx.session = Some(session);
+        let _ = ctx.event_tx.send(Event::SessionStarted).await;
+        let _ = ctx
+            .event_tx
+            .send(Event::SceneChanged { name: Some(scene) })
+            .await;
+        return None;
+    };
+    let (current, has_messages) = {
+        let guard = s.lock().await;
+        (guard.scene.clone(), !guard.messages.is_empty())
+    };
+    if current == name {
+        return None;
+    }
+    if has_messages && !switchable {
+        return Some(match name {
+            Some(name) => {
+                format!("scene `{name}` has no interlude; it cannot be entered mid-session")
+            }
+            None => format!(
+                "the built-in {} scene has no interlude; it cannot be entered mid-session",
+                crate::scenes::DEFAULT_SCENE_NAME
+            ),
+        });
+    }
+    let session_id = s.lock().await.id;
+    {
+        let mut guard = s.lock().await;
+        guard.scene = name.clone();
+    }
+    if let Some(session_id) = session_id
+        && let Err(e) = ctx.store.set_scene(session_id, name.as_deref()).await
+    {
+        return Some(format!("failed to persist the scene: {e}"));
+    }
+    let _ = ctx.event_tx.send(Event::SceneChanged { name }).await;
+    None
+}
+
 /// Decide the next connection-retry step: `None` when retrying is disabled
 /// (`max_retries == 0`) or the cap is reached (give up), otherwise the
 /// 1-based attempt number and its delay.
@@ -198,6 +267,8 @@ struct CoreCtx {
     max_output_chars: usize,
     max_output_bytes: usize,
     steer: SteerSignal,
+    /// The configured scene set (config chain + `scene.d` drop-ins).
+    scenes: shuvarie_config::ScenesConfig,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -210,6 +281,7 @@ pub async fn run(
     connections_path: Option<PathBuf>,
     permissions: Arc<crate::permissions::Permissions>,
     trust: TrustGrants,
+    scene_set: shuvarie_config::SceneSet,
     mut cmd_rx: Receiver<Command>,
     event_tx: Sender<Event>,
 ) {
@@ -308,6 +380,31 @@ pub async fn run(
     }
     let shell = shell_resolution.shell;
 
+    let scene_list = {
+        let mut entries = vec![crate::scenes::SceneListEntry {
+            id: None,
+            name: crate::scenes::DEFAULT_SCENE_NAME.to_string(),
+            description: Some(crate::scenes::DEFAULT_SCENE_DESCRIPTION.to_string()),
+            switchable: false,
+        }];
+        for (name, scene) in &scene_set.scenes.scenes {
+            entries.push(crate::scenes::SceneListEntry {
+                id: Some(name.clone()),
+                name: name.clone(),
+                description: scene.description.clone(),
+                switchable: crate::scenes::is_switchable(scene),
+            });
+        }
+        entries
+    };
+    let _ = event_tx
+        .send(Event::ScenesLoaded {
+            scenes: scene_list,
+            default: scene_set.scenes.default.clone(),
+            warnings: scene_set.warnings,
+        })
+        .await;
+
     let manager_turns = config.agent.effective_max_turns();
     let worker_turns = config.agent.effective_worker_max_turns();
     let max_output_chars = config.context.tool_output_max_chars;
@@ -337,6 +434,7 @@ pub async fn run(
         max_output_chars,
         max_output_bytes,
         steer,
+        scenes: scene_set.scenes,
     };
     load_startup_session(
         &mut ctx.store,
@@ -986,6 +1084,13 @@ pub async fn run(
                             }
                         }
                     }
+                    Command::SwitchScene { name } => {
+                        if let Some(error) = switch_scene(&mut ctx, pending_retry.as_ref(), name)
+                            .await
+                        {
+                            let _ = ctx.event_tx.send(Event::SceneError { error }).await;
+                        }
+                    }
                     Command::Replay => {
                         if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
@@ -1574,6 +1679,7 @@ impl CoreCtx {
             let mut guard = s.lock().await;
             if guard.id.is_none() {
                 let title = title_for(&content);
+                let scene = guard.scene.take().or_else(|| self.scenes.default.clone());
                 match self
                     .store
                     .create_session(
@@ -1586,12 +1692,14 @@ impl CoreCtx {
                             .active
                             .as_ref()
                             .and_then(|a| a.model.as_deref()),
+                        scene.as_deref(),
                     )
                     .await
                 {
                     Ok(id) => {
                         guard.id = Some(id);
                         guard.title = Some(title.clone());
+                        guard.scene = scene;
                         match self.store.acquire_session_lock(id, now_ms()).await {
                             Ok(LockAcquire::Acquired | LockAcquire::Ours) => {
                                 self.locked_session = Some(id);
@@ -1717,13 +1825,15 @@ impl CoreCtx {
                 return;
             }
         };
-        let (prior, todo_records): (
-            Vec<shuvarie_llm::ChatMsg>,
-            Vec<crate::tool_record::ToolRecord>,
-        ) = {
+        let (prior, todo_records, stored_scene) = {
             let guard = s.lock().await;
-            (guard.history_for_send(), guard.tool_records.clone())
+            (
+                guard.history_for_send(),
+                guard.tool_records.clone(),
+                guard.scene.clone(),
+            )
         };
+        let scene = crate::scenes::Scene::resolve(&self.scenes, stored_scene.as_deref());
         let todo_state = crate::tools::todos::TodoState::from_records(&todo_records);
         let agents_md = crate::context::load_agents_md(&self.workspace_root, &self.trust);
         let agents_budget = agents_md.remaining_budget();
@@ -1741,9 +1851,15 @@ impl CoreCtx {
                 })
                 .await;
         }
-        let base = match self.skills.preamble_section() {
-            Some(section) => format!("{AGENT_PREAMBLE}\n\n{section}"),
-            None => AGENT_PREAMBLE.to_string(),
+        let base = match scene.prelude() {
+            Some(prelude) => match self.skills.preamble_section() {
+                Some(section) => format!("{prelude}\n\n{section}"),
+                None => prelude.to_string(),
+            },
+            None => match self.skills.preamble_section() {
+                Some(section) => format!("{AGENT_PREAMBLE}\n\n{section}"),
+                None => AGENT_PREAMBLE.to_string(),
+            },
         };
         let web_search = self
             .config
@@ -1764,6 +1880,7 @@ impl CoreCtx {
         let question_gate = QuestionGate::new(self.question_tx.clone());
         let (shell_tx, mut shell_rx) = tokio::sync::mpsc::channel::<crate::tools::ShellChunk>(64);
         let file_locks = crate::tools::FileLocks::new();
+        let tool_scene = scene.tools();
         let tools = crate::tools::all_tools(
             self.lsp.clone(),
             file_locks.clone(),
@@ -1775,6 +1892,7 @@ impl CoreCtx {
             crate::tools::ShellOutputTx::new(shell_tx.clone()),
             self.shell.clone(),
             todo_state,
+            &tool_scene,
             web_search,
         );
         let catalog_provider = crate::catalog::providers();
@@ -1812,8 +1930,10 @@ impl CoreCtx {
             crate::tools::ShellOutputTx::new(shell_tx),
             self.shell.clone(),
             self.access.clone(),
+            &scene,
             web_search,
         );
+        let prior = crate::scenes::inject_history(&scene, &prior, Some(&content));
         let stream = client
             .stream(
                 &model,
@@ -3505,7 +3625,10 @@ mod tests {
         let session = Arc::new(Mutex::new(Session::new()));
         let (event_tx, event_rx) = tokio::sync::mpsc::channel::<Event>(64);
         let mut store = Store::open_in_memory().await.unwrap();
-        let id = store.create_session("preempt", None, None).await.unwrap();
+        let id = store
+            .create_session("preempt", None, None, None)
+            .await
+            .unwrap();
         session.lock().await.id = Some(id);
         let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
         let turn_state = Arc::new(Mutex::new(TurnState::default()));
@@ -4178,7 +4301,7 @@ mod tests {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
         let mut store = Store::open_in_memory().await.unwrap();
         let id = store
-            .create_session("interleaved", None, None)
+            .create_session("interleaved", None, None, None)
             .await
             .unwrap();
         session.lock().await.id = Some(id);
@@ -4258,7 +4381,7 @@ mod tests {
         let session = Arc::new(Mutex::new(Session::new()));
         let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<Event>(8);
         let mut store = Store::open_in_memory().await.unwrap();
-        let id = store.create_session("cut", None, None).await.unwrap();
+        let id = store.create_session("cut", None, None, None).await.unwrap();
         {
             let mut guard = session.lock().await;
             guard.id = Some(id);
@@ -4340,7 +4463,10 @@ mod tests {
         let session = Arc::new(Mutex::new(Session::new()));
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
         let mut store = Store::open_in_memory().await.unwrap();
-        let id = store.create_session("settle", None, None).await.unwrap();
+        let id = store
+            .create_session("settle", None, None, None)
+            .await
+            .unwrap();
         session.lock().await.id = Some(id);
         let stream: shuvarie_llm::StreamStream = Box::pin(futures_util::stream::iter(vec![
             main_tool_start("edit_file", "c1"),
@@ -4391,7 +4517,10 @@ mod tests {
         let session = Arc::new(Mutex::new(Session::new()));
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
         let mut store = Store::open_in_memory().await.unwrap();
-        let id = store.create_session("runs", None, None).await.unwrap();
+        let id = store
+            .create_session("runs", None, None, None)
+            .await
+            .unwrap();
         {
             let mut guard = session.lock().await;
             guard.id = Some(id);
@@ -4471,7 +4600,10 @@ mod tests {
 
     async fn chain_session() -> (Store, uuid::Uuid, Vec<u64>) {
         let mut store = Store::open_in_memory().await.unwrap();
-        let sid = store.create_session("fork", None, None).await.unwrap();
+        let sid = store
+            .create_session("fork", None, None, None)
+            .await
+            .unwrap();
         let user = store
             .append_message(sid, None, shuvarie_llm::Role::User, "one")
             .await
@@ -4553,7 +4685,10 @@ mod tests {
     #[tokio::test]
     async fn fork_session_undo_on_a_root_only_session_starts_over() {
         let mut store = Store::open_in_memory().await.unwrap();
-        let sid = store.create_session("solo", None, None).await.unwrap();
+        let sid = store
+            .create_session("solo", None, None, None)
+            .await
+            .unwrap();
         store
             .append_message(sid, None, shuvarie_llm::Role::User, "only")
             .await

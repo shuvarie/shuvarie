@@ -1,12 +1,16 @@
 use std::path::PathBuf;
 
-use shuvarie_core::{Config, TrustFile, TrustGrants, WorkspaceScan};
+use shuvarie_core::{Config, SceneSet, TrustFile, TrustGrants, WorkspaceScan};
 
 use crate::tui::trust::{TrustPromptOutcome, run_prompt};
 
 pub struct Resolved {
     pub config: Config,
     pub grants: TrustGrants,
+    /// The merged scene set for the run: the config chain's `scenes`
+    /// sections plus the `scene.d` drop-in dirs under their trust rules,
+    /// with a warning per same-level conflict.
+    pub scenes: SceneSet,
 }
 
 /// Resolves the workspace trust decision and loads the config under it: a
@@ -41,5 +45,15 @@ pub async fn resolve(explicit_config: Option<&PathBuf>) -> color_eyre::Result<Op
         Some(path) => Config::load_explicit(path)?,
         None => Config::load_trusted(&cwd, &grants)?,
     };
-    Ok(Some(Resolved { config, grants }))
+    let scenes = Config::load_scenes(
+        &config,
+        &cwd,
+        &grants,
+        explicit_config.as_ref().map(|p| p.as_path()),
+    )?;
+    Ok(Some(Resolved {
+        config,
+        grants,
+        scenes,
+    }))
 }

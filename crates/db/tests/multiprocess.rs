@@ -48,7 +48,10 @@ async fn two_processes_coordinate_session_locks_over_multiprocess_wal() {
     let path = dir.path().join("data.db");
     let session = {
         let mut store = Store::open(&path).await.unwrap().with_client_id("parent");
-        store.create_session("probe", None, None).await.unwrap()
+        store
+            .create_session("probe", None, None, None)
+            .await
+            .unwrap()
     };
 
     let (mut holder, holder_rx) = spawn_probe(&path, "hold", "a", session, Some("2000"));

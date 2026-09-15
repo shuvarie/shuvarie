@@ -241,4 +241,27 @@ pub enum Event {
     ShellWarning {
         message: String,
     },
+    /// The configured scene set for the scene switcher, sent at startup:
+    /// the built-in Default first, then the configured scenes in name order
+    /// with their optional descriptions. Entries carry their switch identity
+    /// (`SceneListEntry::id`, `None` = built-in Default) rather than bare
+    /// names, so a configured scene named "Default" stays switchable.
+    /// `default` is the scene new sessions start under (`None` = built-in
+    /// Default). `warnings` carries one message per same-level scene
+    /// conflict (a name defined by more than one source of the global or
+    /// local config loads neither copy).
+    ScenesLoaded {
+        scenes: Vec<crate::scenes::SceneListEntry>,
+        default: Option<String>,
+        warnings: Vec<String>,
+    },
+    /// The active session's scene changed (`None` = built-in Default).
+    SceneChanged {
+        name: Option<String>,
+    },
+    /// A scene switch failed: the agent is busy, or the scene name no longer
+    /// resolves.
+    SceneError {
+        error: String,
+    },
 }

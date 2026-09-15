@@ -19,6 +19,7 @@ use super::confirm_quit::{ConfirmQuit, ConfirmQuitEffect, ConfirmQuitMessage};
 use super::context::UpdateCtx;
 use super::history_search::{HistorySearch, HistorySearchEffect, HistorySearchMessage};
 use super::model_picker::{ModelPicker, ModelPickerEffect, ModelPickerMessage};
+use super::scene;
 use super::search::SearchMessage;
 use super::session::tree::{TreeEffect, TreeMessage, TreePopup};
 use super::session::{
@@ -44,6 +45,7 @@ pub enum Overlay {
     HistorySearch,
     TitleEdit,
     Tree,
+    Scene,
 }
 
 pub enum AppMessage {
@@ -62,6 +64,18 @@ pub enum AppMessage {
     Welcome(WelcomeMessage),
     SessionPicker(SessionPickerMessage),
     Tree(TreeMessage),
+    Scene(scene::SceneMessage),
+    /// The configured scene set (startup), for the switcher; `warnings`
+    /// carries one message per same-level scene conflict.
+    ScenesLoaded {
+        scenes: Vec<shuvarie_core::scenes::SceneListEntry>,
+        default: Option<String>,
+        warnings: Vec<String>,
+    },
+    /// The session's scene changed (`None` = built-in Default).
+    SceneChanged {
+        name: Option<String>,
+    },
     HistorySearch(HistorySearchMessage),
     TitlePopup(TitleMessage),
     ConfigSaved,
@@ -151,12 +165,19 @@ pub struct App {
     pub model_picker: ModelPicker,
     pub session_picker: SessionPicker,
     pub tree_popup: TreePopup,
+    pub scene_picker: scene::ScenePicker,
     pub history_search: HistorySearch,
     pub title_popup: TitlePopup,
     pub warning: WarningPopup,
     pub models: HashMap<String, Vec<Model>>,
     registry: RegistryEntry,
     pending_model_pick: Option<String>,
+    /// The configured scene set (built-in Default first) for the switcher.
+    scene_entries: Vec<shuvarie_core::scenes::SceneListEntry>,
+    /// The scene new sessions start under (`None` = built-in Default).
+    scene_default: Option<String>,
+    /// The session's current scene (`None` = built-in Default).
+    current_scene: Option<String>,
     quit: bool,
 }
 
@@ -225,12 +246,16 @@ impl App {
             model_picker: ModelPicker::new(),
             session_picker: SessionPicker::new(),
             tree_popup: TreePopup::new(),
+            scene_picker: scene::ScenePicker::new(),
             history_search: HistorySearch::new(),
             title_popup: TitlePopup::new(),
             warning: WarningPopup::new(),
             models: HashMap::new(),
             registry,
             pending_model_pick: None,
+            scene_entries: Vec::new(),
+            scene_default: None,
+            current_scene: None,
             quit: false,
         }
     }
@@ -362,6 +387,9 @@ impl App {
                         Overlay::Tree => {
                             return self.tree_popup.map_event(&key).map(AppMessage::Tree);
                         }
+                        Overlay::Scene => {
+                            return self.scene_picker.map_event(&key).map(AppMessage::Scene);
+                        }
                         Overlay::HistorySearch => {
                             return self
                                 .history_search
@@ -433,7 +461,9 @@ impl App {
                     Some(AppMessage::RegistryLoaded { providers })
                 }
                 CoreEvent::RegistryError { error } => Some(AppMessage::RegistryError { error }),
-                CoreEvent::SessionStarted => None,
+                CoreEvent::SessionStarted => Some(AppMessage::SceneChanged {
+                    name: self.scene_default.clone(),
+                }),
                 CoreEvent::SessionCreated { id, title } => {
                     Some(AppMessage::SessionCreated { id, title })
                 }
@@ -651,6 +681,19 @@ impl App {
                 CoreEvent::SkillsLoaded { skills, warnings } => {
                     Some(AppMessage::SkillsLoaded { skills, warnings })
                 }
+                CoreEvent::ScenesLoaded {
+                    scenes,
+                    default,
+                    warnings,
+                } => Some(AppMessage::ScenesLoaded {
+                    scenes,
+                    default,
+                    warnings,
+                }),
+                CoreEvent::SceneChanged { name } => Some(AppMessage::SceneChanged { name }),
+                CoreEvent::SceneError { error } => {
+                    Some(AppMessage::Session(SessionMessage::ShowError { error }))
+                }
                 CoreEvent::ShellWarning { message } => Some(AppMessage::ShellWarning { message }),
             },
         }
@@ -675,7 +718,8 @@ impl App {
             | Overlay::CommandMenu
             | Overlay::ConfirmQuit
             | Overlay::SessionPicker
-            | Overlay::Tree => None,
+            | Overlay::Tree
+            | Overlay::Scene => None,
             Overlay::ModelPicker => {
                 let flat = super::components::flatten_newlines(text);
                 let mut msg = None;
@@ -761,6 +805,17 @@ impl App {
                 } else {
                     self.tree_popup.open(&session);
                     self.overlay = Overlay::Tree;
+                }
+            }
+            AppMessage::Scene(m) => {
+                if let Some(effect) = self.scene_picker.update(m) {
+                    match effect {
+                        scene::SceneEffect::Switch { name } => {
+                            self.close_overlay();
+                            self.ctx.send(shuvarie_core::Command::SwitchScene { name });
+                        }
+                        scene::SceneEffect::Close => self.close_overlay(),
+                    }
                 }
             }
             AppMessage::SessionPicker(m) => {
@@ -981,7 +1036,8 @@ impl App {
                     | Overlay::Welcome
                     | Overlay::ConfirmQuit
                     | Overlay::TitleEdit
-                    | Overlay::Tree => {}
+                    | Overlay::Tree
+                    | Overlay::Scene => {}
                 }
             }
             AppMessage::ConfigSaved => {
@@ -1115,9 +1171,11 @@ impl App {
                 self.session_picker.set_sessions(sessions);
             }
             AppMessage::SessionLoaded { id, title, session } => {
+                let scene = session.scene.clone();
                 self.session
                     .update(SessionMessage::Loaded { id, title, session });
                 self.session_picker.active_id = Some(id);
+                self.set_scene(scene);
             }
             AppMessage::SessionDeleted { id } => {
                 let was_active = self.session.session_id == Some(id);
@@ -1167,6 +1225,23 @@ impl App {
                     warnings,
                 });
                 self.session.update(SessionMessage::SetSkills { skills });
+            }
+            AppMessage::ScenesLoaded {
+                scenes,
+                default,
+                warnings,
+            } => {
+                self.scene_entries = scenes;
+                self.scene_default = default.clone();
+                if self.session.session_id.is_none() {
+                    self.set_scene(default);
+                }
+                if !warnings.is_empty() {
+                    self.warning.open(warnings.join("\n"));
+                }
+            }
+            AppMessage::SceneChanged { name } => {
+                self.set_scene(name);
             }
             AppMessage::ShellWarning { message } => {
                 self.warning.open(message);
@@ -1242,6 +1317,15 @@ impl App {
         self.ctx.send(shuvarie_core::Command::ListSessions);
     }
 
+    /// Records the session's current scene (`None` = built-in Default) and
+    /// updates the sidebar's scene line.
+    fn set_scene(&mut self, name: Option<String>) {
+        self.current_scene = name.clone();
+        self.session
+            .sidebar
+            .update(SidebarMessage::SetScene { name });
+    }
+
     /// The spinners currently animating, so the render loop can wake at the
     /// earliest next frame change.
     pub fn active_spinners(&self) -> impl Iterator<Item = SpinnerKind> + '_ {
@@ -1297,6 +1381,27 @@ impl App {
                     });
                 } else {
                     self.ctx.send(shuvarie_core::Command::OpenTree);
+                }
+            }
+            CommandAction::OpenScenePicker => {
+                if let Some(name) = args {
+                    let configured = self
+                        .scene_entries
+                        .iter()
+                        .any(|entry| entry.id.as_deref() == Some(name.as_str()));
+                    let name = if configured || name != shuvarie_core::scenes::DEFAULT_SCENE_NAME {
+                        Some(name)
+                    } else {
+                        None
+                    };
+                    self.ctx.send(shuvarie_core::Command::SwitchScene { name });
+                } else {
+                    self.scene_picker.open(
+                        self.scene_entries.clone(),
+                        self.current_scene.as_deref(),
+                        self.session.has_messages(),
+                    );
+                    self.overlay = Overlay::Scene;
                 }
             }
             CommandAction::NewSession => {
@@ -1414,6 +1519,7 @@ impl App {
         self.model_picker.view(frame, area);
         self.session_picker.view(frame, area);
         self.tree_popup.view(frame, area);
+        self.scene_picker.view(frame, area);
         self.history_search.view(frame, area);
         self.command_menu.view(frame, area);
         self.title_popup.view(frame, area);
@@ -1752,5 +1858,34 @@ mod tests {
             title: "After".into(),
         });
         assert_eq!(app.session.session_title.as_deref(), Some("After"));
+    }
+
+    #[test]
+    fn scenes_loaded_opens_the_warning_popup_on_conflicts() {
+        let mut app = app_with(connected());
+        app.update(AppMessage::ScenesLoaded {
+            scenes: vec![shuvarie_core::scenes::SceneListEntry {
+                id: Some("Plan".into()),
+                name: "Plan".into(),
+                description: None,
+                switchable: true,
+            }],
+            default: None,
+            warnings: vec!["scene `Plan` is defined multiple times".into()],
+        });
+        assert_eq!(app.scene_entries.len(), 1);
+        assert!(app.warning.open, "the conflict warning surfaces as a popup");
+    }
+
+    #[test]
+    fn scenes_loaded_without_warnings_keeps_the_popup_closed() {
+        let mut app = app_with(connected());
+        app.update(AppMessage::ScenesLoaded {
+            scenes: Vec::new(),
+            default: None,
+            warnings: Vec::new(),
+        });
+        assert!(!app.warning.open);
+        assert!(app.scene_entries.is_empty());
     }
 }

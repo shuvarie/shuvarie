@@ -1,14 +1,15 @@
 use std::collections::BTreeMap;
 
-use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
+use kdl::{KdlDocument, KdlEntry, KdlEntryFormat, KdlNode, KdlValue};
 
 use super::kdl_util::{autoformat, child_nodes, node_error, parse_document};
 use super::{
-    AgentConfig, Config, ConfigError, ContextConfig, EmbeddingConfig, LspConfigRepr,
+    AgentConfig, Config, ConfigError, ContextConfig, EmbeddingConfig, Hooks, LspConfigRepr,
     LspServerSpecRepr, Mode, PathRule, PermissionsConfig, RegistriesConfig, RegistryEntry,
-    RetryConfig, RuleSet, ShellConfig, ShellPatternKind, ShellRule, SidebarPref, SkillsConfig,
-    ToolsConfig, UiPrefs, Verb, WebSearchConfig, WebSearchKind, WebSearchParamKind,
-    WebSearchParams,
+    RetryConfig, RuleSet, SceneConfig, SceneToolVerb, SceneToolsConfig, ScenesConfig, ShellConfig,
+    ShellPatternKind, ShellRule, SidebarPref, SkillsConfig, SubagentConfig, SubagentsConfig,
+    SystemPromptsConfig, ToolOverride, ToolsConfig, UiPrefs, Verb, WebSearchConfig, WebSearchKind,
+    WebSearchParamKind, WebSearchParams,
 };
 use crate::Result;
 
@@ -36,11 +37,27 @@ pub(crate) fn from_kdl_with_sections(contents: &str) -> Result<(Config, Vec<Stri
             "registries" => config.registries = parse_registries(node, contents)?,
             "tools" => config.tools = parse_tools(node, contents)?,
             "permissions" => config.permissions = parse_permissions(node, contents)?,
+            "scenes" => config.scenes = parse_scenes(node, contents)?,
             "retry" => config.retry = parse_retry(node, contents)?,
             _ => {}
         }
     }
     Ok((config, sections))
+}
+
+/// Parses a standalone `scenes` document (a `scene.d` drop-in): every
+/// top-level `scenes` node comes back as its own source, so the level merge
+/// can see a name defined by several nodes of one file; other top-level
+/// nodes are ignored.
+pub(crate) fn scenes_from_document(contents: &str) -> Result<Vec<ScenesConfig>> {
+    let doc = parse_document(contents)?;
+    let mut sources = Vec::new();
+    for node in doc.nodes() {
+        if node.name().value() == "scenes" {
+            sources.push(parse_scenes(node, contents)?);
+        }
+    }
+    Ok(sources)
 }
 
 fn set_once<T>(
@@ -979,6 +996,425 @@ fn prop_bool(input: &str, node: &KdlNode, name: &str) -> Result<Option<bool>> {
     Ok(found)
 }
 
+fn parse_scenes(node: &KdlNode, input: &str) -> Result<ScenesConfig> {
+    let mut default = None;
+    let mut scenes = BTreeMap::new();
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "default" => set_once(
+                input,
+                child,
+                &mut default,
+                parse_scene_name(input, child, "default"),
+            )?,
+            "scene" => {
+                let (name, scene) = parse_scene(child, input)?;
+                if scenes.insert(name.clone(), scene).is_some() {
+                    return Err(duplicate(input, child, &format!("scene `{name}`")));
+                }
+            }
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!("unknown node `{other}` in `scenes` (expected `default` or `scene`)"),
+                    None,
+                ));
+            }
+        }
+    }
+    Ok(ScenesConfig { default, scenes })
+}
+
+fn parse_scene_name(input: &str, node: &KdlNode, what: &str) -> Result<Option<String>> {
+    match scalar_string(input, node)? {
+        None => Ok(None),
+        Some(name) if !name.trim().is_empty() => Ok(Some(name)),
+        Some(_) => Err(node_error(
+            input,
+            node,
+            format!("`{what}` must name a scene"),
+            None,
+        )),
+    }
+}
+
+fn parse_scene(node: &KdlNode, input: &str) -> Result<(String, SceneConfig)> {
+    check_props(input, node, &["name"])?;
+    if node.entries().iter().any(|entry| entry.name().is_none()) {
+        return Err(node_error(
+            input,
+            node,
+            "`scene` takes no positional arguments (name the scene with a `name` property)",
+            None,
+        ));
+    }
+    let Some(name) = property_string(input, node, "name")? else {
+        return Err(node_error(
+            input,
+            node,
+            "`scene` requires a `name` property",
+            None,
+        ));
+    };
+    if name.trim().is_empty() {
+        return Err(node_error(input, node, "`scene` must name a scene", None));
+    }
+
+    let mut description = None;
+    let mut subagents = None;
+    let mut system_prompts = None;
+    let mut thinking = None;
+    let mut tools = None;
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "description" => set_once(input, child, &mut description, scalar_string(input, child))?,
+            "subagents" => set_once(
+                input,
+                child,
+                &mut subagents,
+                parse_subagents(child, input).map(Some),
+            )?,
+            "system-prompts" => set_once(
+                input,
+                child,
+                &mut system_prompts,
+                parse_system_prompts(child, input).map(Some),
+            )?,
+            "thinking" => set_once(input, child, &mut thinking, scalar_bool(input, child))?,
+            "tools" => set_once(
+                input,
+                child,
+                &mut tools,
+                parse_scene_tools(child, input).map(Some),
+            )?,
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!(
+                        "unknown node `{other}` in `scene` (expected `description`, \
+                         `subagents`, `system-prompts`, `thinking`, or `tools`)"
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    Ok((
+        name,
+        SceneConfig {
+            description,
+            subagents: subagents.unwrap_or_default(),
+            system_prompts: system_prompts.unwrap_or_default(),
+            thinking,
+            tools: tools.unwrap_or_default(),
+        },
+    ))
+}
+
+fn parse_subagents(node: &KdlNode, input: &str) -> Result<SubagentsConfig> {
+    let mut disabled = None;
+    let mut workers = BTreeMap::new();
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "disabled" => set_once(input, child, &mut disabled, scalar_bool(input, child))?,
+            name => {
+                let worker = parse_subagent(child, input)?;
+                if workers.insert(name.to_string(), worker).is_some() {
+                    return Err(duplicate(input, child, name));
+                }
+            }
+        }
+    }
+    Ok(SubagentsConfig {
+        disabled: disabled.unwrap_or_default(),
+        workers,
+    })
+}
+
+fn parse_subagent(node: &KdlNode, input: &str) -> Result<SubagentConfig> {
+    if !node.entries().is_empty() {
+        return Err(node_error(
+            input,
+            node,
+            format!(
+                "`{}` takes no arguments (name the worker with the node itself)",
+                node.name().value()
+            ),
+            None,
+        ));
+    }
+    let mut disabled = None;
+    let mut thinking = None;
+    let mut system_prompts = None;
+    let mut tools = None;
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "disabled" => set_once(input, child, &mut disabled, scalar_bool(input, child))?,
+            "thinking" => set_once(input, child, &mut thinking, scalar_bool(input, child))?,
+            "system-prompts" => set_once(
+                input,
+                child,
+                &mut system_prompts,
+                parse_system_prompts(child, input).map(Some),
+            )?,
+            "tools" => set_once(
+                input,
+                child,
+                &mut tools,
+                parse_scene_tools(child, input).map(Some),
+            )?,
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!(
+                        "unknown node `{other}` in `{}` (expected `disabled`, `thinking`, \
+                         `system-prompts`, or `tools`)",
+                        node.name().value()
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    Ok(SubagentConfig {
+        disabled: disabled.unwrap_or_default(),
+        thinking,
+        system_prompts: system_prompts.unwrap_or_default(),
+        tools: tools.unwrap_or_default(),
+    })
+}
+
+fn parse_system_prompts(node: &KdlNode, input: &str) -> Result<SystemPromptsConfig> {
+    let mut prelude = None;
+    let mut interlude = None;
+    let mut before_each = None;
+    let mut after_each = None;
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "prelude" => set_once(
+                input,
+                child,
+                &mut prelude,
+                parse_prompt_text(input, child, "prelude"),
+            )?,
+            "interlude" => set_once(
+                input,
+                child,
+                &mut interlude,
+                parse_prompt_text(input, child, "interlude"),
+            )?,
+            "before-each" => set_once(
+                input,
+                child,
+                &mut before_each,
+                parse_hooks(child, input).map(Some),
+            )?,
+            "after-each" => set_once(
+                input,
+                child,
+                &mut after_each,
+                parse_hooks(child, input).map(Some),
+            )?,
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!(
+                        "unknown node `{other}` in `system-prompts` (expected `prelude`, \
+                         `interlude`, `before-each`, or `after-each`)"
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    Ok(SystemPromptsConfig {
+        prelude,
+        interlude,
+        before_each,
+        after_each,
+    })
+}
+
+fn parse_prompt_text(input: &str, node: &KdlNode, what: &str) -> Result<Option<String>> {
+    match scalar_string(input, node)? {
+        None => Ok(None),
+        Some(text) if !text.trim().is_empty() => Ok(Some(text)),
+        Some(_) => Err(node_error(
+            input,
+            node,
+            format!("`{what}` must not be empty"),
+            None,
+        )),
+    }
+}
+
+fn parse_hooks(node: &KdlNode, input: &str) -> Result<Hooks> {
+    let mut user_prompt = None;
+    let mut assistant_prompt = None;
+    let mut turn = None;
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "user-prompt" => set_once(
+                input,
+                child,
+                &mut user_prompt,
+                parse_prompt_text(input, child, "user-prompt"),
+            )?,
+            "assistant-prompt" => set_once(
+                input,
+                child,
+                &mut assistant_prompt,
+                parse_prompt_text(input, child, "assistant-prompt"),
+            )?,
+            "turn" => set_once(
+                input,
+                child,
+                &mut turn,
+                parse_prompt_text(input, child, "turn"),
+            )?,
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!(
+                        "unknown node `{other}` in `{}` (expected `user-prompt`, \
+                         `assistant-prompt`, or `turn`)",
+                        node.name().value()
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    Ok(Hooks {
+        user_prompt,
+        assistant_prompt,
+        turn,
+    })
+}
+
+fn parse_scene_tools(node: &KdlNode, input: &str) -> Result<SceneToolsConfig> {
+    let mut verb = None;
+    let mut tools = BTreeMap::new();
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "enable-all" | "ask-all" | "disable-all" => {
+                let parsed = parse_scene_verb(input, child)?;
+                set_once(input, child, &mut verb, Ok(Some(parsed)))?;
+            }
+            "tool" => {
+                for (name, tool) in parse_tool_overrides(child, input)? {
+                    if tools.insert(name.clone(), tool).is_some() {
+                        return Err(duplicate(input, child, &format!("tool `{name}`")));
+                    }
+                }
+            }
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!(
+                        "unknown node `{other}` in `tools` (expected `enable-all`, \
+                         `ask-all`, `disable-all`, or `tool`)"
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    Ok(SceneToolsConfig { verb, tools })
+}
+
+fn parse_scene_verb(input: &str, node: &KdlNode) -> Result<SceneToolVerb> {
+    if !node.entries().is_empty() {
+        return Err(node_error(
+            input,
+            node,
+            format!("`{}` takes no arguments", node.name().value()),
+            None,
+        ));
+    }
+    if node.children().is_some() {
+        return Err(node_error(
+            input,
+            node,
+            format!("`{}` takes no children", node.name().value()),
+            None,
+        ));
+    }
+    match node.name().value() {
+        "enable-all" => Ok(SceneToolVerb::EnableAll),
+        "ask-all" => Ok(SceneToolVerb::AskAll),
+        "disable-all" => Ok(SceneToolVerb::DisableAll),
+        other => Err(node_error(
+            input,
+            node,
+            format!("`{other}` is not a scene tool verb"),
+            None,
+        )),
+    }
+}
+
+/// One `tool` node: several tool name arguments sharing one override
+/// (`tool "a" "b" { disabled #true }` ≡ two entries).
+fn parse_tool_overrides(node: &KdlNode, input: &str) -> Result<Vec<(String, ToolOverride)>> {
+    check_props(input, node, &[])?;
+    let mut names = Vec::new();
+    for entry in node.entries().iter().filter(|entry| entry.name().is_none()) {
+        match entry.value() {
+            KdlValue::String(name) if !name.trim().is_empty() => names.push(name.clone()),
+            _ => {
+                return Err(node_error(
+                    input,
+                    node,
+                    "`tool` requires non-empty tool name arguments",
+                    None,
+                ));
+            }
+        }
+    }
+    if names.is_empty() {
+        return Err(node_error(
+            input,
+            node,
+            "`tool` requires at least one tool name argument",
+            None,
+        ));
+    }
+    let mut disabled = None;
+    let mut ask = None;
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "disabled" => set_once(input, child, &mut disabled, scalar_bool(input, child))?,
+            "ask" => set_once(input, child, &mut ask, scalar_bool(input, child))?,
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!("unknown node `{other}` in `tool` (expected `disabled` or `ask`)"),
+                    None,
+                ));
+            }
+        }
+    }
+    if disabled.is_none() && ask.is_none() {
+        return Err(node_error(
+            input,
+            node,
+            "`tool` override requires `disabled` or `ask`",
+            None,
+        ));
+    }
+    Ok(names
+        .into_iter()
+        .map(|name| (name, ToolOverride { disabled, ask }))
+        .collect())
+}
+
 pub(crate) fn to_kdl(config: &Config) -> Result<String> {
     let mut doc = KdlDocument::new();
     let sections = [
@@ -992,6 +1428,7 @@ pub(crate) fn to_kdl(config: &Config) -> Result<String> {
         permissions_node(&config.permissions),
         tools_node(&config.tools),
         registries_node(&config.registries),
+        scenes_node(&config.scenes),
         retry_node(&config.retry),
     ];
     for node in sections.into_iter().flatten() {
@@ -1316,6 +1753,183 @@ fn registries_node(cfg: &RegistriesConfig) -> Option<KdlNode> {
         .map(|(name, entry)| registry_entry_node(name, *entry))
         .collect();
     section_node("registries", children)
+}
+
+fn scenes_node(cfg: &ScenesConfig) -> Option<KdlNode> {
+    if cfg.default.is_none() && cfg.scenes.is_empty() {
+        return None;
+    }
+    let mut children = Vec::new();
+    if let Some(default) = &cfg.default {
+        children.push(value_node("default", default.as_str()));
+    }
+    for (name, scene) in &cfg.scenes {
+        children.push(scene_node(name, scene));
+    }
+    section_node("scenes", children)
+}
+
+fn scene_node(name: &str, scene: &SceneConfig) -> KdlNode {
+    let mut children = Vec::new();
+    if let Some(description) = &scene.description {
+        children.push(prompt_node("description", description));
+    }
+    children.extend(subagents_node(&scene.subagents));
+    children.extend(system_prompts_node(&scene.system_prompts));
+    if let Some(thinking) = scene.thinking {
+        children.push(value_node("thinking", thinking));
+    }
+    children.extend(scene_tools_node(&scene.tools));
+    node_with_prop("scene", "name", name, children)
+}
+
+fn subagents_node(cfg: &SubagentsConfig) -> Option<KdlNode> {
+    if cfg.is_default() {
+        return None;
+    }
+    let mut children = Vec::new();
+    if cfg.disabled {
+        children.push(value_node("disabled", true));
+    }
+    for (name, worker) in &cfg.workers {
+        children.push(subagent_node(name, worker));
+    }
+    section_node("subagents", children)
+}
+
+fn subagent_node(name: &str, worker: &SubagentConfig) -> KdlNode {
+    let mut children = Vec::new();
+    if worker.disabled {
+        children.push(value_node("disabled", true));
+    }
+    children.extend(system_prompts_node(&worker.system_prompts));
+    if let Some(thinking) = worker.thinking {
+        children.push(value_node("thinking", thinking));
+    }
+    children.extend(scene_tools_node(&worker.tools));
+    named_node(name, children)
+}
+
+fn system_prompts_node(cfg: &SystemPromptsConfig) -> Option<KdlNode> {
+    if cfg.is_default() {
+        return None;
+    }
+    let mut children = Vec::new();
+    if let Some(text) = &cfg.prelude {
+        children.push(prompt_node("prelude", text));
+    }
+    if let Some(text) = &cfg.interlude {
+        children.push(prompt_node("interlude", text));
+    }
+    children.extend(hooks_node("before-each", &cfg.before_each));
+    children.extend(hooks_node("after-each", &cfg.after_each));
+    section_node("system-prompts", children)
+}
+
+fn hooks_node(name: &str, hooks: &Option<Hooks>) -> Option<KdlNode> {
+    let hooks = hooks.as_ref()?;
+    if hooks.is_default() {
+        return None;
+    }
+    let mut children = Vec::new();
+    if let Some(text) = &hooks.user_prompt {
+        children.push(prompt_node("user-prompt", text));
+    }
+    if let Some(text) = &hooks.assistant_prompt {
+        children.push(prompt_node("assistant-prompt", text));
+    }
+    if let Some(text) = &hooks.turn {
+        children.push(prompt_node("turn", text));
+    }
+    section_node(name, children)
+}
+
+fn scene_tools_node(cfg: &SceneToolsConfig) -> Option<KdlNode> {
+    if cfg.is_default() {
+        return None;
+    }
+    let mut children = Vec::new();
+    if let Some(verb) = cfg.verb {
+        children.push(KdlNode::new(verb.as_str()));
+    }
+    for (name, tool) in &cfg.tools {
+        children.push(tool_override_node(name, tool));
+    }
+    section_node("tools", children)
+}
+
+fn tool_override_node(name: &str, tool: &ToolOverride) -> KdlNode {
+    let mut node = KdlNode::new("tool");
+    node.push(KdlEntry::new(name.to_string()));
+    let mut children = Vec::new();
+    if let Some(disabled) = tool.disabled {
+        children.push(value_node("disabled", disabled));
+    }
+    if let Some(ask) = tool.ask {
+        children.push(value_node("ask", ask));
+    }
+    if !children.is_empty() {
+        let mut body = KdlDocument::new();
+        body.nodes_mut().extend(children);
+        node.set_children(body);
+    }
+    node
+}
+
+fn named_node(name: &str, children: Vec<KdlNode>) -> KdlNode {
+    let mut node = KdlNode::new(name);
+    if !children.is_empty() {
+        let mut body = KdlDocument::new();
+        body.nodes_mut().extend(children);
+        node.set_children(body);
+    }
+    node
+}
+
+fn node_with_prop(name: &str, prop: &str, value: &str, children: Vec<KdlNode>) -> KdlNode {
+    let mut node = KdlNode::new(name);
+    node.push(KdlEntry::new_prop(prop, value));
+    if !children.is_empty() {
+        let mut body = KdlDocument::new();
+        body.nodes_mut().extend(children);
+        node.set_children(body);
+    }
+    node
+}
+
+fn prompt_node(name: &str, text: &str) -> KdlNode {
+    let mut node = KdlNode::new(name);
+    node.push(string_entry(text));
+    node
+}
+
+/// A string entry; text with newlines renders as a KDL multi-line string
+/// (`"""`) so prompts stay readable in the saved file.
+fn string_entry(text: &str) -> KdlEntry {
+    let mut entry = KdlEntry::new(text);
+    if let Some(repr) = multiline_string_repr(text) {
+        let mut format = KdlEntryFormat {
+            value_repr: repr,
+            leading: " ".into(),
+            ..KdlEntryFormat::default()
+        };
+        format.autoformat_keep = true;
+        entry.set_format(format);
+    }
+    entry
+}
+
+/// The `"""`-wrapped literal for a multi-line string, or `None` when the text
+/// has no newlines or cannot be represented raw (a `"""` sequence, a `\r`, or
+/// another control character) — those fall back to an escaped single line.
+fn multiline_string_repr(text: &str) -> Option<String> {
+    let problematic = text.contains("\"\"\"")
+        || text.contains('\r')
+        || text.chars().any(|c| c != '\n' && c.is_control());
+    if !text.contains('\n') || problematic {
+        return None;
+    }
+    Some(format!("\"\"\"\n{}\n\"\"\"", text.replace('\\', "\\\\")))
 }
 
 fn registry_entry_node(name: &str, entry: RegistryEntry) -> KdlNode {

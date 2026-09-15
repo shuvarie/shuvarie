@@ -55,6 +55,8 @@ pub struct StoredSession {
     pub title: String,
     pub provider: Option<String>,
     pub model: Option<String>,
+    /// The session's active scene; `None` = the built-in default scene.
+    pub scene: Option<String>,
     /// Message id of the active branch's tip; the parent chain from it up to
     /// the root is the active path.
     pub leaf_id: Option<u64>,
@@ -283,6 +285,7 @@ impl Store {
             title: session.title,
             provider: session.provider,
             model: session.model,
+            scene: session.scene,
             leaf_id: session.leaf_id,
             messages,
             tool_calls,
@@ -308,6 +311,7 @@ impl Store {
             title: session.title,
             provider: session.provider,
             model: session.model,
+            scene: session.scene,
             leaf_id: session.leaf_id,
             messages,
             tool_calls,
@@ -320,8 +324,9 @@ impl Store {
         title: &str,
         provider: Option<&str>,
         model: Option<&str>,
+        scene: Option<&str>,
     ) -> Result<uuid::Uuid> {
-        self.insert_session(title, provider, model, SessionType::Main, None)
+        self.insert_session(title, provider, model, scene, SessionType::Main, None)
             .await
     }
 
@@ -332,8 +337,15 @@ impl Store {
         model: Option<&str>,
         parent_id: uuid::Uuid,
     ) -> Result<uuid::Uuid> {
-        self.insert_session(title, provider, model, SessionType::Worker, Some(parent_id))
-            .await
+        self.insert_session(
+            title,
+            provider,
+            model,
+            None,
+            SessionType::Worker,
+            Some(parent_id),
+        )
+        .await
     }
 
     async fn insert_session(
@@ -341,6 +353,7 @@ impl Store {
         title: &str,
         provider: Option<&str>,
         model: Option<&str>,
+        scene: Option<&str>,
         session_type: SessionType,
         parent_id: Option<uuid::Uuid>,
     ) -> Result<uuid::Uuid> {
@@ -348,6 +361,7 @@ impl Store {
             title: title.to_string(),
             provider: provider.map(|p| p.to_string()),
             model: model.map(|m| m.to_string()),
+            scene: scene.map(|s| s.to_string()),
             session_type,
             parent_id,
         })
@@ -981,6 +995,19 @@ impl Store {
     pub async fn set_title(&mut self, id: uuid::Uuid, title: &str) -> Result<()> {
         toasty::sql::statement("UPDATE sessions SET title = ?1 WHERE id = ?2")
             .bind_typed(title, db::Type::Text)
+            .bind_typed(id.as_bytes().to_vec(), db::Type::Blob)
+            .exec(&mut self.db)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Set the session's active scene. A raw update bypasses the model's
+    /// auto-timestamp, so `updated_at` is untouched and a scene switch never
+    /// reorders the session list.
+    pub async fn set_scene(&mut self, id: uuid::Uuid, scene: Option<&str>) -> Result<()> {
+        toasty::sql::statement("UPDATE sessions SET scene = ?1 WHERE id = ?2")
+            .bind_typed(scene, db::Type::Text)
             .bind_typed(id.as_bytes().to_vec(), db::Type::Blob)
             .exec(&mut self.db)
             .await

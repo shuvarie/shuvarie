@@ -53,6 +53,55 @@ async fn recv_skills_loaded(event_rx: &mut tokio::sync::mpsc::Receiver<Event>) {
         matches!(ev, Event::SkillsLoaded { .. }),
         "expected SkillsLoaded as the first startup event, got {ev:?}"
     );
+    let ev = event_rx.recv().await.expect("event");
+    assert!(
+        matches!(ev, Event::ScenesLoaded { .. }),
+        "expected ScenesLoaded as the second startup event, got {ev:?}"
+    );
+}
+
+#[tokio::test]
+async fn scenes_loaded_carries_conflict_warnings() {
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+
+    let scene_set = shuvarie_core::SceneSet {
+        scenes: Default::default(),
+        warnings: vec![
+            "scene `Plan` is defined multiple times in the local config \
+             (shuvarie.kdl, scene.d/plan.kdl); loading none of them"
+                .to_string(),
+        ],
+    };
+
+    let handle = tokio::spawn(run(
+        empty_config(),
+        empty_connections(),
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        scene_set,
+        cmd_rx,
+        event_tx,
+    ));
+    let first = event_rx.recv().await.expect("event");
+    assert!(
+        matches!(first, Event::SkillsLoaded { .. }),
+        "expected SkillsLoaded first, got {first:?}"
+    );
+    let ev = event_rx.recv().await.expect("event");
+    match ev {
+        Event::ScenesLoaded { warnings, .. } => {
+            assert_eq!(warnings.len(), 1);
+            assert!(warnings[0].contains("scene `Plan`"), "{}", warnings[0]);
+        }
+        other => panic!("expected ScenesLoaded, got {other:?}"),
+    }
+    drop(cmd_tx);
+    let _ = handle.await;
 }
 
 fn permissions_for_tests() -> std::sync::Arc<shuvarie_core::permissions::Permissions> {
@@ -85,6 +134,7 @@ async fn ping_pong() {
             .unwrap(),
         ),
         TrustGrants::all(),
+        Default::default(),
         cmd_rx,
         event_tx,
     ));
@@ -113,6 +163,7 @@ async fn add_provider_emits_saved() {
         Some(connections_path.clone()),
         permissions_for_tests(),
         TrustGrants::all(),
+        Default::default(),
         cmd_rx,
         event_tx,
     ));
@@ -172,6 +223,7 @@ async fn remove_provider_clears_active() {
         Some(connections_path.clone()),
         permissions_for_tests(),
         TrustGrants::all(),
+        Default::default(),
         cmd_rx,
         event_tx,
     ));
@@ -219,9 +271,11 @@ async fn send_message_without_active_provider_emits_error() {
             .unwrap(),
         ),
         TrustGrants::all(),
+        Default::default(),
         cmd_rx,
         event_tx,
     ));
+    recv_skills_loaded(&mut event_rx).await;
     cmd_tx
         .send(Command::SendMessage {
             content: "hello".into(),
@@ -268,6 +322,7 @@ async fn cancel_with_no_active_stream_keeps_task_alive() {
             .unwrap(),
         ),
         TrustGrants::all(),
+        Default::default(),
         cmd_rx,
         event_tx,
     ));
@@ -304,6 +359,7 @@ async fn send_while_streaming_is_steered() {
             .unwrap(),
         ),
         TrustGrants::all(),
+        Default::default(),
         cmd_rx,
         event_tx,
     ));
@@ -358,6 +414,7 @@ async fn steered_recall_round_trip() {
             .unwrap(),
         ),
         TrustGrants::all(),
+        Default::default(),
         cmd_rx,
         event_tx,
     ));
@@ -449,6 +506,7 @@ async fn cancel_dispatches_first_steered_prompt() {
             .unwrap(),
         ),
         TrustGrants::all(),
+        Default::default(),
         cmd_rx,
         event_tx,
     ));
@@ -536,6 +594,7 @@ async fn new_session_clears_steered_queue() {
             .unwrap(),
         ),
         TrustGrants::all(),
+        Default::default(),
         cmd_rx,
         event_tx,
     ));
@@ -622,6 +681,7 @@ async fn send_message_persists_session_and_messages() {
             .unwrap(),
         ),
         TrustGrants::all(),
+        Default::default(),
         cmd_rx,
         event_tx,
     ));
@@ -668,7 +728,7 @@ async fn send_message_persists_session_and_messages() {
 async fn load_current_emits_session_loaded_on_startup() {
     let mut store = Store::open_in_memory().await.unwrap();
     store
-        .create_session("existing", Some("ollama"), Some("model"))
+        .create_session("existing", Some("ollama"), Some("model"), None)
         .await
         .unwrap();
 
@@ -683,6 +743,7 @@ async fn load_current_emits_session_loaded_on_startup() {
         None,
         permissions_for_tests(),
         TrustGrants::all(),
+        Default::default(),
         cmd_rx,
         event_tx,
     ));
@@ -711,11 +772,11 @@ async fn load_current_emits_session_loaded_on_startup() {
 async fn load_session_by_uuid_on_startup() {
     let mut store = Store::open_in_memory().await.unwrap();
     store
-        .create_session("other", Some("ollama"), Some("model"))
+        .create_session("other", Some("ollama"), Some("model"), None)
         .await
         .unwrap();
     let target = store
-        .create_session("target", Some("ollama"), Some("model"))
+        .create_session("target", Some("ollama"), Some("model"), None)
         .await
         .unwrap();
 
@@ -730,6 +791,7 @@ async fn load_session_by_uuid_on_startup() {
         None,
         permissions_for_tests(),
         TrustGrants::all(),
+        Default::default(),
         cmd_rx,
         event_tx,
     ));
@@ -759,7 +821,7 @@ async fn load_session_by_uuid_on_startup() {
 async fn load_missing_session_uuid_on_startup_errors() {
     let mut store = Store::open_in_memory().await.unwrap();
     store
-        .create_session("existing", Some("ollama"), Some("model"))
+        .create_session("existing", Some("ollama"), Some("model"), None)
         .await
         .unwrap();
 
@@ -774,6 +836,7 @@ async fn load_missing_session_uuid_on_startup_errors() {
         None,
         permissions_for_tests(),
         TrustGrants::all(),
+        Default::default(),
         cmd_rx,
         event_tx,
     ));
@@ -802,7 +865,7 @@ async fn load_missing_session_uuid_on_startup_errors() {
 async fn no_load_current_skips_session_loaded_on_startup() {
     let mut store = Store::open_in_memory().await.unwrap();
     store
-        .create_session("existing", Some("ollama"), Some("model"))
+        .create_session("existing", Some("ollama"), Some("model"), None)
         .await
         .unwrap();
 
@@ -823,6 +886,7 @@ async fn no_load_current_skips_session_loaded_on_startup() {
             .unwrap(),
         ),
         TrustGrants::all(),
+        Default::default(),
         cmd_rx,
         event_tx,
     ));
@@ -844,7 +908,7 @@ async fn no_load_current_skips_session_loaded_on_startup() {
 async fn reload_reconstructs_tool_records_at_dense_message_indices() {
     let mut store = Store::open_in_memory().await.unwrap();
     let sid = store
-        .create_session("t", Some("ollama"), Some("model"))
+        .create_session("t", Some("ollama"), Some("model"), None)
         .await
         .unwrap();
 
@@ -893,7 +957,7 @@ async fn reload_reconstructs_tool_records_at_dense_message_indices() {
 async fn reload_after_resume_maps_tools_to_new_dense_indices() {
     let mut store = Store::open_in_memory().await.unwrap();
     let sid = store
-        .create_session("t", Some("ollama"), Some("model"))
+        .create_session("t", Some("ollama"), Some("model"), None)
         .await
         .unwrap();
 
@@ -953,4 +1017,390 @@ async fn reload_after_resume_maps_tools_to_new_dense_indices() {
     // The tool must be mapped to the assistant's dense index (1), regardless of
     // the re-append bumping the DB seq above the row count.
     assert_eq!(session.tool_records[0].message_seq, 1);
+}
+
+#[tokio::test]
+async fn switch_scene_persists_and_reports() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let mut scenes = shuvarie_config::ScenesConfig::default();
+    let with_interlude = |interlude: &str| shuvarie_config::SceneConfig {
+        system_prompts: shuvarie_config::SystemPromptsConfig {
+            interlude: Some(interlude.into()),
+            ..Default::default()
+        },
+        ..shuvarie_config::SceneConfig::default()
+    };
+    scenes.scenes.insert(
+        "Plan".into(),
+        shuvarie_config::SceneConfig {
+            description: Some("plan first".into()),
+            ..with_interlude("we are in Plan mode")
+        },
+    );
+    scenes.scenes.insert(
+        "Default".into(),
+        shuvarie_config::SceneConfig {
+            description: Some("custom default".into()),
+            ..with_interlude("we are in the custom Default")
+        },
+    );
+    scenes.scenes.insert(
+        "Draft".into(),
+        shuvarie_config::SceneConfig {
+            description: Some("no interlude".into()),
+            ..shuvarie_config::SceneConfig::default()
+        },
+    );
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+    let handle = tokio::spawn(run(
+        empty_config(),
+        empty_connections(),
+        store.clone(),
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        shuvarie_core::SceneSet {
+            scenes,
+            warnings: Vec::new(),
+        },
+        cmd_rx,
+        event_tx,
+    ));
+    cmd_tx.send(Command::Ping).await.unwrap();
+    recv_skills_loaded(&mut event_rx).await;
+    let _ = event_rx.recv().await.expect("pong");
+
+    // No session yet: a pre-pick records the scene the session will start
+    // under (an interlude-less scene may still start a session).
+    cmd_tx
+        .send(Command::SwitchScene {
+            name: Some("Draft".into()),
+        })
+        .await
+        .unwrap();
+    cmd_tx.send(Command::Ping).await.unwrap();
+    let mut saw_started = false;
+    let mut picked = None;
+    for _ in 0..6 {
+        match event_rx.recv().await {
+            Some(Event::SessionStarted) => saw_started = true,
+            Some(Event::SceneChanged { name }) => picked = name,
+            Some(Event::Pong) => break,
+            Some(_) => {}
+            None => panic!("core task stopped"),
+        }
+    }
+    assert!(saw_started, "the pre-pick starts an in-memory session");
+    assert_eq!(picked.as_deref(), Some("Draft"));
+
+    // The first turn creates the row under the pre-picked scene.
+    let ev = tokio::time::timeout(std::time::Duration::from_millis(200), event_rx.recv()).await;
+    assert!(
+        ev.is_err(),
+        "the pre-pick emitted everything before the ping"
+    );
+
+    // Create a session, then switch: SceneChanged reports it.
+    cmd_tx
+        .send(Command::SendMessage {
+            content: "hello".into(),
+        })
+        .await
+        .unwrap();
+    // SendMessage errors (no provider); wait for the error before switching.
+    let mut session_id = None;
+    for _ in 0..6 {
+        match event_rx.recv().await {
+            Some(Event::SessionCreated { id, .. }) => session_id = Some(id),
+            Some(Event::StreamError { .. }) => break,
+            Some(_) => {}
+            None => panic!("core task ended"),
+        }
+    }
+    {
+        let stored = store
+            .load_session(session_id.expect("session created"))
+            .await
+            .unwrap();
+        assert_eq!(
+            stored.scene.as_deref(),
+            Some("Draft"),
+            "the row is created under the pre-picked scene"
+        );
+    }
+
+    // Mid-session, the interlude-less built-in scene is refused.
+    cmd_tx
+        .send(Command::SwitchScene { name: None })
+        .await
+        .unwrap();
+    cmd_tx.send(Command::Ping).await.unwrap();
+    let mut saw_builtin_error = false;
+    for _ in 0..6 {
+        match event_rx.recv().await {
+            Some(Event::SceneError { error }) => {
+                assert!(error.contains("no interlude"), "{error}");
+                assert!(error.contains("Default"), "{error}");
+                saw_builtin_error = true;
+            }
+            Some(Event::Pong) => break,
+            Some(_) => {}
+            None => panic!("core task stopped"),
+        }
+    }
+    assert!(
+        saw_builtin_error,
+        "the built-in scene is refused mid-session"
+    );
+
+    // An interlude-bearing configured scene switches mid-session.
+    cmd_tx
+        .send(Command::SwitchScene {
+            name: Some("Plan".into()),
+        })
+        .await
+        .unwrap();
+    cmd_tx.send(Command::Ping).await.unwrap();
+    let mut saw_changed = false;
+    for _ in 0..5 {
+        match event_rx.recv().await {
+            Some(Event::SceneChanged { name }) => {
+                assert_eq!(name.as_deref(), Some("Plan"));
+                saw_changed = true;
+            }
+            Some(Event::Pong) => break,
+            Some(_) => {}
+            None => panic!("core task stopped"),
+        }
+    }
+    assert!(saw_changed, "SceneChanged reported");
+
+    // Re-selecting the current scene is a no-op even mid-session.
+    cmd_tx
+        .send(Command::SwitchScene {
+            name: Some("Plan".into()),
+        })
+        .await
+        .unwrap();
+    cmd_tx.send(Command::Ping).await.unwrap();
+    for _ in 0..6 {
+        match event_rx.recv().await {
+            Some(Event::SceneChanged { .. }) => {
+                panic!("re-selecting the current scene must be a no-op")
+            }
+            Some(Event::Pong) => break,
+            Some(_) => {}
+            None => panic!("core task stopped"),
+        }
+    }
+
+    // A configured scene named "Default" switches by identity — it must not
+    // collapse into the built-in scene.
+    cmd_tx
+        .send(Command::SwitchScene {
+            name: Some("Default".into()),
+        })
+        .await
+        .unwrap();
+    cmd_tx.send(Command::Ping).await.unwrap();
+    let mut saw_custom_default = false;
+    for _ in 0..5 {
+        match event_rx.recv().await {
+            Some(Event::SceneChanged { name }) => {
+                assert_eq!(name.as_deref(), Some("Default"));
+                saw_custom_default = true;
+            }
+            Some(Event::Pong) => break,
+            Some(_) => {}
+            None => panic!("core task stopped"),
+        }
+    }
+    assert!(saw_custom_default, "the configured Default was switched to");
+
+    // The persisted session row carries the scene.
+    let stored = store
+        .load_session(session_id.expect("session created"))
+        .await
+        .unwrap();
+    assert_eq!(stored.scene.as_deref(), Some("Default"));
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn switch_scene_refuses_unknown_names() {
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+    let handle = tokio::spawn(run(
+        empty_config(),
+        empty_connections(),
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        Default::default(),
+        cmd_rx,
+        event_tx,
+    ));
+    cmd_tx.send(Command::Ping).await.unwrap();
+    recv_skills_loaded(&mut event_rx).await;
+    let _ = event_rx.recv().await.expect("pong");
+
+    cmd_tx
+        .send(Command::SwitchScene {
+            name: Some("Ghost".into()),
+        })
+        .await
+        .unwrap();
+    cmd_tx.send(Command::Ping).await.unwrap();
+    let mut saw_error = false;
+    for _ in 0..5 {
+        match event_rx.recv().await {
+            Some(Event::SceneError { error }) => {
+                assert!(error.contains("unknown scene"), "{error}");
+                saw_error = true;
+            }
+            Some(Event::Pong) => break,
+            Some(_) => {}
+            None => panic!("core task stopped"),
+        }
+    }
+    assert!(saw_error, "SceneError reported");
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn switch_scene_requires_interlude_mid_session() {
+    let mut scenes = shuvarie_config::ScenesConfig::default();
+    scenes.scenes.insert(
+        "Draft".into(),
+        shuvarie_config::SceneConfig {
+            description: Some("no interlude".into()),
+            ..shuvarie_config::SceneConfig::default()
+        },
+    );
+    scenes.scenes.insert(
+        "Plan".into(),
+        shuvarie_config::SceneConfig {
+            system_prompts: shuvarie_config::SystemPromptsConfig {
+                interlude: Some("we are in Plan mode".into()),
+                ..Default::default()
+            },
+            ..shuvarie_config::SceneConfig::default()
+        },
+    );
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+    let handle = tokio::spawn(run(
+        empty_config(),
+        empty_connections(),
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        shuvarie_core::SceneSet {
+            scenes,
+            warnings: Vec::new(),
+        },
+        cmd_rx,
+        event_tx,
+    ));
+    cmd_tx.send(Command::Ping).await.unwrap();
+    recv_skills_loaded(&mut event_rx).await;
+    let _ = event_rx.recv().await.expect("pong");
+
+    // A fresh session (no messages yet) may enter an interlude-less scene.
+    cmd_tx.send(Command::StartSession).await.unwrap();
+    loop {
+        match event_rx.recv().await {
+            Some(Event::SessionStarted) => break,
+            Some(_) => {}
+            None => panic!("core task stopped"),
+        }
+    }
+    cmd_tx
+        .send(Command::SwitchScene {
+            name: Some("Draft".into()),
+        })
+        .await
+        .unwrap();
+    cmd_tx.send(Command::Ping).await.unwrap();
+    let mut saw_changed = false;
+    for _ in 0..6 {
+        match event_rx.recv().await {
+            Some(Event::SceneChanged { name }) => {
+                assert_eq!(name.as_deref(), Some("Draft"));
+                saw_changed = true;
+            }
+            Some(Event::Pong) => break,
+            Some(_) => {}
+            None => panic!("core task stopped"),
+        }
+    }
+    assert!(saw_changed, "a fresh session enters any scene");
+
+    // With messages on the path, moving to the interlude-bearing scene
+    // still works…
+    cmd_tx
+        .send(Command::SendMessage {
+            content: "hello".into(),
+        })
+        .await
+        .unwrap();
+    for _ in 0..8 {
+        match event_rx.recv().await {
+            Some(Event::StreamError { .. }) => break,
+            Some(_) => {}
+            None => panic!("core task ended"),
+        }
+    }
+    cmd_tx
+        .send(Command::SwitchScene {
+            name: Some("Plan".into()),
+        })
+        .await
+        .unwrap();
+    cmd_tx.send(Command::Ping).await.unwrap();
+    for _ in 0..6 {
+        match event_rx.recv().await {
+            Some(Event::SceneChanged { name }) => {
+                assert_eq!(name.as_deref(), Some("Plan"));
+            }
+            Some(Event::Pong) => break,
+            Some(_) => {}
+            None => panic!("core task stopped"),
+        }
+    }
+    // …and the interlude-less scene no longer does.
+    cmd_tx
+        .send(Command::SwitchScene {
+            name: Some("Draft".into()),
+        })
+        .await
+        .unwrap();
+    cmd_tx.send(Command::Ping).await.unwrap();
+    let mut saw_error = false;
+    for _ in 0..6 {
+        match event_rx.recv().await {
+            Some(Event::SceneError { error }) => {
+                assert!(error.contains("no interlude"), "{error}");
+                assert!(error.contains("Draft"), "{error}");
+                saw_error = true;
+            }
+            Some(Event::Pong) => break,
+            Some(_) => {}
+            None => panic!("core task stopped"),
+        }
+    }
+    assert!(saw_error, "the interlude-less scene is refused mid-session");
+    drop(cmd_tx);
+    let _ = handle.await;
 }

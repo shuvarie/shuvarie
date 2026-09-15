@@ -10,6 +10,7 @@ pub mod event;
 pub mod lsp_manager;
 pub mod permissions;
 pub mod question;
+pub mod scenes;
 pub mod session;
 pub mod shell;
 pub mod skills;
