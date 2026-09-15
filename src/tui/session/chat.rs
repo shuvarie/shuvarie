@@ -361,15 +361,6 @@ impl Chat {
         !self.turns.borrow().is_empty()
     }
 
-    pub fn last_turn_interrupted(&self) -> bool {
-        self.interrupted
-            && self
-                .turns
-                .borrow()
-                .last()
-                .is_some_and(|turn| turn.role == Role::Assistant)
-    }
-
     /// Whether any tool block is still animating: live blocks in the
     /// in-flight turn or a straggler in the last committed turn. Only those
     /// turns can hold running blocks — committed turns are built from
@@ -3821,10 +3812,7 @@ mod tests {
         chat.update(ChatMessage::StreamCancelled);
 
         assert!(chat.in_flight.borrow().is_none());
-        assert!(
-            chat.last_turn_interrupted(),
-            "turn committed as interrupted"
-        );
+        assert!(chat.interrupted, "turn committed as interrupted");
         assert!(!chat.has_running_tool_blocks(), "no block animates anymore");
         let turns = chat.turns.borrow();
         let turn = turns.last().unwrap();
@@ -3865,7 +3853,7 @@ mod tests {
         assert!(text.contains("Thought"), "thinking finalized: {text}");
         assert!(text.contains("partial reply"));
         assert!(!text.contains("Thinking..."), "no frozen thinking header");
-        assert!(chat.last_turn_interrupted());
+        assert!(chat.interrupted);
     }
 
     #[test]

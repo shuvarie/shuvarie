@@ -293,20 +293,6 @@ impl SessionScreen {
         self.input.buffer.value.starts_with('!')
     }
 
-    pub fn can_continue(&self) -> bool {
-        self.chat.last_turn_interrupted()
-    }
-
-    pub fn begin_continue(&mut self) {
-        self.chat.update(ChatMessage::BeginUserTurn {
-            content: shuvarie_core::session::CONTINUE_PROMPT.to_string(),
-        });
-        self.busy_kind = BusyKind::Generating;
-        self.status = Some("Thinking...".to_string());
-        self.retry = None;
-        self.last_escape = None;
-    }
-
     /// Expand a `/skill:<name> [args]` submit into the skill's prompt
     /// content. `Ok(None)` when the text is not a skill invocation;
     /// `Err(reason)` for an unknown skill or an unreadable SKILL.md.
@@ -430,8 +416,6 @@ impl SessionScreen {
             .set_availability(CommandAction::Replay, has_messages);
         self.slash
             .set_availability(CommandAction::OpenTree, has_messages);
-        self.slash
-            .set_availability(CommandAction::Continue, self.chat.last_turn_interrupted());
         self.slash
             .set_availability(CommandAction::EditTitle, self.session_id.is_some());
         let buffer = self.input.buffer.value.clone();

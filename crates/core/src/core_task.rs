@@ -16,7 +16,7 @@ use crate::embeddings::{self, EmbeddingSetup};
 use crate::event::Event;
 use crate::permissions::{Access, DenyCut, PermissionGate, PermissionRequest};
 use crate::question::{AnswerResponse, QuestionGate, QuestionRequest};
-use crate::session::{CONTINUE_PROMPT, Session};
+use crate::session::Session;
 use crate::shell::Shell;
 use shuvarie_config::Config;
 use shuvarie_config::{Connections, ProviderConfig, TrustGrants};
@@ -1025,26 +1025,6 @@ pub async fn run(
                             }
                         }
                     }
-                    Command::Continue => {
-                        if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
-                            continue;
-                        }
-                        pending_retry = None;
-                        conn_retries = 0;
-                        ctx.steer.reset();
-                        let Some(s) = &ctx.session else { continue; };
-                        if !s.lock().await.can_continue() {
-                            let _ = ctx
-                                .event_tx
-                                .send(Event::SessionError {
-                                    error: "nothing to continue".into(),
-                                })
-                                .await;
-                            continue;
-                        }
-                        ctx.self_replay_send(CONTINUE_PROMPT.to_string(), true)
-                            .await;
-                    }
                     Command::Reload => {
                         ctx.skills = crate::skills::Skills::load(
                             &ctx.workspace_root,
@@ -1699,7 +1679,12 @@ impl CoreCtx {
                 let parent = guard.leaf_id;
                 if let Ok(msg) = self
                     .store
-                    .append_message(id, parent, guard.messages.last().expect("cannot be poisoned").role, &content)
+                    .append_message(
+                        id,
+                        parent,
+                        guard.messages.last().expect("cannot be poisoned").role,
+                        &content,
+                    )
                     .await
                 {
                     guard.leaf_id = Some(msg.id);

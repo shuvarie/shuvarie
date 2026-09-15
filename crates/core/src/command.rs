@@ -82,7 +82,6 @@ pub enum Command {
     /// [`crate::Event::SessionTree`].
     OpenTree,
     Replay,
-    Continue,
     Reload,
     /// Recall the most recently steered prompt into the input area. `stacked`
     /// (Alt+Shift+Up) prepends the content to the existing text (separated by

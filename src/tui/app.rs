@@ -1270,9 +1270,6 @@ impl App {
             .set_availability(CommandAction::Replay, has_messages);
         self.command_menu
             .set_availability(CommandAction::OpenTree, has_messages);
-        let can_continue = self.session.can_continue();
-        self.command_menu
-            .set_availability(CommandAction::Continue, can_continue);
         self.command_menu
             .set_availability(CommandAction::EditTitle, self.session.session_id.is_some());
     }
@@ -1327,10 +1324,6 @@ impl App {
             }
             CommandAction::Replay => {
                 self.ctx.send(shuvarie_core::Command::Replay);
-            }
-            CommandAction::Continue => {
-                self.session.begin_continue();
-                self.ctx.send(shuvarie_core::Command::Continue);
             }
             CommandAction::Reload => {
                 self.ctx.send(shuvarie_core::Command::Reload);

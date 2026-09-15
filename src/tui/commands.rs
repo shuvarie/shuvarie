@@ -10,14 +10,13 @@ pub enum CommandAction {
     EditTitle,
     UndoLastTurn,
     Replay,
-    Continue,
     Reload,
     ToggleSidebar,
     Quit,
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 12] = [
+    pub const ALL: [CommandAction; 11] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::OpenSessionPicker,
@@ -26,7 +25,6 @@ impl CommandAction {
         CommandAction::EditTitle,
         CommandAction::UndoLastTurn,
         CommandAction::Replay,
-        CommandAction::Continue,
         CommandAction::Reload,
         CommandAction::ToggleSidebar,
         CommandAction::Quit,
@@ -42,7 +40,6 @@ impl CommandAction {
             CommandAction::EditTitle => "title",
             CommandAction::UndoLastTurn => "undo",
             CommandAction::Replay => "replay",
-            CommandAction::Continue => "continue",
             CommandAction::Reload => "reload",
             CommandAction::ToggleSidebar => "sidebar",
             CommandAction::Quit => "quit",
@@ -112,12 +109,6 @@ pub fn default_commands() -> Vec<CommandEntry> {
             name: "Replay last turn",
             description: "Fork + re-run the last turn",
             action: CommandAction::Replay,
-            available: true,
-        },
-        CommandEntry {
-            name: "Continue",
-            description: "Resume the interrupted reply",
-            action: CommandAction::Continue,
             available: true,
         },
         CommandEntry {
@@ -287,23 +278,9 @@ mod tests {
             })
         );
         assert_eq!(
-            parse_command("/continue"),
-            Some(ParsedCommand {
-                action: CommandAction::Continue,
-                args: None
-            })
-        );
-        assert_eq!(
             parse_command("/reload"),
             Some(ParsedCommand {
                 action: CommandAction::Reload,
-                args: None
-            })
-        );
-        assert_eq!(
-            parse_command(":Continue"),
-            Some(ParsedCommand {
-                action: CommandAction::Continue,
                 args: None
             })
         );
