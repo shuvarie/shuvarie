@@ -1112,14 +1112,23 @@ async fn switch_scene_persists_and_reports() {
         .unwrap();
     // SendMessage errors (no provider); wait for the error before switching.
     let mut session_id = None;
+    let mut created_scene = None;
     for _ in 0..6 {
         match event_rx.recv().await {
-            Some(Event::SessionCreated { id, .. }) => session_id = Some(id),
+            Some(Event::SessionCreated { id, scene, .. }) => {
+                session_id = Some(id);
+                created_scene = scene;
+            }
             Some(Event::StreamError { .. }) => break,
             Some(_) => {}
             None => panic!("core task ended"),
         }
     }
+    assert_eq!(
+        created_scene.as_deref(),
+        Some("Draft"),
+        "SessionCreated reports the scene the session started under"
+    );
     {
         let stored = store
             .load_session(session_id.expect("session created"))
@@ -1318,7 +1327,7 @@ async fn switch_scene_requires_interlude_mid_session() {
     let _ = event_rx.recv().await.expect("pong");
 
     // A fresh session (no messages yet) may enter an interlude-less scene.
-    cmd_tx.send(Command::StartSession).await.unwrap();
+    cmd_tx.send(Command::NewSession).await.unwrap();
     loop {
         match event_rx.recv().await {
             Some(Event::SessionStarted) => break,

@@ -595,18 +595,6 @@ pub async fn run(
                         )
                         .await;
                     }
-                    Command::StartSession => {
-                        overflow_retries = 0;
-                        pending_retry = None;
-                        conn_retries = 0;
-                        ctx.context_announced = false;
-                        release_active_lock(&mut ctx).await;
-                        clear_steered(&mut steered, &ctx.steer, &ctx.event_tx).await;
-                        dismiss_pending_questions(&mut pending_questions);
-                        dismiss_pending_permissions(&mut pending_permissions);
-                        ctx.session = Some(Arc::new(Mutex::new(Session::new())));
-                        let _ = ctx.event_tx.send(Event::SessionStarted).await;
-                    }
                     Command::NewSession => {
                         if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
@@ -1691,7 +1679,7 @@ impl CoreCtx {
                     Ok(id) => {
                         guard.id = Some(id);
                         guard.title = Some(title.clone());
-                        guard.scene = scene;
+                        guard.scene = scene.clone();
                         match self.store.acquire_session_lock(id, now_ms()).await {
                             Ok(LockAcquire::Acquired | LockAcquire::Ours) => {
                                 self.locked_session = Some(id);
@@ -1700,7 +1688,7 @@ impl CoreCtx {
                         }
                         let _ = self
                             .event_tx
-                            .send(Event::SessionCreated { id, title })
+                            .send(Event::SessionCreated { id, title, scene })
                             .await;
                     }
                     Err(e) => {

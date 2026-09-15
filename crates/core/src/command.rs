@@ -21,7 +21,6 @@ pub enum Command {
         model: String,
     },
     SaveConfig,
-    StartSession,
     NewSession,
     SendMessage {
         content: String,

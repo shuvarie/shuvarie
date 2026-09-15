@@ -31,6 +31,7 @@ pub enum Event {
     SessionCreated {
         id: uuid::Uuid,
         title: String,
+        scene: Option<String>,
     },
     TokenReceived {
         content: String,

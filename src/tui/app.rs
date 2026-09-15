@@ -114,6 +114,7 @@ pub enum AppMessage {
     SessionCreated {
         id: uuid::Uuid,
         title: String,
+        scene: Option<String>,
     },
     SessionTitleChanged {
         title: String,
@@ -464,8 +465,8 @@ impl App {
                 CoreEvent::SessionStarted => Some(AppMessage::SceneChanged {
                     name: self.scene_default.clone(),
                 }),
-                CoreEvent::SessionCreated { id, title } => {
-                    Some(AppMessage::SessionCreated { id, title })
+                CoreEvent::SessionCreated { id, title, scene } => {
+                    Some(AppMessage::SessionCreated { id, title, scene })
                 }
                 CoreEvent::SessionTitleChanged { title } => {
                     Some(AppMessage::SessionTitleChanged { title })
@@ -764,9 +765,6 @@ impl App {
                 if let Some(effect) = self.session.update(m) {
                     match effect {
                         SessionEffect::SendMessage { content } => {
-                            if !self.session.is_busy() && self.session.session_id.is_none() {
-                                self.ctx.send(shuvarie_core::Command::StartSession);
-                            }
                             self.ctx
                                 .send(shuvarie_core::Command::SendMessage { content });
                         }
@@ -1159,10 +1157,11 @@ impl App {
                     form.error = Some(format!("{provider_name}: {error}"));
                 }
             }
-            AppMessage::SessionCreated { id, title } => {
+            AppMessage::SessionCreated { id, title, scene } => {
                 self.session.session_id = Some(id);
                 self.session.session_title = Some(title);
                 self.session_picker.active_id = Some(id);
+                self.set_scene(scene);
             }
             AppMessage::SessionTitleChanged { title } => {
                 self.session.session_title = Some(title);
