@@ -68,10 +68,12 @@ pub enum Command {
         answers: Option<Vec<Vec<String>>>,
     },
     /// The user's answer to a pending `ask` permission prompt (`id` from
-    /// [`crate::Event::PermissionRequested`]). A missing id is a no-op.
+    /// [`crate::Event::PermissionRequested`]). `Allow` grants one call,
+    /// `AllowSession` also remembers the ask's scope for the rest of the
+    /// run, and `Deny` cuts the turn. A missing id is a no-op.
     PermissionDecide {
         id: u64,
-        allow: bool,
+        decision: crate::permissions::PermissionAnswer,
     },
     /// Fork the session: with `node: None`, walk to the active path's last
     /// user prompt (`/undo`); with a node id, walk to that node. Every turn

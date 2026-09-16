@@ -14,7 +14,7 @@ use shuvarie_llm::{FileChange, ProviderClient, TokenUsage};
 use crate::command::Command;
 use crate::embeddings::{self, EmbeddingSetup};
 use crate::event::Event;
-use crate::permissions::{Access, DenyCut, PermissionGate, PermissionRequest};
+use crate::permissions::{Access, DenyCut, PermissionAnswer, PermissionGate, PermissionRequest};
 use crate::question::{AnswerResponse, QuestionGate, QuestionRequest};
 use crate::session::Session;
 use crate::shell::Shell;
@@ -313,7 +313,7 @@ pub async fn run(
     // the TUI as `Event::PermissionRequested`, resolved by
     // `Command::PermissionDecide`.
     let (permission_tx, mut permission_rx) = tokio::sync::mpsc::channel::<PermissionRequest>(8);
-    let mut pending_permissions: HashMap<u64, oneshot::Sender<bool>> = HashMap::new();
+    let mut pending_permissions: HashMap<u64, oneshot::Sender<PermissionAnswer>> = HashMap::new();
     let mut next_permission_id: u64 = 0;
     let access = Access::new(
         permissions,
@@ -946,9 +946,9 @@ pub async fn run(
                             let _ = respond.send(answers);
                         }
                     }
-                    Command::PermissionDecide { id, allow } => {
+                    Command::PermissionDecide { id, decision } => {
                         if let Some(respond) = pending_permissions.remove(&id) {
-                            let _ = respond.send(allow);
+                            let _ = respond.send(decision);
                         }
                     }
                     Command::ForkSession { node, summarize } => {
@@ -1299,6 +1299,7 @@ pub async fn run(
                     .send(Event::PermissionRequested {
                         id,
                         description: req.description,
+                        allow_session: req.scope.is_some(),
                     })
                     .await;
             }
@@ -2128,7 +2129,7 @@ async fn stream_busy(active_stream: &Option<AbortHandle>, event_tx: &Sender<Even
 async fn cut_running_stream(
     ctx: &mut CoreCtx,
     pending_questions: &mut HashMap<u64, oneshot::Sender<AnswerResponse>>,
-    pending_permissions: &mut HashMap<u64, oneshot::Sender<bool>>,
+    pending_permissions: &mut HashMap<u64, oneshot::Sender<PermissionAnswer>>,
 ) -> bool {
     let Some(handle) = ctx.active_stream.take() else {
         return false;
@@ -2179,7 +2180,9 @@ fn dismiss_pending_questions(
 
 /// Settle all pending permission asks as denied (dropping the responder makes
 /// the awaiting tool error out with a user-denied message).
-fn dismiss_pending_permissions(pending_permissions: &mut HashMap<u64, oneshot::Sender<bool>>) {
+fn dismiss_pending_permissions(
+    pending_permissions: &mut HashMap<u64, oneshot::Sender<PermissionAnswer>>,
+) {
     pending_permissions.clear();
 }
 

@@ -23,7 +23,10 @@ pub mod truncate;
 pub use command::Command;
 pub use core_task::{StartupSession, run};
 pub use event::Event;
-pub use permissions::{Access, Decision, PathKind, PermissionGate, PermissionRequest, Permissions};
+pub use permissions::{
+    Access, AskScope, Decision, PathKind, PermissionAnswer, PermissionGate, PermissionRequest,
+    Permissions,
+};
 pub use question::{QuestionPrompt, QuestionRequest};
 pub use session::Session;
 pub use shuvarie_config::*;

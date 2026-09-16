@@ -716,12 +716,15 @@ impl App {
                         questions,
                     }))
                 }
-                CoreEvent::PermissionRequested { id, description } => {
-                    Some(AppMessage::Session(SessionMessage::PermissionRequested {
-                        id,
-                        description,
-                    }))
-                }
+                CoreEvent::PermissionRequested {
+                    id,
+                    description,
+                    allow_session,
+                } => Some(AppMessage::Session(SessionMessage::PermissionRequested {
+                    id,
+                    description,
+                    allow_session,
+                })),
                 CoreEvent::LspStatus { servers } => Some(AppMessage::LspStatus { servers }),
                 CoreEvent::LspDiagnostics { path, diagnostics } => {
                     Some(AppMessage::LspDiagnostics { path, diagnostics })
@@ -838,9 +841,9 @@ impl App {
                             self.ctx
                                 .send(shuvarie_core::Command::AnswerQuestion { id, answers });
                         }
-                        SessionEffect::PermissionDecide { id, allow } => {
+                        SessionEffect::PermissionDecide { id, decision } => {
                             self.ctx
-                                .send(shuvarie_core::Command::PermissionDecide { id, allow });
+                                .send(shuvarie_core::Command::PermissionDecide { id, decision });
                         }
                         SessionEffect::RunCommand { action, args } => {
                             if let Some(effect) = self.run_command(action, args) {

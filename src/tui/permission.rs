@@ -1,26 +1,34 @@
 use ratatui::layout::Alignment;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph};
+use shuvarie_core::PermissionAnswer;
 use termina::event::{KeyCode, KeyEvent};
 
 use super::theme;
 use super::utils::text::wrap_text;
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum PermissionMessage {
     Allow,
+    AllowSession,
     Deny,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum PermissionEffect {
-    Decide { id: u64, allow: bool },
+    Decide { id: u64, decision: PermissionAnswer },
 }
 
 /// The permission prompt floating above the input while a tool call is
-/// paused on an `ask` verdict: Enter (or `y`) allows, Escape (or `n`) denies.
+/// paused on an `ask` verdict: Enter (or `y`) allows, Escape (or `n`) denies,
+/// and `s` grants the ask for the rest of the session when it is rememberable.
 pub struct PermissionUI {
     pub id: u64,
     pub open: bool,
     pub description: String,
+    /// Whether the ask can be granted for the whole session (paths and
+    /// commands; scene confirmations are one-shot).
+    pub allow_session: bool,
 }
 
 const MAX_VIEW_ROWS: usize = 10;
@@ -31,13 +39,15 @@ impl PermissionUI {
             id: 0,
             open: false,
             description: String::new(),
+            allow_session: false,
         }
     }
 
-    pub fn open(&mut self, id: u64, description: String) {
+    pub fn open(&mut self, id: u64, description: String, allow_session: bool) {
         self.id = id;
         self.open = true;
         self.description = description;
+        self.allow_session = allow_session;
     }
 
     pub fn close(&mut self) {
@@ -53,6 +63,7 @@ impl PermissionUI {
             KeyCode::Enter => Some(PermissionMessage::Allow),
             KeyCode::Escape => Some(PermissionMessage::Deny),
             KeyCode::Char('y') | KeyCode::Char('a') => Some(PermissionMessage::Allow),
+            KeyCode::Char('s') if self.allow_session => Some(PermissionMessage::AllowSession),
             KeyCode::Char('n') | KeyCode::Char('d') => Some(PermissionMessage::Deny),
             _ => None,
         }
@@ -66,11 +77,24 @@ impl PermissionUI {
         match msg {
             PermissionMessage::Allow => {
                 self.close();
-                Some(PermissionEffect::Decide { id, allow: true })
+                Some(PermissionEffect::Decide {
+                    id,
+                    decision: PermissionAnswer::Allow,
+                })
+            }
+            PermissionMessage::AllowSession => {
+                self.close();
+                Some(PermissionEffect::Decide {
+                    id,
+                    decision: PermissionAnswer::AllowSession,
+                })
             }
             PermissionMessage::Deny => {
                 self.close();
-                Some(PermissionEffect::Decide { id, allow: false })
+                Some(PermissionEffect::Decide {
+                    id,
+                    decision: PermissionAnswer::Deny,
+                })
             }
         }
     }
@@ -127,7 +151,12 @@ impl PermissionUI {
                 }
             }
         }
-        lines.push(theme::help_line(&[("Enter/y", "allow"), ("Esc/n", "deny")]));
+        let mut help = vec![("Enter/y", "allow")];
+        if self.allow_session {
+            help.push(("s", "this session"));
+        }
+        help.push(("Esc/n", "deny"));
+        lines.push(theme::help_line(&help));
         lines
     }
 }
@@ -139,7 +168,34 @@ mod tests {
     #[test]
     fn wraps_description_rows() {
         let mut ui = PermissionUI::new();
-        ui.open(1, "a short note".to_string());
+        ui.open(1, "a short note".to_string(), false);
         assert_eq!(ui.build_lines(40, usize::MAX).len(), 4);
+    }
+
+    #[test]
+    fn session_key_only_when_rememberable() {
+        let mut ui = PermissionUI::new();
+        ui.open(1, "desc".to_string(), true);
+        assert_eq!(
+            ui.map_event(&key(KeyCode::Char('s'))),
+            Some(PermissionMessage::AllowSession)
+        );
+        assert_eq!(
+            ui.update(PermissionMessage::AllowSession),
+            Some(PermissionEffect::Decide {
+                id: 1,
+                decision: PermissionAnswer::AllowSession,
+            })
+        );
+        ui.open(2, "desc".to_string(), false);
+        assert_eq!(ui.map_event(&key(KeyCode::Char('s'))), None);
+        assert_eq!(
+            ui.map_event(&key(KeyCode::Enter)),
+            Some(PermissionMessage::Allow)
+        );
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, termina::event::Modifiers::empty())
     }
 }

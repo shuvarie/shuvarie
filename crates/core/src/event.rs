@@ -227,10 +227,13 @@ pub enum Event {
     },
     /// A tool call hit an `ask` permission rule and is paused until the user
     /// answers; the TUI shows the `description` (the action plus the matched
-    /// rule) and replies with [`Command::PermissionDecide`].
+    /// rule) and replies with [`Command::PermissionDecide`]. `allow_session`
+    /// marks asks the user can grant for the rest of the session (paths and
+    /// commands; scene confirmations are one-shot).
     PermissionRequested {
         id: u64,
         description: String,
+        allow_session: bool,
     },
     LspStatus {
         servers: Vec<shuvarie_lsp::LspStatus>,

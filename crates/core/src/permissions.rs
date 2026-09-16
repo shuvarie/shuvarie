@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -94,11 +95,60 @@ pub enum Decision {
     Deny { reason: String },
 }
 
-/// A pending permission ask: what the tool wants to run plus how the core
-/// task answers it.
+/// The user's answer to a permission ask, sent back through
+/// [`crate::Command::PermissionDecide`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionAnswer {
+    /// Allow this one call.
+    Allow,
+    /// Allow and remember the ask's scope for the rest of the session.
+    AllowSession,
+    /// Deny: cuts the turn like any other denial.
+    Deny,
+}
+
+/// What an "allow for this session" grant covers. Grants are consulted only
+/// when the rules settle on `ask`, so a remembered grant never overrides a
+/// `deny` verdict.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum AskScope {
+    /// The canonicalized file path; covers reads and writes of that exact path.
+    Path(PathBuf),
+    /// The exact command line, whitespace runs collapsed.
+    Shell(String),
+}
+
+/// Session-scoped memory behind the "allow for this session" answer: the
+/// scopes granted so far, consulted before the next ask with the same scope
+/// is surfaced. Lives in the [`PermissionGate`] so the consulting side (the
+/// paused tools) and the recording side (the answered requests) share one
+/// set for the whole run.
+#[derive(Clone, Default)]
+pub struct SessionGrants(std::sync::Arc<std::sync::Mutex<HashSet<AskScope>>>);
+
+impl SessionGrants {
+    fn remember(&self, scope: AskScope) {
+        self.0
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .insert(scope);
+    }
+
+    fn contains(&self, scope: &AskScope) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .contains(scope)
+    }
+}
+
+/// A pending permission ask: what the tool wants to run, the scope a
+/// session-wide grant would cover (`None` for one-shot asks like scene
+/// confirmations), plus how the core task answers it.
 pub struct PermissionRequest {
     pub description: String,
-    pub respond: oneshot::Sender<bool>,
+    pub scope: Option<AskScope>,
+    pub respond: oneshot::Sender<PermissionAnswer>,
 }
 
 /// Signals that a permission denial should cut the agent turn: set by the
@@ -129,31 +179,54 @@ impl DenyCut {
 
 /// The channel the tools pause on for `ask` verdicts; the core task forwards
 /// requests to the TUI as [`crate::Event::PermissionRequested`] and resolves
-/// them with [`crate::Command::PermissionDecide`].
+/// them with [`crate::Command::PermissionDecide`]. Also owns the session
+/// grants: a request whose scope is already granted resolves immediately,
+/// and an "allow for this session" answer records the scope here.
 #[derive(Clone)]
 pub struct PermissionGate {
     tx: mpsc::Sender<PermissionRequest>,
+    grants: SessionGrants,
 }
 
 impl PermissionGate {
     pub fn new(tx: mpsc::Sender<PermissionRequest>) -> Self {
-        Self { tx }
+        Self {
+            tx,
+            grants: SessionGrants::default(),
+        }
     }
 
-    /// Blocks until the user allows or denies. `Ok(false)` is a user denial;
-    /// a closed channel or a dropped responder is an error (the turn is being
-    /// torn down already).
-    pub async fn request(&self, description: String) -> Result<bool, String> {
+    /// Blocks until the user allows or denies. A remembered grant for
+    /// `scope` resolves without asking; an "allow for this session" answer
+    /// records `scope`. `Ok(false)` is a user denial; a closed channel or a
+    /// dropped responder is an error (the turn is being torn down already).
+    pub async fn request(
+        &self,
+        description: String,
+        scope: Option<AskScope>,
+    ) -> Result<bool, String> {
+        if scope
+            .as_ref()
+            .is_some_and(|scope| self.grants.contains(scope))
+        {
+            return Ok(true);
+        }
         let (respond, rx) = oneshot::channel();
         self.tx
             .send(PermissionRequest {
                 description,
+                scope: scope.clone(),
                 respond,
             })
             .await
             .map_err(|_| "permission channel closed".to_string())?;
-        rx.await
-            .map_err(|_| "permission responder dropped".to_string())
+        let answer = rx
+            .await
+            .map_err(|_| "permission responder dropped".to_string())?;
+        if let (PermissionAnswer::AllowSession, Some(scope)) = (answer, scope) {
+            self.grants.remember(scope);
+        }
+        Ok(!matches!(answer, PermissionAnswer::Deny))
     }
 }
 
@@ -310,7 +383,8 @@ impl Permissions {
             }
             Decision::Ask { reason } => {
                 let description = format!("Allow {} `{display}`?\n{reason}", kind.action());
-                match gate.request(description).await {
+                let scope = AskScope::Path(path.to_path_buf());
+                match gate.request(description, Some(scope)).await {
                     Ok(true) => Ok(()),
                     Ok(false) => {
                         cut.trigger();
@@ -331,7 +405,7 @@ impl Permissions {
         cut: &DenyCut,
         reason: &str,
     ) -> Result<(), String> {
-        match gate.request(reason.to_string()).await {
+        match gate.request(reason.to_string(), None).await {
             Ok(true) => Ok(()),
             Ok(false) => {
                 cut.trigger();
@@ -358,7 +432,8 @@ impl Permissions {
             }
             Decision::Ask { reason } => {
                 let description = format!("Allow running this command?\n{command}\n{reason}");
-                match gate.request(description).await {
+                let scope = AskScope::Shell(collapse_whitespace(command));
+                match gate.request(description, Some(scope)).await {
                     Ok(true) => Ok(()),
                     Ok(false) => {
                         cut.trigger();
@@ -1137,7 +1212,7 @@ mod tests {
             vec![shell_rule(Verb::Deny, "sudo")],
         ));
         let rx = std::sync::Arc::new(tokio::sync::Mutex::new(rx));
-        let answer = |allow: bool| {
+        let answer = |allow: PermissionAnswer| {
             let rx = rx.clone();
             async move {
                 rx.lock()
@@ -1163,7 +1238,7 @@ mod tests {
         let cut2 = cut.clone();
         let perms2 = perms.clone();
         let gate2 = gate.clone();
-        let allow = answer(false);
+        let allow = answer(PermissionAnswer::Deny);
         let denied = tokio::spawn(async move {
             perms2
                 .authorize_path(
@@ -1185,7 +1260,7 @@ mod tests {
         let cut3 = cut.clone();
         let perms3 = perms.clone();
         let gate3 = gate.clone();
-        let allow = answer(true);
+        let allow = answer(PermissionAnswer::Allow);
         let granted = tokio::spawn(async move {
             perms3
                 .authorize_path(
@@ -1201,6 +1276,141 @@ mod tests {
         allow.await.unwrap();
         assert!(granted.await.unwrap().is_ok());
         assert!(!cut.is_set(), "allowing never triggers the cut");
+    }
+
+    #[tokio::test]
+    async fn session_grant_skips_repeated_path_asks() {
+        let (tx, mut rx) = mpsc::channel::<PermissionRequest>(8);
+        let gate = PermissionGate::new(tx);
+        let cut = DenyCut::default();
+        let perms = std::sync::Arc::new(config_scoped(
+            Some(Verb::Allow),
+            Some(Verb::Ask),
+            vec![],
+            None,
+            vec![],
+        ));
+
+        let first = {
+            let perms = perms.clone();
+            let gate = gate.clone();
+            let cut = cut.clone();
+            tokio::spawn(async move {
+                perms
+                    .authorize_path(
+                        &gate,
+                        &cut,
+                        PathKind::Read,
+                        Path::new("/etc/hosts"),
+                        "/etc/hosts",
+                        None,
+                    )
+                    .await
+            })
+        };
+        let request = rx.recv().await.unwrap();
+        assert!(matches!(
+            request.scope,
+            Some(AskScope::Path(ref path)) if path == Path::new("/etc/hosts")
+        ));
+        request.respond.send(PermissionAnswer::AllowSession).ok();
+        assert!(first.await.unwrap().is_ok());
+
+        // The granted path stops pausing, reads and writes alike.
+        perms
+            .authorize_path(
+                &gate,
+                &cut,
+                PathKind::Read,
+                Path::new("/etc/hosts"),
+                "/etc/hosts",
+                None,
+            )
+            .await
+            .unwrap();
+        perms
+            .authorize_path(
+                &gate,
+                &cut,
+                PathKind::Write,
+                Path::new("/etc/hosts"),
+                "/etc/hosts",
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "granted asks must not surface again"
+        );
+
+        // A different path still asks.
+        let other = {
+            let perms = perms.clone();
+            let gate = gate.clone();
+            let cut = cut.clone();
+            tokio::spawn(async move {
+                perms
+                    .authorize_path(
+                        &gate,
+                        &cut,
+                        PathKind::Read,
+                        Path::new("/etc/passwd"),
+                        "/etc/passwd",
+                        None,
+                    )
+                    .await
+            })
+        };
+        let request = rx.recv().await.unwrap();
+        assert!(matches!(
+            request.scope,
+            Some(AskScope::Path(ref path)) if path == Path::new("/etc/passwd")
+        ));
+        request.respond.send(PermissionAnswer::Allow).ok();
+        assert!(other.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn shell_session_grant_matches_the_collapsed_command() {
+        let (tx, mut rx) = mpsc::channel::<PermissionRequest>(8);
+        let gate = PermissionGate::new(tx);
+        let cut = DenyCut::default();
+        let perms = std::sync::Arc::new(config_scoped(
+            Some(Verb::Allow),
+            None,
+            vec![],
+            Some(Verb::Ask),
+            vec![],
+        ));
+
+        let first = {
+            let perms = perms.clone();
+            let gate = gate.clone();
+            let cut = cut.clone();
+            tokio::spawn(async move {
+                perms
+                    .authorize_shell(&gate, &cut, "cargo  test", None)
+                    .await
+            })
+        };
+        let request = rx.recv().await.unwrap();
+        assert_eq!(
+            request.scope,
+            Some(AskScope::Shell("cargo test".to_string()))
+        );
+        request.respond.send(PermissionAnswer::AllowSession).ok();
+        assert!(first.await.unwrap().is_ok());
+
+        // The same command under different spacing is remembered too.
+        perms
+            .authorize_shell(&gate, &cut, "cargo  test", None)
+            .await
+            .unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "granted commands must not surface again"
+        );
     }
 
     #[test]

@@ -47,6 +47,7 @@ pub enum SessionMessage {
     PermissionRequested {
         id: u64,
         description: String,
+        allow_session: bool,
     },
     Permission(PermissionMessage),
     /// Left-button mouse activity at a terminal cell. Routed by zone: the
@@ -623,8 +624,12 @@ impl SessionScreen {
                 self.status = Some("Waiting for answer...".to_string());
                 None
             }
-            SessionMessage::PermissionRequested { id, description } => {
-                self.permission.open(id, description);
+            SessionMessage::PermissionRequested {
+                id,
+                description,
+                allow_session,
+            } => {
+                self.permission.open(id, description, allow_session);
                 self.busy_kind = BusyKind::Waiting;
                 self.status = Some("Waiting for permission...".to_string());
                 None
@@ -632,11 +637,11 @@ impl SessionScreen {
             SessionMessage::Permission(m) => {
                 if let Some(effect) = self.permission.update(m) {
                     match effect {
-                        PermissionEffect::Decide { id, allow } => {
+                        PermissionEffect::Decide { id, decision } => {
                             self.permission.close();
                             self.busy_kind = BusyKind::Tool;
                             self.status = Some("Calling tool".to_string());
-                            return Some(SessionEffect::PermissionDecide { id, allow });
+                            return Some(SessionEffect::PermissionDecide { id, decision });
                         }
                     }
                 }
@@ -1139,7 +1144,7 @@ pub enum SessionEffect {
     /// Resolve a pending permission ask (`id` from `PermissionRequested`).
     PermissionDecide {
         id: u64,
-        allow: bool,
+        decision: shuvarie_core::PermissionAnswer,
     },
     RunCommand {
         action: CommandAction,

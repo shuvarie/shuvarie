@@ -846,7 +846,10 @@ mod tests {
         let request = rx.recv().await.unwrap();
         assert!(request.description.contains("Allow running this command?"));
         assert!(request.description.contains("echo asked"));
-        request.respond.send(true).unwrap();
+        request
+            .respond
+            .send(crate::permissions::PermissionAnswer::Allow)
+            .unwrap();
         let out = ask.await.unwrap().unwrap();
         assert!(out.as_text().unwrap().contains("asked"));
         drop(dir);
@@ -872,7 +875,10 @@ mod tests {
                 .await
         });
         let request = rx.recv().await.unwrap();
-        request.respond.send(false).unwrap();
+        request
+            .respond
+            .send(crate::permissions::PermissionAnswer::Deny)
+            .unwrap();
         let err = ask.await.unwrap().unwrap_err();
         let message = err.to_string();
         assert!(
