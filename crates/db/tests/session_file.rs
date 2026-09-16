@@ -224,6 +224,32 @@ async fn import_of_a_file_without_a_leaf_falls_back_to_none() {
 }
 
 #[tokio::test]
+async fn export_import_round_trips_a_cleared_leaf() {
+    let mut source = Store::open_in_memory().await.unwrap();
+    let id = source
+        .create_session("cleared", None, None, None)
+        .await
+        .unwrap();
+    source
+        .append_message(id, None, Role::User, "one")
+        .await
+        .unwrap();
+    source.set_active_leaf(id, None).await.unwrap();
+    let stored = source.load_session(id).await.unwrap();
+    assert_eq!(stored.leaf_id, Some(shuvarie_db::EMPTY_LEAF));
+    let file = SessionFile::from_stored(&stored);
+
+    let mut target = Store::open_in_memory().await.unwrap();
+    let imported = target.import_session(&file).await.unwrap();
+    let loaded = target.load_session(imported).await.unwrap();
+    assert_eq!(
+        loaded.leaf_id,
+        Some(shuvarie_db::EMPTY_LEAF),
+        "the empty active path survives the round trip"
+    );
+}
+
+#[tokio::test]
 async fn failed_import_cleans_up_the_partial_rows() {
     let mut store = Store::open_in_memory().await.unwrap();
     let id = store

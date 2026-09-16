@@ -330,19 +330,13 @@ fn build_rows(session: &shuvarie_core::Session) -> Vec<TreeRow> {
             None => roots.push(i),
         }
     }
+    // The active path is walked from the leaf, so its tail is the leaf
+    // itself; a cleared path leaves every row off-path with no tip.
     let tip = session
         .nodes
         .iter()
         .find(|n| n.on_path && Some(n.id) == session.leaf_id)
-        .map(|n| n.id)
-        .or_else(|| {
-            session
-                .nodes
-                .iter()
-                .filter(|n| n.on_path)
-                .map(|n| n.id)
-                .next_back()
-        });
+        .map(|n| n.id);
     let mut rows = Vec::with_capacity(nodes.len() * 2);
     let root_count = roots.len();
     let mut stack: Vec<(usize, usize, String, bool)> = roots
@@ -633,6 +627,19 @@ mod tests {
             popup.map_event(&key(KeyCode::Down, Modifiers::NONE)),
             Some(TreeMessage::Next)
         ));
+    }
+
+    #[test]
+    fn an_empty_path_marks_no_tip_and_selects_the_first_row() {
+        let mut session = shuvarie_core::Session::new();
+        session.nodes = vec![
+            node(1, None, Role::User, 0, "ask", false),
+            node(2, Some(1), Role::Assistant, 1, "reply", false),
+        ];
+        let popup = popup_for(&session);
+        assert_eq!(popup.selected, 0);
+        assert!(popup.rows.iter().all(|row| !row.is_tip));
+        assert!(popup.rows.iter().all(|row| row.deletable));
     }
 
     #[test]

@@ -69,7 +69,7 @@ Every app-owned file/dir name differs by profile: release keeps `shuvarie.kdl`, 
 
 Turso embedded SQLite via the Toasty ORM. Stores open with turso's multiprocess WAL (`experimental_multiprocess_wal`), so several app instances share one store.
 
-- `sessions` — UUID v7; `leaf_id` points at the active branch's tip; also the persisted scene and the chat pane's scroll position (sticky-bottom flag + content anchor, written by `Store::set_scroll` on session leave — a raw SQL update so `updated_at` is untouched; `set_active_leaf` is likewise raw-SQL).
+- `sessions` — UUID v7; `leaf_id` points at the active branch's tip: every append persists the new tip, and forks set it. `0` (`shuvarie_db::EMPTY_LEAF`) marks a deliberately cleared (empty) path — an undo/fork before the first prompt — which reloads as an empty chat; `NULL` is only legacy unset rows and fresh sessions, which load as the newest message; also the persisted scene and the chat pane's scroll position (sticky-bottom flag + content anchor, written by `Store::set_scroll` on session leave — a raw SQL update so `updated_at` is untouched; `set_active_leaf` is likewise raw-SQL).
 - `messages` — the session **tree**: `parent_id` links each node to its predecessor (`None` at root prompts; a fork is just a node with several children); the active path runs leaf → root. Positioned reasoning + text segments — text runs carry the tool-call position they streamed at, so a reload rebuilds the interleave. Interrupted flag; per-message usage plus the turn's last main-request usage (`request_json`; an assistant message joins the turn's multi-request text runs with a paragraph break — `TurnText` in `shuvarie-llm` — so reloads keep the streaming paragraph breaks).
 - `tool_calls` — file-change JSON + original/new content, kept for diff rendering only — nothing ever reverts files; a `killed` flag marks calls cut off mid-run (they persist so reloads keep their blocks).
 - `message_embeddings` — semantic search; regenerated after imports.
@@ -102,7 +102,7 @@ Tool calls are gated by the configurable `permissions` config section (`crates/c
 
 ### Tree, active path, forking
 
-- `Session::from_stored` builds the full tree (`Session.nodes`, used by the popup) and walks `leaf_id` → root into the **active path** (`Session.messages` + the path-keyed maps the TUI renders from); usage totals are path-only.
+- `Session::from_stored` builds the full tree (`Session.nodes`, used by the popup) and walks `leaf_id` → root into the **active path** (`Session.messages` + the path-keyed maps the TUI renders from); usage totals are path-only. A cleared `EMPTY_LEAF` walks an empty path, and the in-memory leaf is the walked tip.
 - `history_for_send` walks tip → root and stops after the newest summary node, so a summary replaces everything before it.
 - `Command::ForkSession { node, summarize }` re-roots the path: every turn node forks *before* itself (its parent becomes the tip; its content is recalled into the input) — summary/system nodes are markers that walk to themselves, and `node: None` walks to the last user prompt (`/undo`). While a turn runs, the fork first cuts it (`cut_running_stream` — the same persist-interrupted path as `CancelStream`) and wipes the steered queue.
 - With `summarize`, the fork tip's ancestor chain is summarized by an LLM (`compaction::summarize` + `serialize_head`) into a new summary node (`CompactionStarted`/`Finished` keep the TUI busy indicator armed); the forked-away node is reparented under it.

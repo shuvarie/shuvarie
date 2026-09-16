@@ -131,18 +131,21 @@ impl Session {
         }
         let by_id: HashMap<u64, usize> = nodes.iter().enumerate().map(|(i, n)| (n.id, i)).collect();
 
-        // The active tip: the stored leaf when it still exists, else the
-        // newest message by seq.
-        let leaf_pos = stored
-            .leaf_id
-            .and_then(|id| by_id.get(&id).copied())
-            .or_else(|| {
-                nodes
-                    .iter()
-                    .enumerate()
-                    .max_by_key(|(_, n)| n.seq)
-                    .map(|(i, _)| i)
-            });
+        // The active tip: `Some(EMPTY_LEAF)` marks a cleared (empty) path; a
+        // stored leaf that still resolves wins; otherwise — legacy unset or
+        // dangling — the newest message by seq.
+        let newest = || {
+            nodes
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, n)| n.seq)
+                .map(|(i, _)| i)
+        };
+        let leaf_pos = match stored.leaf_id {
+            Some(shuvarie_db::EMPTY_LEAF) => None,
+            Some(id) => by_id.get(&id).copied().or_else(newest),
+            None => newest(),
+        };
 
         // Walk leaf → root, reversing into path order. The `seen` guard makes
         // a corrupt parent cycle terminate instead of looping.
@@ -173,7 +176,7 @@ impl Session {
         let mut s = Self {
             id: Some(stored.id),
             title: Some(stored.title),
-            leaf_id: stored.leaf_id,
+            leaf_id: path_ids.last().copied(),
             scene: stored.scene,
             scroll: stored.scroll,
             ..Self::default()
@@ -501,6 +504,40 @@ mod tests {
         let session = Session::from_stored(stored);
         assert_eq!(session.messages.len(), 2);
         assert_eq!(session.messages[1].content, "r1");
+    }
+
+    #[test]
+    fn from_stored_treats_a_cleared_leaf_as_an_empty_path() {
+        let mut stored = stored_session(vec![
+            stored_message(0, MsgRole::User, "one"),
+            stored_message(1, MsgRole::Assistant, "r1"),
+        ]);
+        chain(&mut stored.messages);
+        stored.leaf_id = Some(shuvarie_db::EMPTY_LEAF);
+
+        let session = Session::from_stored(stored);
+        assert!(
+            session.messages.is_empty(),
+            "undoing the first prompt clears the chat"
+        );
+        assert!(session.nodes.iter().all(|n| !n.on_path));
+        assert_eq!(session.leaf_id, None, "new appends hang from the root");
+    }
+
+    #[test]
+    fn from_stored_uses_the_walked_tip_as_the_leaf() {
+        let mut stored = stored_session(vec![
+            stored_message(0, MsgRole::User, "one"),
+            stored_message(1, MsgRole::Assistant, "r1"),
+        ]);
+        chain(&mut stored.messages);
+
+        let session = Session::from_stored(stored);
+        assert_eq!(
+            session.leaf_id,
+            Some(2),
+            "the fallback tip becomes the leaf"
+        );
     }
 
     #[test]

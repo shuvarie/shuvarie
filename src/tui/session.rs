@@ -424,7 +424,7 @@ impl SessionScreen {
         self.slash
             .set_availability(CommandAction::Replay, has_messages);
         self.slash
-            .set_availability(CommandAction::OpenTree, has_messages);
+            .set_availability(CommandAction::OpenTree, self.session_id.is_some());
         self.slash
             .set_availability(CommandAction::OpenScenePicker, !self.chat.is_streaming());
         self.slash

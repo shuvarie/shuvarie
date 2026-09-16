@@ -1493,18 +1493,21 @@ fn title_for(content: &str) -> String {
 }
 
 /// The active path's message ids, root → tip: the parent chain from the
-/// stored leaf (or the newest message when the leaf is unknown). The `seen`
-/// guard makes a corrupt parent cycle terminate.
+/// stored leaf, with [`shuvarie_db::EMPTY_LEAF`] meaning a cleared path (an
+/// empty chain) and the newest message as a fallback for legacy unset or
+/// dangling leaves. The `seen` guard makes a corrupt parent cycle terminate.
 fn chain_of(stored: &shuvarie_db::StoredSession) -> Vec<u64> {
     let by_id: std::collections::HashMap<u64, Option<u64>> = stored
         .messages
         .iter()
         .map(|m| (m.id, m.parent_id))
         .collect();
-    let mut leaf = stored
-        .leaf_id
-        .filter(|id| by_id.contains_key(id))
-        .or_else(|| stored.messages.iter().max_by_key(|m| m.seq).map(|m| m.id));
+    let newest = || stored.messages.iter().max_by_key(|m| m.seq).map(|m| m.id);
+    let mut leaf = match stored.leaf_id {
+        Some(shuvarie_db::EMPTY_LEAF) => None,
+        Some(id) => by_id.contains_key(&id).then_some(id).or_else(newest),
+        None => newest(),
+    };
     let mut ids = Vec::with_capacity(stored.messages.len());
     let mut seen = std::collections::HashSet::new();
     while let Some(id) = leaf {
@@ -1656,10 +1659,6 @@ async fn fork_session(
                 .await
                 .map_err(|e| e.to_string())?;
         }
-        store
-            .set_active_leaf(session_id, Some(summary_msg.id))
-            .await
-            .map_err(|e| e.to_string())?;
     } else {
         store
             .set_active_leaf(session_id, fork_tip)
@@ -2750,7 +2749,6 @@ async fn stream_stream_to_events(
                                             .set_message_parent(first_tail.id, Some(msg.id))
                                             .await;
                                     }
-                                    let _ = store.set_active_leaf(sid, Some(msg.id)).await;
                                     compacted = true;
                                 }
                             }
@@ -4874,8 +4872,19 @@ mod tests {
             .unwrap();
         assert_eq!(prompt.as_deref(), Some("one"));
         let stored = store.load_session(sid).await.unwrap();
-        assert_eq!(stored.leaf_id, None, "the active path is empty again");
+        assert_eq!(
+            stored.leaf_id,
+            Some(shuvarie_db::EMPTY_LEAF),
+            "the active path is empty again"
+        );
         assert_eq!(stored.messages.len(), 4, "every row stays in the tree");
+
+        let loaded = Session::from_stored(store.load_session(sid).await.unwrap());
+        assert!(
+            loaded.messages.is_empty(),
+            "a reload of a cleared path shows an empty chat"
+        );
+        assert_eq!(loaded.leaf_id, None);
     }
 
     #[tokio::test]
@@ -4927,8 +4936,31 @@ mod tests {
             .unwrap();
         assert_eq!(prompt.as_deref(), Some("only"));
         let stored = store.load_session(sid).await.unwrap();
-        assert_eq!(stored.leaf_id, None, "the active path is empty again");
+        assert_eq!(
+            stored.leaf_id,
+            Some(shuvarie_db::EMPTY_LEAF),
+            "the active path is empty again"
+        );
         assert_eq!(stored.messages.len(), 1, "the root prompt survives");
+
+        let loaded = Session::from_stored(store.load_session(sid).await.unwrap());
+        assert!(
+            loaded.messages.is_empty(),
+            "a reload of a cleared path shows an empty chat"
+        );
+
+        let restart = store
+            .append_message(sid, None, shuvarie_llm::Role::User, "again")
+            .await
+            .unwrap();
+        let loaded = Session::from_stored(store.load_session(sid).await.unwrap());
+        assert_eq!(
+            loaded.messages.len(),
+            1,
+            "a turn after the undo starts a fresh root prompt"
+        );
+        assert_eq!(loaded.messages[0].content, "again");
+        assert_eq!(loaded.leaf_id, Some(restart.id));
     }
 
     #[tokio::test]

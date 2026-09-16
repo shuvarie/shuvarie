@@ -24,6 +24,14 @@ pub const SESSION_LOCK_TTL_MS: i64 = 30_000;
 
 pub const SESSION_LOCK_HEARTBEAT_MS: u64 = 10_000;
 
+/// The `sessions.leaf_id` value marking a deliberately cleared (empty) active
+/// path: forking before the root prompt stores it, and loading treats it as
+/// "the path is empty". A `NULL` leaf, by contrast, only occurs in legacy rows
+/// and freshly created sessions, where loading falls back to the newest
+/// message. Safe as a sentinel because message ids are AUTOINCREMENT rowids
+/// and never 0.
+pub const EMPTY_LEAF: u64 = 0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockAcquire {
     Acquired,
@@ -60,6 +68,9 @@ pub struct StoredSession {
     pub scene: Option<String>,
     /// Message id of the active branch's tip; the parent chain from it up to
     /// the root is the active path.
+    ///
+    /// [`EMPTY_LEAF`] marks a cleared path; `None` is a legacy unset leaf
+    /// (or a fresh session without messages).
     pub leaf_id: Option<u64>,
     pub messages: Vec<StoredMessage>,
     pub tool_calls: Vec<StoredToolCall>,
@@ -408,6 +419,7 @@ impl Store {
         .await
         .map_err(|e| DbError::Query(e.to_string()))?;
         self.touch_session(session_id).await?;
+        self.set_active_leaf(session_id, Some(msg.id)).await?;
         Ok(StoredMessage::from(msg))
     }
 
@@ -447,6 +459,7 @@ impl Store {
         .await
         .map_err(|e| DbError::Query(e.to_string()))?;
         self.touch_session(session_id).await?;
+        self.set_active_leaf(session_id, Some(msg.id)).await?;
         Ok(StoredMessage::from(msg))
     }
 
@@ -509,6 +522,7 @@ impl Store {
         .await
         .map_err(|e| DbError::Query(e.to_string()))?;
         self.touch_session(session_id).await?;
+        self.set_active_leaf(session_id, Some(msg.id)).await?;
         Ok(StoredMessage::from(msg))
     }
 
@@ -626,19 +640,33 @@ impl Store {
             .map_err(|e| DbError::Query(e.to_string()))?;
         }
 
-        let leaf_id = file
-            .session
-            .leaf_id
-            .and_then(|leaf| id_map.get(&leaf).copied());
-        self.set_active_leaf(session_id, leaf_id).await?;
+        let leaf_id = match file.session.leaf_id {
+            Some(EMPTY_LEAF) => Some(EMPTY_LEAF),
+            Some(id) => id_map.get(&id).copied(),
+            None => None,
+        };
+        self.store_leaf_raw(session_id, leaf_id).await?;
         self.set_scroll(session_id, file.scroll).await?;
         Ok(())
     }
 
-    /// Point the session's active branch at a (possibly new) tip. A raw
-    /// update bypasses the model's auto-timestamp, so `updated_at` is
-    /// untouched.
+    /// Point the session's active branch at a (possibly new) tip; `None`
+    /// clears it to an empty active path. A raw update bypasses the model's
+    /// auto-timestamp, so `updated_at` is untouched.
     pub async fn set_active_leaf(&mut self, id: uuid::Uuid, leaf_id: Option<u64>) -> Result<()> {
+        toasty::sql::statement("UPDATE sessions SET leaf_id = ?1 WHERE id = ?2")
+            .bind_typed(leaf_id.unwrap_or(EMPTY_LEAF), db::Type::UnsignedInteger(8))
+            .bind_typed(id.as_bytes().to_vec(), db::Type::Blob)
+            .exec(&mut self.db)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Write a leaf id verbatim, `None` storing SQL `NULL`: the "unset"
+    /// shape format-1 session files use for a tip the loader reconstructs
+    /// from the newest message.
+    async fn store_leaf_raw(&mut self, id: uuid::Uuid, leaf_id: Option<u64>) -> Result<()> {
         toasty::sql::statement("UPDATE sessions SET leaf_id = ?1 WHERE id = ?2")
             .bind_typed(leaf_id, db::Type::UnsignedInteger(8))
             .bind_typed(id.as_bytes().to_vec(), db::Type::Blob)

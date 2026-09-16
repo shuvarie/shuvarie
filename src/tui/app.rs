@@ -1477,8 +1477,10 @@ impl App {
             .set_availability(CommandAction::UndoLastTurn, has_messages);
         self.command_menu
             .set_availability(CommandAction::Replay, has_messages);
+        // The tree stays openable on a cleared (empty) active path — it is the
+        // way back to a forked-away branch.
         self.command_menu
-            .set_availability(CommandAction::OpenTree, has_messages);
+            .set_availability(CommandAction::OpenTree, self.session.session_id.is_some());
         self.command_menu
             .set_availability(CommandAction::EditTitle, self.session.session_id.is_some());
         self.command_menu

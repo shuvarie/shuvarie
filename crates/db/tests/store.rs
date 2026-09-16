@@ -986,13 +986,59 @@ async fn set_active_leaf_is_clearable() {
     store.set_active_leaf(id, Some(user.id)).await.unwrap();
     store.set_active_leaf(id, None).await.unwrap();
     let loaded = store.load_session(id).await.unwrap();
-    assert_eq!(loaded.leaf_id, None);
+    assert_eq!(
+        loaded.leaf_id,
+        Some(shuvarie_db::EMPTY_LEAF),
+        "a cleared leaf stores the EMPTY_LEAF sentinel"
+    );
     let before = store.list_sessions().await.unwrap()[0].updated_at_epoch_ms;
     store.set_active_leaf(id, Some(user.id)).await.unwrap();
     assert_eq!(
         store.list_sessions().await.unwrap()[0].updated_at_epoch_ms,
         before,
         "leaf writes must not reorder the session list"
+    );
+}
+
+#[tokio::test]
+async fn appends_advance_the_active_leaf() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store
+        .create_session("leaf", None, None, None)
+        .await
+        .unwrap();
+
+    let user = store
+        .append_message(id, None, Role::User, "hi")
+        .await
+        .unwrap();
+    let loaded = store.load_session(id).await.unwrap();
+    assert_eq!(loaded.leaf_id, Some(user.id), "an append becomes the tip");
+
+    store.set_active_leaf(id, None).await.unwrap();
+    let assistant = store
+        .append_assistant_message(
+            id,
+            Some(user.id),
+            "hello",
+            &[],
+            &[],
+            false,
+            TokenUsage::default(),
+            0.0,
+            &TokenUsage::default(),
+        )
+        .await
+        .unwrap();
+    let summary = store
+        .append_summary(id, Some(assistant.id), "so far")
+        .await
+        .unwrap();
+    let loaded = store.load_session(id).await.unwrap();
+    assert_eq!(
+        loaded.leaf_id,
+        Some(summary.id),
+        "every append persists the new tip, even over a cleared leaf"
     );
 }
 

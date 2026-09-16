@@ -10,7 +10,7 @@ pub use model::{
 };
 pub use session_file::{FileMessage, FileSession, FileToolCall, SessionFile};
 pub use store::{
-    EmbeddableMessage, LockAcquire, SESSION_LOCK_HEARTBEAT_MS, SESSION_LOCK_TTL_MS, SearchHit,
-    SearchSource, SessionSummary, Store, StoredMessage, StoredScroll, StoredSession,
+    EMPTY_LEAF, EmbeddableMessage, LockAcquire, SESSION_LOCK_HEARTBEAT_MS, SESSION_LOCK_TTL_MS,
+    SearchHit, SearchSource, SessionSummary, Store, StoredMessage, StoredScroll, StoredSession,
     StoredToolCall, WORKSPACE_DIR_NAME,
 };
