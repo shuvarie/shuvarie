@@ -6,6 +6,7 @@ use termina::event::{KeyCode, KeyEvent, Modifiers};
 
 use super::components::InputBuffer;
 use super::theme;
+use super::utils::text::wrap_text;
 
 pub enum QuestionMessage {
     Up,
@@ -48,6 +49,9 @@ pub struct QuestionUI {
 }
 
 const MAX_VIEW_ROWS: usize = 12;
+
+/// Left indent of the description rows under an option label.
+const DESC_INDENT: usize = 5;
 
 impl QuestionUI {
     pub fn new() -> Self {
@@ -352,10 +356,11 @@ impl QuestionUI {
         self.advance_after_answer()
     }
 
-    /// Height the question UI wants at the given content width (matches the
-    /// TextArea's symmetric(2, 1) padding contract).
+    /// Height the question UI wants at the given content width: measured at
+    /// the inner width the symmetric(2, 1) padded block paints at.
     pub fn desired_height(&self, width: usize) -> u16 {
-        let lines = self.build_lines(width.max(10) as u16, usize::MAX).len();
+        let inner = (width.max(10) as u16).saturating_sub(4);
+        let lines = self.build_lines(inner, usize::MAX).len();
         (lines.min(MAX_VIEW_ROWS) as u16) + 2
     }
 
@@ -438,11 +443,17 @@ impl QuestionUI {
             spans.push(Span::raw(number).fg(theme::text_muted()));
             spans.push(Span::raw(option.label.clone()).fg(theme::text()));
             lines.push(Line::from(spans));
-            if !option.description.is_empty() && lines.len() < max_rows {
-                lines.push(
-                    truncate_line(&format!("     {}", option.description), width)
-                        .style(Style::new().fg(theme::text_muted())),
-                );
+            if !option.description.is_empty() {
+                let desc_width = (width as usize).saturating_sub(DESC_INDENT);
+                for row in wrap_text(&option.description, desc_width) {
+                    if lines.len() >= max_rows {
+                        break;
+                    }
+                    lines.push(Line::from(
+                        Span::raw(format!("{}{row}", " ".repeat(DESC_INDENT)))
+                            .fg(theme::text_muted()),
+                    ));
+                }
             }
         }
         if q.custom && lines.len() < max_rows {
@@ -555,4 +566,93 @@ fn take_chars(text: &str, max: usize) -> String {
         return String::new();
     }
     text.chars().take(max).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shuvarie_core::question::QuestionOption;
+
+    fn ui(descriptions: &[&str]) -> QuestionUI {
+        let mut ui = QuestionUI::new();
+        ui.open(
+            1,
+            vec![QuestionPrompt {
+                question: "Which one?".into(),
+                header: "Pick".into(),
+                options: descriptions
+                    .iter()
+                    .map(|d| QuestionOption {
+                        label: "label".into(),
+                        description: (*d).into(),
+                    })
+                    .collect(),
+                multiple: false,
+                custom: false,
+            }],
+        );
+        ui
+    }
+
+    fn texts(lines: &[Line<'static>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.to_string())
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn long_description_wraps_under_the_option() {
+        let ui = ui(&["first row here second row here"]);
+        let lines = ui.build_lines(30, usize::MAX);
+        let texts = texts(&lines);
+        assert_eq!(texts[4], "     first row here second row");
+        assert_eq!(texts[5], "     here");
+        assert_eq!(lines[4].spans[0].style.fg, Some(theme::text_muted()));
+    }
+
+    #[test]
+    fn short_description_stays_one_row() {
+        let ui = ui(&["a short note"]);
+        let lines = ui.build_lines(40, usize::MAX);
+        let texts = texts(&lines);
+        assert_eq!(texts[4], "     a short note");
+        assert_eq!(lines.len(), 6);
+    }
+
+    #[test]
+    fn wrapped_rows_respect_max_rows() {
+        let ui = ui(&["aaaa bbbb cccc dddd eeee ffff gggg hhhh"]);
+        let lines = ui.build_lines(30, 6);
+        let texts = texts(&lines);
+        assert_eq!(lines.len(), 6);
+        assert_eq!(texts[4], "     aaaa bbbb cccc dddd eeee");
+        assert_eq!(texts[5], "     ffff gggg hhhh");
+    }
+
+    #[test]
+    fn desired_height_measures_at_the_painted_inner_width() {
+        let desc = format!("{} zzzz", "w".repeat(20));
+        let ui = ui(&[&desc]);
+        let inner_lines = ui.build_lines(26, usize::MAX).len();
+        assert_eq!(inner_lines, 7);
+        assert_eq!(
+            ui.desired_height(30),
+            (inner_lines.min(MAX_VIEW_ROWS) + 2) as u16
+        );
+    }
+
+    #[test]
+    fn newline_in_description_starts_a_new_row() {
+        let ui = ui(&["one\ntwo"]);
+        let texts = texts(&ui.build_lines(40, usize::MAX));
+        assert_eq!(texts[4], "     one");
+        assert_eq!(texts[5], "     two");
+    }
 }

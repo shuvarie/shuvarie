@@ -4,6 +4,7 @@ use ratatui::widgets::{Block, Padding, Paragraph};
 use termina::event::{KeyCode, KeyEvent};
 
 use super::theme;
+use super::utils::text::wrap_text;
 
 pub enum PermissionMessage {
     Allow,
@@ -74,10 +75,11 @@ impl PermissionUI {
         }
     }
 
-    /// Height the prompt wants at the given content width (matches the
-    /// TextArea's symmetric(2, 1) padding contract).
+    /// Height the prompt wants at the given content width: measured at the
+    /// inner width the symmetric(2, 1) padded block paints at.
     pub fn desired_height(&self, width: usize) -> u16 {
-        let lines = self.build_lines(width.max(10) as u16, usize::MAX).len();
+        let inner = (width.max(10) as u16).saturating_sub(4);
+        let lines = self.build_lines(inner, usize::MAX).len();
         (lines.min(MAX_VIEW_ROWS) as u16) + 2
     }
 
@@ -130,52 +132,14 @@ impl PermissionUI {
     }
 }
 
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    if text.is_empty() {
-        return vec![String::new()];
-    }
-    let mut rows = Vec::new();
-    let mut row = String::new();
-    for word in text.split(' ') {
-        let mut rest = word;
-        while rest.chars().count() > width {
-            if !row.is_empty() {
-                rows.push(std::mem::take(&mut row));
-            }
-            let split = rest
-                .char_indices()
-                .nth(width)
-                .map(|(i, _)| i)
-                .unwrap_or(rest.len());
-            rows.push(rest[..split].to_string());
-            rest = &rest[split..];
-        }
-        if row.is_empty() {
-            row = rest.to_string();
-        } else if row.chars().count() + 1 + rest.chars().count() <= width {
-            row.push(' ');
-            row.push_str(rest);
-        } else {
-            rows.push(std::mem::take(&mut row));
-            row = rest.to_string();
-        }
-    }
-    rows.push(row);
-    rows
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn wrap_respects_width() {
-        let rows = wrap_text("one two three", 8);
-        assert_eq!(rows, vec!["one two".to_string(), "three".to_string()]);
-        assert!(wrap_text("", 5) == vec![String::new()]);
-        let long = "x".repeat(20);
-        let rows = wrap_text(&long, 8);
-        assert_eq!(rows.len(), 3);
-        assert!(rows.iter().all(|r| r.chars().count() <= 8));
+    fn wraps_description_rows() {
+        let mut ui = PermissionUI::new();
+        ui.open(1, "a short note".to_string());
+        assert_eq!(ui.build_lines(40, usize::MAX).len(), 4);
     }
 }
