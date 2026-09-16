@@ -74,8 +74,4 @@ In addition, pull requests about refactoring the codebase will **always** get re
 
 ## Response to Rule Violation
 
-AI automated issue or pull request will lead to an immediate ban when discovered.
-
-Issue or pull request with unclear, irrelevant, or contradicted description will be rejected.
-
-Bait speech, hate speech, political speech, scams, or spams will lead to an immediate ban.
+If you ignore this document twice, or if you spam the tracker with agent-generated issues, your GitHub account will be permanently blocked.
