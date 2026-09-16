@@ -8,7 +8,7 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::new().migration(
         MigrationConfig::new()
             .path(migration_dir)
-            .prefix_style(MigrationPrefixStyle::Sequential),
+            .prefix_style(MigrationPrefixStyle::Timestamp),
     );
 
     let mut builder = toasty::Db::builder();
