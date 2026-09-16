@@ -1,8 +1,8 @@
-use ratatui::prelude::{Modifier, Style};
+use ratatui::prelude::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 
 use crate::md::{plain, render, render_dim, render_pass};
-use crate::{code, diff, syntax, theme};
+use crate::{code, diff, syntax, table, theme};
 
 fn styles_of(line: &Line<'static>) -> Vec<Style> {
     line.spans.iter().map(|s| s.style).collect()
@@ -306,6 +306,107 @@ fn table_wide_cells_count_columns() {
             "├────────┼───┤",
             "│ x      │ y │",
             "└────────┴───┘",
+        ]
+    );
+}
+
+#[test]
+fn wrap_cell_breaks_at_words() {
+    let wrapped = table::wrap_cell(&[Span::raw("aa bb cc dd")], 5);
+    let texts: Vec<String> = wrapped
+        .iter()
+        .map(|row| row.iter().map(|s| s.content.to_string()).collect())
+        .collect();
+    assert_eq!(texts, vec!["aa bb", "cc dd"]);
+    assert_eq!(table::wrap_cell(&[], 4), vec![Vec::<Span<'static>>::new()]);
+}
+
+#[test]
+fn wrap_cell_hard_splits_tokens() {
+    let wrapped = table::wrap_cell(&[Span::raw("abcdefgh")], 3);
+    let texts: Vec<String> = wrapped
+        .iter()
+        .map(|row| row.iter().map(|s| s.content.to_string()).collect())
+        .collect();
+    assert_eq!(texts, vec!["abc", "def", "gh"]);
+}
+
+#[test]
+fn wrap_cell_keeps_span_styles() {
+    let wrapped = table::wrap_cell(
+        &[
+            Span::raw("ab").style(Style::new().fg(theme::SAGE)),
+            Span::raw(" cde").fg(theme::STEEL),
+        ],
+        4,
+    );
+    assert_eq!(wrapped.len(), 2);
+    assert_eq!(wrapped[0][0].content, "ab");
+    assert_eq!(wrapped[0][0].style.fg, Some(theme::SAGE));
+    assert_eq!(wrapped[1][0].content, "cde");
+    assert_eq!(wrapped[1][0].style.fg, Some(theme::STEEL));
+}
+
+#[test]
+fn wrap_cell_keeps_wide_chars_whole() {
+    let wrapped = table::wrap_cell(&[Span::raw("日本語です")], 6);
+    let texts: Vec<String> = wrapped
+        .iter()
+        .map(|row| row.iter().map(|s| s.content.to_string()).collect())
+        .collect();
+    assert_eq!(texts, vec!["日本語", "です"]);
+}
+
+#[test]
+fn table_wraps_capped_columns() {
+    let rule = "─".repeat(42);
+    let lines = render(
+        "| head | b |\n|------|---|\n| aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj | y |",
+    );
+    assert_eq!(
+        rows(&lines),
+        vec![
+            format!("┌{rule}┬───┐"),
+            format!("│ head{}│ b │", " ".repeat(37)),
+            format!("├{rule}┼───┤"),
+            "│ aaaa bbbb cccc dddd eeee ffff gggg hhhh  │ y │".to_string(),
+            format!("│ iiii jjjj{}│   │", " ".repeat(32)),
+            format!("└{rule}┴───┘"),
+        ]
+    );
+}
+
+#[test]
+fn table_hard_splits_unbreakable_cells() {
+    let rule = "─".repeat(42);
+    let lines = render(&format!("| h |\n|---|\n| {} |", "x".repeat(45)));
+    assert_eq!(
+        rows(&lines),
+        vec![
+            format!("┌{rule}┐"),
+            format!("│ h{}│", " ".repeat(40)),
+            format!("├{rule}┤"),
+            format!("│ {} │", "x".repeat(40)),
+            format!("│ xxxxx{}│", " ".repeat(36)),
+            format!("└{rule}┘"),
+        ]
+    );
+}
+
+#[test]
+fn table_alignment_applies_to_wrapped_rows() {
+    let rule = "─".repeat(42);
+    let cell = format!("{} bbbb", "a".repeat(40));
+    let lines = render(&format!("| name |\n|-----:|\n| {cell} |"));
+    assert_eq!(
+        rows(&lines),
+        vec![
+            format!("┌{rule}┐"),
+            format!("│{}name │", " ".repeat(37)),
+            format!("├{rule}┤"),
+            format!("│ {} │", "a".repeat(40)),
+            format!("│{}bbbb │", " ".repeat(37)),
+            format!("└{rule}┘"),
         ]
     );
 }
