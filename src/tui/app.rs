@@ -946,7 +946,7 @@ impl App {
                             api_key,
                             base_url,
                         } => {
-                            let id = uuid::Uuid::new_v4().to_string();
+                            let id = uuid::Uuid::now_v7().to_string();
                             let pc = shuvarie_core::ProviderConfig::new(
                                 name.clone(),
                                 kind,

@@ -81,5 +81,5 @@ tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 unicode-width = "0.2"
-uuid = { version = "1", features = ["fast-rng", "v4", "v7"] }
+uuid = { version = "1", features = ["fast-rng", "v7"] }
 yaml_serde = "0.10"

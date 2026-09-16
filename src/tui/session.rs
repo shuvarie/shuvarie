@@ -1331,7 +1331,7 @@ mod tests {
             ..Default::default()
         });
         screen.update(SessionMessage::Loaded {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::now_v7(),
             title: "t".into(),
             session,
         });
@@ -1362,7 +1362,7 @@ mod tests {
             r#"{"op":"add","text":"write tests","status":"in_progress"}"#,
         )];
         screen.update(SessionMessage::Loaded {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::now_v7(),
             title: "t".into(),
             session,
         });
