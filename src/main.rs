@@ -17,7 +17,14 @@ async fn main() -> color_eyre::Result<()> {
         })?;
     }
 
-    let store = shuvarie_db::Store::open(&shuvarie_db::Store::default_path()).await?;
+    let mut store = shuvarie_db::Store::open(&shuvarie_db::Store::default_path()).await?;
+
+    if let Some(path) = args.import_session.as_deref() {
+        return cli::import_session(&mut store, path).await;
+    }
+    if let Some(dest) = args.export_session.as_deref() {
+        return cli::export_session(&mut store, dest, args.session).await;
+    }
 
     let Some(trust::Resolved {
         config,

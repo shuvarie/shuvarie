@@ -10,6 +10,8 @@ pub enum DbError {
     Query(String),
     #[error("search query failed: {0}")]
     Search(String),
+    #[error("session file: {0}")]
+    SessionFile(String),
     #[error("session {id} not found")]
     NotFound { id: uuid::Uuid },
 }

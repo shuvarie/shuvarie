@@ -10,6 +10,7 @@ pub enum CommandAction {
     OpenVariantPicker,
     NewSession,
     EditTitle,
+    Export,
     UndoLastTurn,
     Replay,
     Reload,
@@ -18,7 +19,7 @@ pub enum CommandAction {
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 13] = [
+    pub const ALL: [CommandAction; 14] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::OpenSessionPicker,
@@ -27,6 +28,7 @@ impl CommandAction {
         CommandAction::OpenVariantPicker,
         CommandAction::NewSession,
         CommandAction::EditTitle,
+        CommandAction::Export,
         CommandAction::UndoLastTurn,
         CommandAction::Replay,
         CommandAction::Reload,
@@ -44,6 +46,7 @@ impl CommandAction {
             CommandAction::OpenVariantPicker => "variant",
             CommandAction::NewSession => "new",
             CommandAction::EditTitle => "title",
+            CommandAction::Export => "export",
             CommandAction::UndoLastTurn => "undo",
             CommandAction::Replay => "replay",
             CommandAction::Reload => "reload",
@@ -58,6 +61,7 @@ impl CommandAction {
         matches!(
             self,
             CommandAction::EditTitle
+                | CommandAction::Export
                 | CommandAction::OpenScenePicker
                 | CommandAction::OpenVariantPicker
         )
@@ -120,6 +124,12 @@ pub fn default_commands() -> Vec<CommandEntry> {
             name: "Edit title",
             description: "Rename the current session",
             action: CommandAction::EditTitle,
+            available: true,
+        },
+        CommandEntry {
+            name: "Export session",
+            description: "Write the session to a JSON file",
+            action: CommandAction::Export,
             available: true,
         },
         CommandEntry {
@@ -401,6 +411,24 @@ mod tests {
         assert_eq!(parse_command(""), None);
         assert_eq!(parse_command("/undo now"), None);
         assert_eq!(parse_command(":/undo"), None);
+    }
+
+    #[test]
+    fn parse_recognizes_export_with_optional_path() {
+        assert_eq!(
+            parse_command("/export"),
+            Some(ParsedCommand {
+                action: CommandAction::Export,
+                args: None
+            })
+        );
+        assert_eq!(
+            parse_command("/EXPORT backups/out.json"),
+            Some(ParsedCommand {
+                action: CommandAction::Export,
+                args: Some("backups/out.json".into())
+            })
+        );
     }
 
     #[test]

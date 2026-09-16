@@ -1122,6 +1122,21 @@ pub async fn run(
                             }
                         }
                     }
+                    Command::ExportSession { path } => {
+                        let Some(s) = &ctx.session else { continue; };
+                        let Some(sid) = s.lock().await.id else { continue; };
+                        match export_session(&mut ctx.store, sid, path.as_deref()).await {
+                            Ok(path) => {
+                                let _ = ctx.event_tx.send(Event::SessionExported { path }).await;
+                            }
+                            Err(e) => {
+                                let _ = ctx
+                                    .event_tx
+                                    .send(Event::SessionError { error: e.to_string() })
+                                    .await;
+                            }
+                        }
+                    }
                     Command::SwitchScene { name } => {
                         if let Some(error) = switch_scene(&mut ctx, pending_retry.as_ref(), name)
                             .await
@@ -2997,6 +3012,21 @@ async fn persist_interrupted_turn(
             g.interrupted.insert(seq as u64, true);
         }
     }
+}
+
+/// Write the active session to a JSON file: an explicit path, a directory
+/// (the default file name is joined under it), or the default file name in
+/// the working directory.
+async fn export_session(
+    store: &mut Store,
+    session_id: uuid::Uuid,
+    path: Option<&std::path::Path>,
+) -> shuvarie_db::Result<std::path::PathBuf> {
+    let stored = store.load_session(session_id).await?;
+    let file = shuvarie_db::SessionFile::from_stored(&stored);
+    let path = shuvarie_db::session_file::resolve_export_path(path, session_id);
+    file.write_json(&path)?;
+    Ok(path)
 }
 
 fn build_client(pc: &ProviderConfig) -> Result<ProviderClient, String> {

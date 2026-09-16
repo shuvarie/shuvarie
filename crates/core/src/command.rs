@@ -92,6 +92,13 @@ pub enum Command {
     /// Load the active session's tree for the `/tree` popup; reports
     /// [`crate::Event::SessionTree`].
     OpenTree,
+    /// Write the active session to a JSON file (`/export [path]`); `None`
+    /// picks `<session_id>-<timestamp>.json` in the working directory.
+    /// Reports [`crate::Event::SessionExported`] or
+    /// [`crate::Event::SessionError`].
+    ExportSession {
+        path: Option<std::path::PathBuf>,
+    },
     /// Switch the active session's scene (`None` = the built-in default
     /// scene). Refused with [`crate::Event::SceneError`] while a stream is
     /// busy or the name does not resolve.

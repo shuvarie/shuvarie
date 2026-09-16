@@ -36,6 +36,7 @@ libc = "0.2"
 
 [dev-dependencies]
 http.workspace = true
+jiff.workspace = true
 shuvarie-lsp.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

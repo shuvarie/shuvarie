@@ -14,6 +14,7 @@ use crate::model::{
     Message, MessageEmbedding, MsgRole, ReasoningSegment, Session, SessionType, TextSegment,
     ToolCall, encode_reasoning, encode_text_segments, parse_reasoning, parse_text_segments,
 };
+use crate::session_file::{FileMessage, SessionFile, timestamp_from_millis};
 
 static MIGRATIONS: toasty::migration::MigrationSet = toasty::embed_migrations!();
 
@@ -43,7 +44,7 @@ pub struct SessionSummary {
 /// pinned to the bottom of the history, and — when released from the bottom —
 /// the content anchor it was held at (`turn` = dense message index, `row` =
 /// wrapped row within that turn).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredScroll {
     pub sticky: bool,
     pub anchor: Option<(u64, u64)>,
@@ -63,6 +64,8 @@ pub struct StoredSession {
     pub messages: Vec<StoredMessage>,
     pub tool_calls: Vec<StoredToolCall>,
     pub scroll: StoredScroll,
+    pub created_at: jiff::Timestamp,
+    pub updated_at: jiff::Timestamp,
 }
 
 #[derive(Debug, Clone)]
@@ -290,6 +293,8 @@ impl Store {
             messages,
             tool_calls,
             scroll,
+            created_at: session.created_at,
+            updated_at: session.updated_at,
         })
     }
 
@@ -316,6 +321,8 @@ impl Store {
             messages,
             tool_calls,
             scroll,
+            created_at: session.created_at,
+            updated_at: session.updated_at,
         }))
     }
 
@@ -503,6 +510,129 @@ impl Store {
         .map_err(|e| DbError::Query(e.to_string()))?;
         self.touch_session(session_id).await?;
         Ok(StoredMessage::from(msg))
+    }
+
+    /// Restore a [`SessionFile`] as a new session row: the file's session id
+    /// is kept when free (else a fresh UUID v7 is minted), message and tool
+    /// call ids are regenerated (original ids remap to the new parents), the
+    /// leaf and scroll carry over, and the row timestamps are preserved.
+    /// Imports as a `Main` session regardless of the source's shape.
+    pub async fn import_session(&mut self, file: &SessionFile) -> Result<uuid::Uuid> {
+        let mut id = file.session.id;
+        if self.session_row_exists(id).await? {
+            id = uuid::Uuid::now_v7();
+        }
+
+        let now = jiff::Timestamp::now();
+        let created_at = timestamp_from_millis(file.session.created_at, now);
+        let updated_at = timestamp_from_millis(file.session.updated_at, created_at);
+        toasty::create!(Session {
+            id,
+            title: file.session.title.clone(),
+            provider: file.session.provider.clone(),
+            model: file.session.model.clone(),
+            scene: file.session.scene.clone(),
+            session_type: SessionType::Main,
+            parent_id: None,
+            created_at,
+            updated_at,
+        })
+        .exec(&mut self.db)
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
+
+        if let Err(e) = self.import_messages(id, file).await {
+            self.delete_imported_rows(id).await;
+            return Err(e);
+        }
+        Ok(id)
+    }
+
+    async fn session_row_exists(&mut self, id: uuid::Uuid) -> Result<bool> {
+        Ok(Session::filter_by_id(id)
+            .first()
+            .exec(&mut self.db)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?
+            .is_some())
+    }
+
+    /// Best-effort cleanup when an import fails partway through its inserts.
+    async fn delete_imported_rows(&mut self, session_id: uuid::Uuid) {
+        for sql in [
+            "DELETE FROM tool_calls WHERE session_id = ?1",
+            "DELETE FROM messages WHERE session_id = ?1",
+            "DELETE FROM sessions WHERE id = ?1",
+        ] {
+            let _ = toasty::sql::statement(sql)
+                .bind_typed(session_id.as_bytes().to_vec(), db::Type::Blob)
+                .exec(&mut self.db)
+                .await;
+        }
+    }
+
+    async fn import_messages(&mut self, session_id: uuid::Uuid, file: &SessionFile) -> Result<()> {
+        let mut messages: Vec<&FileMessage> = file.messages.iter().collect();
+        messages.sort_by_key(|m| m.seq);
+        let mut id_map: HashMap<u64, u64> = HashMap::new();
+        for m in messages {
+            let parent_id = m.parent_id.and_then(|p| id_map.get(&p).copied());
+            let msg = toasty::create!(Message {
+                session_id,
+                parent_id,
+                seq: m.seq,
+                role: m.role,
+                content: m.content.clone(),
+                reasoning: encode_reasoning(&m.reasoning),
+                text_segments: encode_text_segments(&m.text_segments),
+                interrupted: m.interrupted,
+                input_tokens: m.input_tokens,
+                output_tokens: m.output_tokens,
+                total_tokens: m.total_tokens,
+                cached_input_tokens: m.cached_input_tokens,
+                reasoning_tokens: m.reasoning_tokens,
+                cost: m.cost,
+                summary: m.summary,
+                request_json: serde_json::to_string(&m.request).unwrap_or_default(),
+            })
+            .exec(&mut self.db)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+            id_map.insert(m.id, msg.id);
+        }
+
+        for tc in &file.tool_calls {
+            let Some(&message_id) = id_map.get(&tc.message_id) else {
+                continue;
+            };
+            toasty::create!(ToolCall {
+                session_id,
+                message_id,
+                seq: tc.seq,
+                name: tc.name.clone(),
+                args_json: tc.args_json.clone(),
+                output: tc.output.clone(),
+                stderr: tc.stderr.clone(),
+                ok: tc.ok,
+                killed: tc.killed,
+                worker: tc.worker.clone(),
+                file_change_json: tc.file_change_json.clone(),
+                original_content: tc.original_content.clone(),
+                new_content: tc.new_content.clone(),
+                duration_ms: tc.duration_ms,
+            })
+            .exec(&mut self.db)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        }
+
+        let leaf_id = file
+            .session
+            .leaf_id
+            .and_then(|leaf| id_map.get(&leaf).copied());
+        self.set_active_leaf(session_id, leaf_id).await?;
+        self.set_scroll(session_id, file.scroll).await?;
+        Ok(())
     }
 
     /// Point the session's active branch at a (possibly new) tip. A raw

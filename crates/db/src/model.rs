@@ -145,8 +145,11 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, toasty::Embed)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, toasty::Embed, serde::Serialize, serde::Deserialize,
+)]
 #[column(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum MsgRole {
     System,
     User,

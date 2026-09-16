@@ -353,6 +353,8 @@ mod tests {
             messages,
             tool_calls: Vec::new(),
             scroll: shuvarie_db::StoredScroll::default(),
+            created_at: jiff::Timestamp::now(),
+            updated_at: jiff::Timestamp::now(),
         }
     }
 

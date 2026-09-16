@@ -205,6 +205,11 @@ pub enum Event {
     SessionTree {
         session: crate::Session,
     },
+    /// The active session was written to a JSON file (`/export`); `path` is
+    /// the file it was written to.
+    SessionExported {
+        path: std::path::PathBuf,
+    },
     SearchResults {
         hits: Vec<shuvarie_db::SearchHit>,
     },

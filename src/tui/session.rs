@@ -71,6 +71,11 @@ pub enum SessionMessage {
         error: String,
     },
     ClearError,
+    /// A transient informational status line in the status row (e.g. the
+    /// `/export` destination path); the next busy-state event replaces it.
+    ShowStatus {
+        status: String,
+    },
     /// Replaces the session's skill list (mirrors what the sidebar shows).
     SetSkills {
         skills: Vec<Skill>,
@@ -423,6 +428,8 @@ impl SessionScreen {
             .set_availability(CommandAction::OpenScenePicker, !self.chat.is_streaming());
         self.slash
             .set_availability(CommandAction::EditTitle, self.session_id.is_some());
+        self.slash
+            .set_availability(CommandAction::Export, self.session_id.is_some());
         let buffer = self.input.buffer.value.clone();
         self.slash.sync(&buffer);
     }
@@ -570,6 +577,10 @@ impl SessionScreen {
             }
             SessionMessage::ClearError => {
                 self.error = None;
+                None
+            }
+            SessionMessage::ShowStatus { status } => {
+                self.status = Some(status);
                 None
             }
             SessionMessage::SetSkills { skills } => {

@@ -693,6 +693,11 @@ impl App {
                     }))
                 }
                 CoreEvent::SessionTree { session } => Some(AppMessage::SessionTree { session }),
+                CoreEvent::SessionExported { path } => {
+                    Some(AppMessage::Session(SessionMessage::ShowStatus {
+                        status: format!("Exported to {}", path.display()),
+                    }))
+                }
                 CoreEvent::SearchResults { hits } => {
                     Some(AppMessage::HistorySearch(HistorySearchMessage::Results {
                         hits,
@@ -1466,6 +1471,8 @@ impl App {
             .set_availability(CommandAction::OpenTree, has_messages);
         self.command_menu
             .set_availability(CommandAction::EditTitle, self.session.session_id.is_some());
+        self.command_menu
+            .set_availability(CommandAction::Export, self.session.session_id.is_some());
     }
 
     /// Runs a command action (from the Ctrl+M menu or the inline slash menu).
@@ -1532,6 +1539,17 @@ impl App {
                 } else {
                     self.title_popup.open(self.session.session_title.as_deref());
                     self.overlay = Overlay::TitleEdit;
+                }
+            }
+            CommandAction::Export => {
+                if self.session.session_id.is_none() {
+                    self.session.update(SessionMessage::ShowError {
+                        error: "no active session".into(),
+                    });
+                } else {
+                    self.ctx.send(shuvarie_core::Command::ExportSession {
+                        path: args.map(std::path::PathBuf::from),
+                    });
                 }
             }
             CommandAction::UndoLastTurn => {

@@ -64,6 +64,7 @@ repository = "https://github.com/shuvarie/shuvarie.git"
 dirs = "7"
 futures-util = { version = "0.3", default-features = false, features = ["std", "alloc"] }
 http = "1"
+jiff = "0.2"
 kdl = "6.7"
 regex = "1"
 reqwest = "0.13"
@@ -80,5 +81,5 @@ tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 unicode-width = "0.2"
-uuid = { version = "1", features = ["fast-rng", "v4"] }
+uuid = { version = "1", features = ["fast-rng", "v4", "v7"] }
 yaml_serde = "0.10"
