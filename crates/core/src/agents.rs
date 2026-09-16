@@ -3,6 +3,7 @@ use std::sync::Arc;
 use shuvarie_llm::ProviderClient;
 use shuvarie_llm::TokenUsage;
 
+use crate::Skills;
 use crate::WebSearchConfig;
 use crate::lsp_manager::SharedManager;
 use crate::scenes::{Scene, ToolScene};
@@ -60,6 +61,7 @@ pub fn build_workers(
     access: crate::permissions::Access,
     scene: &Scene,
     web_search: Option<&WebSearchConfig>,
+    skills: &Skills,
 ) -> WorkerSet {
     let usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
     let roster_disabled = scene.subagents().map(|s| s.disabled).unwrap_or(false);
@@ -92,6 +94,7 @@ pub fn build_workers(
                     access.clone(),
                     &tool_scene,
                     web_search,
+                    skills,
                 ),
                 WorkerTools::Command => tools::command_tools(
                     shell_tx.tagged(spec.name),
@@ -188,6 +191,7 @@ mod tests {
             crate::test_util::access(),
             scene,
             None,
+            &Skills::default(),
         )
     }
 

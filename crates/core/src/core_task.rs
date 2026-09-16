@@ -1930,6 +1930,7 @@ impl CoreCtx {
             todo_state,
             &tool_scene,
             web_search,
+            &self.skills,
         );
         let catalog_provider = crate::catalog::providers();
         let catalog_provider = self
@@ -1955,6 +1956,7 @@ impl CoreCtx {
             self.access.clone(),
             &scene,
             web_search,
+            &self.skills,
         );
         let prior = crate::scenes::inject_history(&scene, &prior, Some(&content));
         let stream = client

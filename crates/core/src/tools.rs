@@ -7,6 +7,7 @@ mod lsp;
 mod question;
 mod read_file;
 mod run_shell;
+mod skill;
 pub mod todos;
 mod web_search;
 mod webfetch;
@@ -19,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 use shuvarie_llm::{DiffLine, DiffLineKind, DynamicTool, Tool, ToolExecutionError, ToolOutput};
 
+use crate::Skills;
 use crate::WebSearchConfig;
 use crate::lsp_manager::SharedManager;
 use crate::permissions::Access;
@@ -34,6 +36,7 @@ use lsp::Lsp;
 use question::Question;
 use read_file::ReadFile;
 use run_shell::RunShell;
+use skill::SkillTool;
 use web_search::WebSearch;
 use webfetch::WebFetch;
 use write_file::WriteFile;
@@ -233,6 +236,7 @@ pub fn all_tools(
     todo_state: todos::TodoState,
     scene: &ToolScene,
     web_search: Option<&WebSearchConfig>,
+    skills: &Skills,
 ) -> Vec<DynamicTool> {
     let mut tools = Vec::new();
     tools.extend(scene_tool("read_file", scene, &access, true, |access| {
@@ -267,6 +271,15 @@ pub fn all_tools(
     tools.extend(scene_tool("glob", scene, &access, true, |access| {
         Glob::new(access)
     }));
+    if !skills.is_empty() {
+        tools.extend(scene_tool(
+            SkillTool::NAME,
+            scene,
+            &access,
+            false,
+            |_access| SkillTool::new(skills.clone(), max_output_chars),
+        ));
+    }
     tools.extend(scene_tool("lsp", scene, &access, false, |_access| {
         Lsp::new(lsp.clone())
     }));
@@ -295,6 +308,7 @@ pub fn all_tools(
     tools
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn read_tools(
     lsp: SharedManager,
     read_cache: ReadCache,
@@ -303,6 +317,7 @@ pub fn read_tools(
     access: Access,
     scene: &ToolScene,
     web_search: Option<&WebSearchConfig>,
+    skills: &Skills,
 ) -> Vec<DynamicTool> {
     let mut tools = Vec::new();
     tools.extend(scene_tool("read_file", scene, &access, true, |access| {
@@ -322,6 +337,15 @@ pub fn read_tools(
     tools.extend(scene_tool("glob", scene, &access, true, |access| {
         Glob::new(access)
     }));
+    if !skills.is_empty() {
+        tools.extend(scene_tool(
+            SkillTool::NAME,
+            scene,
+            &access,
+            false,
+            |_access| SkillTool::new(skills.clone(), max_output_chars),
+        ));
+    }
     tools.extend(scene_tool("lsp", scene, &access, false, |_access| {
         Lsp::new(lsp.clone())
     }));
@@ -398,7 +422,7 @@ mod tests {
     use tempfile::TempDir;
 
     /// The full roster built for one scene, as the core task does per turn.
-    fn roster(scene: &ToolScene) -> Vec<String> {
+    fn roster_with(skills: &Skills, scene: &ToolScene) -> Vec<String> {
         let (question_tx, _question_rx) = tokio::sync::mpsc::channel(1);
         let (shell_tx, _shell_rx) = tokio::sync::mpsc::channel(1);
         let lsp = std::sync::Arc::new(tokio::sync::Mutex::new(shuvarie_lsp::LspManager::new(
@@ -419,10 +443,15 @@ mod tests {
             todos::TodoState::from_records(&[]),
             scene,
             None,
+            skills,
         )
         .into_iter()
         .map(|tool| tool.name().to_string())
         .collect()
+    }
+
+    fn roster(scene: &ToolScene) -> Vec<String> {
+        roster_with(&Skills::default(), scene)
     }
 
     #[test]
@@ -475,6 +504,37 @@ mod tests {
         };
         let names = roster(&ToolScene::build(Some(&tools)));
         assert!(names.is_empty(), "roster: {names:?}");
+    }
+
+    #[test]
+    fn skill_tool_enters_the_roster_only_with_skills() {
+        let mut skills = Skills::default();
+        skills.skills.push(crate::Skill {
+            name: "demo".into(),
+            description: "d".into(),
+            tags: vec![],
+            category: None,
+            path: std::path::PathBuf::from("."),
+            global: false,
+            disable_model_invocation: false,
+        });
+        let names = roster_with(&skills, &ToolScene::default());
+        assert!(names.contains(&"skill".into()), "roster: {names:?}");
+        assert!(!roster(&ToolScene::default()).contains(&"skill".into()));
+
+        let mut tools = SceneToolsConfig {
+            verb: Some(SceneToolVerb::DisableAll),
+            ..SceneToolsConfig::default()
+        };
+        tools.tools.insert(
+            "skill".into(),
+            ToolOverride {
+                disabled: Some(false),
+                ask: None,
+            },
+        );
+        let names = roster_with(&skills, &ToolScene::build(Some(&tools)));
+        assert_eq!(names, vec!["skill".to_string()]);
     }
 
     #[test]

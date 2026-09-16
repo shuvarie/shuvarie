@@ -124,9 +124,12 @@ impl Skills {
         }
         let mut s = String::from(
             "The following skills provide specialized instructions for specific tasks. \
-             Read the SKILL.md file (via read_file) when a task matches its description. \
-             When a skill file references a relative path, resolve it against the skill \
-             directory (the parent of SKILL.md) and use that absolute path in tool commands.",
+             When a task matches a skill's description, load that skill with the `skill` tool \
+             (passing the skill name) before starting work, then follow its instructions. \
+             A skill's SKILL.md may reference further files relative to its directory — load \
+             those with the `skill` tool's `path` argument, and when another tool needs a path \
+             from a skill reference, resolve it against the skill directory (the parent of \
+             SKILL.md).",
         );
         s.push_str("\n\n<available_skills>");
         for skill in visible {
@@ -953,7 +956,7 @@ mod tests {
         );
         let skills = Skills::load_from(&workspace, None, None, &SkillsConfig::default());
         let section = skills.preamble_section().unwrap();
-        assert!(section.contains("read_file"));
+        assert!(section.contains("`skill` tool"));
         assert!(section.contains("<available_skills>"));
         assert!(section.contains("</available_skills>"));
         assert!(section.contains("<skill>"));
