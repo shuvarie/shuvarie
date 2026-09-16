@@ -53,3 +53,7 @@ Posting issue/PR comments:
 Closing issues via commit:
 
 - Include `fixes #<number>` or `closes #<number>` in the message so merging auto-closes the issue. For multiple issues, repeat the keyword per issue (`closes #1, closes #2`); a shared keyword (`closes #1, #2`) only closes the first.
+
+## Conventions
+
+- Add an end newline when creating a new file
