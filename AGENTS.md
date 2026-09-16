@@ -106,7 +106,3 @@ Nix flakes: `nix build .#` builds the binary and runs the test suite in checkPha
 When changes are made, it's a good practice to check AGENTS.md if there is stale guidance and update it.
 
 Keep AGENTS.md concise. Only add important points that every AI agent should know before working on this project.
-
-### In development notice
-
-Since the project is not released yet. It's safe to update the `0000` (init) migration directly; newer timestamp-prefixed migrations should only be amended via `migration drop` + re-`generate`.
