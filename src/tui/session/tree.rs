@@ -70,6 +70,7 @@ pub struct TreePopup {
     pub offset: usize,
     pub summarize: bool,
     pub confirm_delete: bool,
+    busy: bool,
 }
 
 impl TreePopup {
@@ -81,6 +82,7 @@ impl TreePopup {
             offset: 0,
             summarize: false,
             confirm_delete: false,
+            busy: false,
         }
     }
 
@@ -102,6 +104,16 @@ impl TreePopup {
     pub fn close(&mut self) {
         self.open = false;
         self.confirm_delete = false;
+    }
+
+    /// View-only mode while a turn runs: forking and branch deletion wait
+    /// until the stream settles. Tracked live so the popup opens read-only
+    /// and unlocks as soon as the turn ends.
+    pub fn set_busy(&mut self, busy: bool) {
+        self.busy = busy;
+        if busy {
+            self.confirm_delete = false;
+        }
     }
 
     pub fn set_rows(&mut self, session: &shuvarie_core::Session) {
@@ -151,9 +163,9 @@ impl TreePopup {
             KeyCode::Escape => Some(TreeMessage::Close),
             KeyCode::Down | KeyCode::Char('j') => Some(TreeMessage::Next),
             KeyCode::Up | KeyCode::Char('k') => Some(TreeMessage::Prev),
-            KeyCode::Enter => Some(TreeMessage::Fork),
-            KeyCode::Char('s') => Some(TreeMessage::ToggleSummarize),
-            KeyCode::Char('d') => Some(TreeMessage::Delete),
+            KeyCode::Enter if !self.busy => Some(TreeMessage::Fork),
+            KeyCode::Char('s') if !self.busy => Some(TreeMessage::ToggleSummarize),
+            KeyCode::Char('d') if !self.busy => Some(TreeMessage::Delete),
             _ => None,
         }
     }
@@ -176,6 +188,9 @@ impl TreePopup {
                 None
             }
             TreeMessage::Fork => {
+                if self.busy {
+                    return None;
+                }
                 let row = self.rows.get(self.selected)?;
                 Some(TreeEffect::Fork {
                     node: row.fork_node,
@@ -187,6 +202,9 @@ impl TreePopup {
                 None
             }
             TreeMessage::Delete => {
+                if self.busy {
+                    return None;
+                }
                 if self.confirm_delete {
                     let row = self.rows.get(self.selected)?;
                     let node = row.node_id;
@@ -243,6 +261,12 @@ impl TreePopup {
 
         let hint = if self.confirm_delete {
             theme::help_line(&[("Enter", "delete branch"), ("Esc", "cancel")])
+        } else if self.busy {
+            theme::help_line(&[
+                ("↑↓", "walk"),
+                ("⌛", "switching disabled"),
+                ("Esc", "close"),
+            ])
         } else {
             let summarize_label: &str = if self.summarize {
                 "summarize: on"
@@ -566,6 +590,92 @@ mod tests {
             Some(TreeEffect::DeleteBranch { node }) => assert_eq!(node, 2),
             other => panic!("expected delete effect, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn busy_popup_is_view_only() {
+        let session = session_with(
+            vec![
+                node(1, None, Role::User, 0, "ask", true),
+                node(2, Some(1), Role::Assistant, 1, "reply", true),
+                node(3, Some(2), Role::User, 2, "other", false),
+            ],
+            2,
+        );
+        let mut popup = popup_for(&session);
+        popup.set_busy(true);
+        assert_eq!(popup.selected, 1);
+        assert!(
+            popup
+                .map_event(&key(KeyCode::Enter, Modifiers::NONE))
+                .is_none(),
+            "Enter does not fork while a turn runs"
+        );
+        assert!(
+            popup
+                .map_event(&key(KeyCode::Char('s'), Modifiers::NONE))
+                .is_none(),
+            "'s' does not toggle summarize while a turn runs"
+        );
+        assert!(
+            popup
+                .map_event(&key(KeyCode::Char('d'), Modifiers::NONE))
+                .is_none(),
+            "'d' does not arm deletion while a turn runs"
+        );
+        assert!(popup.update(TreeMessage::Fork).is_none());
+        assert!(popup.update(TreeMessage::Delete).is_none());
+        assert!(matches!(
+            popup.map_event(&key(KeyCode::Escape, Modifiers::NONE)),
+            Some(TreeMessage::Close)
+        ));
+        assert!(matches!(
+            popup.map_event(&key(KeyCode::Down, Modifiers::NONE)),
+            Some(TreeMessage::Next)
+        ));
+    }
+
+    #[test]
+    fn busy_popup_unlocks_when_the_turn_ends() {
+        let session = session_with(
+            vec![
+                node(1, None, Role::User, 0, "ask", true),
+                node(2, Some(1), Role::Assistant, 1, "reply", true),
+            ],
+            2,
+        );
+        let mut popup = popup_for(&session);
+        popup.set_busy(true);
+        popup.set_busy(false);
+        popup.selected = 1;
+        assert!(matches!(
+            popup.map_event(&key(KeyCode::Enter, Modifiers::NONE)),
+            Some(TreeMessage::Fork)
+        ));
+        assert!(matches!(
+            popup.update(TreeMessage::Fork),
+            Some(TreeEffect::Fork {
+                node: 2,
+                summarize: false
+            })
+        ));
+    }
+
+    #[test]
+    fn busy_resets_a_pending_delete_confirmation() {
+        let session = session_with(
+            vec![
+                node(1, None, Role::User, 0, "ask", true),
+                node(2, Some(1), Role::Assistant, 1, "off", false),
+            ],
+            1,
+        );
+        let mut popup = popup_for(&session);
+        popup.selected = 1;
+        popup.update(TreeMessage::Delete);
+        assert!(popup.confirm_delete);
+        popup.set_busy(true);
+        assert!(!popup.confirm_delete);
     }
 
     fn key(code: KeyCode, modifiers: Modifiers) -> KeyEvent {

@@ -737,33 +737,12 @@ pub async fn run(
                         });
                     }
                     Command::CancelStream => {
-                        let mut aborted = false;
-                        if let Some(handle) = ctx.active_stream.take()
-                            && !handle.is_finished()
-                        {
-                            if ctx.steer.is_finalizing() {
-                                // The stream task is already cutting itself at
-                                // an action boundary to dispatch a steered
-                                // prompt; it persists the turn and reports
-                                // `StreamOutcome::Preempted`. Keep the handle
-                                // so the ending task still counts as busy and
-                                // don't abort it mid-persist.
-                                ctx.active_stream = Some(handle);
-                            } else {
-                                handle.abort();
-                                dismiss_pending_questions(&mut pending_questions);
-                                dismiss_pending_permissions(&mut pending_permissions);
-                                persist_interrupted_turn(
-                                    ctx.turn_state.take(),
-                                    &mut ctx.store,
-                                    &ctx.session,
-                                    &ctx.event_tx,
-                                )
-                                .await;
-                                let _ = ctx.event_tx.send(Event::StreamCancelled).await;
-                                aborted = true;
-                            }
-                        }
+                        let mut aborted = cut_running_stream(
+                            &mut ctx,
+                            &mut pending_questions,
+                            &mut pending_permissions,
+                        )
+                        .await;
                         if !aborted
                             && let Some(pending) = pending_retry.take()
                         {
@@ -973,9 +952,20 @@ pub async fn run(
                         }
                     }
                     Command::ForkSession { node, summarize } => {
-                        if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
-                            continue;
+                        // A fork rewinds the active path, so a running turn is
+                        // cut first (persisted interrupted) and the queued
+                        // steered prompts belong to a discarded context: wipe
+                        // the queue and let the TUI drop its display.
+                        if cut_running_stream(
+                            &mut ctx,
+                            &mut pending_questions,
+                            &mut pending_permissions,
+                        )
+                        .await
+                        {
+                            ctx.steer.reset();
                         }
+                        clear_steered(&mut steered, &ctx.steer, &ctx.event_tx).await;
                         pending_retry = None;
                         conn_retries = 0;
                         let Some(s) = &ctx.session else { continue; };
@@ -1100,9 +1090,6 @@ pub async fn run(
                         }
                     }
                     Command::OpenTree => {
-                        if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
-                            continue;
-                        }
                         let Some(s) = &ctx.session else { continue; };
                         let Some(sid) = s.lock().await.id else { continue; };
                         match ctx.store.load_session(sid).await {
@@ -2132,6 +2119,45 @@ async fn stream_busy(active_stream: &Option<AbortHandle>, event_tx: &Sender<Even
         return true;
     }
     false
+}
+
+/// Cut the running stream and settle its in-flight state: persist the
+/// partial turn as interrupted, dismiss pending asks, and surface the
+/// cancellation. Returns `true` when a running stream was cut (the caller
+/// then resets the steer signal); `false` while the stream is idle or already
+/// self-cutting a steered dispatch (`FINALIZING`) — the ending task owns the
+/// persist and still reports its outcome.
+async fn cut_running_stream(
+    ctx: &mut CoreCtx,
+    pending_questions: &mut HashMap<u64, oneshot::Sender<AnswerResponse>>,
+    pending_permissions: &mut HashMap<u64, oneshot::Sender<bool>>,
+) -> bool {
+    let Some(handle) = ctx.active_stream.take() else {
+        return false;
+    };
+    if handle.is_finished() {
+        return false;
+    }
+    if ctx.steer.is_finalizing() {
+        // The stream task is already cutting itself at an action boundary to
+        // dispatch a steered prompt; it persists the turn and reports
+        // `StreamOutcome::Preempted`. Keep the handle so the ending task still
+        // counts as busy and don't abort it mid-persist.
+        ctx.active_stream = Some(handle);
+        return false;
+    }
+    handle.abort();
+    dismiss_pending_questions(pending_questions);
+    dismiss_pending_permissions(pending_permissions);
+    persist_interrupted_turn(
+        ctx.turn_state.take(),
+        &mut ctx.store,
+        &ctx.session,
+        &ctx.event_tx,
+    )
+    .await;
+    let _ = ctx.event_tx.send(Event::StreamCancelled).await;
+    true
 }
 
 /// Wipe the steered queue (session-level transition) and tell the TUI to drop

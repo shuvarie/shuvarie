@@ -730,6 +730,10 @@ impl SessionScreen {
                 let cost = session.cost;
                 self.retry = None;
                 self.last_escape = None;
+                if prompt.is_some() {
+                    self.busy_kind = BusyKind::Idle;
+                    self.status = None;
+                }
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
                 self.sidebar.update(SidebarMessage::SetContextRequest {

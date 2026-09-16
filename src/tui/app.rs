@@ -812,7 +812,11 @@ impl App {
                 self.overlay = Overlay::None;
             }
             AppMessage::Session(m) => {
-                if let Some(effect) = self.session.update(m) {
+                let effect = self.session.update(m);
+                if self.tree_popup.open {
+                    self.tree_popup.set_busy(self.session.is_busy());
+                }
+                if let Some(effect) = effect {
                     match effect {
                         SessionEffect::SendMessage { content } => {
                             self.ctx
@@ -854,6 +858,7 @@ impl App {
                     self.tree_popup.open(&session);
                     self.overlay = Overlay::Tree;
                 }
+                self.tree_popup.set_busy(self.session.is_busy());
             }
             AppMessage::Scene(m) => {
                 if let Some(effect) = self.scene_picker.update(m) {
