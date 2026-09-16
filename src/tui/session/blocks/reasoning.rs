@@ -143,18 +143,18 @@ impl ReasoningBlock {
                 Span::raw(" "),
                 self.label("Thinking..."),
                 Span::raw(format!(" {}", format_duration_ms(ms)))
-                    .fg(theme::TEXT_MUTED)
+                    .fg(theme::text_muted())
                     .italic(),
             ]
         } else {
             let arrow = if self.expanded { "v" } else { ">" };
             vec![
-                Span::raw("  ").fg(theme::TEXT_MUTED),
+                Span::raw("  ").fg(theme::text_muted()),
                 self.label("Thought"),
                 Span::raw(format!(" {}", format_duration_ms(self.duration_ms)))
-                    .fg(theme::TEXT_MUTED)
+                    .fg(theme::text_muted())
                     .italic(),
-                Span::raw(format!(" {arrow}")).fg(theme::TEXT_MUTED),
+                Span::raw(format!(" {arrow}")).fg(theme::text_muted()),
             ]
         };
         let mut chunks = vec![BodyChunk::fixed(vec![Line::from(header)])];
@@ -171,7 +171,7 @@ impl ReasoningBlock {
     }
 
     fn label(&self, text: &str) -> Span<'static> {
-        Span::raw(text.to_string()).fg(theme::TEXT_MUTED).italic()
+        Span::raw(text.to_string()).fg(theme::text_muted()).italic()
     }
 }
 
@@ -194,12 +194,12 @@ mod tests {
 
     fn header_line(duration: &str) -> Line<'static> {
         Line::from(vec![
-            Span::raw("  ").fg(theme::TEXT_MUTED),
-            Span::raw("Thought").fg(theme::TEXT_MUTED).italic(),
+            Span::raw("  ").fg(theme::text_muted()),
+            Span::raw("Thought").fg(theme::text_muted()).italic(),
             Span::raw(format!(" {duration}"))
-                .fg(theme::TEXT_MUTED)
+                .fg(theme::text_muted())
                 .italic(),
-            Span::raw(" v").fg(theme::TEXT_MUTED),
+            Span::raw(" v").fg(theme::text_muted()),
         ])
     }
 

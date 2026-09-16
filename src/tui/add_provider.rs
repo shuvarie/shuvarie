@@ -617,12 +617,12 @@ impl AddProviderForm {
         field: FormField,
         suffix: &str,
     ) -> Line<'static> {
-        let label_style = Style::new().fg(theme::TEXT_DIM);
-        let hint_style = Style::new().fg(theme::TEXT_MUTED);
-        let active_style = Style::new().fg(theme::ACCENT);
-        let inactive_style = Style::new().fg(theme::TEXT_DIM);
+        let label_style = Style::new().fg(theme::text_dim());
+        let hint_style = Style::new().fg(theme::text_muted());
+        let active_style = Style::new().fg(theme::accent());
+        let inactive_style = Style::new().fg(theme::text_dim());
         let cursor_style = Style::new()
-            .fg(theme::ACCENT)
+            .fg(theme::accent())
             .add_modifier(Modifier::REVERSED);
 
         let is_active = self.field == field;
@@ -664,14 +664,14 @@ impl AddProviderForm {
 
     fn source_line(&self) -> Line<'static> {
         let mut spans = vec![
-            Span::raw("Registry: ").fg(theme::TEXT_DIM),
-            Span::raw(self.source.label()).fg(theme::ACCENT),
+            Span::raw("Registry: ").fg(theme::text_dim()),
+            Span::raw(self.source.label()).fg(theme::accent()),
         ];
         match &self.source.state {
-            FetchState::Fetching => spans.push(Span::raw(" — fetching…").fg(theme::TEXT_MUTED)),
+            FetchState::Fetching => spans.push(Span::raw(" — fetching…").fg(theme::text_muted())),
             FetchState::Failed(error) => {
-                spans.push(Span::raw(" — ").fg(theme::TEXT_MUTED));
-                spans.push(Span::raw(error.clone()).fg(theme::ERROR));
+                spans.push(Span::raw(" — ").fg(theme::text_muted()));
+                spans.push(Span::raw(error.clone()).fg(theme::error()));
             }
             FetchState::Idle => {}
         }
@@ -703,9 +703,9 @@ impl AddProviderForm {
         for row in offset..self.visible_len().min(offset + visible_len) {
             if let Some(&orig) = self.filtered.get(row) {
                 let provider = &self.providers[orig];
-                let mut line = vec![Span::raw(provider.name.clone()).fg(theme::TEXT)];
+                let mut line = vec![Span::raw(provider.name.clone()).fg(theme::text())];
                 if self.existing_catalog_ids.contains(&provider.id.0) {
-                    line.push(Span::raw("  ✓ configured").fg(theme::TEXT_MUTED));
+                    line.push(Span::raw("  ✓ configured").fg(theme::text_muted()));
                 }
                 items.push(render_list_item_line(
                     Line::from(line),
@@ -731,7 +731,7 @@ impl AddProviderForm {
         hints.push(("Ctrl+I", "custom"));
         hints.push(("Esc", "cancel"));
         frame.render_widget(
-            Paragraph::new(theme::help_line(&hints)).fg(theme::TEXT_MUTED),
+            Paragraph::new(theme::help_line(&hints)).fg(theme::text_muted()),
             hint_area,
         );
     }
@@ -757,8 +757,8 @@ impl AddProviderForm {
                 let (ptype, description) = TRANSPORTS[i];
                 let line = Line::from(vec![
                     Span::raw(shuvarie_core::catalog::provider_type_name(ptype).to_string())
-                        .fg(theme::TEXT),
-                    Span::raw(format!("  — {description}")).fg(theme::TEXT_MUTED),
+                        .fg(theme::text()),
+                    Span::raw(format!("  — {description}")).fg(theme::text_muted()),
                 ]);
                 render_list_item_line(line, i == self.kind_selected)
             })
@@ -771,7 +771,7 @@ impl AddProviderForm {
                 ("Enter", "pick"),
                 ("Esc", "back"),
             ]))
-            .fg(theme::TEXT_MUTED),
+            .fg(theme::text_muted()),
             hint_area,
         );
     }
@@ -810,7 +810,7 @@ impl AddProviderForm {
             Layout::vertical([Min(0), Length(2), Length(1)]).areas(inner);
         frame.render_widget(body, body_area);
         if let Some(e) = &self.error {
-            frame.render_widget(Paragraph::new(e.as_str()).fg(theme::ERROR), error_area);
+            frame.render_widget(Paragraph::new(e.as_str()).fg(theme::error()), error_area);
         }
         frame.render_widget(
             Paragraph::new(theme::help_line(&[
@@ -818,7 +818,7 @@ impl AddProviderForm {
                 ("Enter", "submit"),
                 ("Esc", "back"),
             ]))
-            .fg(theme::TEXT_MUTED),
+            .fg(theme::text_muted()),
             hint_area,
         );
     }

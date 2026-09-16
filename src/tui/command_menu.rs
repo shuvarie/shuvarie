@@ -185,8 +185,8 @@ impl CommandMenu {
             .map(|(idx, &i)| {
                 let cmd = &self.commands[i];
                 let line = Line::from(vec![
-                    Span::raw(format!("{:<20} ", cmd.name)).fg(theme::TEXT),
-                    Span::raw(cmd.description.to_string()).fg(theme::TEXT_MUTED),
+                    Span::raw(format!("{:<20} ", cmd.name)).fg(theme::text()),
+                    Span::raw(cmd.description.to_string()).fg(theme::text_muted()),
                 ]);
                 render_list_item_line(line, idx == self.selected)
             })
@@ -199,7 +199,7 @@ impl CommandMenu {
                 ("Esc", "close"),
                 ("↑↓", "navigate"),
             ]))
-            .fg(theme::TEXT_MUTED),
+            .fg(theme::text_muted()),
             hint_area,
         );
     }

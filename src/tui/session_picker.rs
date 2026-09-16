@@ -213,7 +213,7 @@ impl SessionPicker {
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
                     super::spinner::spinner(),
-                    Span::raw(" Loading sessions...").fg(theme::TEXT_MUTED),
+                    Span::raw(" Loading sessions...").fg(theme::text_muted()),
                 ])),
                 list_area,
             );
@@ -266,7 +266,7 @@ impl SessionPicker {
                 ("Esc", "close"),
             ])
         };
-        frame.render_widget(Paragraph::new(hint).fg(theme::TEXT_MUTED), hint_area);
+        frame.render_widget(Paragraph::new(hint).fg(theme::text_muted()), hint_area);
     }
 }
 

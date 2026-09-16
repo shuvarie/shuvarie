@@ -57,7 +57,7 @@ impl WorkspaceInfo {
             max_cols.saturating_sub(branch_cols),
         );
         if let Some(branch) = branch {
-            spans.push(Span::raw(" ").fg(theme::TEXT_MUTED));
+            spans.push(Span::raw(" ").fg(theme::text_muted()));
             spans.extend(branch);
         }
         truncate_spans(spans, max_cols)
@@ -76,8 +76,8 @@ fn branch_name(head: &gix::Head<'_>) -> Option<String> {
 
 fn branch_spans(branch: &str) -> Vec<Span<'static>> {
     vec![
-        Span::raw("⎇ ").fg(theme::TEXT_MUTED),
-        Span::raw(branch.to_string()).fg(theme::TEXT),
+        Span::raw("⎇ ").fg(theme::text_muted()),
+        Span::raw(branch.to_string()).fg(theme::text()),
     ]
 }
 
@@ -185,7 +185,7 @@ impl DisplayPath {
                 true => format!("{}{sep}", self.root),
                 false => self.root.clone(),
             };
-            return vec![Span::raw(text).fg(theme::TEXT)];
+            return vec![Span::raw(text).fg(theme::text())];
         };
         let mut head = self.prefix(sep);
         for (i, comp) in comps.iter().enumerate().take(comps.len() - 1) {
@@ -198,8 +198,8 @@ impl DisplayPath {
             head.push(sep);
         }
         vec![
-            Span::raw(head).fg(theme::TEXT_DIM),
-            Span::raw(tail).fg(theme::TEXT),
+            Span::raw(head).fg(theme::text_dim()),
+            Span::raw(tail).fg(theme::text()),
         ]
     }
 
@@ -212,8 +212,8 @@ impl DisplayPath {
             .cloned()
             .unwrap_or_else(|| self.root.clone());
         vec![
-            Span::raw(self.prefix(sep)).fg(theme::TEXT_DIM),
-            Span::raw(tail).fg(theme::TEXT),
+            Span::raw(self.prefix(sep)).fg(theme::text_dim()),
+            Span::raw(tail).fg(theme::text()),
         ]
     }
 }
@@ -247,7 +247,10 @@ mod tests {
         };
         let spans = path_spans(&info.path, info.home.as_deref(), 100);
         assert_eq!(joined(&spans), "/home/other/repos/shuvarie");
-        assert_eq!(fg(&spans), vec![Some(theme::TEXT_DIM), Some(theme::TEXT)]);
+        assert_eq!(
+            fg(&spans),
+            vec![Some(theme::text_dim()), Some(theme::text())]
+        );
     }
 
     #[test]
@@ -259,7 +262,10 @@ mod tests {
         };
         let spans = path_spans(&info.path, info.home.as_deref(), 100);
         assert_eq!(joined(&spans), "~/projects/shuvarie");
-        assert_eq!(fg(&spans), vec![Some(theme::TEXT_DIM), Some(theme::TEXT)]);
+        assert_eq!(
+            fg(&spans),
+            vec![Some(theme::text_dim()), Some(theme::text())]
+        );
     }
 
     #[test]
@@ -271,7 +277,7 @@ mod tests {
         };
         let spans = path_spans(&info.path, info.home.as_deref(), 100);
         assert_eq!(joined(&spans), "~");
-        assert_eq!(fg(&spans), vec![Some(theme::TEXT)]);
+        assert_eq!(fg(&spans), vec![Some(theme::text())]);
     }
 
     #[test]
@@ -294,7 +300,10 @@ mod tests {
         };
         let spans = path_spans(&info.path, info.home.as_deref(), 20);
         assert_eq!(joined(&spans), "~/s/r/shuvarie");
-        assert_eq!(fg(&spans), vec![Some(theme::TEXT_DIM), Some(theme::TEXT)]);
+        assert_eq!(
+            fg(&spans),
+            vec![Some(theme::text_dim()), Some(theme::text())]
+        );
     }
 
     #[test]
@@ -317,7 +326,10 @@ mod tests {
         };
         let spans = path_spans(&info.path, info.home.as_deref(), 10);
         assert_eq!(joined(&spans), "~/averyve…");
-        assert_eq!(fg(&spans), vec![Some(theme::TEXT_DIM), Some(theme::TEXT)]);
+        assert_eq!(
+            fg(&spans),
+            vec![Some(theme::text_dim()), Some(theme::text())]
+        );
     }
 
     #[test]
@@ -415,6 +427,9 @@ mod tests {
     fn branch_marker_spans_use_theme_colors() {
         let spans = branch_spans("main");
         assert_eq!(joined(&spans), "⎇ main");
-        assert_eq!(fg(&spans), vec![Some(theme::TEXT_MUTED), Some(theme::TEXT)]);
+        assert_eq!(
+            fg(&spans),
+            vec![Some(theme::text_muted()), Some(theme::text())]
+        );
     }
 }

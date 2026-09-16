@@ -142,9 +142,9 @@ impl BashPopup {
     fn body_row(&self, i: usize) -> (&str, Color) {
         let stdout_rows = self.stdout.rows();
         if i < stdout_rows {
-            (self.stdout.row(i), theme::TEXT_DIM)
+            (self.stdout.row(i), theme::text_dim())
         } else {
-            (self.stderr.row(i - stdout_rows), theme::ERROR)
+            (self.stderr.row(i - stdout_rows), theme::error())
         }
     }
 
@@ -185,7 +185,7 @@ impl BashPopup {
         let inner_w = usize::from(inner.width);
         let viewport = usize::from(inner.height.saturating_sub(2));
         let mut lines = self.body_lines(inner_w, viewport);
-        lines.push(theme::help_line(&[("Esc", "dismiss")]).fg(theme::TEXT_MUTED));
+        lines.push(theme::help_line(&[("Esc", "dismiss")]).fg(theme::text_muted()));
         frame.render_widget(ratatui::widgets::Paragraph::new(lines), inner);
     }
 
@@ -222,14 +222,14 @@ impl BashPopup {
         if self.running {
             header.push(spinner::spinner());
         } else if self.ok {
-            header.push(Span::raw("✓").fg(theme::SUCCESS).bold());
+            header.push(Span::raw("✓").fg(theme::success()).bold());
         } else {
-            header.push(Span::raw("✗").fg(theme::ERROR).bold());
+            header.push(Span::raw("✗").fg(theme::error()).bold());
         }
         header.push(Span::raw(" "));
         header.push(
             Span::raw(format!("$ {}", self.command))
-                .fg(theme::TEXT)
+                .fg(theme::text())
                 .bold(),
         );
 
@@ -254,7 +254,7 @@ impl BashPopup {
                 .saturating_sub(right_w)
                 .max(1);
             header.push(Span::raw(" ".repeat(pad)));
-            header.push(Span::raw(right).fg(theme::TEXT_MUTED));
+            header.push(Span::raw(right).fg(theme::text_muted()));
         }
         Line::from(header)
     }

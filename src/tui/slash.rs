@@ -165,7 +165,7 @@ impl SlashMenu {
         }
         frame.render_widget(Clear, area);
         let block = Block::new()
-            .bg(theme::OVERLAY)
+            .bg(theme::overlay())
             .padding(Padding::new(1, 1, 0, 1));
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -189,9 +189,9 @@ impl SlashMenu {
                         "{:<10}",
                         format!("{}{}", self.trigger, cmd.action.slash_name())
                     ))
-                    .fg(theme::ACCENT)
+                    .fg(theme::accent())
                     .bold(),
-                    Span::raw(cmd.description.to_string()).fg(theme::TEXT_MUTED),
+                    Span::raw(cmd.description.to_string()).fg(theme::text_muted()),
                 ]);
                 render_list_item_line(line, idx == self.selected)
             })

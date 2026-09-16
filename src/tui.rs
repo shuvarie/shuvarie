@@ -6,7 +6,7 @@ use ratatui::prelude::*;
 use termina::{EventStream, PlatformTerminal, Terminal};
 use tokio::sync::mpsc::{Receiver, Sender};
 
-use shuvarie_core::{Command, Config, Connections, Event as CoreEvent};
+use shuvarie_core::{Command, Config, Connections, Event as CoreEvent, ResolvedTheme};
 
 use crate::tui::event::Event;
 
@@ -49,6 +49,7 @@ pub enum TuiResponse {
 
 pub async fn run_tui(
     config: Config,
+    theme: ResolvedTheme,
     cmd_tx: Sender<Command>,
     event_rx: Receiver<CoreEvent>,
 ) -> io::Result<Option<TuiResponse>> {
@@ -65,6 +66,7 @@ pub async fn run_tui(
     let workspace = workspace::WorkspaceInfo::detect();
     let app = App::new(
         config.ui,
+        theme,
         config.registries.selune(),
         connections,
         cmd_tx,

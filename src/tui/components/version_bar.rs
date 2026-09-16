@@ -21,8 +21,8 @@ impl VersionBar {
 
         Self {
             line: Line::from(vec![
-                Span::raw("⚔️ Shuvarie ").fg(theme::ACCENT).bold(),
-                Span::raw(version).fg(theme::TEXT_DIM),
+                Span::raw("⚔️ Shuvarie ").fg(theme::accent()).bold(),
+                Span::raw(version).fg(theme::text_dim()),
             ])
             .alignment(alignment),
         }

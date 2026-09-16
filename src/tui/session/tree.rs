@@ -220,7 +220,7 @@ impl TreePopup {
         let [list_area, hint_area] = Layout::vertical([Min(0), Length(1)]).areas(inner);
         if self.rows.is_empty() {
             frame.render_widget(
-                Paragraph::new("empty conversation".to_string()).fg(theme::TEXT_MUTED),
+                Paragraph::new("empty conversation".to_string()).fg(theme::text_muted()),
                 list_area,
             );
         } else {
@@ -257,33 +257,33 @@ impl TreePopup {
                 ("Esc", "close"),
             ])
         };
-        frame.render_widget(Paragraph::new(hint).fg(theme::TEXT_MUTED), hint_area);
+        frame.render_widget(Paragraph::new(hint).fg(theme::text_muted()), hint_area);
     }
 
     fn render_row(&self, row: &TreeRow, is_selected: bool) -> ListItem<'static> {
         let prefix: &str = if is_selected { "▶ " } else { "  " };
         let text = elide(&row.text, 46);
         let (glyph_color, text_color) = match row.role {
-            Role::User => (theme::ACCENT, theme::TEXT),
-            Role::Assistant if row.summary => (theme::WARNING, theme::WARNING),
-            _ if !row.on_path => (theme::TEXT_MUTED, theme::TEXT_DIM),
-            _ => (theme::TEXT, theme::TEXT),
+            Role::User => (theme::accent(), theme::text()),
+            Role::Assistant if row.summary => (theme::warning(), theme::warning()),
+            _ if !row.on_path => (theme::text_muted(), theme::text_dim()),
+            _ => (theme::text(), theme::text()),
         };
         let mut spans = vec![
-            Span::raw(prefix).fg(theme::ACCENT),
-            Span::raw(row.guide.clone()).fg(theme::TEXT_MUTED),
+            Span::raw(prefix).fg(theme::accent()),
+            Span::raw(row.guide.clone()).fg(theme::text_muted()),
             Span::raw(row.glyph).fg(glyph_color),
             Span::raw(" "),
             Span::raw(text).fg(text_color),
         ];
         if row.is_tip {
-            spans.push(Span::raw(" ●").fg(theme::ACCENT));
+            spans.push(Span::raw(" ●").fg(theme::accent()));
         }
         if row.summary {
-            spans.push(Span::raw(" [summarized]").fg(theme::WARNING));
+            spans.push(Span::raw(" [summarized]").fg(theme::warning()));
         }
         ListItem::new(Line::from(spans)).style(if is_selected {
-            ratatui::style::Style::new().bg(theme::ACCENT_BG)
+            ratatui::style::Style::new().bg(theme::accent_bg())
         } else {
             ratatui::style::Style::new()
         })

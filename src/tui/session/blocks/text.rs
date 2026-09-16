@@ -43,7 +43,7 @@ impl UserPrompt {
         };
         vec![Segment {
             chunks,
-            bg: Some(theme::PROMPT_BG),
+            bg: Some(theme::prompt_bg()),
             padding: BLOCK_PADDING,
             hit: None,
             trim: true,
@@ -76,13 +76,13 @@ impl SteeredPrompt {
         }
         let mut chunks = vec![BodyChunk::fixed(vec![Line::from(
             Span::raw("↻ steered — sends after the current action")
-                .fg(theme::ACCENT)
+                .fg(theme::accent())
                 .italic(),
         )])];
         chunks.extend(self.cache.chunks(width).unwrap_or_default());
         vec![Segment {
             chunks,
-            bg: Some(theme::PROMPT_BG),
+            bg: Some(theme::prompt_bg()),
             padding: BLOCK_PADDING,
             hit: None,
             trim: true,
@@ -154,7 +154,7 @@ impl SystemText {
 
     pub fn view(&self, width: u16) -> Vec<Segment> {
         let mut chunks = vec![BodyChunk::fixed(vec![Line::from(
-            Span::raw("System").fg(theme::TEXT_MUTED).bold(),
+            Span::raw("System").fg(theme::text_muted()).bold(),
         )])];
         chunks.extend(self.cache.chunks(width).unwrap_or_default());
         vec![Segment {
@@ -295,11 +295,11 @@ mod tests {
     fn user_prompt_render_matches_one_shot() {
         let prompt = UserPrompt::new("**bold** intro\n\nsecond para");
         let seg = &prompt.view(50)[0];
-        assert_eq!(seg.bg, Some(theme::PROMPT_BG));
+        assert_eq!(seg.bg, Some(theme::prompt_bg()));
         assert_eq!(seg.padding, BLOCK_PADDING);
         let materialized = Segment::materialized(
             render("**bold** intro\n\nsecond para"),
-            Some(theme::PROMPT_BG),
+            Some(theme::prompt_bg()),
             BLOCK_PADDING,
             true,
         );

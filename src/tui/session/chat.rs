@@ -108,7 +108,7 @@ fn tint_row(buf: &mut Buffer, clip: Rect, content_width: u16, y: u16, mut x0: u1
     }
     for x in x0..x1 {
         if let Some(cell) = buf.cell_mut((x, y)) {
-            cell.set_bg(theme::SELECTION);
+            cell.set_bg(theme::selection());
         }
     }
 }
@@ -1709,9 +1709,9 @@ impl Chat {
         for row in area.top()..area.bottom() {
             let y = row as usize;
             let (symbol, style) = if (thumb_start..thumb_start + thumb_len).contains(&y) {
-                ("█", theme::ACCENT)
+                ("█", theme::accent())
             } else {
-                (" ", theme::TEXT_MUTED)
+                (" ", theme::text_muted())
             };
             let cell = buf.cell_mut((bar_x, row)).expect("bar_x in bounds");
             cell.set_symbol(symbol);
@@ -3061,7 +3061,7 @@ mod tests {
 
         let buf = draw(&chat, 80, 20);
         let rect = chat.history_rect.get();
-        let click_row = (1..buf.area().height).find(|row| buf[(0, *row)].bg == theme::SUCCESS_BG);
+        let click_row = (1..buf.area().height).find(|row| buf[(0, *row)].bg == theme::success_bg());
         let Some(row) = click_row else {
             panic!("tool block background not found");
         };
@@ -3162,7 +3162,7 @@ mod tests {
         });
         let buf = draw(&chat, 80, 20);
         let Some((col, row)) = (1..buf.area().height)
-            .find_map(|row| (buf[(0, row)].bg == theme::SUCCESS_BG).then_some((5, row)))
+            .find_map(|row| (buf[(0, row)].bg == theme::success_bg()).then_some((5, row)))
         else {
             panic!("tool block background not found");
         };
@@ -3357,7 +3357,7 @@ mod tests {
         });
         let buf = draw_at(&chat, clip);
         let tinted: Vec<u16> = (0..buf.area().width)
-            .filter(|&x| buf[(x, row)].bg == theme::SELECTION)
+            .filter(|&x| buf[(x, row)].bg == theme::selection())
             .collect();
         assert_eq!(
             tinted,
@@ -3395,7 +3395,7 @@ mod tests {
         for row in (row + 1)..tail_row {
             for x in 0..buf.area().width {
                 assert_eq!(
-                    buf[(x, row)].bg == theme::SELECTION,
+                    buf[(x, row)].bg == theme::selection(),
                     content.contains(&x),
                     "interior row {row} tints exactly the content width"
                 );
@@ -3439,7 +3439,7 @@ mod tests {
         for x in 0..buf.area().width {
             assert_ne!(
                 buf[(x, other_row)].bg,
-                theme::SELECTION,
+                theme::selection(),
                 "a turn outside the selection never tints"
             );
         }
@@ -3468,7 +3468,7 @@ mod tests {
         let buf = draw(&chat, 80, 20);
         let mut tinted = 0usize;
         for x in 0..buf.area().width {
-            if buf[(x, row)].bg == theme::SELECTION {
+            if buf[(x, row)].bg == theme::selection() {
                 tinted += 1;
             }
         }

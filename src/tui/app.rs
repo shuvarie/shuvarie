@@ -28,6 +28,7 @@ use super::session::{
 use super::session_picker::{SessionPicker, SessionPickerEffect, SessionPickerMessage};
 use super::sidebar::SidebarMessage;
 use super::spinner::SpinnerKind;
+use super::theme;
 use super::title::{TitleEffect, TitleMessage, TitlePopup};
 use super::variant;
 use super::warning::{WarningMessage, WarningPopup};
@@ -223,6 +224,7 @@ fn catalog_variants(connections: &Connections) -> Option<Vec<String>> {
 impl App {
     pub fn new(
         ui: UiPrefs,
+        theme: shuvarie_core::ResolvedTheme,
         registry: RegistryEntry,
         connections: Connections,
         cmd_tx: Sender<shuvarie_core::Command>,
@@ -233,6 +235,12 @@ impl App {
         if !shuvarie_core::catalog::has_connected_providers(&connections) {
             welcome.open();
         }
+        let mut warning = WarningPopup::new();
+        if !theme.warnings.is_empty() {
+            warning.open(theme.warnings.join("\n"));
+        }
+        theme::init(theme);
+
         let initial_provider = connections.active.as_ref().map(|a| a.provider.clone());
         let initial_model = connections.active.as_ref().and_then(|a| a.model.clone());
         let initial_variant = connections.active.as_ref().and_then(|a| a.variant.clone());
@@ -277,7 +285,7 @@ impl App {
             variant_picker: variant::VariantPicker::new(),
             history_search: HistorySearch::new(),
             title_popup: TitlePopup::new(),
-            warning: WarningPopup::new(),
+            warning,
             models: HashMap::new(),
             registry,
             pending_model_pick: None,
@@ -1699,6 +1707,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         App::new(
             UiPrefs::default(),
+            shuvarie_core::ResolvedTheme::faerun(),
             RegistryEntry::default(),
             connections,
             tx,
@@ -1713,6 +1722,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(16);
         let app = App::new(
             UiPrefs::default(),
+            shuvarie_core::ResolvedTheme::faerun(),
             RegistryEntry::default(),
             connections,
             tx,

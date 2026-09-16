@@ -1,41 +1,125 @@
+use std::sync::OnceLock;
+
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Padding};
 
-#[allow(dead_code)]
-pub const BG: Color = Color::Rgb(18, 18, 22);
-pub const SURFACE: Color = Color::Rgb(28, 28, 34);
-pub const SURFACE_FOCUSED: Color = Color::Rgb(38, 38, 46);
-pub const OVERLAY: Color = Color::Rgb(34, 34, 42);
+use shuvarie_core::{ResolvedTheme, Rgb, ThemeColors};
 
-pub const ACCENT: Color = Color::Rgb(212, 175, 95);
-pub const ACCENT_BG: Color = Color::Rgb(52, 48, 42);
-pub const SELECTION: Color = Color::Rgb(78, 60, 28);
+static ACTIVE: OnceLock<ThemeColors> = OnceLock::new();
 
-pub const TEXT: Color = Color::Rgb(224, 216, 196);
-pub const TEXT_DIM: Color = Color::Rgb(128, 120, 104);
-pub const TEXT_MUTED: Color = Color::Rgb(92, 86, 74);
+/// Installs the resolved theme for this run: every palette access below
+/// paints its colors from then on. Without a call the built-in Faerun
+/// palette stays active.
+pub fn init(resolved: ResolvedTheme) {
+    let _ = ACTIVE.set(resolved.colors);
+}
 
-pub const PROMPT_BG: Color = Color::Rgb(44, 38, 30);
-pub const RUNNING_BG: Color = Color::Rgb(38, 38, 46);
-pub const SUCCESS_BG: Color = Color::Rgb(26, 40, 30);
-pub const WARNING_BG: Color = Color::Rgb(45, 37, 23);
-pub const ERROR_BG: Color = Color::Rgb(46, 26, 24);
-pub const DIFF_ADD_BG: Color = Color::Rgb(34, 58, 42);
-pub const DIFF_ADD_EMPH_BG: Color = Color::Rgb(50, 84, 58);
-pub const DIFF_DEL_BG: Color = Color::Rgb(62, 34, 30);
-pub const DIFF_DEL_EMPH_BG: Color = Color::Rgb(94, 50, 44);
+fn active() -> &'static ThemeColors {
+    ACTIVE.get_or_init(ThemeColors::faerun)
+}
+
+fn paint(color: Rgb) -> Color {
+    Color::Rgb(color.0, color.1, color.2)
+}
 
 #[allow(dead_code)]
-pub const SUCCESS: Color = Color::Rgb(138, 146, 90);
-#[allow(dead_code)]
-pub const WARNING: Color = Color::Rgb(192, 152, 72);
-pub const ERROR: Color = Color::Rgb(186, 88, 72);
+pub fn bg() -> Color {
+    paint(active().bg)
+}
+
+pub fn surface() -> Color {
+    paint(active().surface)
+}
+
+pub fn surface_focused() -> Color {
+    paint(active().surface_focused)
+}
+
+pub fn overlay() -> Color {
+    paint(active().overlay)
+}
+
+pub fn accent() -> Color {
+    paint(active().accent)
+}
+
+pub fn accent_bg() -> Color {
+    paint(active().accent_bg)
+}
+
+pub fn selection() -> Color {
+    paint(active().selection)
+}
+
+pub fn text() -> Color {
+    paint(active().text)
+}
+
+pub fn text_dim() -> Color {
+    paint(active().text_dim)
+}
+
+pub fn text_muted() -> Color {
+    paint(active().text_muted)
+}
+
+pub fn prompt_bg() -> Color {
+    paint(active().prompt_bg)
+}
+
+pub fn running_bg() -> Color {
+    paint(active().running_bg)
+}
+
+pub fn success_bg() -> Color {
+    paint(active().success_bg)
+}
+
+pub fn warning_bg() -> Color {
+    paint(active().warning_bg)
+}
+
+pub fn error_bg() -> Color {
+    paint(active().error_bg)
+}
+
+pub fn diff_add_bg() -> Color {
+    paint(active().diff_add_bg)
+}
+
+pub fn diff_add_emph_bg() -> Color {
+    paint(active().diff_add_emph_bg)
+}
+
+pub fn diff_del_bg() -> Color {
+    paint(active().diff_del_bg)
+}
+
+pub fn diff_del_emph_bg() -> Color {
+    paint(active().diff_del_emph_bg)
+}
+
+pub fn success() -> Color {
+    paint(active().success)
+}
+
+pub fn warning() -> Color {
+    paint(active().warning)
+}
+
+pub fn error() -> Color {
+    paint(active().error)
+}
 
 #[allow(dead_code)]
 pub fn section_block<'a>(title: &str, focused: bool) -> Block<'a> {
-    let bg = if focused { SURFACE_FOCUSED } else { SURFACE };
-    let title_style = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
+    let bg = if focused {
+        surface_focused()
+    } else {
+        surface()
+    };
+    let title_style = Style::new().fg(accent()).add_modifier(Modifier::BOLD);
     Block::new()
         .bg(bg)
         .title_top(Line::from(format!(" {title} ")).style(title_style))
@@ -44,9 +128,9 @@ pub fn section_block<'a>(title: &str, focused: bool) -> Block<'a> {
 
 #[allow(dead_code)]
 pub fn panel_block<'a>(title: &str) -> Block<'a> {
-    let title_style = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
+    let title_style = Style::new().fg(accent()).add_modifier(Modifier::BOLD);
     Block::new()
-        .bg(SURFACE)
+        .bg(surface())
         .title_top(Line::from(format!(" {title} ")).style(title_style))
         .padding(Padding::new(1, 1, 0, 0))
 }
@@ -58,14 +142,14 @@ pub fn transparent_block<'a>() -> Block<'a> {
 
 pub fn title_header<'a>(text: &str) -> Line<'a> {
     Line::from(format!(" {text} "))
-        .style(Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
+        .style(Style::new().fg(accent()).add_modifier(Modifier::BOLD))
         .centered()
 }
 
 pub fn overlay_block<'a>(title: &str) -> Block<'a> {
-    let title_style = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
+    let title_style = Style::new().fg(accent()).add_modifier(Modifier::BOLD);
     Block::new()
-        .bg(OVERLAY)
+        .bg(overlay())
         .title_top(Line::from(format!(" {title} ")).style(title_style))
         .padding(Padding::uniform(1))
 }
@@ -79,10 +163,10 @@ pub fn help_line(bindings: &[(&'static str, &'static str)]) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (i, (key, label)) in bindings.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::raw("    ").fg(TEXT_MUTED));
+            spans.push(Span::raw("    ").fg(text_muted()));
         }
-        spans.push(Span::raw(*key).fg(ACCENT));
-        spans.push(Span::raw(format!(" {label}")).fg(TEXT_MUTED));
+        spans.push(Span::raw(*key).fg(accent()));
+        spans.push(Span::raw(format!(" {label}")).fg(text_muted()));
     }
     Line::from(spans)
 }
@@ -95,16 +179,16 @@ pub fn title_bar(
     model: Option<&str>,
 ) -> Line<'static> {
     let mut spans = vec![
-        Span::raw(format!(" {app_name}")).fg(ACCENT).bold(),
-        Span::raw("  ").fg(TEXT_MUTED),
-        Span::raw(route.to_string()).fg(TEXT_DIM),
+        Span::raw(format!(" {app_name}")).fg(accent()).bold(),
+        Span::raw("  ").fg(text_muted()),
+        Span::raw(route.to_string()).fg(text_dim()),
     ];
     if let Some(p) = provider {
-        spans.push(Span::raw("  ").fg(TEXT_MUTED));
-        spans.push(Span::raw(p.to_string()).fg(TEXT));
+        spans.push(Span::raw("  ").fg(text_muted()));
+        spans.push(Span::raw(p.to_string()).fg(text()));
         if let Some(m) = model {
-            spans.push(Span::raw(":").fg(TEXT_MUTED));
-            spans.push(Span::raw(m.to_string()).fg(TEXT));
+            spans.push(Span::raw(":").fg(text_muted()));
+            spans.push(Span::raw(m.to_string()).fg(text()));
         }
     }
     Line::from(spans)

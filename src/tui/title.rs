@@ -127,9 +127,9 @@ impl TitlePopup {
     }
 
     fn input_line(&self) -> Line<'static> {
-        let text_style = Style::new().fg(theme::TEXT);
+        let text_style = Style::new().fg(theme::text());
         let cursor_style = Style::new()
-            .fg(theme::ACCENT)
+            .fg(theme::accent())
             .add_modifier(Modifier::REVERSED);
         let mut spans = Vec::new();
         let chars: Vec<char> = self.buffer.value.chars().collect();
@@ -166,7 +166,7 @@ impl TitlePopup {
 
         if self.buffer.value.is_empty() {
             frame.render_widget(
-                Paragraph::new("Untitled session").fg(theme::TEXT_MUTED),
+                Paragraph::new("Untitled session").fg(theme::text_muted()),
                 input_area,
             );
         } else {
@@ -175,7 +175,7 @@ impl TitlePopup {
 
         frame.render_widget(
             Paragraph::new(theme::help_line(&[("Enter", "save"), ("Esc", "cancel")]))
-                .fg(theme::TEXT_MUTED),
+                .fg(theme::text_muted()),
             help_area,
         );
     }

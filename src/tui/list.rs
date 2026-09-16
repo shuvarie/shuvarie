@@ -27,13 +27,13 @@ pub fn scroll_offset_for(
 pub fn render_list_item(content: String, is_selected: bool) -> ListItem<'static> {
     let prefix: &'static str = if is_selected { "▶ " } else { "  " };
     let line = Line::from(vec![
-        Span::raw(prefix).fg(theme::ACCENT),
-        Span::raw(content).fg(theme::TEXT),
+        Span::raw(prefix).fg(theme::accent()),
+        Span::raw(content).fg(theme::text()),
     ]);
     let style = if is_selected {
         ratatui::style::Style::new()
-            .bg(theme::ACCENT_BG)
-            .fg(theme::TEXT)
+            .bg(theme::accent_bg())
+            .fg(theme::text())
     } else {
         ratatui::style::Style::new()
     };
@@ -42,12 +42,12 @@ pub fn render_list_item(content: String, is_selected: bool) -> ListItem<'static>
 
 pub fn render_list_item_line(line: Line<'static>, is_selected: bool) -> ListItem<'static> {
     let prefix: &'static str = if is_selected { "▶ " } else { "  " };
-    let mut spans = vec![Span::raw(prefix).fg(theme::ACCENT)];
+    let mut spans = vec![Span::raw(prefix).fg(theme::accent())];
     spans.extend(line.spans);
     let style = if is_selected {
         ratatui::style::Style::new()
-            .bg(theme::ACCENT_BG)
-            .fg(theme::TEXT)
+            .bg(theme::accent_bg())
+            .fg(theme::text())
     } else {
         ratatui::style::Style::new()
     };
@@ -57,13 +57,13 @@ pub fn render_list_item_line(line: Line<'static>, is_selected: bool) -> ListItem
 pub fn render_list_item_dim(content: String, is_selected: bool) -> ListItem<'static> {
     let prefix: &'static str = if is_selected { "▶ " } else { "  " };
     let line = Line::from(vec![
-        Span::raw(prefix).fg(theme::TEXT_MUTED),
-        Span::raw(content).fg(theme::TEXT_DIM),
+        Span::raw(prefix).fg(theme::text_muted()),
+        Span::raw(content).fg(theme::text_dim()),
     ]);
     let style = if is_selected {
         ratatui::style::Style::new()
-            .bg(theme::ACCENT_BG)
-            .fg(theme::TEXT_DIM)
+            .bg(theme::accent_bg())
+            .fg(theme::text_dim())
     } else {
         ratatui::style::Style::new()
     };

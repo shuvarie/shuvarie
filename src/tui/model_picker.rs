@@ -438,17 +438,17 @@ impl ModelPicker {
             Layout::vertical([Length(1), Length(1), Min(0), Length(1)]).areas(inner);
 
         let mut source_spans = vec![
-            Span::raw("Models: ").fg(theme::TEXT_DIM),
-            Span::raw(self.source.label()).fg(theme::ACCENT),
+            Span::raw("Models: ").fg(theme::text_dim()),
+            Span::raw(self.source.label()).fg(theme::accent()),
         ];
         match self.source.state.error() {
             Some(error) => {
-                source_spans.push(Span::raw(" — ").fg(theme::TEXT_MUTED));
-                source_spans.push(Span::raw(error.to_string()).fg(theme::ERROR));
+                source_spans.push(Span::raw(" — ").fg(theme::text_muted()));
+                source_spans.push(Span::raw(error.to_string()).fg(theme::error()));
             }
             None => {
                 if self.source.needs_fetch() {
-                    source_spans.push(Span::raw(" — fetching…").fg(theme::TEXT_MUTED));
+                    source_spans.push(Span::raw(" — fetching…").fg(theme::text_muted()));
                 }
             }
         }
@@ -471,12 +471,12 @@ impl ModelPicker {
                 Row::Custom => {
                     let mut line = vec![
                         Span::raw("Use this input anyway")
-                            .fg(theme::ACCENT)
+                            .fg(theme::accent())
                             .add_modifier(Modifier::BOLD),
                     ];
                     line.push(
                         Span::raw(format!("  — {}", self.search.query.trim()))
-                            .fg(theme::TEXT_MUTED),
+                            .fg(theme::text_muted()),
                     );
                     render_list_item_line(Line::from(line), is_selected)
                 }
@@ -484,33 +484,33 @@ impl ModelPicker {
                     let mut spans = vec![Span::raw("  ".to_string())];
                     spans.push(
                         Span::raw(name.clone())
-                            .fg(theme::TEXT_DIM)
+                            .fg(theme::text_dim())
                             .add_modifier(Modifier::BOLD),
                     );
                     if *active {
-                        spans.push(Span::raw("  · active").fg(theme::ACCENT));
+                        spans.push(Span::raw("  · active").fg(theme::accent()));
                     }
                     ListItem::new(Line::from(spans))
                 }
                 Row::Model { id, context, .. } => {
-                    let mut line = vec![Span::raw(id.clone()).fg(theme::TEXT)];
+                    let mut line = vec![Span::raw(id.clone()).fg(theme::text())];
                     if let Some(ctx) = context {
                         line.push(
                             Span::raw(format!(" · {} ctx", fmt_tokens(u64::from(*ctx))))
-                                .fg(theme::TEXT_MUTED),
+                                .fg(theme::text_muted()),
                         );
                     }
                     render_list_item_line(Line::from(line), is_selected)
                 }
                 Row::Status { text } => ListItem::new(Line::from(
-                    Span::raw(format!("  {text}")).fg(theme::TEXT_MUTED),
+                    Span::raw(format!("  {text}")).fg(theme::text_muted()),
                 )),
             };
             items.push(item);
         }
         if items.is_empty() {
             items.push(ListItem::new(Line::from(
-                Span::raw("  no providers configured").fg(theme::TEXT_MUTED),
+                Span::raw("  no providers configured").fg(theme::text_muted()),
             )));
         }
         frame.render_widget(List::new(items), list_area);
@@ -530,7 +530,7 @@ impl ModelPicker {
         }
         hints.push(("Esc", "close"));
         frame.render_widget(
-            Paragraph::new(theme::help_line(&hints)).fg(theme::TEXT_MUTED),
+            Paragraph::new(theme::help_line(&hints)).fg(theme::text_muted()),
             hint_area,
         );
     }

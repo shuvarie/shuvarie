@@ -242,10 +242,10 @@ impl ToolBlock {
 
     pub fn bg(&self) -> Color {
         match self.status {
-            ToolStatus::Running => theme::RUNNING_BG,
-            ToolStatus::Ok => theme::SUCCESS_BG,
-            ToolStatus::Killed => theme::WARNING_BG,
-            ToolStatus::Failed => theme::ERROR_BG,
+            ToolStatus::Running => theme::running_bg(),
+            ToolStatus::Ok => theme::success_bg(),
+            ToolStatus::Killed => theme::warning_bg(),
+            ToolStatus::Failed => theme::error_bg(),
         }
     }
 
@@ -380,24 +380,24 @@ impl ToolBlock {
             ToolStatus::Ok => header.push(
                 Span::raw(if is_worker_call { "❖" } else { "✓" })
                     .fg(if is_worker_call {
-                        theme::ACCENT
+                        theme::accent()
                     } else {
-                        theme::SUCCESS
+                        theme::success()
                     })
                     .bold(),
             ),
             ToolStatus::Failed => header.push(
                 Span::raw(if is_worker_call { "❖" } else { "✗" })
                     .fg(if is_worker_call {
-                        theme::ACCENT
+                        theme::accent()
                     } else {
-                        theme::ERROR
+                        theme::error()
                     })
                     .bold(),
             ),
             ToolStatus::Killed => header.push(
                 Span::raw(if is_worker_call { "❖" } else { "⏹" })
-                    .fg(theme::WARNING)
+                    .fg(theme::warning())
                     .bold(),
             ),
         }
@@ -406,7 +406,7 @@ impl ToolBlock {
         let args = self.args_value();
 
         if is_worker_call {
-            header.push(Span::raw(self.name.clone()).fg(theme::TEXT).bold());
+            header.push(Span::raw(self.name.clone()).fg(theme::text()).bold());
             let task = args.get("task").and_then(Value::as_str).unwrap_or("");
             if !task.is_empty() {
                 let avail = inner_w.saturating_sub(spans_width(&header) + 1);
@@ -416,7 +416,7 @@ impl ToolBlock {
                     .map(|c| if c == '\n' { ' ' } else { c })
                     .collect();
                 if !preview.is_empty() {
-                    header.push(Span::raw(format!(" {preview}")).fg(theme::TEXT_MUTED));
+                    header.push(Span::raw(format!(" {preview}")).fg(theme::text_muted()));
                 }
             }
             return Line::from(header);
@@ -438,13 +438,13 @@ impl ToolBlock {
                 }
                 let right_text = right.join(" · ");
                 let right_w = UnicodeWidthStr::width(right_text.as_str());
-                header.push(Span::raw("$ ".to_string() + cmd).fg(theme::TEXT).bold());
+                header.push(Span::raw("$ ".to_string() + cmd).fg(theme::text()).bold());
                 if !right_text.is_empty() {
                     let pad = inner_w
                         .saturating_sub(spans_width(&header) + right_w)
                         .max(1);
                     header.push(Span::raw(" ".repeat(pad)));
-                    header.push(Span::raw(right_text).fg(theme::TEXT_MUTED));
+                    header.push(Span::raw(right_text).fg(theme::text_muted()));
                 }
             }
             "read_file" => {
@@ -456,36 +456,37 @@ impl ToolBlock {
                     .saturating_sub(self.name.chars().count() + 1)
                     .saturating_sub(20);
                 let path_display: String = path.chars().take(avail).collect();
-                header.push(Span::raw(self.name.clone()).fg(theme::TEXT).bold());
+                header.push(Span::raw(self.name.clone()).fg(theme::text()).bold());
                 header.push(
                     Span::raw(format!(" {path_display}"))
-                        .fg(theme::ACCENT)
+                        .fg(theme::accent())
                         .bold(),
                 );
                 if let Some((start, end)) = range {
-                    header.push(Span::raw(format!(" · lines {start}–{end}")).fg(theme::TEXT_MUTED));
+                    header
+                        .push(Span::raw(format!(" · lines {start}–{end}")).fg(theme::text_muted()));
                 }
             }
             "edit_file" | "write_file" | "delete_file" => {
                 let path = args.get("path").and_then(Value::as_str).unwrap_or("");
-                header.push(Span::raw(self.name.clone()).fg(theme::TEXT).bold());
+                header.push(Span::raw(self.name.clone()).fg(theme::text()).bold());
                 if !path.is_empty() {
                     let avail = inner_w.saturating_sub(spans_width(&header) + 1);
                     let path_display: String = path.chars().take(avail).collect();
                     header.push(
                         Span::raw(format!(" {path_display}"))
-                            .fg(theme::ACCENT)
+                            .fg(theme::accent())
                             .bold(),
                     );
                 }
             }
             "question" | "apply_patch" => {
-                header.push(Span::raw(self.name.clone()).fg(theme::TEXT).bold());
+                header.push(Span::raw(self.name.clone()).fg(theme::text()).bold());
             }
             "todo" => {
-                header.push(Span::raw("todo").fg(theme::TEXT).bold());
+                header.push(Span::raw("todo").fg(theme::text()).bold());
                 if let Some(summary) = todo_op_summary(args) {
-                    header.push(Span::raw(format!(" {summary}")).fg(theme::TEXT_MUTED));
+                    header.push(Span::raw(format!(" {summary}")).fg(theme::text_muted()));
                 }
                 if let Some(items) = parse_items(&self.output) {
                     let (done, total) = done_total(&items);
@@ -495,11 +496,11 @@ impl ToolBlock {
                         .saturating_sub(spans_width(&header) + right_w)
                         .max(1);
                     header.push(Span::raw(" ".repeat(pad)));
-                    header.push(Span::raw(right_text).fg(theme::TEXT_MUTED));
+                    header.push(Span::raw(right_text).fg(theme::text_muted()));
                 }
             }
             _ => {
-                header.push(Span::raw(self.name.clone()).fg(theme::TEXT).bold());
+                header.push(Span::raw(self.name.clone()).fg(theme::text()).bold());
                 if !self.args.is_empty() {
                     let avail = inner_w.saturating_sub(spans_width(&header) + 1);
                     let args_display: String = self
@@ -509,7 +510,7 @@ impl ToolBlock {
                         .map(|c| if c == '\n' { ' ' } else { c })
                         .collect();
                     if !args_display.is_empty() {
-                        header.push(Span::raw(format!(" {args_display}")).fg(theme::TEXT_MUTED));
+                        header.push(Span::raw(format!(" {args_display}")).fg(theme::text_muted()));
                     }
                 }
             }
@@ -566,7 +567,7 @@ fn push_output_rows(tool: &ToolBlock, body: &mut BodyBuilder, is_shell: bool) ->
             body.rows(BodySource::Text {
                 rows: TextRows::new(stdout_body),
                 prefix: "",
-                style: Style::new().fg(theme::TEXT_DIM),
+                style: Style::new().fg(theme::text_dim()),
             });
             has_output = true;
         }
@@ -577,7 +578,7 @@ fn push_output_rows(tool: &ToolBlock, body: &mut BodyBuilder, is_shell: bool) ->
             body.rows(BodySource::Text {
                 rows: TextRows::new(stderr_body),
                 prefix: "",
-                style: Style::new().fg(theme::ERROR),
+                style: Style::new().fg(theme::error()),
             });
             has_output = true;
         }
@@ -585,9 +586,9 @@ fn push_output_rows(tool: &ToolBlock, body: &mut BodyBuilder, is_shell: bool) ->
     }
 
     let (display, fg) = if is_shell && stderr_count > 0 {
-        (stderr_body, theme::ERROR)
+        (stderr_body, theme::error())
     } else {
-        (stdout_body, theme::TEXT_DIM)
+        (stdout_body, theme::text_dim())
     };
     if tool.status == ToolStatus::Ok && hides_output_when_collapsed(&tool.name) {
         return false;
@@ -608,7 +609,7 @@ fn push_tail_rows(body: &mut BodyBuilder, text: &str, fg: Color) -> bool {
     if hidden > 0 {
         body.fixed(Line::from(
             Span::raw(format!("… +{hidden} more lines"))
-                .fg(theme::TEXT_MUTED)
+                .fg(theme::text_muted())
                 .italic(),
         ));
         pushed = true;
@@ -658,25 +659,25 @@ fn push_todo_rows(
         let (marker, marker_fg, text_style) = match item.status {
             TodoStatus::Done => (
                 "✓",
-                theme::SUCCESS,
+                theme::success(),
                 Style::new()
-                    .fg(theme::TEXT_DIM)
+                    .fg(theme::text_dim())
                     .add_modifier(Modifier::CROSSED_OUT),
             ),
-            TodoStatus::InProgress => ("●", theme::ACCENT, Style::new().fg(theme::TEXT).bold()),
-            TodoStatus::Pending => ("○", theme::TEXT_MUTED, Style::new().fg(theme::TEXT_DIM)),
+            TodoStatus::InProgress => ("●", theme::accent(), Style::new().fg(theme::text()).bold()),
+            TodoStatus::Pending => ("○", theme::text_muted(), Style::new().fg(theme::text_dim())),
         };
         body.fixed(Line::from(vec![
-            Span::raw("  ").fg(theme::TEXT_MUTED),
+            Span::raw("  ").fg(theme::text_muted()),
             Span::raw(marker).fg(marker_fg).bold(),
-            Span::raw(" ").fg(theme::TEXT_MUTED),
+            Span::raw(" ").fg(theme::text_muted()),
             Span::raw(item.text.clone()).style(text_style),
         ]));
     }
     if hidden > 0 {
         body.fixed(Line::from(
             Span::raw(format!("… +{hidden} more items"))
-                .fg(theme::TEXT_MUTED)
+                .fg(theme::text_muted())
                 .italic(),
         ));
     }
@@ -694,16 +695,16 @@ fn elapsed_line(tool: &ToolBlock) -> Line<'static> {
             .map(|started| started.elapsed().as_millis() as u64)
             .unwrap_or_default();
         Line::from(vec![
-            Span::raw("  Elapsed ").fg(theme::TEXT_MUTED).italic(),
+            Span::raw("  Elapsed ").fg(theme::text_muted()).italic(),
             Span::raw(format_duration_ms(ms))
-                .fg(theme::TEXT_MUTED)
+                .fg(theme::text_muted())
                 .italic(),
         ])
     } else {
         Line::from(vec![
-            Span::raw("  Took ").fg(theme::TEXT_MUTED).italic(),
+            Span::raw("  Took ").fg(theme::text_muted()).italic(),
             Span::raw(format_duration_ms(tool.duration_ms))
-                .fg(theme::TEXT_MUTED)
+                .fg(theme::text_muted())
                 .italic(),
         ])
     }
@@ -713,7 +714,7 @@ fn push_question_block_lines(body: &mut BodyBuilder, tool: &ToolBlock) {
     if tool.status == ToolStatus::Running {
         body.fixed(
             Span::raw("  Asking...")
-                .fg(theme::TEXT_MUTED)
+                .fg(theme::text_muted())
                 .italic()
                 .into(),
         );
@@ -743,7 +744,7 @@ fn push_question_block_lines(body: &mut BodyBuilder, tool: &ToolBlock) {
         };
         body.fixed(
             Span::raw(format!("  {note}"))
-                .fg(theme::TEXT_DIM)
+                .fg(theme::text_dim())
                 .italic()
                 .into(),
         );
@@ -752,13 +753,13 @@ fn push_question_block_lines(body: &mut BodyBuilder, tool: &ToolBlock) {
     for q in &questions {
         let answer = answer_for_question(&tool.output, &q.question);
         body.fixed(Line::from(vec![
-            Span::raw("  ? ").fg(theme::ACCENT),
-            Span::raw(q.question.clone()).fg(theme::TEXT),
+            Span::raw("  ? ").fg(theme::accent()),
+            Span::raw(q.question.clone()).fg(theme::text()),
         ]));
         let (marker, fg) = if answer.is_empty() {
-            ("  ⚠ ", theme::WARNING)
+            ("  ⚠ ", theme::warning())
         } else {
-            ("  ⇒ ", theme::SUCCESS)
+            ("  ⇒ ", theme::success())
         };
         let shown = if answer.is_empty() {
             "unanswered".to_string()
@@ -778,22 +779,22 @@ fn push_diagnostics_lines(body: &mut BodyBuilder, env: &ChatEnv, path: &str) {
     }
     body.fixed(Line::from(""));
     body.fixed(Line::from(vec![
-        Span::raw("  ── diagnostics: ").fg(theme::TEXT_MUTED),
-        Span::raw(path.to_string()).fg(theme::ACCENT),
+        Span::raw("  ── diagnostics: ").fg(theme::text_muted()),
+        Span::raw(path.to_string()).fg(theme::accent()),
     ]));
     for d in diags {
         let (sev_label, sev_color) = match d.severity {
-            shuvarie_core::DiagnosticSeverity::Error => ("error", theme::ERROR),
-            shuvarie_core::DiagnosticSeverity::Warning => ("warning", theme::WARNING),
-            shuvarie_core::DiagnosticSeverity::Information => ("info", theme::ACCENT),
-            shuvarie_core::DiagnosticSeverity::Hint => ("hint", theme::TEXT_DIM),
+            shuvarie_core::DiagnosticSeverity::Error => ("error", theme::error()),
+            shuvarie_core::DiagnosticSeverity::Warning => ("warning", theme::warning()),
+            shuvarie_core::DiagnosticSeverity::Information => ("info", theme::accent()),
+            shuvarie_core::DiagnosticSeverity::Hint => ("hint", theme::text_dim()),
         };
         let loc = format!("{}:{}", d.line, d.col);
         let msg = d.message.chars().take(140).collect::<String>();
         body.fixed(Line::from(vec![
-            Span::raw(format!("    {loc:<10} ")).fg(theme::TEXT_MUTED),
+            Span::raw(format!("    {loc:<10} ")).fg(theme::text_muted()),
             Span::raw(format!("{sev_label:<8} ")).fg(sev_color),
-            Span::raw(msg).fg(theme::TEXT_DIM),
+            Span::raw(msg).fg(theme::text_dim()),
         ]));
     }
 }
@@ -802,8 +803,8 @@ fn push_file_change_rows(body: &mut BodyBuilder, change: &FileChange) {
     match change {
         FileChange::Edit { path, diff, .. } => {
             body.fixed(Line::from(vec![
-                Span::raw("  ── diff: ").fg(theme::TEXT_MUTED),
-                Span::raw(path.clone()).fg(theme::ACCENT),
+                Span::raw("  ── diff: ").fg(theme::text_muted()),
+                Span::raw(path.clone()).fg(theme::accent()),
             ]));
             body.rows(BodySource::Diff {
                 lines: Rc::from(diff.as_slice()),
@@ -811,8 +812,8 @@ fn push_file_change_rows(body: &mut BodyBuilder, change: &FileChange) {
         }
         FileChange::Write { path, content, .. } => {
             body.fixed(Line::from(vec![
-                Span::raw("  ── new file: ").fg(theme::TEXT_MUTED),
-                Span::raw(path.clone()).fg(theme::ACCENT),
+                Span::raw("  ── new file: ").fg(theme::text_muted()),
+                Span::raw(path.clone()).fg(theme::accent()),
             ]));
             body.rows(BodySource::Numbered {
                 rows: TextRows::new(content.as_str()),
@@ -820,8 +821,8 @@ fn push_file_change_rows(body: &mut BodyBuilder, change: &FileChange) {
         }
         FileChange::Delete { path, .. } => {
             body.fixed(Line::from(vec![
-                Span::raw("  ── deleted: ").fg(theme::TEXT_MUTED),
-                Span::raw(path.clone()).fg(theme::ERROR),
+                Span::raw("  ── deleted: ").fg(theme::text_muted()),
+                Span::raw(path.clone()).fg(theme::error()),
             ]));
         }
         FileChange::Patch { files, .. } => {
@@ -829,14 +830,14 @@ fn push_file_change_rows(body: &mut BodyBuilder, change: &FileChange) {
                 match (&file.kind, &file.moved_to) {
                     (PatchFileKind::Delete, _) => {
                         body.fixed(Line::from(vec![
-                            Span::raw("  ── deleted: ").fg(theme::TEXT_MUTED),
-                            Span::raw(file.path.clone()).fg(theme::ERROR),
+                            Span::raw("  ── deleted: ").fg(theme::text_muted()),
+                            Span::raw(file.path.clone()).fg(theme::error()),
                         ]));
                     }
                     (PatchFileKind::Add, _) => {
                         body.fixed(Line::from(vec![
-                            Span::raw("  ── new file: ").fg(theme::TEXT_MUTED),
-                            Span::raw(file.path.clone()).fg(theme::ACCENT),
+                            Span::raw("  ── new file: ").fg(theme::text_muted()),
+                            Span::raw(file.path.clone()).fg(theme::accent()),
                         ]));
                         body.rows(BodySource::Numbered {
                             rows: TextRows::new(file.new.as_deref().unwrap_or_default()),
@@ -844,10 +845,10 @@ fn push_file_change_rows(body: &mut BodyBuilder, change: &FileChange) {
                     }
                     (PatchFileKind::Update, Some(target)) => {
                         body.fixed(Line::from(vec![
-                            Span::raw("  ── moved: ").fg(theme::TEXT_MUTED),
-                            Span::raw(file.path.clone()).fg(theme::ACCENT),
-                            Span::raw(" → ").fg(theme::TEXT_MUTED),
-                            Span::raw(target.clone()).fg(theme::ACCENT),
+                            Span::raw("  ── moved: ").fg(theme::text_muted()),
+                            Span::raw(file.path.clone()).fg(theme::accent()),
+                            Span::raw(" → ").fg(theme::text_muted()),
+                            Span::raw(target.clone()).fg(theme::accent()),
                         ]));
                         body.rows(BodySource::Diff {
                             lines: Rc::from(file.diff.as_slice()),
@@ -855,8 +856,8 @@ fn push_file_change_rows(body: &mut BodyBuilder, change: &FileChange) {
                     }
                     (PatchFileKind::Update, None) => {
                         body.fixed(Line::from(vec![
-                            Span::raw("  ── diff: ").fg(theme::TEXT_MUTED),
-                            Span::raw(file.path.clone()).fg(theme::ACCENT),
+                            Span::raw("  ── diff: ").fg(theme::text_muted()),
+                            Span::raw(file.path.clone()).fg(theme::accent()),
                         ]));
                         body.rows(BodySource::Diff {
                             lines: Rc::from(file.diff.as_slice()),
@@ -1621,13 +1622,13 @@ mod tests {
         ));
         let materialized_lines: Vec<Line<'static>> = big_output(300)
             .lines()
-            .map(|row| Line::from(Span::raw(row.to_string()).fg(theme::TEXT_DIM)))
+            .map(|row| Line::from(Span::raw(row.to_string()).fg(theme::text_dim())))
             .collect();
         let materialized = Segment::materialized(
             std::iter::once(block.header_line(count_width as usize))
                 .chain(materialized_lines)
                 .collect(),
-            Some(theme::SUCCESS_BG),
+            Some(theme::success_bg()),
             BLOCK_PADDING,
             false,
         );

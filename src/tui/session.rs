@@ -930,14 +930,14 @@ impl SessionScreen {
 
         frame.render_widget(
             Paragraph::new(theme::title_header(&title))
-                .bg(theme::SURFACE)
+                .bg(theme::surface())
                 .alignment(Alignment::Center),
             title_area,
         );
 
         if working_rows > 0 {
             let todos_block = Block::new()
-                .bg(theme::SURFACE)
+                .bg(theme::surface())
                 .padding(Padding::horizontal(2));
             let todos_inner = todos_block.inner(todos_area);
             frame.render_widget(todos_block, todos_area);
@@ -958,9 +958,9 @@ impl SessionScreen {
             self.question.view(frame, input_area);
         } else {
             let text_color = if bash_mode {
-                theme::ACCENT
+                theme::accent()
             } else {
-                theme::TEXT
+                theme::text()
             };
             self.input.view(frame, input_area, text_color);
         }
@@ -978,13 +978,13 @@ impl SessionScreen {
         }
 
         let connection = self.provider.as_ref().map(|p| {
-            let mut spans = vec![Span::raw(p.clone()).fg(theme::TEXT)];
+            let mut spans = vec![Span::raw(p.clone()).fg(theme::text())];
             if let Some(m) = &self.model {
-                spans.push(Span::raw(":").fg(theme::TEXT_MUTED));
-                spans.push(Span::raw(m.clone()).fg(theme::TEXT_DIM));
+                spans.push(Span::raw(":").fg(theme::text_muted()));
+                spans.push(Span::raw(m.clone()).fg(theme::text_dim()));
                 if let Some(v) = &self.variant {
-                    spans.push(Span::raw(":").fg(theme::TEXT_MUTED));
-                    spans.push(Span::raw(v.clone()).fg(theme::ACCENT));
+                    spans.push(Span::raw(":").fg(theme::text_muted()));
+                    spans.push(Span::raw(v.clone()).fg(theme::accent()));
                 }
             }
             Line::from(spans)
@@ -1018,7 +1018,7 @@ impl SessionScreen {
             let spans = vec![
                 super::spinner::wait_spinner(),
                 Span::raw(" "),
-                Span::raw(text).fg(theme::ERROR),
+                Span::raw(text).fg(theme::error()),
             ];
             frame.render_widget(Paragraph::new(Line::from(spans)), status_area);
         } else if let Some((status, kind)) = status {
@@ -1034,7 +1034,7 @@ impl SessionScreen {
                 spans.push(spinner_span);
                 spans.push(Span::raw(" "));
             }
-            spans.push(Span::raw(status).fg(theme::TEXT_MUTED));
+            spans.push(Span::raw(status).fg(theme::text_muted()));
             frame.render_widget(Paragraph::new(Line::from(spans)), status_area);
         }
 
@@ -1044,7 +1044,10 @@ impl SessionScreen {
         }
 
         if let Some(error) = &self.error {
-            frame.render_widget(Paragraph::new(error.as_str()).fg(theme::ERROR), footer_area);
+            frame.render_widget(
+                Paragraph::new(error.as_str()).fg(theme::error()),
+                footer_area,
+            );
         } else {
             let recall = self
                 .chat
@@ -1092,13 +1095,13 @@ impl SessionScreen {
                 let [hints_area, _, workspace_area] =
                     Layout::horizontal([Length(footer.width() as u16), Length(2), Min(0)])
                         .areas(footer_area);
-                frame.render_widget(Paragraph::new(footer).fg(theme::TEXT_MUTED), hints_area);
+                frame.render_widget(Paragraph::new(footer).fg(theme::text_muted()), hints_area);
                 frame.render_widget(
                     Paragraph::new(workspace).alignment(Alignment::Right),
                     workspace_area,
                 );
             } else {
-                frame.render_widget(Paragraph::new(footer).fg(theme::TEXT_MUTED), footer_area);
+                frame.render_widget(Paragraph::new(footer).fg(theme::text_muted()), footer_area);
             }
         }
     }
@@ -1161,14 +1164,14 @@ fn working_todo_lines(
         let prefix = format!("~ #{} ", item.id);
         let text_width = usize::from(width).saturating_sub(prefix.chars().count() + 1);
         lines.push(Line::from(vec![
-            Span::raw("~").fg(theme::WARNING),
-            Span::raw(format!(" #{} ", item.id)).fg(theme::TEXT_MUTED),
-            elided_span(&item.text, text_width, theme::TEXT),
+            Span::raw("~").fg(theme::warning()),
+            Span::raw(format!(" #{} ", item.id)).fg(theme::text_muted()),
+            elided_span(&item.text, text_width, theme::text()),
         ]));
     }
     let overflow = todos.len().saturating_sub(MAX_WORKING_ROWS);
     if overflow > 0 {
-        lines.push(Line::from(format!("… +{overflow} more in progress")).fg(theme::TEXT_MUTED));
+        lines.push(Line::from(format!("… +{overflow} more in progress")).fg(theme::text_muted()));
     }
     lines
 }
@@ -1546,7 +1549,7 @@ mod tests {
         let col = text.find("Connection reset").unwrap() as u16;
         assert_eq!(
             buf[(col, y)].fg,
-            theme::ERROR,
+            theme::error(),
             "countdown text renders in ERROR color"
         );
     }

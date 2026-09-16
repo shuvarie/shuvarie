@@ -56,7 +56,7 @@ impl Welcome {
 
         let lines = vec![
             Line::from(""),
-            Line::from("Connect an LLM provider to begin.").style(Style::new().fg(theme::TEXT)),
+            Line::from("Connect an LLM provider to begin.").style(Style::new().fg(theme::text())),
             Line::from(""),
             Line::from(""),
         ];
@@ -77,7 +77,7 @@ impl Welcome {
                 ("Enter", "add provider"),
                 ("Ctrl+C", "quit"),
             ]))
-            .fg(theme::TEXT_MUTED),
+            .fg(theme::text_muted()),
             Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
         );
     }

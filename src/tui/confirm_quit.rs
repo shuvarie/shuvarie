@@ -74,7 +74,7 @@ impl ConfirmQuit {
         let lines = vec![
             Line::from(""),
             Line::from("Are you sure you want to quit?")
-                .style(Style::new().fg(theme::TEXT))
+                .style(Style::new().fg(theme::text()))
                 .alignment(Alignment::Center),
             Line::from(""),
             Line::from(""),
@@ -97,7 +97,7 @@ impl ConfirmQuit {
                 ("Ctrl+C", "confirm"),
                 ("Esc", "cancel"),
             ]))
-            .fg(theme::TEXT_MUTED)
+            .fg(theme::text_muted())
             .alignment(Alignment::Center),
             Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
         );

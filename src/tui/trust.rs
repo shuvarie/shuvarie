@@ -175,7 +175,7 @@ impl TrustPrompt {
 
         let mut lines: Vec<ListItem> = vec![
             ListItem::new(Line::from(
-                Span::raw(self.cwd.to_string_lossy().into_owned()).fg(theme::TEXT_MUTED),
+                Span::raw(self.cwd.to_string_lossy().into_owned()).fg(theme::text_muted()),
             )),
             ListItem::new(Line::from("")),
         ];
@@ -184,13 +184,13 @@ impl TrustPrompt {
             let box_glyph: &str = if checked { "[x]" } else { "[ ]" };
             let line = Line::from(vec![
                 Span::raw(format!("{box_glyph} ")).fg(if checked {
-                    theme::ACCENT
+                    theme::accent()
                 } else {
-                    theme::TEXT_MUTED
+                    theme::text_muted()
                 }),
-                Span::raw(format!("{:<label_width$}", label(*category))).fg(theme::TEXT),
-                Span::raw("  ").fg(theme::TEXT),
-                Span::raw(detail.clone()).fg(theme::TEXT_MUTED),
+                Span::raw(format!("{:<label_width$}", label(*category))).fg(theme::text()),
+                Span::raw("  ").fg(theme::text()),
+                Span::raw(detail.clone()).fg(theme::text_muted()),
             ]);
             lines.push(list::render_list_item_line(line, i == self.selected));
         }
@@ -207,7 +207,7 @@ impl TrustPrompt {
             ("Esc", "skip (session only)"),
         ]);
         frame.render_widget(
-            Paragraph::new(help).fg(theme::TEXT_MUTED),
+            Paragraph::new(help).fg(theme::text_muted()),
             Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
         );
     }

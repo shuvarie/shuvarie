@@ -230,28 +230,28 @@ impl HistorySearch {
         let [input_area, status_area, list_area, hint_area] =
             Layout::vertical([Length(1), Length(1), Min(0), Length(1)]).areas(inner);
 
-        let input_line = self.query.cursor_line(theme::TEXT, theme::ACCENT);
-        let mut input_spans = vec![Span::raw("/ ").fg(theme::TEXT_MUTED)];
+        let input_line = self.query.cursor_line(theme::text(), theme::accent());
+        let mut input_spans = vec![Span::raw("/ ").fg(theme::text_muted())];
         input_spans.extend(input_line.spans);
         frame.render_widget(Paragraph::new(Line::from(input_spans)), input_area);
 
         let status = if let Some(err) = &self.error {
-            Paragraph::new(err.as_str()).fg(theme::ERROR)
+            Paragraph::new(err.as_str()).fg(theme::error())
         } else if self.loading {
             Paragraph::new(Line::from(vec![
                 super::spinner::spinner(),
-                Span::raw(" Searching...").fg(theme::TEXT_MUTED),
+                Span::raw(" Searching...").fg(theme::text_muted()),
             ]))
         } else if self.query.value.is_empty() {
-            Paragraph::new("type to search all sessions").fg(theme::TEXT_MUTED)
+            Paragraph::new("type to search all sessions").fg(theme::text_muted())
         } else if self.hits.is_empty() {
-            Paragraph::new("no matches").fg(theme::TEXT_MUTED)
+            Paragraph::new("no matches").fg(theme::text_muted())
         } else {
             Paragraph::new(format!(
                 "{} matches · ⌕ semantic results are merged as they arrive",
                 self.hits.len()
             ))
-            .fg(theme::TEXT_MUTED)
+            .fg(theme::text_muted())
         };
         frame.render_widget(status, status_area);
 
@@ -278,12 +278,12 @@ impl HistorySearch {
                     shuvarie_core::SearchSource::Fts => "",
                 };
                 let line = Line::from(vec![
-                    Span::raw(format!("{} · ", hit.session_title)).fg(theme::ACCENT),
-                    Span::raw(role_tag).fg(theme::TEXT_MUTED),
+                    Span::raw(format!("{} · ", hit.session_title)).fg(theme::accent()),
+                    Span::raw(role_tag).fg(theme::text_muted()),
                     Span::raw("  "),
-                    Span::raw(source_tag).fg(theme::ACCENT),
-                    Span::raw(Self::snippet(&hit.content)).fg(theme::TEXT),
-                    Span::raw(format!("  {:.2}", hit.score)).fg(theme::TEXT_MUTED),
+                    Span::raw(source_tag).fg(theme::accent()),
+                    Span::raw(Self::snippet(&hit.content)).fg(theme::text()),
+                    Span::raw(format!("  {:.2}", hit.score)).fg(theme::text_muted()),
                 ]);
                 render_list_item_line(line, idx == self.selected)
             })
@@ -297,7 +297,7 @@ impl HistorySearch {
                 ("Enter", "open session"),
                 ("Esc", "close"),
             ]))
-            .fg(theme::TEXT_MUTED),
+            .fg(theme::text_muted()),
             hint_area,
         );
     }

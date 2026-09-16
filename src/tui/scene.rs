@@ -154,7 +154,7 @@ impl ScenePicker {
         let [list_area, hint_area] = Layout::vertical([Min(0), Length(1)]).areas(inner);
         if self.entries.is_empty() {
             frame.render_widget(
-                Paragraph::new("no scenes configured".to_string()).fg(theme::TEXT_MUTED),
+                Paragraph::new("no scenes configured".to_string()).fg(theme::text_muted()),
                 list_area,
             );
         } else {
@@ -176,35 +176,35 @@ impl ScenePicker {
         }
 
         let hint = theme::help_line(&[("↑↓", "walk"), ("Enter", "switch"), ("Esc", "close")]);
-        frame.render_widget(Paragraph::new(hint).fg(theme::TEXT_MUTED), hint_area);
+        frame.render_widget(Paragraph::new(hint).fg(theme::text_muted()), hint_area);
     }
 
     fn render_row(&self, entry: &SceneEntry, is_selected: bool) -> ListItem<'static> {
         let prefix: &str = if is_selected { "▶ " } else { "  " };
         let name_color = if !entry.switchable {
-            theme::TEXT_MUTED
+            theme::text_muted()
         } else if entry.current {
-            theme::ACCENT
+            theme::accent()
         } else {
-            theme::TEXT
+            theme::text()
         };
         let mut spans = vec![
-            Span::raw(prefix).fg(theme::ACCENT),
-            Span::raw("⌗ ").fg(theme::TEXT_MUTED),
+            Span::raw(prefix).fg(theme::accent()),
+            Span::raw("⌗ ").fg(theme::text_muted()),
             Span::raw(entry.name.clone()).fg(name_color),
         ];
         if let Some(description) = &entry.description {
-            spans.push(Span::raw(" — ").fg(theme::TEXT_MUTED));
-            spans.push(Span::raw(description.clone()).fg(theme::TEXT_DIM));
+            spans.push(Span::raw(" — ").fg(theme::text_muted()));
+            spans.push(Span::raw(description.clone()).fg(theme::text_dim()));
         }
         if !entry.switchable {
-            spans.push(Span::raw(" (no interlude)").fg(theme::TEXT_MUTED));
+            spans.push(Span::raw(" (no interlude)").fg(theme::text_muted()));
         }
         if entry.current {
-            spans.push(Span::raw(" ●").fg(theme::ACCENT));
+            spans.push(Span::raw(" ●").fg(theme::accent()));
         }
         ListItem::new(Line::from(spans)).style(if is_selected {
-            ratatui::style::Style::new().bg(theme::ACCENT_BG)
+            ratatui::style::Style::new().bg(theme::accent_bg())
         } else {
             ratatui::style::Style::new()
         })

@@ -136,19 +136,19 @@ impl Block {
             Block::Context(block) => block.view(),
             Block::Summary => vec![Segment::plain(vec![Line::from(
                 Span::raw("◈ summary of earlier conversation")
-                    .fg(theme::ACCENT)
+                    .fg(theme::accent())
                     .italic(),
             )])],
             Block::Interrupted => vec![Segment::plain(vec![Line::from(
-                Span::raw("(interrupted)").fg(theme::WARNING).italic(),
+                Span::raw("(interrupted)").fg(theme::warning()).italic(),
             )])],
             Block::Working => vec![Segment::plain(vec![Line::from(vec![
                 spinner::spinner(),
                 Span::raw(" "),
-                Span::raw("(Working...)").fg(theme::TEXT_MUTED),
+                Span::raw("(Working...)").fg(theme::text_muted()),
             ])])],
             Block::ToolOnlyNote => vec![Segment::plain(vec![Line::from(
-                Span::raw("(tool output only — no text reply)").fg(theme::TEXT_MUTED),
+                Span::raw("(tool output only — no text reply)").fg(theme::text_muted()),
             )])],
         }
     }

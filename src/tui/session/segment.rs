@@ -174,8 +174,8 @@ impl BodySource {
                 *style,
             )),
             BodySource::Numbered { rows } => Line::from(vec![
-                Span::raw(format!("    {:>4} ", index + 1)).fg(theme::TEXT_MUTED),
-                Span::raw(rows.row_str(index).to_string()).fg(theme::TEXT_DIM),
+                Span::raw(format!("    {:>4} ", index + 1)).fg(theme::text_muted()),
+                Span::raw(rows.row_str(index).to_string()).fg(theme::text_dim()),
             ]),
             BodySource::Diff { lines } => diff_row_line(&lines[index as usize]),
             BodySource::Lines { lines } => lines[index as usize].clone(),
@@ -214,19 +214,19 @@ fn diff_row_copy_text(line: &DiffLine) -> String {
 
 fn diff_row_line(line: &DiffLine) -> Line<'static> {
     if line.kind == DiffLineKind::Ellipsis {
-        return Line::from(Span::raw("    …").fg(theme::TEXT_MUTED));
+        return Line::from(Span::raw("    …").fg(theme::text_muted()));
     }
     let (marker, fg, emph_bg) = match line.kind {
-        DiffLineKind::Add => ("+", theme::SUCCESS, Some(theme::DIFF_ADD_EMPH_BG)),
-        DiffLineKind::Remove => ("-", theme::ERROR, Some(theme::DIFF_DEL_EMPH_BG)),
-        DiffLineKind::Context => (" ", theme::TEXT_DIM, None),
+        DiffLineKind::Add => ("+", theme::success(), Some(theme::diff_add_emph_bg())),
+        DiffLineKind::Remove => ("-", theme::error(), Some(theme::diff_del_emph_bg())),
+        DiffLineKind::Context => (" ", theme::text_dim(), None),
         DiffLineKind::Ellipsis => unreachable!(),
     };
     let old_num = gutter_number(line.old_line);
     let new_num = gutter_number(line.new_line);
     let text = line.text.trim_end_matches(['\r', '\n']);
     let mut spans = vec![
-        Span::raw(format!("  {old_num} {new_num} ")).fg(theme::TEXT_MUTED),
+        Span::raw(format!("  {old_num} {new_num} ")).fg(theme::text_muted()),
         Span::raw(marker).fg(fg).bold(),
     ];
     spans.extend(edited_spans(text, &line.edits, fg, emph_bg));
@@ -417,8 +417,8 @@ fn source_row_bg(source: &BodySource, index: u32) -> Option<Color> {
         return None;
     };
     match lines.get(index as usize)?.kind {
-        DiffLineKind::Add => Some(theme::DIFF_ADD_BG),
-        DiffLineKind::Remove => Some(theme::DIFF_DEL_BG),
+        DiffLineKind::Add => Some(theme::diff_add_bg()),
+        DiffLineKind::Remove => Some(theme::diff_del_bg()),
         DiffLineKind::Context | DiffLineKind::Ellipsis => None,
     }
 }
@@ -974,7 +974,7 @@ pub(crate) mod tests {
     fn materialized_text_lines(count: u32) -> Vec<Line<'static>> {
         big_text(count)
             .lines()
-            .map(|row| Line::from(Span::raw(row.to_string()).fg(theme::TEXT_DIM)))
+            .map(|row| Line::from(Span::raw(row.to_string()).fg(theme::text_dim())))
             .collect()
     }
 
@@ -982,7 +982,7 @@ pub(crate) mod tests {
         let source = BodySource::Text {
             rows: TextRows::new(big_text(220)),
             prefix: "",
-            style: Style::new().fg(theme::TEXT_DIM),
+            style: Style::new().fg(theme::text_dim()),
         };
         Segment {
             chunks: vec![BodyChunk::rows(source, 0, width, false)],
@@ -1023,7 +1023,7 @@ pub(crate) mod tests {
         BodySource::Text {
             rows: TextRows::new(big_text(count)),
             prefix: "",
-            style: Style::new().fg(theme::TEXT_DIM),
+            style: Style::new().fg(theme::text_dim()),
         }
     }
 
@@ -1042,7 +1042,7 @@ pub(crate) mod tests {
                 ),
                 BodyChunk::fixed(vec![Line::from("trailer")]),
             ],
-            bg: Some(theme::SUCCESS_BG),
+            bg: Some(theme::success_bg()),
             padding: BLOCK_PADDING,
             hit: None,
             trim: false,
@@ -1051,12 +1051,12 @@ pub(crate) mod tests {
         flat.extend(
             big_text(220)
                 .lines()
-                .map(|row| Line::from(Span::raw(row.to_string()).fg(theme::TEXT_DIM))),
+                .map(|row| Line::from(Span::raw(row.to_string()).fg(theme::text_dim()))),
         );
         flat.push(Line::from("trailer"));
         let fixed_equivalent = Segment {
             chunks: vec![BodyChunk::fixed(flat)],
-            bg: Some(theme::SUCCESS_BG),
+            bg: Some(theme::success_bg()),
             padding: BLOCK_PADDING,
             hit: None,
             trim: false,
@@ -1119,7 +1119,7 @@ pub(crate) mod tests {
     fn empty_body_segment_measures_as_bg_row() {
         let seg = Segment {
             chunks: Vec::new(),
-            bg: Some(theme::PROMPT_BG),
+            bg: Some(theme::prompt_bg()),
             padding: BLOCK_PADDING,
             hit: None,
             trim: true,
@@ -1282,7 +1282,7 @@ pub(crate) mod tests {
         let width = 40;
         let seg = Segment::chunked(
             BodyChunk::rows(emphasis_diff_source(), 0, width, false),
-            Some(theme::SUCCESS_BG),
+            Some(theme::success_bg()),
             (0, 0),
             false,
         );
@@ -1290,17 +1290,17 @@ pub(crate) mod tests {
         // Row layout: "  {old:>4} {new:>4} {marker}{text}" — the text starts
         // at column 13, so the emphasized run covers columns 25..28.
         let bg_at = |row: u32, x: u16| buf[(x, row as u16)].bg;
-        assert_eq!(bg_at(0, 0), theme::DIFF_DEL_BG);
-        assert_eq!(bg_at(0, 12), theme::DIFF_DEL_BG);
-        assert_eq!(bg_at(0, width - 1), theme::DIFF_DEL_BG, "full row");
-        assert_eq!(bg_at(0, 25), theme::DIFF_DEL_EMPH_BG, "run start");
-        assert_eq!(bg_at(0, 27), theme::DIFF_DEL_EMPH_BG, "run end");
-        assert_eq!(bg_at(0, 28), theme::DIFF_DEL_BG, "after the run");
-        assert_eq!(bg_at(1, 0), theme::DIFF_ADD_BG);
-        assert_eq!(bg_at(1, 25), theme::DIFF_ADD_EMPH_BG);
-        assert_eq!(bg_at(1, 28), theme::DIFF_ADD_BG);
-        assert_eq!(bg_at(2, 0), theme::SUCCESS_BG, "context row");
-        assert_eq!(bg_at(2, width - 1), theme::SUCCESS_BG);
+        assert_eq!(bg_at(0, 0), theme::diff_del_bg());
+        assert_eq!(bg_at(0, 12), theme::diff_del_bg());
+        assert_eq!(bg_at(0, width - 1), theme::diff_del_bg(), "full row");
+        assert_eq!(bg_at(0, 25), theme::diff_del_emph_bg(), "run start");
+        assert_eq!(bg_at(0, 27), theme::diff_del_emph_bg(), "run end");
+        assert_eq!(bg_at(0, 28), theme::diff_del_bg(), "after the run");
+        assert_eq!(bg_at(1, 0), theme::diff_add_bg());
+        assert_eq!(bg_at(1, 25), theme::diff_add_emph_bg());
+        assert_eq!(bg_at(1, 28), theme::diff_add_bg());
+        assert_eq!(bg_at(2, 0), theme::success_bg(), "context row");
+        assert_eq!(bg_at(2, width - 1), theme::success_bg());
     }
 
     #[test]
@@ -1318,7 +1318,7 @@ pub(crate) mod tests {
         let width = 30;
         let seg = Segment::chunked(
             BodyChunk::rows(source, 0, width, false),
-            Some(theme::SURFACE),
+            Some(theme::surface()),
             (0, 0),
             false,
         );
@@ -1330,7 +1330,11 @@ pub(crate) mod tests {
                 continue;
             }
             for x in 0..width {
-                assert_eq!(buf[(x, y as u16)].bg, theme::DIFF_DEL_BG, "row {y} col {x}");
+                assert_eq!(
+                    buf[(x, y as u16)].bg,
+                    theme::diff_del_bg(),
+                    "row {y} col {x}"
+                );
             }
         }
     }
@@ -1362,7 +1366,7 @@ pub(crate) mod tests {
                 width,
                 false,
             ),
-            Some(theme::SUCCESS_BG),
+            Some(theme::success_bg()),
             (0, 0),
             false,
         );
@@ -1371,14 +1375,14 @@ pub(crate) mod tests {
             "60 rows must slice"
         );
         let full = full_render(&seg, width);
-        assert_eq!(full[(0, 0)].bg, theme::DIFF_DEL_BG);
+        assert_eq!(full[(0, 0)].bg, theme::diff_del_bg());
         // The rows overflow the pane and wrap, so locate the first Add row's
         // leading wrapped row instead of assuming its y.
         let add_row = buffer_rows(&full, width, full.area().height)
             .iter()
             .position(|row| row.contains("edited row 1"))
             .expect("add row rendered") as u16;
-        assert_eq!(full[(0, add_row)].bg, theme::DIFF_ADD_BG);
+        assert_eq!(full[(0, add_row)].bg, theme::diff_add_bg());
         assert_windows_match(
             &seg,
             width,

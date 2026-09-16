@@ -364,7 +364,7 @@ impl QuestionUI {
             return;
         }
         let block = Block::new()
-            .bg(theme::SURFACE)
+            .bg(theme::surface())
             .padding(Padding::symmetric(2, 1));
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -391,16 +391,19 @@ impl QuestionUI {
         };
         let mut lines = vec![
             Line::from(vec![
-                Span::raw("▸ ").fg(theme::ACCENT),
+                Span::raw("▸ ").fg(theme::accent()),
                 Span::raw(format!("{progress}{}", q.header))
-                    .fg(theme::ACCENT)
+                    .fg(theme::accent())
                     .bold(),
             ]),
-            truncate_line(&q.question, width).style(Style::new().fg(theme::TEXT).italic()),
+            truncate_line(&q.question, width).style(Style::new().fg(theme::text()).italic()),
             Line::from(""),
         ];
         if self.typing_custom {
-            lines.push(self.typing_buffer.cursor_line(theme::TEXT, theme::ACCENT));
+            lines.push(
+                self.typing_buffer
+                    .cursor_line(theme::text(), theme::accent()),
+            );
             lines.push(theme::help_line(&[
                 ("←/→", "move"),
                 ("Enter", "save"),
@@ -423,22 +426,22 @@ impl QuestionUI {
             let number = format!("{} ", i + 1);
             let mut spans = Vec::new();
             if self.cursor == i {
-                spans.push(Span::raw("▶ ").fg(theme::ACCENT));
+                spans.push(Span::raw("▶ ").fg(theme::accent()));
             } else {
                 spans.push(Span::raw("  "));
             }
             spans.push(Span::raw(marker).fg(if picked {
-                theme::SUCCESS
+                theme::success()
             } else {
-                theme::TEXT_MUTED
+                theme::text_muted()
             }));
-            spans.push(Span::raw(number).fg(theme::TEXT_MUTED));
-            spans.push(Span::raw(option.label.clone()).fg(theme::TEXT));
+            spans.push(Span::raw(number).fg(theme::text_muted()));
+            spans.push(Span::raw(option.label.clone()).fg(theme::text()));
             lines.push(Line::from(spans));
             if !option.description.is_empty() && lines.len() < max_rows {
                 lines.push(
                     truncate_line(&format!("     {}", option.description), width)
-                        .style(Style::new().fg(theme::TEXT_MUTED)),
+                        .style(Style::new().fg(theme::text_muted())),
                 );
             }
         }
@@ -447,18 +450,18 @@ impl QuestionUI {
             let selected = self.cursor == q.options.len();
             let mut spans = Vec::new();
             if selected {
-                spans.push(Span::raw("▶ ").fg(theme::ACCENT));
+                spans.push(Span::raw("▶ ").fg(theme::accent()));
             } else {
                 spans.push(Span::raw("  "));
             }
-            spans.push(Span::raw("✎ ").fg(theme::TEXT_MUTED));
+            spans.push(Span::raw("✎ ").fg(theme::text_muted()));
             match saved {
                 Some(text) => {
-                    spans.push(Span::raw("✓ ").fg(theme::SUCCESS));
-                    spans.push(truncate_span(&text, width.saturating_sub(6), theme::TEXT));
+                    spans.push(Span::raw("✓ ").fg(theme::success()));
+                    spans.push(truncate_span(&text, width.saturating_sub(6), theme::text()));
                 }
                 None => {
-                    spans.push(Span::raw("Type your own answer").fg(theme::TEXT_DIM));
+                    spans.push(Span::raw("Type your own answer").fg(theme::text_dim()));
                 }
             }
             lines.push(Line::from(spans));
@@ -489,7 +492,7 @@ impl QuestionUI {
     fn confirm_lines(&self) -> Vec<Line<'static>> {
         let ready = self.all_answered();
         let mut lines = vec![Line::from(
-            Span::raw("Confirm answers").fg(theme::ACCENT).bold(),
+            Span::raw("Confirm answers").fg(theme::accent()).bold(),
         )];
         for (i, q) in self.questions.iter().enumerate() {
             let answer = if let Some(text) = &self.custom_answers[i] {
@@ -504,30 +507,30 @@ impl QuestionUI {
             let answered = !answer.is_empty();
             lines.push(Line::from(vec![
                 Span::raw(if answered { "  ✓ " } else { "  ⚠ " }).fg(if answered {
-                    theme::SUCCESS
+                    theme::success()
                 } else {
-                    theme::WARNING
+                    theme::warning()
                 }),
-                Span::raw(format!("{}: ", q.header)).fg(theme::TEXT),
+                Span::raw(format!("{}: ", q.header)).fg(theme::text()),
                 Span::raw(if answered {
                     answer
                 } else {
                     "unanswered".into()
                 })
                 .fg(if answered {
-                    theme::TEXT_DIM
+                    theme::text_dim()
                 } else {
-                    theme::WARNING
+                    theme::warning()
                 }),
             ]));
         }
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::raw(if ready { "▶ " } else { "  " }).fg(theme::ACCENT),
+            Span::raw(if ready { "▶ " } else { "  " }).fg(theme::accent()),
             Span::raw("Confirm").fg(if ready {
-                theme::TEXT
+                theme::text()
             } else {
-                theme::TEXT_MUTED
+                theme::text_muted()
             }),
         ]));
         lines
@@ -539,7 +542,7 @@ fn ctrl_mod(key: &KeyEvent) -> bool {
 }
 
 fn truncate_line(text: &str, width: u16) -> Line<'static> {
-    Line::from(truncate_span(text, width.saturating_sub(1), theme::TEXT))
+    Line::from(truncate_span(text, width.saturating_sub(1), theme::text()))
 }
 
 fn truncate_span(text: &str, width: u16, color: Color) -> Span<'static> {

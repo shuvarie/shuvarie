@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use shuvarie_core::{Category, Config, ScanItem, SceneSet, TrustFile, TrustGrants, WorkspaceScan};
+use shuvarie_core::{
+    Category, Config, ResolvedTheme, ScanItem, SceneSet, TrustFile, TrustGrants, WorkspaceScan,
+};
 
 use crate::tui::trust::{TrustPromptOutcome, run_prompt};
 
@@ -11,6 +13,10 @@ pub struct Resolved {
     /// sections plus the `scene.d` drop-in dirs under their trust rules,
     /// with a warning per same-level conflict.
     pub scenes: SceneSet,
+    /// The resolved UI theme (the built-in Faerun palette, overridden by the
+    /// `ui.theme` selection) plus a warning per unresolvable name or `themes.d`
+    /// problem.
+    pub theme: ResolvedTheme,
 }
 
 /// Resolves the workspace trust decision and loads the config under it: a
@@ -90,10 +96,18 @@ pub async fn resolve(explicit_config: Option<&PathBuf>) -> color_eyre::Result<Op
         &grants,
         explicit_config.as_ref().map(|p| p.as_path()),
     )?;
+    let theme_set = Config::load_themes(
+        &config,
+        &cwd,
+        &grants,
+        explicit_config.as_ref().map(|p| p.as_path()),
+    )?;
+    let ResolvedTheme { colors, warnings } = theme_set.resolve(config.ui.theme.as_deref());
     Ok(Some(Resolved {
         config,
         grants,
         scenes,
+        theme: ResolvedTheme { colors, warnings },
     }))
 }
 

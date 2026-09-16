@@ -34,6 +34,10 @@ pub const WORKSPACE_DIR_NAME: &str = if cfg!(debug_assertions) {
 /// `<config_dir>/scene.d` and a workspace `<WORKSPACE_DIR_NAME>/scene.d`.
 pub const SCENE_DIR_NAME: &str = "scene.d";
 
+/// The `themes.d` drop-in dir name, next to each config directory: a global
+/// `<config_dir>/themes.d` and a workspace `<WORKSPACE_DIR_NAME>/themes.d`.
+pub const THEMES_DIR_NAME: &str = "themes.d";
+
 /// Context-file candidates for one directory, in priority order: an
 /// `AGENTS.override.md` replaces the plain files in its directory, and
 /// `CLAUDE.md` is the fallback for projects written for other agents.
@@ -75,9 +79,9 @@ fn read_layer(path: &std::path::Path) -> Result<Option<ConfigLayer>> {
 /// not), so locally-set sections intentionally reset untouched fields of that
 /// section to defaults. `lsp.servers` merges key-by-key so a file adding one
 /// server doesn't shadow the rest; `registries` merges key-by-key per
-/// registry name for the same reason. `permissions` and `scenes` are stacked
-/// separately by [`stack_permissions`] / [`stack_scenes`] once the whole
-/// chain has been read.
+/// registry name for the same reason. `permissions`, `scenes`, and `themes`
+/// are stacked separately by [`stack_permissions`] / [`stack_scenes`] /
+/// [`stack_themes`] once the whole chain has been read.
 fn merge_layer(config: &mut Config, layer: &ConfigLayer) {
     for section in &layer.sections {
         match section.as_str() {
@@ -144,6 +148,20 @@ fn stack_scenes(layers: &[ScenesConfig]) -> ScenesConfig {
     merged
 }
 
+/// Stacks the chain's `themes` sections into one config, lowest-priority
+/// layer first: each theme merges its color overrides key-wise per theme
+/// name so a layer can extend a theme defined elsewhere without hiding it.
+/// This is the save-faithful merge for [`Config::themes`]; the runtime theme
+/// set ([`Config::load_themes`]) instead resolves the chain's layers through
+/// `theme_sources`, where same-level duplicates conflict.
+fn stack_themes(layers: &[ThemesConfig]) -> ThemesConfig {
+    let mut merged = ThemesConfig::default();
+    for layer in layers.iter().rev() {
+        merged.stack(layer.clone());
+    }
+    merged
+}
+
 /// Merges one level's sources (highest priority first): `default` comes from
 /// the highest-priority source that sets it, and a scene name defined by more
 /// than one source of the level is a conflict — the scene is dropped
@@ -185,9 +203,9 @@ fn merge_level(level: &str, sources: &[SceneSource]) -> (ScenesConfig, Vec<Strin
     (merged, warnings)
 }
 
-/// The display label of a config file in scene-conflict warnings: the file
-/// name, prefixed with the workspace dir when it lives inside one.
-fn scene_source_label(path: &std::path::Path) -> String {
+/// The display label of a config file in same-level conflict warnings: the
+/// file name, prefixed with the workspace dir when it lives inside one.
+fn source_label(path: &std::path::Path) -> String {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -233,6 +251,74 @@ fn scene_set_from_levels(
     SceneSet { scenes, warnings }
 }
 
+/// Merges one level's theme sources (highest priority first): a theme name
+/// defined by more than one source of the level is a conflict — the theme is
+/// dropped entirely and a warning names every defining source.
+fn merge_theme_level(level: &str, sources: &[ThemeSource]) -> (ThemesConfig, Vec<String>) {
+    let mut merged = ThemesConfig::default();
+    let mut defined: std::collections::BTreeMap<String, String> = Default::default();
+    let mut conflicts: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for source in sources {
+        for (name, theme) in &source.themes.themes {
+            match defined.get(name) {
+                None => {
+                    defined.insert(name.clone(), source.label.clone());
+                    merged.themes.insert(name.clone(), theme.clone());
+                }
+                Some(first) => {
+                    merged.themes.remove(name);
+                    let labels = conflicts.entry(name.clone()).or_default();
+                    if labels.is_empty() {
+                        labels.push(first.clone());
+                    }
+                    labels.push(source.label.clone());
+                }
+            }
+        }
+    }
+    let warnings = conflicts
+        .into_iter()
+        .map(|(name, labels)| {
+            format!(
+                "theme `{name}` is defined multiple times in the {level} ({labels}); loading none of them",
+                labels = labels.join(", ")
+            )
+        })
+        .collect();
+    (merged, warnings)
+}
+
+/// Merges the two levels into the runtime theme set: the global config layer
+/// plus the global drop-ins form the global level, the local config layers
+/// plus the workspace drop-ins form the local level, and the local level
+/// then overrides the global one key-wise per theme name.
+fn theme_set_from_levels(
+    global_layer: Option<ThemeSource>,
+    local_layers: Vec<ThemeSource>,
+    global_dir: &std::path::Path,
+    dropin_dirs: &[PathBuf],
+) -> ThemeSet {
+    let mut global_sources = Vec::new();
+    if let Some(layer) = global_layer {
+        global_sources.push(layer);
+    }
+    let (dir_sources, mut warnings) = load_theme_dir_in(global_dir, false);
+    global_sources.extend(dir_sources);
+    let mut local_sources = local_layers;
+    for dir in dropin_dirs {
+        let (dir_sources, dir_warnings) = load_theme_dir_in(dir, true);
+        local_sources.extend(dir_sources);
+        warnings.extend(dir_warnings);
+    }
+    let (global, global_warnings) = merge_theme_level("global config", &global_sources);
+    warnings.extend(global_warnings);
+    let (local, local_warnings) = merge_theme_level("local config", &local_sources);
+    warnings.extend(local_warnings);
+    let mut themes = global;
+    themes.stack(local);
+    ThemeSet { themes, warnings }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Config {
     pub ui: UiPrefs,
@@ -269,6 +355,19 @@ pub struct Config {
     /// global level from the local one and to detect same-level conflicts;
     /// `scenes` above stays the plain chain merge for save fidelity.
     pub scene_sources: Vec<SceneSource>,
+
+    /// `themes { … }` — the named themes defined by the config chain,
+    /// already stacked. The runtime theme set additionally layers the
+    /// `themes.d` drop-in dirs on top and resolves same-level conflicts
+    /// (see [`Self::load_themes`]).
+    pub themes: ThemesConfig,
+
+    /// The config chain's `themes` per layer, highest priority first (the
+    /// local layers, then the global one; an explicit `--config` file is the
+    /// single layer). [`Self::load_themes`] needs the layers to tell the
+    /// global level from the local one and to detect same-level conflicts;
+    /// `themes` above stays the plain chain merge for save fidelity.
+    pub theme_sources: Vec<ThemeSource>,
 }
 
 /// A permission verdict for file paths and shell commands.
@@ -905,6 +1004,248 @@ impl ToolOverride {
     }
 }
 
+/// An RGB color: `(red, green, blue)`, each channel `0..=255`.
+pub type Rgb = (u8, u8, u8);
+
+/// The palette role names a `theme` node may set, in the order the TUI uses
+/// them. A role a theme does not name keeps the built-in Faerun value.
+pub const THEME_ROLES: [&str; 22] = [
+    "bg",
+    "surface",
+    "surface-focused",
+    "overlay",
+    "accent",
+    "accent-bg",
+    "selection",
+    "text",
+    "text-dim",
+    "text-muted",
+    "prompt-bg",
+    "running-bg",
+    "success-bg",
+    "warning-bg",
+    "error-bg",
+    "diff-add-bg",
+    "diff-add-emph-bg",
+    "diff-del-bg",
+    "diff-del-emph-bg",
+    "success",
+    "warning",
+    "error",
+];
+
+/// The resolved palette the TUI paints with, one field per palette role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThemeColors {
+    pub bg: Rgb,
+    pub surface: Rgb,
+    pub surface_focused: Rgb,
+    pub overlay: Rgb,
+    pub accent: Rgb,
+    pub accent_bg: Rgb,
+    pub selection: Rgb,
+    pub text: Rgb,
+    pub text_dim: Rgb,
+    pub text_muted: Rgb,
+    pub prompt_bg: Rgb,
+    pub running_bg: Rgb,
+    pub success_bg: Rgb,
+    pub warning_bg: Rgb,
+    pub error_bg: Rgb,
+    pub diff_add_bg: Rgb,
+    pub diff_add_emph_bg: Rgb,
+    pub diff_del_bg: Rgb,
+    pub diff_del_emph_bg: Rgb,
+    pub success: Rgb,
+    pub warning: Rgb,
+    pub error: Rgb,
+}
+
+impl ThemeColors {
+    /// The built-in Faerun palette — the default theme, defined in code and
+    /// never serialized.
+    pub const fn faerun() -> Self {
+        Self {
+            bg: (18, 18, 22),
+            surface: (28, 28, 34),
+            surface_focused: (38, 38, 46),
+            overlay: (34, 34, 42),
+            accent: (212, 175, 95),
+            accent_bg: (52, 48, 42),
+            selection: (78, 60, 28),
+            text: (224, 216, 196),
+            text_dim: (128, 120, 104),
+            text_muted: (92, 86, 74),
+            prompt_bg: (44, 38, 30),
+            running_bg: (38, 38, 46),
+            success_bg: (26, 40, 30),
+            warning_bg: (45, 37, 23),
+            error_bg: (46, 26, 24),
+            diff_add_bg: (34, 58, 42),
+            diff_add_emph_bg: (50, 84, 58),
+            diff_del_bg: (62, 34, 30),
+            diff_del_emph_bg: (94, 50, 44),
+            success: (138, 146, 90),
+            warning: (192, 152, 72),
+            error: (186, 88, 72),
+        }
+    }
+
+    /// Overwrites every role the theme defines.
+    fn apply(&mut self, colors: &BTreeMap<String, Rgb>) {
+        for (role, value) in colors {
+            match role.as_str() {
+                "bg" => self.bg = *value,
+                "surface" => self.surface = *value,
+                "surface-focused" => self.surface_focused = *value,
+                "overlay" => self.overlay = *value,
+                "accent" => self.accent = *value,
+                "accent-bg" => self.accent_bg = *value,
+                "selection" => self.selection = *value,
+                "text" => self.text = *value,
+                "text-dim" => self.text_dim = *value,
+                "text-muted" => self.text_muted = *value,
+                "prompt-bg" => self.prompt_bg = *value,
+                "running-bg" => self.running_bg = *value,
+                "success-bg" => self.success_bg = *value,
+                "warning-bg" => self.warning_bg = *value,
+                "error-bg" => self.error_bg = *value,
+                "diff-add-bg" => self.diff_add_bg = *value,
+                "diff-add-emph-bg" => self.diff_add_emph_bg = *value,
+                "diff-del-bg" => self.diff_del_bg = *value,
+                "diff-del-emph-bg" => self.diff_del_emph_bg = *value,
+                "success" => self.success = *value,
+                "warning" => self.warning = *value,
+                "error" => self.error = *value,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// `themes { … }` — the named themes: per-theme palette overrides over the
+/// built-in Faerun colors. The built-in Faerun theme is code, not config;
+/// this section only defines named themes on top of it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ThemesConfig {
+    /// The defined themes, keyed by name.
+    pub themes: BTreeMap<String, ThemeDef>,
+}
+
+impl ThemesConfig {
+    /// Parses a standalone `themes` document (the same format as the config
+    /// section, as used by `themes.d` drop-ins). Top-level `themes` nodes
+    /// stack key-wise; same-level conflicts are only decided across sources,
+    /// by [`Config::load_themes`].
+    pub fn from_kdl(contents: &str) -> crate::Result<Self> {
+        let mut themes = Self::default();
+        for source in crate::config_kdl::themes_from_document(contents)? {
+            themes.stack(source);
+        }
+        Ok(themes)
+    }
+
+    /// Stacks `higher` over `self`: each theme merges its colors key-wise so
+    /// a layer can extend a theme defined elsewhere without hiding it.
+    pub fn stack(&mut self, higher: ThemesConfig) {
+        for (name, theme) in higher.themes {
+            match self.themes.get_mut(&name) {
+                Some(lower) => lower.merge(theme),
+                None => {
+                    self.themes.insert(name, theme);
+                }
+            }
+        }
+    }
+
+    /// The theme with the given name.
+    pub fn theme(&self, name: &str) -> Option<&ThemeDef> {
+        self.themes.get(name)
+    }
+}
+
+/// One named theme: palette overrides keyed by role (`accent`, `bg`, …).
+/// Unset roles keep the built-in Faerun values.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ThemeDef {
+    pub colors: BTreeMap<String, Rgb>,
+}
+
+impl ThemeDef {
+    fn merge(&mut self, higher: ThemeDef) {
+        self.colors.extend(higher.colors);
+    }
+}
+
+/// One config source's `themes` section, with the display label used in
+/// same-level conflict warnings.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ThemeSource {
+    /// Display label: `shuvarie.kdl`, `.shuvarie/config.kdl`, `config.kdl`,
+    /// or `themes.d/<file>`.
+    pub label: String,
+
+    pub themes: ThemesConfig,
+
+    /// Whether the source belongs to the workspace (local) level; `false` is
+    /// the global config's layer. Levels decide override order and same-level
+    /// conflicts, so the flag is recorded at load time — deriving it from the
+    /// chain position would misclassify a local layer as the global one when
+    /// the global config file does not exist.
+    pub local: bool,
+}
+
+/// The runtime theme set [`Config::load_themes`] builds: the merged theme
+/// config plus one warning per same-level conflict (a theme name defined by
+/// more than one source of the same level loads neither copy).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ThemeSet {
+    pub themes: ThemesConfig,
+
+    pub warnings: Vec<String>,
+}
+
+/// The palette a run paints with plus the warnings collected while resolving
+/// it: same-level conflicts from [`ThemeSet`], and one warning when `ui.theme`
+/// names a theme nothing defines.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedTheme {
+    pub colors: ThemeColors,
+
+    pub warnings: Vec<String>,
+}
+
+impl ResolvedTheme {
+    /// The built-in Faerun palette, no warnings.
+    pub fn faerun() -> Self {
+        Self {
+            colors: ThemeColors::faerun(),
+            warnings: Vec::new(),
+        }
+    }
+}
+
+impl ThemeSet {
+    /// Resolves the palette for the run: `name` selects a defined theme over
+    /// the built-in Faerun — an unknown name warns and keeps Faerun, while
+    /// `Faerun` itself always resolves to the built-in. Each selected theme's
+    /// set roles override the built-in values field-wise.
+    pub fn resolve(&self, name: Option<&str>) -> ResolvedTheme {
+        let mut colors = ThemeColors::faerun();
+        let mut warnings = self.warnings.clone();
+        if let Some(name) = name {
+            match self.themes.theme(name) {
+                Some(theme) => colors.apply(&theme.colors),
+                None if name != "Faerun" => warnings.push(format!(
+                    "theme `{name}` is not defined by `themes {{ … }}` or a `themes.d` drop-in; using the built-in Faerun theme"
+                )),
+                None => {}
+            }
+        }
+        ResolvedTheme { colors, warnings }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SkillsConfig {
     pub disabled: bool,
@@ -941,6 +1282,11 @@ pub struct UiPrefs {
     /// Copy the selection to the system clipboard when a chat drag finalizes.
     /// Off by default; copying stays available via Ctrl+Shift+C.
     pub copy_on_select: bool,
+
+    /// The theme the TUI paints with: `theme "name"` selects a theme defined
+    /// by `themes { … }` or a `themes.d` drop-in. `None` keeps the built-in
+    /// Faerun theme; an unknown name warns and keeps Faerun.
+    pub theme: Option<String>,
 }
 
 impl Default for UiPrefs {
@@ -949,6 +1295,7 @@ impl Default for UiPrefs {
             frame_rate: 60,
             sidebar: SidebarPref::Auto,
             copy_on_select: false,
+            theme: None,
         }
     }
 }
@@ -1035,9 +1382,9 @@ pub fn config_dir() -> Result<PathBuf> {
     Ok(dir.join(CONFIG_DIR_NAME))
 }
 
-/// The sorted `*.kdl` scene drop-ins of `dir` (a missing or non-directory
-/// `dir` yields none).
-fn scene_dir_files(dir: &std::path::Path) -> Vec<PathBuf> {
+/// The sorted `*.kdl` drop-ins of `dir` (a missing or non-directory `dir`
+/// yields none).
+fn dropin_files(dir: &std::path::Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -1057,7 +1404,7 @@ fn scene_dir_files(dir: &std::path::Path) -> Vec<PathBuf> {
 fn load_scene_dir_in(dir: &std::path::Path, local: bool) -> (Vec<SceneSource>, Vec<String>) {
     let mut sources = Vec::new();
     let mut warnings = Vec::new();
-    for file in scene_dir_files(dir) {
+    for file in dropin_files(dir) {
         let base = file
             .file_name()
             .and_then(|name| name.to_str())
@@ -1087,6 +1434,50 @@ fn load_scene_dir_in(dir: &std::path::Path, local: bool) -> (Vec<SceneSource>, V
             sources.push(SceneSource {
                 label,
                 scenes,
+                local,
+            });
+        }
+    }
+    (sources, warnings)
+}
+
+/// Loads the sorted `*.kdl` theme drop-ins of `dir` as level sources, one per
+/// top-level `themes` node (a missing or non-directory `dir` yields none). A
+/// file that fails to read or parse is skipped with a warning instead of
+/// failing the load.
+fn load_theme_dir_in(dir: &std::path::Path, local: bool) -> (Vec<ThemeSource>, Vec<String>) {
+    let mut sources = Vec::new();
+    let mut warnings = Vec::new();
+    for file in dropin_files(dir) {
+        let base = file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("theme.kdl");
+        let skip = |error: String| format!("{THEMES_DIR_NAME}/{base}: {error} (file skipped)");
+        let contents = match std::fs::read_to_string(&file) {
+            Ok(contents) => contents,
+            Err(error) => {
+                warnings.push(skip(error.to_string()));
+                continue;
+            }
+        };
+        let blocks = match config_kdl::themes_from_document(&contents) {
+            Ok(blocks) => blocks,
+            Err(error) => {
+                warnings.push(skip(error.to_string()));
+                continue;
+            }
+        };
+        let numbered = blocks.len() > 1;
+        for (idx, themes) in blocks.into_iter().enumerate() {
+            let label = if numbered {
+                format!("{THEMES_DIR_NAME}/{base} (block {})", idx + 1)
+            } else {
+                format!("{THEMES_DIR_NAME}/{base}")
+            };
+            sources.push(ThemeSource {
+                label,
+                themes,
                 local,
             });
         }
@@ -1176,6 +1567,31 @@ impl Config {
         cwd.join(WORKSPACE_DIR_NAME).join(SCENE_DIR_NAME)
     }
 
+    /// The global `themes.d` drop-in dir.
+    pub fn global_themes_dir() -> Result<PathBuf> {
+        Ok(config_dir()?.join(THEMES_DIR_NAME))
+    }
+
+    /// The workspace-root `themes.d` drop-in dir (next to `shuvarie.kdl`).
+    pub fn root_themes_dir(cwd: &std::path::Path) -> PathBuf {
+        cwd.join(THEMES_DIR_NAME)
+    }
+
+    /// The workspace `themes.d` drop-in dir.
+    pub fn workspace_themes_dir(cwd: &std::path::Path) -> PathBuf {
+        cwd.join(WORKSPACE_DIR_NAME).join(THEMES_DIR_NAME)
+    }
+
+    /// Loads the `*.kdl` theme drop-ins of `dir` as one level (sorted by
+    /// filename; a missing or empty dir yields an empty set; a file that
+    /// fails to read or parse is skipped with a warning).
+    pub fn load_theme_dir(dir: &std::path::Path) -> ThemeSet {
+        let (sources, mut warnings) = load_theme_dir_in(dir, false);
+        let (themes, merge_warnings) = merge_theme_level("theme dir", &sources);
+        warnings.extend(merge_warnings);
+        ThemeSet { themes, warnings }
+    }
+
     /// Loads the `*.kdl` scene drop-ins of `dir` as one level (sorted by
     /// filename; a missing or empty dir yields an empty set; a file that
     /// fails to read or parse is skipped with a warning).
@@ -1244,15 +1660,79 @@ impl Config {
             &dropin_dirs,
         ))
     }
+
+    /// The runtime theme set for an app run, built from two levels: the same
+    /// layout as [`Self::load_scenes`] with `themes.d` drop-in dirs — the
+    /// global level is the chain's global config layer plus the global
+    /// `themes.d`, the local level is the chain's local layers (or the
+    /// explicit `--config` file as the single layer) plus the workspace
+    /// `themes.d` dirs (the workspace-root `./themes.d` first, then the
+    /// nested `<WORKSPACE_DIR_NAME>/themes.d`), which load only when the
+    /// `configs` trust category is granted and no explicit config was named;
+    /// with an explicit config the drop-in dir next to that file is used.
+    /// Within a level a theme name must be unique: a name defined by more
+    /// than one source is a conflict reported in `ThemeSet::warnings` and
+    /// neither copy loads. Across levels the local level overrides the
+    /// global one key-wise per theme name, and the built-in Faerun theme
+    /// stays the fallback when `ui.theme` resolves nowhere.
+    pub fn load_themes(
+        config: &Config,
+        cwd: &std::path::Path,
+        grants: &crate::trusts::TrustGrants,
+        explicit: Option<&std::path::Path>,
+    ) -> Result<ThemeSet> {
+        let mut sources = config.theme_sources.clone();
+        if sources.is_empty() {
+            sources.push(ThemeSource {
+                label: "config.kdl".to_string(),
+                themes: config.themes.clone(),
+                local: false,
+            });
+        }
+        let (local_layers, mut global_layers): (Vec<ThemeSource>, Vec<ThemeSource>) =
+            sources.into_iter().partition(|source| source.local);
+        if explicit.is_some() {
+            global_layers.clear();
+        }
+        let global_layer = global_layers.pop();
+        let granted = explicit.is_none() && grants.allows(crate::trusts::Category::Configs);
+        let dropin_dirs: Vec<PathBuf> = if explicit.is_some() {
+            vec![
+                explicit
+                    .map(|path| {
+                        path.parent()
+                            .unwrap_or_else(|| std::path::Path::new("."))
+                            .join(THEMES_DIR_NAME)
+                    })
+                    .unwrap_or_default(),
+            ]
+        } else if granted {
+            vec![Self::root_themes_dir(cwd), Self::workspace_themes_dir(cwd)]
+        } else {
+            Vec::new()
+        };
+        Ok(theme_set_from_levels(
+            global_layer,
+            local_layers,
+            &Self::global_themes_dir()?,
+            &dropin_dirs,
+        ))
+    }
     fn load_chain(paths: &[(PathBuf, bool)]) -> Result<Self> {
         let mut config = Self::default();
         let mut permissions = Vec::new();
         let mut scene_sources = Vec::new();
+        let mut theme_sources = Vec::new();
         for (path, local) in paths {
             if let Some(layer) = read_layer(path)? {
                 scene_sources.push(SceneSource {
-                    label: scene_source_label(path),
+                    label: source_label(path),
                     scenes: layer.config.scenes.clone(),
+                    local: *local,
+                });
+                theme_sources.push(ThemeSource {
+                    label: source_label(path),
+                    themes: layer.config.themes.clone(),
                     local: *local,
                 });
                 if layer.sections.contains("permissions") {
@@ -1265,6 +1745,9 @@ impl Config {
         let layers: Vec<ScenesConfig> = scene_sources.iter().map(|s| s.scenes.clone()).collect();
         config.scenes = stack_scenes(&layers);
         config.scene_sources = scene_sources;
+        let layers: Vec<ThemesConfig> = theme_sources.iter().map(|s| s.themes.clone()).collect();
+        config.themes = stack_themes(&layers);
+        config.theme_sources = theme_sources;
         Ok(config)
     }
 
@@ -1276,8 +1759,13 @@ impl Config {
             Ok(contents) => {
                 let mut config = config_kdl::from_kdl(&contents)?;
                 config.scene_sources = vec![SceneSource {
-                    label: scene_source_label(path),
+                    label: source_label(path),
                     scenes: config.scenes.clone(),
+                    local: true,
+                }];
+                config.theme_sources = vec![ThemeSource {
+                    label: source_label(path),
+                    themes: config.themes.clone(),
                     local: true,
                 }];
                 Ok(config)
@@ -3436,5 +3924,551 @@ Now we're in Plan mode: plan first, no edits.
         assert!(set.warnings[0].contains("local config"));
         assert!(set.warnings[0].contains(LOCAL_CONFIG_FILE_NAME));
         assert!(set.warnings[0].contains(".shuvarie-dev/config.kdl"));
+    }
+
+    fn themes(text: &str) -> ThemesConfig {
+        config_kdl::from_kdl(text).unwrap().themes
+    }
+
+    fn config_with_themes(th: ThemesConfig) -> Config {
+        Config {
+            themes: th,
+            ..Config::default()
+        }
+    }
+
+    fn theme_example() -> &'static str {
+        r##"
+            themes {
+                theme name="Ayu" {
+                    bg "#0b0e14"
+                    surface "#151a23"
+                    surface-focused "#1c2230"
+                    overlay "#1f2430"
+                    accent "#ffb454"
+                    accent-bg "#2d3644"
+                    selection "#2d4a63"
+                    text "#e6e1cf"
+                    text-dim "#8a919e"
+                    text-muted "#5c6773"
+                    prompt-bg "#1c2130"
+                    running-bg "#20283a"
+                    success-bg "#1c2b23"
+                    warning-bg "#322b1a"
+                    error-bg "#331d19"
+                    diff-add-bg "#203528"
+                    diff-add-emph-bg "#2c4f3a"
+                    diff-del-bg "#3a2224"
+                    diff-del-emph-bg "#543032"
+                    success "#a6cc70"
+                    warning "#e6b674"
+                    error "#f07178"
+                }
+                theme name="One Dark" {
+                    bg "#282c34"
+                    accent "#98c379"
+                }
+            }
+        "##
+    }
+
+    #[test]
+    fn themes_absent_by_default() {
+        let parsed = config_kdl::from_kdl("ui { frame-rate 30 }").unwrap();
+        assert_eq!(parsed.themes, ThemesConfig::default());
+        assert!(parsed.themes.themes.is_empty());
+        assert!(
+            !config_kdl::to_kdl(&Config::default())
+                .unwrap()
+                .contains("themes")
+        );
+    }
+
+    #[test]
+    fn themes_full_example_parses() {
+        let parsed = themes(theme_example());
+        assert_eq!(parsed.themes.len(), 2);
+
+        let ayu = parsed.theme("Ayu").unwrap();
+        assert_eq!(ayu.colors.len(), 22, "every palette role is set");
+        assert_eq!(ayu.colors.get("bg"), Some(&(11, 14, 20)));
+        assert_eq!(ayu.colors.get("accent"), Some(&(255, 180, 84)));
+        assert_eq!(ayu.colors.get("success"), Some(&(166, 204, 112)));
+
+        let one_dark = parsed.theme("One Dark").unwrap();
+        assert_eq!(one_dark.colors.get("bg"), Some(&(40, 44, 52)));
+        assert_eq!(one_dark.colors.get("accent"), Some(&(152, 195, 121)));
+        assert_eq!(
+            one_dark.colors.len(),
+            2,
+            "unset roles keep the Faerun values"
+        );
+    }
+
+    #[test]
+    fn themes_round_trip() {
+        let parsed = themes(theme_example());
+        let out = config_kdl::to_kdl(&config_with_themes(parsed.clone())).unwrap();
+        assert!(out.contains("theme name=Ayu"), "body: {out}");
+        assert!(out.contains("0b0e14"), "body: {out}");
+        assert_eq!(config_kdl::from_kdl(&out).unwrap().themes, parsed);
+    }
+
+    #[test]
+    fn themes_bare_theme_stays_declared() {
+        let parsed = themes(r##"themes { theme name="Only" }"##);
+        assert!(parsed.theme("Only").unwrap().colors.is_empty());
+        let out = config_kdl::to_kdl(&config_with_themes(parsed.clone())).unwrap();
+        assert!(out.contains("theme name=Only"), "body: {out}");
+        assert_eq!(config_kdl::from_kdl(&out).unwrap().themes, parsed);
+    }
+
+    #[test]
+    fn ui_theme_round_trips() {
+        let parsed = config_kdl::from_kdl("ui { theme \"Ayu\" }").unwrap();
+        assert_eq!(parsed.ui.theme.as_deref(), Some("Ayu"));
+        let out = config_kdl::to_kdl(&parsed).unwrap();
+        assert!(out.contains("theme Ayu"), "body: {out}");
+        assert_eq!(config_kdl::from_kdl(&out).unwrap().ui, parsed.ui);
+        assert!(
+            !config_kdl::to_kdl(&Config::default())
+                .unwrap()
+                .contains("theme")
+        );
+    }
+
+    #[test]
+    fn themes_parse_errors() {
+        let cases: &[(&str, &str)] = &[
+            ("themes { theme { } }", "requires a `name`"),
+            ("themes { theme name=\"\" }", "must name a theme"),
+            (
+                "themes {\n    theme name=\"A\" { bg \"#000000\" }\n    theme name=\"A\"\n}",
+                "duplicate",
+            ),
+            ("themes { bogus }", "unknown node"),
+            (
+                "themes { theme name=\"A\" { bogus \"#000000\" } }",
+                "unknown color",
+            ),
+            (
+                "themes { theme name=\"A\" { accent } }",
+                "requires a color value",
+            ),
+            (
+                "themes { theme name=\"A\" { bg \"#00\" } }",
+                "must be a hex color",
+            ),
+            (
+                "themes { theme name=\"A\" { bg \"#gggggg\" } }",
+                "must be a hex color",
+            ),
+            (
+                "themes { theme name=\"A\" { bg \"#12345\" } }",
+                "must be a hex color",
+            ),
+            (
+                "themes { theme name=\"A\" { bg \"#00000000\" } }",
+                "must be a hex color",
+            ),
+            (
+                "themes { theme name=\"A\" { bg \"#00000g\" } }",
+                "must be a hex color",
+            ),
+            (
+                "themes {\n    theme name=\"A\" {\n        bg \"#000000\"\n        bg \"#111111\"\n    }\n}",
+                "duplicate",
+            ),
+            (
+                "themes { theme name=\"A\" { bg \"#000000\" { nested } } }",
+                "takes no children",
+            ),
+            (
+                "themes { theme name=\"A\" 42 }",
+                "takes no positional arguments",
+            ),
+            (
+                "themes { theme name=\"A\" wrong=\"x\" }",
+                "unknown property",
+            ),
+            ("ui { theme \"\" }", "must name a theme"),
+            ("ui { theme \"  \" }", "must name a theme"),
+            ("ui { theme \"a\" \"b\" }", "takes a single argument"),
+        ];
+        for (text, expected) in cases {
+            let error = config_kdl::from_kdl(text).unwrap_err();
+            assert!(error.to_string().contains(expected), "{text}\n{error}");
+        }
+    }
+
+    #[test]
+    fn themes_chain_merges_fieldwise() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global.kdl");
+        let top = dir.path().join("shuvarie.kdl");
+        std::fs::write(
+            &global,
+            r##"
+            themes {
+                theme name="Ayu" {
+                    bg "#0b0e14"
+                    accent "#ffb454"
+                }
+                theme name="Only-Global" {
+                    accent "#ff0000"
+                }
+            }
+        "##,
+        )
+        .unwrap();
+        std::fs::write(
+            &top,
+            r##"
+            themes {
+                theme name="Ayu" {
+                    accent "#00ff00"
+                }
+            }
+        "##,
+        )
+        .unwrap();
+
+        let config = Config::load_chain(&[(top, true), (global, false)]).unwrap();
+        assert!(config.themes.themes.contains_key("Only-Global"));
+        let ayu = config.themes.theme("Ayu").unwrap();
+        assert_eq!(
+            ayu.colors.get("bg"),
+            Some(&(11, 14, 20)),
+            "the top file only overrides its own roles"
+        );
+        assert_eq!(ayu.colors.get("accent"), Some(&(0, 255, 0)));
+    }
+
+    #[test]
+    fn theme_dir_loads_sorted_kdl_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let themes_dir = dir.path().join(THEMES_DIR_NAME);
+        std::fs::create_dir_all(&themes_dir).unwrap();
+        std::fs::write(
+            themes_dir.join("10-ayu.kdl"),
+            r##"
+            themes {
+                theme name="Ayu" { accent "#ffb454" }
+            }
+            ignored { whatever #true }
+        "##,
+        )
+        .unwrap();
+        std::fs::write(
+            themes_dir.join("20-dark.kdl"),
+            r##"
+            themes {
+                theme name="One Dark" { accent "#98c379" }
+            }
+        "##,
+        )
+        .unwrap();
+        std::fs::write(themes_dir.join("30-notes.txt"), "not kdl").unwrap();
+        std::fs::create_dir_all(themes_dir.join("40-subdir.kdl")).unwrap();
+
+        let set = Config::load_theme_dir(&themes_dir);
+        assert_eq!(set.themes.themes.len(), 2);
+        assert!(set.themes.theme("Ayu").is_some());
+        assert!(set.themes.theme("One Dark").is_some());
+        assert!(set.warnings.is_empty());
+
+        assert_eq!(
+            Config::load_theme_dir(&dir.path().join("missing")),
+            ThemeSet::default()
+        );
+    }
+
+    #[test]
+    fn theme_dir_parse_error_warns_and_skips() {
+        let dir = tempfile::tempdir().unwrap();
+        let themes_dir = dir.path().join(THEMES_DIR_NAME);
+        std::fs::create_dir_all(&themes_dir).unwrap();
+        std::fs::write(
+            themes_dir.join("10-ayu.kdl"),
+            r##"themes { theme name="Ayu" { accent "#ffb454" } }"##,
+        )
+        .unwrap();
+        std::fs::write(
+            themes_dir.join("20-bad.kdl"),
+            r##"themes { theme name="Bad" { primary-color "#ff0000" } }"##,
+        )
+        .unwrap();
+
+        let set = Config::load_theme_dir(&themes_dir);
+        assert!(
+            set.themes.theme("Ayu").is_some(),
+            "the parseable file still loads"
+        );
+        assert!(set.themes.theme("Bad").is_none());
+        assert_eq!(set.warnings.len(), 1, "warnings: {:?}", set.warnings);
+        assert!(set.warnings[0].contains("themes.d/20-bad.kdl"));
+        assert!(set.warnings[0].contains("(file skipped)"));
+    }
+
+    #[test]
+    fn theme_dropin_warnings_survive_the_level_merge() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global");
+        let dropins = dir.path().join("dropins");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::create_dir_all(&dropins).unwrap();
+        std::fs::write(
+            dropins.join("10-bad.kdl"),
+            r##"themes { theme name="Bad" { accent "not-a-color" } }"##,
+        )
+        .unwrap();
+
+        let set = theme_set_from_levels(None, Vec::new(), &global, &[dropins]);
+        assert!(
+            set.warnings.iter().any(|warning| {
+                warning.contains("themes.d/10-bad.kdl") && warning.contains("(file skipped)")
+            }),
+            "warnings: {:?}",
+            set.warnings
+        );
+    }
+
+    #[test]
+    fn theme_dir_duplicates_conflict_and_load_neither() {
+        let dir = tempfile::tempdir().unwrap();
+        let themes_dir = dir.path().join(THEMES_DIR_NAME);
+        std::fs::create_dir_all(&themes_dir).unwrap();
+        std::fs::write(
+            themes_dir.join("10-ayu.kdl"),
+            r##"themes { theme name="Ayu" { accent "#ffb454" } }"##,
+        )
+        .unwrap();
+        std::fs::write(
+            themes_dir.join("20-ayu.kdl"),
+            r##"themes { theme name="Ayu" { accent "#00ff00" } }"##,
+        )
+        .unwrap();
+
+        let set = Config::load_theme_dir(&themes_dir);
+        assert!(set.themes.theme("Ayu").is_none(), "neither copy loads");
+        assert_eq!(set.warnings.len(), 1, "warnings: {:?}", set.warnings);
+        assert!(set.warnings[0].contains("theme dir"));
+        assert!(set.warnings[0].contains("10-ayu.kdl"));
+        assert!(set.warnings[0].contains("20-ayu.kdl"));
+    }
+
+    #[test]
+    fn theme_levels_local_overrides_global_fieldwise() {
+        let global = ThemeSource {
+            label: "config.kdl".to_string(),
+            themes: themes(
+                r##"
+                themes {
+                    theme name="Ayu" {
+                        bg "#0b0e14"
+                        accent "#ffb454"
+                    }
+                    theme name="Only-Global"
+                }
+            "##,
+            ),
+            local: false,
+        };
+        let local = ThemeSource {
+            label: "shuvarie.kdl".to_string(),
+            themes: themes(
+                r##"
+                themes {
+                    theme name="Ayu" {
+                        accent "#00ff00"
+                    }
+                }
+            "##,
+            ),
+            local: true,
+        };
+
+        let set = theme_set_from_levels(
+            Some(global),
+            vec![local],
+            &std::path::Path::new("missing"),
+            &[],
+        );
+        let ayu = set.themes.theme("Ayu").unwrap();
+        assert_eq!(
+            ayu.colors.get("bg"),
+            Some(&(11, 14, 20)),
+            "the local level only overrides its own roles"
+        );
+        assert_eq!(ayu.colors.get("accent"), Some(&(0, 255, 0)));
+        assert!(set.themes.theme("Only-Global").is_some());
+        assert!(set.warnings.is_empty());
+    }
+
+    #[test]
+    fn theme_dir_duplicates_conflict_across_sources_of_one_level() {
+        let global = ThemeSource {
+            label: "config.kdl".to_string(),
+            themes: themes(r##"themes { theme name="Ayu" { accent "#ffb454" } }"##),
+            local: false,
+        };
+        let first = ThemeSource {
+            label: "themes.d/10-ayu.kdl".to_string(),
+            themes: themes(r##"themes { theme name="Ayu" { accent "#00ff00" } }"##),
+            local: true,
+        };
+        let second = ThemeSource {
+            label: "themes.d/20-ayu.kdl".to_string(),
+            themes: themes(r##"themes { theme name="Ayu" { accent "#0000ff" } }"##),
+            local: true,
+        };
+
+        let set = theme_set_from_levels(
+            Some(global),
+            vec![first, second],
+            &std::path::Path::new("missing"),
+            &[],
+        );
+        assert_eq!(
+            set.themes.theme("Ayu").unwrap().colors.get("accent"),
+            Some(&(255, 180, 84)),
+            "the local copies conflict, the global one survives"
+        );
+        assert_eq!(set.warnings.len(), 1, "warnings: {:?}", set.warnings);
+        assert!(set.warnings[0].contains("local config"));
+        assert!(set.warnings[0].contains("themes.d/10-ayu.kdl"));
+        assert!(set.warnings[0].contains("themes.d/20-ayu.kdl"));
+    }
+
+    #[test]
+    fn explicit_config_records_a_single_theme_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("custom.kdl");
+        std::fs::write(
+            &file,
+            "themes { theme name=\"Ayu\" { accent \"#ffb454\" } }",
+        )
+        .unwrap();
+
+        let config = Config::load_explicit(&file).unwrap();
+        assert_eq!(config.theme_sources.len(), 1);
+        assert!(config.theme_sources[0].local);
+        assert_eq!(config.theme_sources[0].label, "custom.kdl");
+    }
+
+    /// An end-to-end startup against an isolated global config dir: a
+    /// workspace theme layer plus a workspace themes.d drop-in must land in
+    /// the local level when `configs` is granted, and the global config's
+    /// theme must not shadow the local one.
+    #[test]
+    fn local_themes_load_end_to_end_when_configs_are_granted() {
+        let _lock = global_dir_lock();
+        let global_home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        // SAFETY: serialized behind `global_dir_lock`.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", global_home.path()) };
+        let cfg_dir = global_home.path().join(CONFIG_DIR_NAME);
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join("config.kdl"),
+            "themes { theme name=\"Ayu\" { accent \"#111111\" } }",
+        )
+        .unwrap();
+        let ws_dir = workspace.path().join(WORKSPACE_DIR_NAME);
+        std::fs::create_dir_all(ws_dir.join("themes.d")).unwrap();
+        std::fs::write(
+            ws_dir.join("config.kdl"),
+            "themes { theme name=\"Ayu\" { accent \"#222222\" } }",
+        )
+        .unwrap();
+        std::fs::write(
+            ws_dir.join("themes.d").join("draft.kdl"),
+            "themes { theme name=\"Draft\" { accent \"#333333\" } }",
+        )
+        .unwrap();
+
+        let grants = crate::trusts::TrustGrants::from_categories([
+            crate::trusts::Category::Configs,
+            crate::trusts::Category::Contexts,
+        ]);
+        let config = Config::load_trusted(workspace.path(), &grants).unwrap();
+        let set = Config::load_themes(&config, workspace.path(), &grants, None).unwrap();
+        // SAFETY: restoring the test process env.
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+
+        let resolved = set.resolve(Some("Ayu"));
+        assert_eq!(
+            resolved.colors.accent,
+            (34, 34, 34),
+            "the local layer's accent wins"
+        );
+        assert_eq!(
+            resolved.colors.bg,
+            ThemeColors::faerun().bg,
+            "unset roles keep the built-in values"
+        );
+        assert!(set.themes.theme("Draft").is_some(), "drop-ins load too");
+        assert!(set.warnings.is_empty());
+    }
+
+    #[test]
+    fn resolve_falls_back_to_faerun_and_warns_on_unknown_names() {
+        let set = ThemeSet::default();
+        assert_eq!(set.resolve(None).colors, ThemeColors::faerun());
+        assert_eq!(set.resolve(Some("Faerun")).colors, ThemeColors::faerun());
+        assert!(set.resolve(Some("Faerun")).warnings.is_empty());
+        assert_eq!(set.resolve(Some("Ayu")).colors, ThemeColors::faerun());
+        assert_eq!(set.resolve(Some("Ayu")).warnings.len(), 1);
+        assert!(set.resolve(Some("Ayu")).warnings[0].contains("Ayu"));
+    }
+
+    #[test]
+    fn resolve_applies_overrides_fieldwise_over_faerun() {
+        let set = ThemeSet {
+            themes: themes(
+                r##"
+                themes {
+                    theme name="Ayu" {
+                        accent "#ffb454"
+                        text-dim "#8a919e"
+                    }
+                }
+            "##,
+            ),
+            warnings: Vec::new(),
+        };
+        let resolved = set.resolve(Some("Ayu"));
+        assert_eq!(resolved.colors.accent, (255, 180, 84));
+        assert_eq!(resolved.colors.text_dim, (138, 145, 158));
+        assert_eq!(
+            resolved.colors.text,
+            ThemeColors::faerun().text,
+            "unset roles keep the built-in values"
+        );
+        assert!(resolved.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_user_defined_faerun_shadows_the_builtin() {
+        let set = ThemeSet {
+            themes: themes(
+                r##"
+                themes {
+                    theme name="Faerun" {
+                        accent "#ff0000"
+                    }
+                }
+            "##,
+            ),
+            warnings: Vec::new(),
+        };
+        let resolved = set.resolve(Some("Faerun"));
+        assert_eq!(resolved.colors.accent, (255, 0, 0));
+        assert_eq!(
+            resolved.colors.bg,
+            ThemeColors::faerun().bg,
+            "the built-in palette still fills the unset roles"
+        );
+        assert!(resolved.warnings.is_empty());
     }
 }

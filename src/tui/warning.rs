@@ -60,7 +60,7 @@ impl WarningPopup {
 
         frame.render_widget(
             Paragraph::new(self.message.clone())
-                .style(Style::new().fg(theme::TEXT))
+                .style(Style::new().fg(theme::text()))
                 .wrap(Wrap { trim: false }),
             Rect::new(
                 inner.x,
@@ -71,7 +71,7 @@ impl WarningPopup {
         );
 
         frame.render_widget(
-            Paragraph::new(theme::help_line(&[("any key", "dismiss")])).fg(theme::TEXT_MUTED),
+            Paragraph::new(theme::help_line(&[("any key", "dismiss")])).fg(theme::text_muted()),
             Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
         );
     }

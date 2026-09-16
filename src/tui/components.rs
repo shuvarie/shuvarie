@@ -525,7 +525,7 @@ impl InputBuffer {
         let total = rows.len();
         let start = self.scroll_offset.get().min(total.saturating_sub(1));
         let text_style = Style::new().fg(text_color);
-        let selected_style = Style::new().fg(text_color).bg(theme::SELECTION);
+        let selected_style = Style::new().fg(text_color).bg(theme::selection());
         let cursor_style = Style::new()
             .fg(cursor_color)
             .add_modifier(Modifier::REVERSED);
@@ -632,14 +632,14 @@ fn row_col_to_byte(row: &Row, col: usize) -> usize {
 
 fn paste_label_style() -> Style {
     Style::new()
-        .fg(theme::ACCENT)
-        .bg(theme::ACCENT_BG)
+        .fg(theme::accent())
+        .bg(theme::accent_bg())
         .add_modifier(Modifier::BOLD)
 }
 
 fn input_block<'a>() -> Block<'a> {
     Block::new()
-        .bg(theme::SURFACE)
+        .bg(theme::surface())
         .padding(ratatui::widgets::Padding::symmetric(2, 1))
 }
 
@@ -1056,9 +1056,9 @@ impl TextArea {
         if self.buffer.value.is_empty() {
             let mut placeholder_line = self
                 .buffer
-                .cursor_line(crate::tui::theme::TEXT_MUTED, crate::tui::theme::ACCENT);
+                .cursor_line(crate::tui::theme::text_muted(), crate::tui::theme::accent());
             let ph = format!(" {}", self.placeholder);
-            placeholder_line.push_span(Span::raw(ph).fg(crate::tui::theme::TEXT_MUTED));
+            placeholder_line.push_span(Span::raw(ph).fg(crate::tui::theme::text_muted()));
             frame.render_widget(
                 Paragraph::new(placeholder_line).alignment(Alignment::Left),
                 inner,
@@ -1066,7 +1066,7 @@ impl TextArea {
         } else {
             let lines =
                 self.buffer
-                    .cursor_lines(text_color, crate::tui::theme::ACCENT, width, viewport);
+                    .cursor_lines(text_color, crate::tui::theme::accent(), width, viewport);
             frame.render_widget(Paragraph::new(lines).alignment(Alignment::Left), inner);
         }
     }
@@ -1342,7 +1342,7 @@ mod tests {
 
         let mut area = TextArea::with_max_height("p", 8);
         area.set("hi");
-        for text_color in [crate::tui::theme::TEXT, crate::tui::theme::ACCENT] {
+        for text_color in [crate::tui::theme::text(), crate::tui::theme::accent()] {
             let mut terminal = Terminal::new(TestBackend::new(40, 5)).unwrap();
             terminal
                 .draw(|frame| area.view(frame, Rect::new(0, 0, 40, 5), text_color))
@@ -1395,7 +1395,12 @@ mod tests {
     fn paste_label_renders_inline_without_content() {
         let mut b = InputBuffer::new();
         b.paste("l1\nl2\nl3");
-        let lines = b.cursor_lines(crate::tui::theme::TEXT, crate::tui::theme::ACCENT, 60, 8);
+        let lines = b.cursor_lines(
+            crate::tui::theme::text(),
+            crate::tui::theme::accent(),
+            60,
+            8,
+        );
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
@@ -1405,9 +1410,9 @@ mod tests {
         let chip = lines[0]
             .spans
             .iter()
-            .find(|s| s.style.bg == Some(crate::tui::theme::ACCENT_BG))
+            .find(|s| s.style.bg == Some(crate::tui::theme::accent_bg()))
             .expect("chip background");
-        assert_eq!(chip.style.fg, Some(crate::tui::theme::ACCENT));
+        assert_eq!(chip.style.fg, Some(crate::tui::theme::accent()));
     }
 
     #[test]
@@ -1813,12 +1818,12 @@ mod tests {
         let mut b = InputBuffer::new();
         b.set("hello");
         select(&mut b, 0, 3);
-        let lines = b.cursor_lines(theme::TEXT, theme::ACCENT, 20, 8);
+        let lines = b.cursor_lines(theme::text(), theme::accent(), 20, 8);
         let row = &lines[0];
         let highlighted: String = row
             .spans
             .iter()
-            .filter(|s| s.style.bg == Some(theme::SELECTION))
+            .filter(|s| s.style.bg == Some(theme::selection()))
             .map(|s| s.content.to_string())
             .collect();
         assert_eq!(highlighted, "hel");
@@ -1835,9 +1840,9 @@ mod tests {
         b.set("a\n\nb");
         select(&mut b, 0, 3);
         assert_eq!(b.selection(), Some(0..3));
-        let lines = b.cursor_lines(theme::TEXT, theme::ACCENT, 20, 8);
+        let lines = b.cursor_lines(theme::text(), theme::accent(), 20, 8);
         assert_eq!(lines.len(), 3);
-        assert_eq!(lines[1].spans[0].style.bg, Some(theme::SELECTION));
+        assert_eq!(lines[1].spans[0].style.bg, Some(theme::selection()));
         assert_eq!(lines[2].spans[0].style.bg, None, "beyond the break");
     }
 

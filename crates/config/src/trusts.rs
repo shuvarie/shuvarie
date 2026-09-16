@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use super::{CONFIG_FILE_NAME, LOCAL_CONFIG_FILE_NAME, SCENE_DIR_NAME, WORKSPACE_DIR_NAME};
+use super::{
+    CONFIG_FILE_NAME, LOCAL_CONFIG_FILE_NAME, SCENE_DIR_NAME, THEMES_DIR_NAME, WORKSPACE_DIR_NAME,
+};
 use crate::Result;
 
 pub const TRUSTS_FILE_NAME: &str = "trusts.kdl";
@@ -297,6 +299,10 @@ fn config_detail(cwd: &Path) -> Option<String> {
         let plural = if count == 1 { "file" } else { "files" };
         parts.push(format!("{SCENE_DIR_NAME} ({count} {plural})"));
     }
+    if let Some(count) = kdl_file_count(&cwd.join(THEMES_DIR_NAME)) {
+        let plural = if count == 1 { "file" } else { "files" };
+        parts.push(format!("{THEMES_DIR_NAME} ({count} {plural})"));
+    }
     let workspace_config = cwd.join(WORKSPACE_DIR_NAME).join(CONFIG_FILE_NAME);
     if workspace_config.exists() {
         parts.push(format!("{WORKSPACE_DIR_NAME}/{CONFIG_FILE_NAME}"));
@@ -305,6 +311,12 @@ fn config_detail(cwd: &Path) -> Option<String> {
         let plural = if count == 1 { "file" } else { "files" };
         parts.push(format!(
             "{WORKSPACE_DIR_NAME}/{SCENE_DIR_NAME} ({count} {plural})"
+        ));
+    }
+    if let Some(count) = kdl_file_count(&cwd.join(WORKSPACE_DIR_NAME).join(THEMES_DIR_NAME)) {
+        let plural = if count == 1 { "file" } else { "files" };
+        parts.push(format!(
+            "{WORKSPACE_DIR_NAME}/{THEMES_DIR_NAME} ({count} {plural})"
         ));
     }
     (!parts.is_empty()).then(|| parts.join(", "))

@@ -86,7 +86,7 @@ impl PermissionUI {
             return;
         }
         let block = Block::new()
-            .bg(theme::SURFACE)
+            .bg(theme::surface())
             .padding(Padding::symmetric(2, 1));
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -102,8 +102,8 @@ impl PermissionUI {
         let width = width.max(10);
         let mut lines = vec![
             Line::from(vec![
-                Span::raw("▸ ").fg(theme::ACCENT),
-                Span::raw("Permission required").fg(theme::ACCENT).bold(),
+                Span::raw("▸ ").fg(theme::accent()),
+                Span::raw("Permission required").fg(theme::accent()).bold(),
             ]),
             Line::from(""),
         ];
@@ -114,9 +114,9 @@ impl PermissionUI {
             let mut first = true;
             for chunk in wrap_text(text, width as usize) {
                 let styled = if first {
-                    Span::raw(chunk).fg(theme::TEXT)
+                    Span::raw(chunk).fg(theme::text())
                 } else {
-                    Span::raw(chunk).fg(theme::TEXT_DIM)
+                    Span::raw(chunk).fg(theme::text_dim())
                 };
                 first = false;
                 lines.push(Line::from(styled));

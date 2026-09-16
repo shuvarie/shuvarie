@@ -107,14 +107,16 @@ impl Search {
 
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect, placeholder: &str) {
         let widget = if self.query.is_empty() {
-            Paragraph::new(placeholder).fg(theme::TEXT_MUTED)
+            Paragraph::new(placeholder).fg(theme::text_muted())
         } else {
-            let mut spans = vec![Span::raw("/ ").fg(theme::TEXT_MUTED)];
+            let mut spans = vec![Span::raw("/ ").fg(theme::text_muted())];
             let chars: Vec<char> = self.query.chars().collect();
             for c in chars {
                 spans.push(Span::styled(
                     c.to_string(),
-                    Style::new().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+                    Style::new()
+                        .fg(theme::accent())
+                        .add_modifier(Modifier::BOLD),
                 ));
             }
             Paragraph::new(Line::from(spans))

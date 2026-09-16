@@ -200,7 +200,7 @@ impl Sidebar {
 
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
         let block = Block::new()
-            .bg(theme::SURFACE)
+            .bg(theme::surface())
             .padding(Padding::new(2, 2, 1, 1));
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -229,19 +229,19 @@ impl Sidebar {
     pub fn collapsed_line(&self, max_width: usize) -> Line<'static> {
         let mut spans = self.context.compact_spans();
         if self.lsp_enabled && !self.lsp_servers.is_empty() {
-            spans.push(Span::raw("  │  ").fg(theme::TEXT_MUTED));
+            spans.push(Span::raw("  │  ").fg(theme::text_muted()));
             for (i, s) in self.lsp_servers.iter().enumerate() {
                 if i > 0 {
-                    spans.push(Span::raw("  ").fg(theme::TEXT_MUTED));
+                    spans.push(Span::raw("  ").fg(theme::text_muted()));
                 }
                 match server_marker(s.status) {
                     Some((marker, color)) => spans.push(Span::raw(marker.to_string()).fg(color)),
                     None => spans.push(self.spinner_span.clone()),
                 }
-                spans.push(Span::raw(" ").fg(theme::TEXT_MUTED));
-                spans.push(Span::raw(s.name.clone()).fg(theme::TEXT));
+                spans.push(Span::raw(" ").fg(theme::text_muted()));
+                spans.push(Span::raw(s.name.clone()).fg(theme::text()));
                 if s.diagnostics > 0 {
-                    spans.push(Span::raw(format!(" ⚑{}", s.diagnostics)).fg(theme::WARNING));
+                    spans.push(Span::raw(format!(" ⚑{}", s.diagnostics)).fg(theme::warning()));
                 }
             }
         }
@@ -253,8 +253,8 @@ impl Sidebar {
     pub fn workspace_line(&self, max_width: usize) -> Line<'static> {
         let mut spans = self.workspace.compact_spans(max_width);
         if let Some(scene) = &self.scene {
-            spans.push(Span::raw("  ⌗ ").fg(theme::TEXT_MUTED));
-            spans.push(Span::raw(scene.clone()).fg(theme::TEXT));
+            spans.push(Span::raw("  ⌗ ").fg(theme::text_muted()));
+            spans.push(Span::raw(scene.clone()).fg(theme::text()));
         }
         Line::from(truncate_spans(spans, max_width))
     }
@@ -270,8 +270,8 @@ impl Sidebar {
 
         if let Some(scene) = &self.scene {
             lines.push(Line::from(vec![
-                Span::raw("⌗ ").fg(theme::TEXT_MUTED),
-                Span::raw(scene.clone()).fg(theme::TEXT),
+                Span::raw("⌗ ").fg(theme::text_muted()),
+                Span::raw(scene.clone()).fg(theme::text()),
             ]));
             lines.push(Line::from(""));
         }
@@ -279,49 +279,49 @@ impl Sidebar {
         self.context.view(&mut lines);
 
         if self.todos_total > 0 {
-            lines.push(Line::from("Todos").fg(theme::ACCENT).bold());
+            lines.push(Line::from("Todos").fg(theme::accent()).bold());
             let done_color = if self.todos_done == self.todos_total {
-                theme::SUCCESS
+                theme::success()
             } else {
-                theme::TEXT
+                theme::text()
             };
             lines.push(Line::from(vec![
-                Span::raw("  ").fg(theme::TEXT_MUTED),
+                Span::raw("  ").fg(theme::text_muted()),
                 Span::raw(format!("{}", self.todos_done))
                     .fg(done_color)
                     .bold(),
-                Span::raw(format!("/{} done", self.todos_total)).fg(theme::TEXT_DIM),
+                Span::raw(format!("/{} done", self.todos_total)).fg(theme::text_dim()),
             ]));
             lines.push(Line::from(""));
         }
 
-        lines.push(Line::from("LSP").fg(theme::ACCENT).bold());
+        lines.push(Line::from("LSP").fg(theme::accent()).bold());
         if !self.lsp_enabled {
-            lines.push(Line::from("  disabled").fg(theme::TEXT_MUTED));
+            lines.push(Line::from("  disabled").fg(theme::text_muted()));
         } else if self.lsp_servers.is_empty() {
-            lines.push(Line::from("  no servers").fg(theme::TEXT_MUTED));
+            lines.push(Line::from("  no servers").fg(theme::text_muted()));
         } else {
             for s in &self.lsp_servers {
                 let mut row = vec![
-                    Span::raw("  ").fg(theme::TEXT_MUTED),
+                    Span::raw("  ").fg(theme::text_muted()),
                     match server_marker(s.status) {
                         Some((marker, color)) => Span::raw(marker.to_string()).fg(color),
                         None => self.spinner_span.clone(),
                     },
-                    Span::raw(" ").fg(theme::TEXT_MUTED),
-                    Span::raw(s.name.clone()).fg(theme::TEXT),
+                    Span::raw(" ").fg(theme::text_muted()),
+                    Span::raw(s.name.clone()).fg(theme::text()),
                 ];
                 if let Some(pid) = s.pid {
-                    row.push(Span::raw(format!(" #{pid}")).fg(theme::TEXT_MUTED));
+                    row.push(Span::raw(format!(" #{pid}")).fg(theme::text_muted()));
                 }
                 if s.diagnostics > 0 {
-                    row.push(Span::raw(format!("  ⚑{}", s.diagnostics)).fg(theme::WARNING));
+                    row.push(Span::raw(format!("  ⚑{}", s.diagnostics)).fg(theme::warning()));
                 }
                 lines.push(Line::from(row));
                 if let Some(err) = &s.error {
                     lines.push(
                         Line::from(format!("    {err}"))
-                            .fg(theme::TEXT_MUTED)
+                            .fg(theme::text_muted())
                             .italic(),
                     );
                 }
@@ -329,23 +329,23 @@ impl Sidebar {
         }
         lines.push(Line::from(""));
 
-        lines.push(Line::from("Skills").fg(theme::ACCENT).bold());
+        lines.push(Line::from("Skills").fg(theme::accent()).bold());
         if self.skills.is_empty() {
-            lines.push(Line::from("  none").fg(theme::TEXT_MUTED));
+            lines.push(Line::from("  none").fg(theme::text_muted()));
         } else {
             for skill in &self.skills {
                 let mut spans = vec![Span::styled(
                     format!("  {}", skill.name),
                     if skill.disable_model_invocation {
-                        Style::new().fg(theme::TEXT_MUTED)
+                        Style::new().fg(theme::text_muted())
                     } else {
-                        Style::new().fg(theme::TEXT).bold()
+                        Style::new().fg(theme::text()).bold()
                     },
                 )];
                 if skill.global {
                     spans.push(Span::styled(
                         " (global)",
-                        Style::new().fg(theme::TEXT_MUTED),
+                        Style::new().fg(theme::text_muted()),
                     ));
                 }
                 lines.push(Line::from(spans));
@@ -360,7 +360,7 @@ impl Sidebar {
                 .unwrap_or_else(|| warning.path.display().to_string());
             lines.push(
                 Line::from(format!("  ! {label}: {}", warning.message))
-                    .fg(theme::WARNING)
+                    .fg(theme::warning())
                     .italic(),
             );
         }
@@ -379,10 +379,10 @@ impl Default for Sidebar {
 /// span stands in).
 fn server_marker(status: ServerStatus) -> Option<(&'static str, Color)> {
     match status {
-        ServerStatus::Running => Some(("✓", theme::SUCCESS)),
+        ServerStatus::Running => Some(("✓", theme::success())),
         ServerStatus::Starting | ServerStatus::Stopping => None,
-        ServerStatus::Stopped => Some(("○", theme::TEXT_MUTED)),
-        ServerStatus::Failed => Some(("✗", theme::ERROR)),
+        ServerStatus::Stopped => Some(("○", theme::text_muted())),
+        ServerStatus::Failed => Some(("✗", theme::error())),
     }
 }
 
@@ -1035,13 +1035,13 @@ mod tests {
         assert!(path < branch && branch < context, "order: {}", text(lines));
         assert_eq!(
             lines[path].spans.last().map(|s| s.style.fg),
-            Some(Some(theme::TEXT)),
+            Some(Some(theme::text())),
             "current dir renders bright: {:?}",
             lines[path]
         );
         assert_eq!(
             lines[path].spans.first().map(|s| s.style.fg),
-            Some(Some(theme::TEXT_DIM)),
+            Some(Some(theme::text_dim())),
             "ancestors are dimmed: {:?}",
             lines[path]
         );

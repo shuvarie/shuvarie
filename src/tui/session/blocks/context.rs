@@ -25,8 +25,8 @@ impl ContextBlock {
             .iter()
             .map(|path| {
                 Line::from(vec![
-                    Span::raw("◈").fg(theme::ACCENT).bold(),
-                    Span::raw(format!(" Loaded {path}")).fg(theme::TEXT),
+                    Span::raw("◈").fg(theme::accent()).bold(),
+                    Span::raw(format!(" Loaded {path}")).fg(theme::text()),
                 ])
             })
             .collect();

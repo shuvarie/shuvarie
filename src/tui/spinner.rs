@@ -138,21 +138,21 @@ pub fn spinner_frame() -> &'static str {
 
 /// A styled spinner span in the accent color.
 pub fn spinner() -> Span<'static> {
-    Span::raw(spinner_frame()).fg(theme::ACCENT)
+    Span::raw(spinner_frame()).fg(theme::accent())
 }
 
 /// The wide status-row spinner shown while the model is generating.
 pub fn generating_spinner() -> Span<'static> {
-    Span::raw(*frameplay(SpinnerKind::Generating).get_frame()).fg(theme::ACCENT)
+    Span::raw(*frameplay(SpinnerKind::Generating).get_frame()).fg(theme::accent())
 }
 
 /// The wide status-row spinner shown while a tool is running.
 pub fn tool_spinner() -> Span<'static> {
-    Span::raw(*frameplay(SpinnerKind::Tool).get_frame()).fg(theme::ACCENT)
+    Span::raw(*frameplay(SpinnerKind::Tool).get_frame()).fg(theme::accent())
 }
 
 /// The wide status-row spinner shown while a tool is blocked waiting on the
 /// user (e.g. an open `question` prompt).
 pub fn wait_spinner() -> Span<'static> {
-    Span::raw(*frameplay(SpinnerKind::Waiting).get_frame()).fg(theme::ACCENT)
+    Span::raw(*frameplay(SpinnerKind::Waiting).get_frame()).fg(theme::accent())
 }
