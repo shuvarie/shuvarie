@@ -7,7 +7,7 @@
 
 *-- moonshotai/Kimi-K2.6*
 
-![Demo screenshot](./docs/images/shuvarie-screenshot-demo.png)
+[![Demo screenshot](./docs/images/shuvarie-screenshot-demo.png)](./docs/demo-spec.md)
 
 Let me tell you a story, True Soul.
 
