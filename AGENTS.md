@@ -100,14 +100,6 @@ cargo fmt --check
 
 Nix flakes: `nix build .#` builds the binary and runs the test suite in checkPhase; `nix develop` provides the toolchain. The flake splices the `vendor/selune` submodule from its own `selune` input in `postUnpack`, because Nix drops submodule gitlinks from git trees.
 
-## Tips
-
-### AGENTS.md
-
-When changes are made, it's a good practice to check AGENTS.md if there is stale guidance and update it.
-
-Keep AGENTS.md concise. Only add important points that every AI agent should know before working on this project.
-
 ## Issues and Pull Requests
 
 When reviewing PRs:
@@ -125,3 +117,11 @@ When posting issue/PR comments:
 When closing issues via commit:
 
 - Include `fixes #<number>` or `closes #<number>` in the message so merging auto-closes the issue. For multiple issues, repeat the keyword per issue (`closes #1, closes #2`); a shared keyword (`closes #1, #2`) only closes the first.
+
+## Tips
+
+### AGENTS.md
+
+When changes are made, it's a good practice to check AGENTS.md if there is stale guidance and update it.
+
+Keep AGENTS.md concise. Only add important points that every AI agent should know before working on this project.
