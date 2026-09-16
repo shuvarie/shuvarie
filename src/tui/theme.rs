@@ -1,10 +1,17 @@
+use std::io::Write;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Padding};
+use termina::escape::osc::{ColorOrQuery, DynamicColorNumber, Osc};
+use termina::event::Event;
+use termina::{EventReader, PlatformTerminal};
 
-use shuvarie_core::{ResolvedTheme, Rgb, ThemeColors};
+use shuvarie_core::{ResolvedTheme, Rgb, ThemeColors, ThemeVariant};
+
+use super::escape;
 
 static ACTIVE: OnceLock<ThemeColors> = OnceLock::new();
 
@@ -192,4 +199,89 @@ pub fn title_bar(
         }
     }
     Line::from(spans)
+}
+
+/// How long the terminal gets to answer the background color query before
+/// detection gives up and assumes a dark terminal.
+const DETECT_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Asks the terminal for its background color (OSC 11) and maps the answer to
+/// a theme variant by relative luminance. Keystrokes typed during the wait are
+/// retained by the reader and delivered to the TUI afterwards. Dark is the
+/// default when the write fails, the terminal never answers within the
+/// timeout, or the answer carries no color.
+pub fn detect_variant(term: &mut PlatformTerminal, reader: &EventReader) -> ThemeVariant {
+    if write!(term, "{}", escape::query_background_color())
+        .and_then(|()| term.flush())
+        .is_err()
+    {
+        return ThemeVariant::Dark;
+    }
+    if let Ok(true) = reader.poll(Some(DETECT_TIMEOUT), background_answer)
+        && let Ok(Event::Osc(Osc::ChangeDynamicColors(_, colors))) = reader.read(background_answer)
+    {
+        for color in colors {
+            if let ColorOrQuery::Color(rgb) = color {
+                return luminance_variant(rgb.red, rgb.green, rgb.blue);
+            }
+        }
+    }
+    ThemeVariant::Dark
+}
+
+/// Matches the OSC 11 answer: a background color report carrying an RGB value.
+/// Non-matching events (keys typed during detection, other protocol responses)
+/// are retained by the reader.
+fn background_answer(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Osc(Osc::ChangeDynamicColors(DynamicColorNumber::TextBackgroundColor, colors))
+            if colors.iter().any(|color| matches!(color, ColorOrQuery::Color(_)))
+    )
+}
+
+/// Maps a background color to a theme variant by relative luminance: light
+/// terminals above the midpoint, dark below.
+fn luminance_variant(red: u8, green: u8, blue: u8) -> ThemeVariant {
+    if relative_luminance(red, green, blue) >= 0.5 {
+        ThemeVariant::Light
+    } else {
+        ThemeVariant::Dark
+    }
+}
+
+/// Relative luminance (BT.709 weights over linearized sRGB channels).
+fn relative_luminance(red: u8, green: u8, blue: u8) -> f64 {
+    let channel = |value: u8| -> f64 {
+        let value = f64::from(value) / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(red) + 0.7152 * channel(green) + 0.0722 * channel(blue)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn luminance_detects_light_and_dark_backgrounds() {
+        assert_eq!(luminance_variant(0, 0, 0), ThemeVariant::Dark);
+        assert_eq!(
+            luminance_variant(18, 18, 22),
+            ThemeVariant::Dark,
+            "the Faerun dark background"
+        );
+        assert_eq!(luminance_variant(127, 127, 127), ThemeVariant::Dark);
+        assert_eq!(luminance_variant(255, 255, 255), ThemeVariant::Light);
+        assert_eq!(
+            luminance_variant(247, 243, 234),
+            ThemeVariant::Light,
+            "the Faerun light background"
+        );
+        assert_eq!(luminance_variant(200, 200, 200), ThemeVariant::Light);
+    }
 }

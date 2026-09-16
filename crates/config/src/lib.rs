@@ -149,8 +149,9 @@ fn stack_scenes(layers: &[ScenesConfig]) -> ScenesConfig {
 }
 
 /// Stacks the chain's `themes` sections into one config, lowest-priority
-/// layer first: each theme merges its color overrides key-wise per theme
-/// name so a layer can extend a theme defined elsewhere without hiding it.
+/// layer first: each theme definition merges its color overrides key-wise
+/// per name and variant so a layer can extend a theme defined elsewhere
+/// without hiding it.
 /// This is the save-faithful merge for [`Config::themes`]; the runtime theme
 /// set ([`Config::load_themes`]) instead resolves the chain's layers through
 /// `theme_sources`, where same-level duplicates conflict.
@@ -251,23 +252,26 @@ fn scene_set_from_levels(
     SceneSet { scenes, warnings }
 }
 
-/// Merges one level's theme sources (highest priority first): a theme name
-/// defined by more than one source of the level is a conflict — the theme is
-/// dropped entirely and a warning names every defining source.
+/// Merges one level's theme sources (highest priority first): a theme
+/// definition (a name, plus its optional variant) defined by more than one
+/// source of the level is a conflict — the definition is dropped entirely
+/// and a warning names every defining source.
 fn merge_theme_level(level: &str, sources: &[ThemeSource]) -> (ThemesConfig, Vec<String>) {
     let mut merged = ThemesConfig::default();
-    let mut defined: std::collections::BTreeMap<String, String> = Default::default();
-    let mut conflicts: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    let mut defined: std::collections::BTreeMap<(String, Option<String>), String> =
+        Default::default();
+    let mut conflicts: std::collections::BTreeMap<(String, Option<String>), Vec<String>> =
+        Default::default();
     for source in sources {
-        for (name, theme) in &source.themes.themes {
-            match defined.get(name) {
+        for (key, theme) in &source.themes.themes {
+            match defined.get(key) {
                 None => {
-                    defined.insert(name.clone(), source.label.clone());
-                    merged.themes.insert(name.clone(), theme.clone());
+                    defined.insert(key.clone(), source.label.clone());
+                    merged.themes.insert(key.clone(), theme.clone());
                 }
                 Some(first) => {
-                    merged.themes.remove(name);
-                    let labels = conflicts.entry(name.clone()).or_default();
+                    merged.themes.remove(key);
+                    let labels = conflicts.entry(key.clone()).or_default();
                     if labels.is_empty() {
                         labels.push(first.clone());
                     }
@@ -278,9 +282,10 @@ fn merge_theme_level(level: &str, sources: &[ThemeSource]) -> (ThemesConfig, Vec
     }
     let warnings = conflicts
         .into_iter()
-        .map(|(name, labels)| {
+        .map(|(key, labels)| {
             format!(
-                "theme `{name}` is defined multiple times in the {level} ({labels}); loading none of them",
+                "theme `{}` is defined multiple times in the {level} ({labels}); loading none of them",
+                theme_key_label(&key),
                 labels = labels.join(", ")
             )
         })
@@ -288,10 +293,19 @@ fn merge_theme_level(level: &str, sources: &[ThemeSource]) -> (ThemesConfig, Vec
     (merged, warnings)
 }
 
+/// The display form of a theme definition key: `name`, or `name:variant`
+/// when the definition targets one variant.
+pub(crate) fn theme_key_label(key: &(String, Option<String>)) -> String {
+    match &key.1 {
+        Some(variant) => format!("{}:{variant}", key.0),
+        None => key.0.clone(),
+    }
+}
+
 /// Merges the two levels into the runtime theme set: the global config layer
 /// plus the global drop-ins form the global level, the local config layers
 /// plus the workspace drop-ins form the local level, and the local level
-/// then overrides the global one key-wise per theme name.
+/// then overrides the global one key-wise per name and variant.
 fn theme_set_from_levels(
     global_layer: Option<ThemeSource>,
     local_layers: Vec<ThemeSource>,
@@ -1034,6 +1048,40 @@ pub const THEME_ROLES: [&str; 22] = [
     "error",
 ];
 
+/// The terminal appearance a theme definition targets — the `mode` value of
+/// a `theme` node and the terminal background state detected at startup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThemeVariant {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl ThemeVariant {
+    /// The kebab-case `mode` value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
+    /// Parses a `mode` value.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "dark" => Some(Self::Dark),
+            "light" => Some(Self::Light),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ThemeVariant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// The resolved palette the TUI paints with, one field per palette role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThemeColors {
@@ -1091,6 +1139,35 @@ impl ThemeColors {
         }
     }
 
+    /// The built-in Faerun palette's light variant — parchment and warm
+    /// amber, defined in code and never serialized.
+    pub const fn faerun_light() -> Self {
+        Self {
+            bg: (247, 243, 234),
+            surface: (239, 233, 220),
+            surface_focused: (231, 223, 207),
+            overlay: (250, 247, 240),
+            accent: (160, 94, 3),
+            accent_bg: (245, 227, 192),
+            selection: (240, 224, 184),
+            text: (47, 42, 36),
+            text_dim: (107, 99, 87),
+            text_muted: (138, 129, 116),
+            prompt_bg: (238, 231, 216),
+            running_bg: (228, 236, 220),
+            success_bg: (217, 234, 211),
+            warning_bg: (247, 232, 195),
+            error_bg: (246, 215, 211),
+            diff_add_bg: (220, 240, 216),
+            diff_add_emph_bg: (191, 230, 184),
+            diff_del_bg: (248, 220, 216),
+            diff_del_emph_bg: (245, 192, 186),
+            success: (61, 122, 55),
+            warning: (163, 98, 10),
+            error: (168, 50, 50),
+        }
+    }
+
     /// Overwrites every role the theme defines.
     fn apply(&mut self, colors: &BTreeMap<String, Rgb>) {
         for (role, value) in colors {
@@ -1124,12 +1201,13 @@ impl ThemeColors {
 }
 
 /// `themes { … }` — the named themes: per-theme palette overrides over the
-/// built-in Faerun colors. The built-in Faerun theme is code, not config;
-/// this section only defines named themes on top of it.
+/// built-in Faerun colors. The built-in Faerun theme (dark base plus light
+/// variant) is code, not config; this section only defines named themes on
+/// top of it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ThemesConfig {
-    /// The defined themes, keyed by name.
-    pub themes: BTreeMap<String, ThemeDef>,
+    /// The defined themes, keyed by name and optional variant name.
+    pub themes: BTreeMap<(String, Option<String>), ThemeDef>,
 }
 
 impl ThemesConfig {
@@ -1145,36 +1223,105 @@ impl ThemesConfig {
         Ok(themes)
     }
 
-    /// Stacks `higher` over `self`: each theme merges its colors key-wise so
-    /// a layer can extend a theme defined elsewhere without hiding it.
+    /// Stacks `higher` over `self`: each theme definition merges its colors
+    /// key-wise so a layer can extend a theme defined elsewhere without
+    /// hiding it.
     pub fn stack(&mut self, higher: ThemesConfig) {
-        for (name, theme) in higher.themes {
-            match self.themes.get_mut(&name) {
+        for (key, theme) in higher.themes {
+            match self.themes.get_mut(&key) {
                 Some(lower) => lower.merge(theme),
                 None => {
-                    self.themes.insert(name, theme);
+                    self.themes.insert(key, theme);
                 }
             }
         }
     }
 
-    /// The theme with the given name.
+    /// The theme with the given name: its base definition (no variant).
     pub fn theme(&self, name: &str) -> Option<&ThemeDef> {
-        self.themes.get(name)
+        self.themes.get(&(name.to_string(), None))
+    }
+
+    /// Every definition of the theme with the given name, base definition
+    /// first (the map orders `None` before `Some`, so variants follow in
+    /// alphabetical order).
+    pub fn defs(&self, name: &str) -> Vec<&ThemeDef> {
+        self.themes
+            .iter()
+            .filter(|(key, _)| key.0 == name)
+            .map(|(_, def)| def)
+            .collect()
     }
 }
 
-/// One named theme: palette overrides keyed by role (`accent`, `bg`, …).
-/// Unset roles keep the built-in Faerun values.
+/// One named theme definition: palette overrides keyed by role (`accent`,
+/// `bg`, …) plus the optional variant it targets and the terminal mode it
+/// paints for. Unset roles keep the built-in Faerun values.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ThemeDef {
     pub colors: BTreeMap<String, Rgb>,
+
+    /// The variant this definition targets; `None` is the theme's base
+    /// definition. Part of the definition's key, never overridden by merges.
+    pub variant: Option<String>,
+
+    /// The terminal mode this definition paints for — how auto-detection
+    /// picks among a theme's definitions when no explicit variant is set.
+    pub mode: ThemeVariant,
 }
 
 impl ThemeDef {
     fn merge(&mut self, higher: ThemeDef) {
         self.colors.extend(higher.colors);
+        self.mode = higher.mode;
     }
+
+    /// The built-in theme definitions, consulted when no user definition
+    /// shadows them per name and variant: the Faerun dark base plus its
+    /// light variant.
+    pub fn builtins() -> Vec<ThemeDef> {
+        vec![
+            ThemeDef {
+                colors: all_roles(ThemeColors::faerun()),
+                variant: None,
+                mode: ThemeVariant::Dark,
+            },
+            ThemeDef {
+                colors: all_roles(ThemeColors::faerun_light()),
+                variant: Some("light".to_string()),
+                mode: ThemeVariant::Light,
+            },
+        ]
+    }
+}
+
+/// Every palette role mapped to its color, for materializing a built-in
+/// palette as a [`ThemeDef`].
+fn all_roles(colors: ThemeColors) -> BTreeMap<String, Rgb> {
+    let mut roles = BTreeMap::new();
+    roles.insert("bg".to_string(), colors.bg);
+    roles.insert("surface".to_string(), colors.surface);
+    roles.insert("surface-focused".to_string(), colors.surface_focused);
+    roles.insert("overlay".to_string(), colors.overlay);
+    roles.insert("accent".to_string(), colors.accent);
+    roles.insert("accent-bg".to_string(), colors.accent_bg);
+    roles.insert("selection".to_string(), colors.selection);
+    roles.insert("text".to_string(), colors.text);
+    roles.insert("text-dim".to_string(), colors.text_dim);
+    roles.insert("text-muted".to_string(), colors.text_muted);
+    roles.insert("prompt-bg".to_string(), colors.prompt_bg);
+    roles.insert("running-bg".to_string(), colors.running_bg);
+    roles.insert("success-bg".to_string(), colors.success_bg);
+    roles.insert("warning-bg".to_string(), colors.warning_bg);
+    roles.insert("error-bg".to_string(), colors.error_bg);
+    roles.insert("diff-add-bg".to_string(), colors.diff_add_bg);
+    roles.insert("diff-add-emph-bg".to_string(), colors.diff_add_emph_bg);
+    roles.insert("diff-del-bg".to_string(), colors.diff_del_bg);
+    roles.insert("diff-del-emph-bg".to_string(), colors.diff_del_emph_bg);
+    roles.insert("success".to_string(), colors.success);
+    roles.insert("warning".to_string(), colors.warning);
+    roles.insert("error".to_string(), colors.error);
+    roles
 }
 
 /// One config source's `themes` section, with the display label used in
@@ -1196,7 +1343,7 @@ pub struct ThemeSource {
 }
 
 /// The runtime theme set [`Config::load_themes`] builds: the merged theme
-/// config plus one warning per same-level conflict (a theme name defined by
+/// config plus one warning per same-level conflict (a definition defined by
 /// more than one source of the same level loads neither copy).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ThemeSet {
@@ -1226,24 +1373,106 @@ impl ResolvedTheme {
 }
 
 impl ThemeSet {
-    /// Resolves the palette for the run: `name` selects a defined theme over
-    /// the built-in Faerun — an unknown name warns and keeps Faerun, while
-    /// `Faerun` itself always resolves to the built-in. Each selected theme's
-    /// set roles override the built-in values field-wise.
-    pub fn resolve(&self, name: Option<&str>) -> ResolvedTheme {
-        let mut colors = ThemeColors::faerun();
+    /// Resolves the palette for the run: `pref` (`ui.theme`) selects a theme
+    /// as `name` or `name:variant`. The exact string names a theme first, so
+    /// names containing `:` keep working; otherwise the last `:` separates an
+    /// explicit variant. With no explicit variant the theme's definitions are
+    /// picked by `detected` (the terminal background's mode): definitions
+    /// whose `mode` match win — the base definition first, then alphabetical
+    /// variants — and with no match the base definition, else the first
+    /// remaining one, is used so a defined theme still wins over the
+    /// built-in. `Faerun` resolves against its built-in dark and light
+    /// palettes; user definitions shadow built-ins per name and variant.
+    /// Unknown names and unknown explicit variants warn and fall back to the
+    /// built-in Faerun.
+    pub fn resolve(&self, pref: Option<&str>, detected: ThemeVariant) -> ResolvedTheme {
+        let mut colors = builtin_colors(detected);
         let mut warnings = self.warnings.clone();
-        if let Some(name) = name {
-            match self.themes.theme(name) {
-                Some(theme) => colors.apply(&theme.colors),
-                None if name != "Faerun" => warnings.push(format!(
-                    "theme `{name}` is not defined by `themes {{ … }}` or a `themes.d` drop-in; using the built-in Faerun theme"
-                )),
-                None => {}
+        if let Some(pref) = pref {
+            let (name, variant) = self.split_pref(pref);
+            let defs = self.candidates(&name);
+            if defs.is_empty() {
+                if name != BUILTIN_FAERUN {
+                    warnings.push(format!(
+                        "theme `{pref}` is not defined by `themes {{ … }}` or a `themes.d` drop-in; using the built-in Faerun theme"
+                    ));
+                }
+            } else if let Some(variant) = variant {
+                match defs
+                    .iter()
+                    .find(|def| def.variant.as_deref() == Some(variant.as_str()))
+                {
+                    Some(def) => colors.apply(&def.colors),
+                    None => warnings.push(format!(
+                        "theme `{pref}` has no `{variant}` variant defined by `themes {{ … }}` or a `themes.d` drop-in; using the built-in Faerun theme"
+                    )),
+                }
+            } else {
+                colors.apply(&pick_by_mode(&defs, detected).colors);
             }
         }
         ResolvedTheme { colors, warnings }
     }
+
+    /// Splits `ui.theme` into a theme name and an optional explicit variant:
+    /// the exact whole string names a defined theme first (so names
+    /// containing `:` keep working), otherwise the last `:` separates a
+    /// variant.
+    fn split_pref(&self, pref: &str) -> (String, Option<String>) {
+        if !self.candidates(pref).is_empty() {
+            return (pref.to_string(), None);
+        }
+        match pref.rsplit_once(':') {
+            Some((name, variant)) if !name.is_empty() && !variant.is_empty() => {
+                (name.to_string(), Some(variant.to_string()))
+            }
+            _ => (pref.to_string(), None),
+        }
+    }
+
+    /// Every definition of the theme with the given name: the merged user
+    /// definitions plus the unshadowed built-ins (only `Faerun` has those),
+    /// base definition first, then alphabetical variants.
+    fn candidates(&self, name: &str) -> Vec<ThemeDef> {
+        let mut defs: Vec<ThemeDef> = self
+            .themes
+            .themes
+            .iter()
+            .filter(|(key, _)| key.0 == name)
+            .map(|(_, def)| def.clone())
+            .collect();
+        if name == BUILTIN_FAERUN {
+            for builtin in ThemeDef::builtins() {
+                let key = (BUILTIN_FAERUN.to_string(), builtin.variant.clone());
+                if !self.themes.themes.contains_key(&key) {
+                    defs.push(builtin);
+                }
+            }
+        }
+        defs
+    }
+}
+
+/// The built-in theme's name; `themes` definitions with this name shadow the
+/// built-in palettes per variant.
+const BUILTIN_FAERUN: &str = "Faerun";
+
+/// The built-in Faerun palette for the detected terminal mode.
+fn builtin_colors(detected: ThemeVariant) -> ThemeColors {
+    match detected {
+        ThemeVariant::Dark => ThemeColors::faerun(),
+        ThemeVariant::Light => ThemeColors::faerun_light(),
+    }
+}
+
+/// Picks the definition painting for the detected terminal mode:
+/// definitions whose `mode` match win — base first, then alphabetical
+/// variants (the candidate order) — and with no match the base definition
+/// if present, else the first remaining one, keeps the theme alive.
+fn pick_by_mode(defs: &[ThemeDef], detected: ThemeVariant) -> &ThemeDef {
+    defs.iter()
+        .find(|def| def.mode == detected)
+        .unwrap_or(&defs[0])
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -4134,7 +4363,12 @@ Now we're in Plan mode: plan first, no edits.
         .unwrap();
 
         let config = Config::load_chain(&[(top, true), (global, false)]).unwrap();
-        assert!(config.themes.themes.contains_key("Only-Global"));
+        assert!(
+            config
+                .themes
+                .themes
+                .contains_key(&("Only-Global".to_string(), None))
+        );
         let ayu = config.themes.theme("Ayu").unwrap();
         assert_eq!(
             ayu.colors.get("bg"),
@@ -4396,7 +4630,7 @@ Now we're in Plan mode: plan first, no edits.
         // SAFETY: restoring the test process env.
         unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
 
-        let resolved = set.resolve(Some("Ayu"));
+        let resolved = set.resolve(Some("Ayu"), ThemeVariant::Dark);
         assert_eq!(
             resolved.colors.accent,
             (34, 34, 34),
@@ -4414,12 +4648,30 @@ Now we're in Plan mode: plan first, no edits.
     #[test]
     fn resolve_falls_back_to_faerun_and_warns_on_unknown_names() {
         let set = ThemeSet::default();
-        assert_eq!(set.resolve(None).colors, ThemeColors::faerun());
-        assert_eq!(set.resolve(Some("Faerun")).colors, ThemeColors::faerun());
-        assert!(set.resolve(Some("Faerun")).warnings.is_empty());
-        assert_eq!(set.resolve(Some("Ayu")).colors, ThemeColors::faerun());
-        assert_eq!(set.resolve(Some("Ayu")).warnings.len(), 1);
-        assert!(set.resolve(Some("Ayu")).warnings[0].contains("Ayu"));
+        assert_eq!(
+            set.resolve(None, ThemeVariant::Dark).colors,
+            ThemeColors::faerun()
+        );
+        assert_eq!(
+            set.resolve(None, ThemeVariant::Light).colors,
+            ThemeColors::faerun_light()
+        );
+        assert_eq!(
+            set.resolve(Some("Faerun"), ThemeVariant::Light).colors,
+            ThemeColors::faerun_light()
+        );
+        assert!(
+            set.resolve(Some("Faerun"), ThemeVariant::Dark)
+                .warnings
+                .is_empty()
+        );
+        assert_eq!(
+            set.resolve(Some("Ayu"), ThemeVariant::Dark).colors,
+            ThemeColors::faerun()
+        );
+        let warnings = set.resolve(Some("Ayu"), ThemeVariant::Light).warnings;
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("Ayu"));
     }
 
     #[test]
@@ -4437,7 +4689,7 @@ Now we're in Plan mode: plan first, no edits.
             ),
             warnings: Vec::new(),
         };
-        let resolved = set.resolve(Some("Ayu"));
+        let resolved = set.resolve(Some("Ayu"), ThemeVariant::Dark);
         assert_eq!(resolved.colors.accent, (255, 180, 84));
         assert_eq!(resolved.colors.text_dim, (138, 145, 158));
         assert_eq!(
@@ -4462,7 +4714,7 @@ Now we're in Plan mode: plan first, no edits.
             ),
             warnings: Vec::new(),
         };
-        let resolved = set.resolve(Some("Faerun"));
+        let resolved = set.resolve(Some("Faerun"), ThemeVariant::Dark);
         assert_eq!(resolved.colors.accent, (255, 0, 0));
         assert_eq!(
             resolved.colors.bg,
@@ -4470,5 +4722,314 @@ Now we're in Plan mode: plan first, no edits.
             "the built-in palette still fills the unset roles"
         );
         assert!(resolved.warnings.is_empty());
+    }
+
+    fn theme_set(text: &str) -> ThemeSet {
+        ThemeSet {
+            themes: themes(text),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn theme_variant_and_mode_round_trip() {
+        let parsed = themes(
+            r##"
+            themes {
+                theme name="Ayu" variant="light" mode="light" {
+                    accent "#ffb454"
+                }
+                theme name="Ayu" {
+                    accent "#ff8800"
+                }
+            }
+        "##,
+        );
+        assert_eq!(parsed.themes.len(), 2, "base and variant coexist");
+        assert!(
+            parsed.theme("Ayu").is_some(),
+            "the base definition is keyed"
+        );
+        assert!(parsed.theme("Ayu").unwrap().mode == ThemeVariant::Dark);
+
+        let defs = parsed.defs("Ayu");
+        assert_eq!(defs.len(), 2);
+        assert!(defs[0].variant.is_none(), "base first");
+        assert_eq!(defs[1].variant.as_deref(), Some("light"));
+        assert_eq!(defs[1].mode, ThemeVariant::Light);
+
+        let out = config_kdl::to_kdl(&config_with_themes(parsed.clone())).unwrap();
+        assert!(out.contains("variant=light"), "body: {out}");
+        assert!(out.contains("mode=light"), "body: {out}");
+        assert_eq!(config_kdl::from_kdl(&out).unwrap().themes, parsed);
+    }
+
+    #[test]
+    fn theme_mode_defaults_to_dark_and_is_omitted_from_saves() {
+        let parsed = themes(r##"themes { theme name="A" { accent "#000000" } }"##);
+        assert_eq!(parsed.defs("A")[0].mode, ThemeVariant::Dark);
+        let out = config_kdl::to_kdl(&config_with_themes(parsed.clone())).unwrap();
+        assert!(!out.contains("mode"), "body: {out}");
+        assert_eq!(config_kdl::from_kdl(&out).unwrap().themes, parsed);
+    }
+
+    #[test]
+    fn theme_variant_and_mode_parse_errors() {
+        let cases: &[(&str, &str)] = &[
+            (
+                "themes { theme name=\"A\" variant=\"\" { accent \"#000000\" } }",
+                "must name a variant",
+            ),
+            (
+                "themes { theme name=\"A\" mode=\"blue\" { accent \"#000000\" } }",
+                "must be `dark` or `light`",
+            ),
+            (
+                "themes {\n    theme name=\"A\" variant=\"light\" { accent \"#000000\" }\n    theme name=\"A\" variant=\"light\"\n}",
+                "duplicate",
+            ),
+            (
+                "themes { theme name=\"A\" mode=\"dark\" mode=\"light\" { accent \"#000000\" } }",
+                "duplicate",
+            ),
+            (
+                "themes { theme name=\"A\" wrong=\"x\" { accent \"#000000\" } }",
+                "unknown property",
+            ),
+        ];
+        for (text, expected) in cases {
+            let error = config_kdl::from_kdl(text).unwrap_err();
+            assert!(error.to_string().contains(expected), "{text}\n{error}");
+        }
+    }
+
+    #[test]
+    fn theme_variant_conflicts_within_a_level_drop_the_variant_only() {
+        let global = ThemeSource {
+            label: "config.kdl".to_string(),
+            themes: themes(r##"themes { theme name="Ayu" { accent "#ffb454" } }"##),
+            local: false,
+        };
+        let first = ThemeSource {
+            label: "themes.d/10-ayu.kdl".to_string(),
+            themes: themes(r##"themes { theme name="Ayu" variant="light" { accent "#00ff00" } }"##),
+            local: true,
+        };
+        let second = ThemeSource {
+            label: "themes.d/20-ayu.kdl".to_string(),
+            themes: themes(r##"themes { theme name="Ayu" variant="light" { accent "#0000ff" } }"##),
+            local: true,
+        };
+
+        let set = theme_set_from_levels(
+            Some(global),
+            vec![first, second],
+            &std::path::Path::new("missing"),
+            &[],
+        );
+        assert_eq!(set.themes.defs("Ayu").len(), 1, "the base def survives");
+        assert!(set.themes.theme("Ayu").is_some());
+        assert_eq!(set.warnings.len(), 1, "warnings: {:?}", set.warnings);
+        assert!(set.warnings[0].contains("theme `Ayu:light`"));
+        assert!(set.warnings[0].contains("themes.d/10-ayu.kdl"));
+        assert!(set.warnings[0].contains("themes.d/20-ayu.kdl"));
+    }
+
+    #[test]
+    fn theme_variants_merge_across_levels() {
+        let global = ThemeSource {
+            label: "config.kdl".to_string(),
+            themes: themes(r##"themes { theme name="Ayu" { accent "#ffb454" } }"##),
+            local: false,
+        };
+        let local = ThemeSource {
+            label: "shuvarie.kdl".to_string(),
+            themes: themes(r##"themes { theme name="Ayu" variant="light" { accent "#00ff00" } }"##),
+            local: true,
+        };
+
+        let set = theme_set_from_levels(
+            Some(global),
+            vec![local],
+            &std::path::Path::new("missing"),
+            &[],
+        );
+        assert_eq!(set.themes.defs("Ayu").len(), 2);
+        assert!(set.warnings.is_empty());
+    }
+
+    #[test]
+    fn resolve_picks_by_mode_with_a_base_definition() {
+        let set = theme_set(
+            r##"
+            themes {
+                theme name="Ayu" { accent "#111111" }
+                theme name="Ayu" variant="light" mode="light" { accent "#222222" }
+            }
+        "##,
+        );
+        assert_eq!(
+            set.resolve(Some("Ayu"), ThemeVariant::Dark).colors.accent,
+            (17, 17, 17)
+        );
+        assert_eq!(
+            set.resolve(Some("Ayu"), ThemeVariant::Light).colors.accent,
+            (34, 34, 34)
+        );
+        assert_eq!(
+            set.resolve(Some("Ayu:light"), ThemeVariant::Dark)
+                .colors
+                .accent,
+            (34, 34, 34),
+            "an explicit variant ignores the detected mode"
+        );
+    }
+
+    #[test]
+    fn resolve_no_base_theme_picks_by_mode() {
+        let set = theme_set(
+            r##"
+            themes {
+                theme name="Solarized" variant="solarized-light" mode="light" { accent "#111111" }
+                theme name="Solarized" variant="solarized-dark" mode="dark" { accent "#222222" }
+            }
+        "##,
+        );
+        assert_eq!(
+            set.resolve(Some("Solarized"), ThemeVariant::Dark)
+                .colors
+                .accent,
+            (34, 34, 34)
+        );
+        assert_eq!(
+            set.resolve(Some("Solarized"), ThemeVariant::Light)
+                .colors
+                .accent,
+            (17, 17, 17)
+        );
+    }
+
+    #[test]
+    fn resolve_light_base_wins_on_light_terminals() {
+        let set = theme_set(
+            r##"
+            themes {
+                theme name="Paper" mode="light" { accent "#111111" }
+                theme name="Paper" variant="midnight" mode="dark" { accent "#222222" }
+            }
+        "##,
+        );
+        assert_eq!(
+            set.resolve(Some("Paper"), ThemeVariant::Dark).colors.accent,
+            (34, 34, 34)
+        );
+        assert_eq!(
+            set.resolve(Some("Paper"), ThemeVariant::Light)
+                .colors
+                .accent,
+            (17, 17, 17),
+            "the base definition matches the mode"
+        );
+    }
+
+    #[test]
+    fn resolve_falls_back_to_base_then_first_remaining() {
+        let set = theme_set(
+            r##"
+            themes {
+                theme name="A" { accent "#111111" }
+                theme name="A" variant="bright" mode="light" { accent "#222222" }
+                theme name="B" variant="solar" mode="light" { accent "#333333" }
+            }
+        "##,
+        );
+        assert_eq!(
+            set.resolve(Some("A"), ThemeVariant::Dark).colors.accent,
+            (17, 17, 17),
+            "no mode matches: the base definition keeps the theme alive"
+        );
+        assert_eq!(
+            set.resolve(Some("B"), ThemeVariant::Dark).colors.accent,
+            (51, 51, 51),
+            "no base: the first remaining definition wins over Faerun"
+        );
+    }
+
+    #[test]
+    fn resolve_unknown_explicit_variant_warns_and_falls_back() {
+        let set = theme_set(r##"themes { theme name="Ayu" { accent "#111111" } }"##);
+        let resolved = set.resolve(Some("Ayu:midnight"), ThemeVariant::Dark);
+        assert_eq!(resolved.colors, ThemeColors::faerun());
+        assert_eq!(resolved.warnings.len(), 1);
+        assert!(resolved.warnings[0].contains("Ayu:midnight"));
+        assert!(resolved.warnings[0].contains("midnight"));
+    }
+
+    #[test]
+    fn resolve_exact_name_wins_over_variant_split() {
+        let set = theme_set(
+            r##"
+            themes {
+                theme name="One:Dark" { accent "#111111" }
+                theme name="One" { accent "#222222" }
+            }
+        "##,
+        );
+        assert_eq!(
+            set.resolve(Some("One:Dark"), ThemeVariant::Dark)
+                .colors
+                .accent,
+            (17, 17, 17),
+            "the whole string names a theme"
+        );
+    }
+
+    #[test]
+    fn resolve_user_defs_shadow_builtins_per_variant() {
+        let set = theme_set(
+            r##"
+            themes {
+                theme name="Faerun" variant="light" mode="light" { accent "#111111" }
+            }
+        "##,
+        );
+        assert_eq!(
+            set.resolve(Some("Faerun"), ThemeVariant::Light)
+                .colors
+                .accent,
+            (17, 17, 17),
+            "the user light def shadows the built-in light palette"
+        );
+        assert_eq!(
+            set.resolve(Some("Faerun"), ThemeVariant::Dark).colors,
+            ThemeColors::faerun(),
+            "the built-in dark base stays"
+        );
+
+        let set = theme_set(r##"themes { theme name="Faerun" { accent "#111111" } }"##);
+        assert_eq!(
+            set.resolve(Some("Faerun"), ThemeVariant::Dark)
+                .colors
+                .accent,
+            (17, 17, 17)
+        );
+        assert_eq!(
+            set.resolve(Some("Faerun"), ThemeVariant::Light).colors.bg,
+            ThemeColors::faerun_light().bg,
+            "the unshadowed built-in light palette still serves light terminals"
+        );
+    }
+
+    #[test]
+    fn builtin_defs_cover_every_role_for_both_modes() {
+        let builtins = ThemeDef::builtins();
+        assert_eq!(builtins.len(), 2);
+        for def in &builtins {
+            assert_eq!(def.colors.len(), THEME_ROLES.len());
+        }
+        assert_eq!(builtins[0].variant, None);
+        assert_eq!(builtins[0].mode, ThemeVariant::Dark);
+        assert_eq!(builtins[1].variant.as_deref(), Some("light"));
+        assert_eq!(builtins[1].mode, ThemeVariant::Light);
     }
 }

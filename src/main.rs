@@ -23,7 +23,7 @@ async fn main() -> color_eyre::Result<()> {
         config,
         grants,
         scenes,
-        theme,
+        theme_set,
     }) = trust::resolve(args.config.as_ref()).await?
     else {
         return Ok(());
@@ -58,7 +58,7 @@ async fn main() -> color_eyre::Result<()> {
         event_tx,
     ));
 
-    let res = tui::run_tui(config, theme, cmd_tx.clone(), event_rx).await;
+    let res = tui::run_tui(config, theme_set, cmd_tx.clone(), event_rx).await;
     drop(cmd_tx);
     let core_res = core.await;
 

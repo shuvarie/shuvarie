@@ -3,16 +3,8 @@ use std::collections::BTreeMap;
 use kdl::{KdlDocument, KdlEntry, KdlEntryFormat, KdlNode, KdlValue};
 
 use super::kdl_util::{autoformat, child_nodes, node_error, parse_document};
-use super::{
-    AgentConfig, Config, ConfigError, ContextConfig, EmbeddingConfig, Hooks, LspConfigRepr,
-    LspServerSpecRepr, Mode, PathRule, PermissionsConfig, RegistriesConfig, RegistryEntry,
-    RetryConfig, Rgb, RuleSet, SceneConfig, SceneToolVerb, SceneToolsConfig, ScenesConfig,
-    ShellConfig, ShellPatternKind, ShellRule, SidebarPref, SkillsConfig, SubagentConfig,
-    SubagentsConfig, SystemPromptsConfig, THEME_ROLES, ThemeDef, ThemesConfig, ToolOverride,
-    ToolsConfig, UiPrefs, Verb, WebSearchConfig, WebSearchKind, WebSearchParamKind,
-    WebSearchParams,
-};
-use crate::Result;
+use super::*;
+use crate::{Result, theme_key_label};
 
 pub(crate) fn from_kdl(contents: &str) -> Result<Config> {
     Ok(from_kdl_with_sections(contents)?.0)
@@ -1146,9 +1138,14 @@ fn parse_themes(node: &KdlNode, input: &str) -> Result<ThemesConfig> {
     for child in child_nodes(node) {
         match child.name().value() {
             "theme" => {
-                let (name, theme) = parse_theme(child, input)?;
-                if themes.insert(name.clone(), theme).is_some() {
-                    return Err(duplicate(input, child, &format!("theme `{name}`")));
+                let (name, variant, theme) = parse_theme(child, input)?;
+                let key = (name, variant);
+                if themes.insert(key.clone(), theme).is_some() {
+                    return Err(duplicate(
+                        input,
+                        child,
+                        &format!("theme `{}`", theme_key_label(&key)),
+                    ));
                 }
             }
             other => {
@@ -1164,8 +1161,8 @@ fn parse_themes(node: &KdlNode, input: &str) -> Result<ThemesConfig> {
     Ok(ThemesConfig { themes })
 }
 
-fn parse_theme(node: &KdlNode, input: &str) -> Result<(String, ThemeDef)> {
-    check_props(input, node, &["name"])?;
+fn parse_theme(node: &KdlNode, input: &str) -> Result<(String, Option<String>, ThemeDef)> {
+    check_props(input, node, &["name", "variant", "mode"])?;
     if node.entries().iter().any(|entry| entry.name().is_none()) {
         return Err(node_error(
             input,
@@ -1185,6 +1182,22 @@ fn parse_theme(node: &KdlNode, input: &str) -> Result<(String, ThemeDef)> {
     if name.trim().is_empty() {
         return Err(node_error(input, node, "`theme` must name a theme", None));
     }
+    let variant = match property_string(input, node, "variant")? {
+        Some(variant) if variant.trim().is_empty() => {
+            return Err(node_error(
+                input,
+                node,
+                "`variant` must name a variant",
+                None,
+            ));
+        }
+        variant => variant,
+    };
+    let mode = match property_string(input, node, "mode")? {
+        Some(text) => ThemeVariant::parse(&text)
+            .ok_or_else(|| node_error(input, node, "`mode` must be `dark` or `light`", None))?,
+        None => ThemeVariant::Dark,
+    };
 
     let mut colors = BTreeMap::new();
     for child in child_nodes(node) {
@@ -1227,7 +1240,12 @@ fn parse_theme(node: &KdlNode, input: &str) -> Result<(String, ThemeDef)> {
             return Err(duplicate(input, child, &format!("color `{role}`")));
         }
     }
-    Ok((name, ThemeDef { colors }))
+    let def = ThemeDef {
+        colors,
+        variant: variant.clone(),
+        mode,
+    };
+    Ok((name, variant, def))
 }
 
 /// Parses `#rgb` or `#rrggbb` (the leading `#` optional) into an RGB triple.
@@ -1935,19 +1953,32 @@ fn themes_node(cfg: &ThemesConfig) -> Option<KdlNode> {
         return None;
     }
     let mut children = Vec::new();
-    for (name, theme) in &cfg.themes {
-        children.push(theme_node(name, theme));
+    for (key, theme) in &cfg.themes {
+        children.push(theme_node(&key.0, theme));
     }
     section_node("themes", children)
 }
 
 fn theme_node(name: &str, theme: &ThemeDef) -> KdlNode {
-    let children = theme
+    let children: Vec<KdlNode> = theme
         .colors
         .iter()
         .map(|(role, (r, g, b))| value_node(role, format!("#{r:02x}{g:02x}{b:02x}")))
         .collect();
-    node_with_prop("theme", "name", name, children)
+    let mut node = KdlNode::new("theme");
+    node.push(KdlEntry::new_prop("name", name));
+    if let Some(variant) = &theme.variant {
+        node.push(KdlEntry::new_prop("variant", variant.as_str()));
+    }
+    if theme.mode != ThemeVariant::Dark {
+        node.push(KdlEntry::new_prop("mode", theme.mode.as_str()));
+    }
+    if !children.is_empty() {
+        let mut body = KdlDocument::new();
+        body.nodes_mut().extend(children);
+        node.set_children(body);
+    }
+    node
 }
 
 fn scene_node(name: &str, scene: &SceneConfig) -> KdlNode {

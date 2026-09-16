@@ -1,7 +1,7 @@
 use termina::escape::csi::{
     Csi, DecPrivateMode, DecPrivateModeCode, Keyboard, KittyKeyboardFlags, Mode, Window,
 };
-use termina::escape::osc::{Osc, Selection};
+use termina::escape::osc::{ColorOrQuery, DynamicColorNumber, Osc, Selection};
 
 pub const ENTER_ALTERNATE_SCREEN: Csi = Csi::Mode(Mode::SetDecPrivateMode(DecPrivateMode::Code(
     DecPrivateModeCode::ClearAndEnableAlternateScreen,
@@ -75,4 +75,14 @@ pub fn set_window_title(title: &str) -> Osc<'_> {
 
 pub fn set_clipboard(text: &str) -> Osc<'_> {
     Osc::SetSelection(Selection::CLIPBOARD, text)
+}
+
+// OSC 11 query: asks the terminal for its current background color. Terminals
+// that don't answer dynamic color queries simply never reply, so the caller
+// must bound the wait and default to a sensible mode.
+pub fn query_background_color() -> Osc<'static> {
+    Osc::ChangeDynamicColors(
+        DynamicColorNumber::TextBackgroundColor,
+        vec![ColorOrQuery::Query],
+    )
 }

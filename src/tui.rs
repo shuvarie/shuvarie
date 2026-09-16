@@ -6,7 +6,7 @@ use ratatui::prelude::*;
 use termina::{EventStream, PlatformTerminal, Terminal};
 use tokio::sync::mpsc::{Receiver, Sender};
 
-use shuvarie_core::{Command, Config, Connections, Event as CoreEvent, ResolvedTheme};
+use shuvarie_core::{Command, Config, Connections, Event as CoreEvent, ThemeSet};
 
 use crate::tui::event::Event;
 
@@ -49,7 +49,7 @@ pub enum TuiResponse {
 
 pub async fn run_tui(
     config: Config,
-    theme: ResolvedTheme,
+    theme_set: ThemeSet,
     cmd_tx: Sender<Command>,
     event_rx: Receiver<CoreEvent>,
 ) -> io::Result<Option<TuiResponse>> {
@@ -57,6 +57,10 @@ pub async fn run_tui(
     term.enter_raw_mode()?;
 
     let reader = term.event_reader();
+    let theme = theme_set.resolve(
+        config.ui.theme.as_deref(),
+        self::theme::detect_variant(&mut term, &reader),
+    );
     let event_stream = EventStream::new(reader, |_| true);
 
     let initial_cols = term.get_dimensions()?.cols;
