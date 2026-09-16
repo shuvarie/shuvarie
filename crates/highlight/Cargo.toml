@@ -1,6 +1,6 @@
 [package]
 name = "shuvarie-highlight"
-description = "AI coding TUI for chivalrous people (highlight module)"
+description = "Blazingly fast AI coding TUI for chivalrous people (highlight module)"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

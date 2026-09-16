@@ -1,6 +1,6 @@
 [package]
 name = "shuvarie-llm"
-description = "AI coding TUI for chivalrous people (LLM module)"
+description = "Blazingly fast AI coding TUI for chivalrous people (LLM module)"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

@@ -1,5 +1,5 @@
 {
-  description = "AI coding TUI for chivalrous people";
+  description = "Blazingly fast AI coding TUI for chivalrous people";
 
   inputs = {
     nixpkgs.url = "git+https://github.com/NixOS/nixpkgs?ref=nixos-unstable";
@@ -53,7 +53,7 @@
               cp -rL ${selune} "$sourceRoot/vendor/selune"
             '';
             meta = {
-              description = "AI coding TUI for chivalrous people";
+              description = "Blazingly fast AI coding TUI for chivalrous people";
               homepage = "https://github.com/shuvarie/shuvarie";
               license = pkgs.lib.licenses.mit;
               mainProgram = "shuvarie";
