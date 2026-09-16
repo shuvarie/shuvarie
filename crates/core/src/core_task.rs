@@ -1461,8 +1461,12 @@ struct TurnState {
 }
 
 /// A tool call whose result has not arrived yet: the serialized args plus the
-/// moment the call started, so the finished call can record its duration.
+/// moment the call started, so the finished call can record its duration. The
+/// name and owning worker also let a streamed shell chunk resolve back to its
+/// own call.
 struct PendingTool {
+    name: String,
+    worker: Option<String>,
     args_json: String,
     started: std::time::Instant,
 }
@@ -1910,7 +1914,7 @@ impl CoreCtx {
         };
         let preamble = crate::context::build_preamble(&base, &loaded_context);
         let question_gate = QuestionGate::new(self.question_tx.clone());
-        let (shell_tx, mut shell_rx) = tokio::sync::mpsc::channel::<crate::tools::ShellChunk>(64);
+        let (shell_tx, shell_rx) = tokio::sync::mpsc::channel::<crate::tools::ShellChunk>(64);
         let file_locks = crate::tools::FileLocks::new();
         let tool_scene = scene.tools();
         let tools = crate::tools::all_tools(
@@ -1937,19 +1941,6 @@ impl CoreCtx {
             .cloned();
         let budget = context_budget(&self.config, catalog_provider.as_ref(), &model)
             .map(|b| b.with_preamble_tokens(shuvarie_llm::estimate_text_tokens(&preamble)));
-        let output_forward_tx = self.event_tx.clone();
-        tokio::spawn(async move {
-            while let Some(chunk) = shell_rx.recv().await {
-                let _ = output_forward_tx
-                    .send(Event::ToolOutput {
-                        tool: "run_shell".to_string(),
-                        worker: chunk.worker,
-                        stdout: chunk.stdout,
-                        stderr: chunk.stderr,
-                    })
-                    .await;
-            }
-        });
         let mut worker_set = crate::agents::build_workers(
             client.clone(),
             &model,
@@ -1978,6 +1969,11 @@ impl CoreCtx {
                 budget,
             )
             .await;
+        // Live `run_shell` output flows through the same merged turn stream as
+        // the tool activity, so a chunk is always processed after its call's
+        // `ToolStart` (earlier sub-streams poll first) and resolves to its own
+        // call id in the stream loop.
+        let stream = merge_shell_chunks(stream, shell_rx);
         let tx = self.event_tx.clone();
         let session_shared = s.clone();
         let client_shared = client.clone();
@@ -2235,6 +2231,74 @@ fn starts_action_after_boundary(item: &shuvarie_llm::StreamItem, action: &Action
     }
 }
 
+/// Resolve a streamed shell chunk to the still-running `run_shell` call it
+/// belongs to. Candidates are the pending calls of the chunk's agent (the main
+/// map for `worker: None`, the worker-internal map otherwise) whose name and
+/// serialized command match the chunk; a single match identifies the call, an
+/// ambiguous or already-settled call stays unresolved.
+fn resolve_shell_call(
+    worker: &Option<String>,
+    command: &str,
+    pending_tool_args: &std::collections::HashMap<String, PendingTool>,
+    pending_worker_tools: &std::collections::HashMap<String, PendingTool>,
+) -> Option<String> {
+    let matched: Vec<&String> = match worker {
+        None => pending_tool_args
+            .iter()
+            .filter(|(_, pending)| {
+                pending.name == "run_shell"
+                    && args_command(&pending.args_json).as_deref() == Some(command)
+            })
+            .map(|(id, _)| id)
+            .collect(),
+        Some(_) => pending_worker_tools
+            .iter()
+            .filter(|(_, pending)| {
+                &pending.worker == worker
+                    && pending.name == "run_shell"
+                    && args_command(&pending.args_json).as_deref() == Some(command)
+            })
+            .map(|(id, _)| id)
+            .collect(),
+    };
+    match matched.as_slice() {
+        [id] => Some((*id).clone()),
+        _ => None,
+    }
+}
+
+fn args_command(args_json: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(args_json)
+        .ok()?
+        .get("command")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// Merge the turn's live `run_shell` output channel into the turn stream:
+/// chunks become `StreamItem::ShellOutput` items the stream loop handles like
+/// any other item. `select_all` polls the LLM/worker sub-streams first, so a
+/// call's `ToolStart` is always processed before its own chunks and the chunk
+/// resolves to its call id.
+fn merge_shell_chunks(
+    stream: shuvarie_llm::StreamStream,
+    shell_rx: tokio::sync::mpsc::Receiver<crate::tools::ShellChunk>,
+) -> shuvarie_llm::StreamStream {
+    let chunks = futures_util::stream::unfold(shell_rx, |mut rx| async move {
+        let chunk = rx.recv().await?;
+        Some((
+            shuvarie_llm::StreamItem::ShellOutput {
+                worker: chunk.worker,
+                command: chunk.command,
+                stdout: chunk.stdout,
+                stderr: chunk.stderr,
+            },
+            rx,
+        ))
+    });
+    Box::pin(futures_util::stream::select_all([stream, Box::pin(chunks)]))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn stream_stream_to_events(
     mut stream: shuvarie_llm::StreamStream,
@@ -2354,6 +2418,8 @@ async fn stream_stream_to_events(
                     pending_tool_args.insert(
                         call_id.clone(),
                         PendingTool {
+                            name: name.clone(),
+                            worker: None,
                             args_json: args.to_string(),
                             started,
                         },
@@ -2362,6 +2428,8 @@ async fn stream_stream_to_events(
                     pending_worker_tools.insert(
                         call_id.clone(),
                         PendingTool {
+                            name: name.clone(),
+                            worker: worker.clone(),
                             args_json: args.to_string(),
                             started,
                         },
@@ -2538,6 +2606,34 @@ async fn stream_stream_to_events(
                 } else {
                     ActionPhase::Tools
                 };
+            }
+            shuvarie_llm::StreamItem::ShellOutput {
+                worker,
+                command,
+                stdout,
+                stderr,
+            } => {
+                // The chunk belongs to one specific `run_shell` call: resolve
+                // it against the still-running calls' args (keyed by call id)
+                // so concurrent shells of one agent stream into their own
+                // blocks. Ambiguous (two identical commands) or already-settled
+                // calls resolve to `None`; the TUI then falls back to the
+                // name+worker match.
+                let call_id = resolve_shell_call(
+                    &worker,
+                    &command,
+                    &pending_tool_args,
+                    &pending_worker_tools,
+                );
+                let _ = event_tx
+                    .send(Event::ToolOutput {
+                        tool: "run_shell".to_string(),
+                        worker,
+                        call_id,
+                        stdout,
+                        stderr,
+                    })
+                    .await;
             }
             shuvarie_llm::StreamItem::Usage { usage, worker } => {
                 let cost = catalog_provider
@@ -4835,5 +4931,189 @@ mod tests {
         let (mut store, sid, ids) = chain_session().await;
         let stored = store.load_session(sid).await.unwrap();
         assert!(subtree_contains(&stored, ids[0], stored.leaf_id));
+    }
+
+    #[tokio::test]
+    async fn shell_chunks_resolve_to_their_own_concurrent_calls() {
+        // One worker runs two `run_shell` calls concurrently: each streamed
+        // chunk resolves against the pending calls' args and must carry its
+        // own call id. A chunk arriving after its call settled (no pending
+        // candidate left) resolves to `None`.
+        let items = vec![
+            StreamItem::WorkerStart {
+                name: "run_tests".into(),
+                args: serde_json::json!({ "task": "verify" }),
+                call_id: "w1".into(),
+            },
+            StreamItem::ToolStart {
+                name: "run_shell".into(),
+                args: serde_json::json!({ "command": "cargo test" }),
+                worker: Some("run_tests".into()),
+                call_id: "s1".into(),
+            },
+            StreamItem::ToolStart {
+                name: "run_shell".into(),
+                args: serde_json::json!({ "command": "cargo clippy" }),
+                worker: Some("run_tests".into()),
+                call_id: "s2".into(),
+            },
+            StreamItem::ShellOutput {
+                worker: Some("run_tests".into()),
+                command: "cargo clippy".into(),
+                stdout: "clippy tail".into(),
+                stderr: String::new(),
+            },
+            StreamItem::ShellOutput {
+                worker: Some("run_tests".into()),
+                command: "cargo test".into(),
+                stdout: "test tail".into(),
+                stderr: String::new(),
+            },
+            StreamItem::ToolResult {
+                name: "run_shell".into(),
+                output: "exit 0\ntest tail".into(),
+                ok: true,
+                worker: Some("run_tests".into()),
+                file_change: None,
+                streams: None,
+                call_id: "s1".into(),
+            },
+            StreamItem::ShellOutput {
+                worker: Some("run_tests".into()),
+                command: "cargo test".into(),
+                stdout: "straggler".into(),
+                stderr: String::new(),
+            },
+            StreamItem::WorkerResult {
+                name: "run_tests".into(),
+                output: "done".into(),
+                ok: true,
+                call_id: "w1".into(),
+            },
+            StreamItem::Done {
+                text: "done".into(),
+                usage: TokenUsage::default(),
+            },
+        ];
+        let (_session, mut event_rx, mut done_rx) =
+            spawn_preempt_stream(items, SteerSignal::default(), DenyCut::default()).await;
+
+        let mut chunks: Vec<(Option<String>, Option<String>, String)> = Vec::new();
+        while let Some(event) = event_rx.recv().await {
+            if let Event::ToolOutput {
+                worker,
+                call_id,
+                stdout,
+                ..
+            } = event
+            {
+                chunks.push((worker, call_id, stdout));
+            }
+        }
+        assert_eq!(
+            done_rx.recv().await,
+            Some(StreamOutcome::Finished),
+            "the turn completes normally"
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                (
+                    Some("run_tests".into()),
+                    Some("s2".into()),
+                    "clippy tail".into()
+                ),
+                (
+                    Some("run_tests".into()),
+                    Some("s1".into()),
+                    "test tail".into()
+                ),
+                (Some("run_tests".into()), None, "straggler".into()),
+            ],
+            "each chunk routes to its own call; the settled call's chunk is unresolved"
+        );
+    }
+
+    #[tokio::test]
+    async fn ambiguous_shell_chunk_stays_unresolved() {
+        // Two concurrent calls running the identical command cannot be told
+        // apart: the chunk resolves to `None` instead of guessing.
+        let items = vec![
+            StreamItem::WorkerStart {
+                name: "run_tests".into(),
+                args: serde_json::json!({ "task": "verify" }),
+                call_id: "w1".into(),
+            },
+            StreamItem::ToolStart {
+                name: "run_shell".into(),
+                args: serde_json::json!({ "command": "cargo test" }),
+                worker: Some("run_tests".into()),
+                call_id: "s1".into(),
+            },
+            StreamItem::ToolStart {
+                name: "run_shell".into(),
+                args: serde_json::json!({ "command": "cargo test" }),
+                worker: Some("run_tests".into()),
+                call_id: "s2".into(),
+            },
+            StreamItem::ShellOutput {
+                worker: Some("run_tests".into()),
+                command: "cargo test".into(),
+                stdout: "tail".into(),
+                stderr: String::new(),
+            },
+            StreamItem::Done {
+                text: "done".into(),
+                usage: TokenUsage::default(),
+            },
+        ];
+        let (_session, mut event_rx, _done_rx) =
+            spawn_preempt_stream(items, SteerSignal::default(), DenyCut::default()).await;
+
+        while let Some(event) = event_rx.recv().await {
+            if let Event::ToolOutput { call_id, .. } = event {
+                assert_eq!(call_id, None, "identical commands stay ambiguous");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn merged_shell_chunks_follow_their_tool_start() {
+        // The shell sub-stream polls after the LLM stream, so a call's
+        // ToolStart event precedes its own chunk even when both are ready at
+        // the same poll — the block the chunk streams into exists by then.
+        let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel::<crate::tools::ShellChunk>(4);
+        let _ = chunk_tx
+            .send(crate::tools::ShellChunk {
+                worker: Some("run_tests".into()),
+                command: "cargo test".into(),
+                stdout: "tail".into(),
+                stderr: String::new(),
+            })
+            .await;
+        drop(chunk_tx);
+        let llm: shuvarie_llm::StreamStream =
+            Box::pin(futures_util::stream::iter(vec![StreamItem::ToolStart {
+                name: "run_shell".into(),
+                args: serde_json::json!({ "command": "cargo test" }),
+                worker: Some("run_tests".into()),
+                call_id: "s1".into(),
+            }]));
+        let merged = merge_shell_chunks(llm, chunk_rx);
+
+        let mut items = Vec::new();
+        let mut merged = merged;
+        while let Some(item) = merged.next().await {
+            items.push(item);
+        }
+        assert_eq!(items.len(), 2, "the chunk stream ends after senders drop");
+        assert!(
+            matches!(&items[0], StreamItem::ToolStart { call_id, .. } if call_id == "s1"),
+            "the ToolStart is polled first: {items:?}"
+        );
+        assert!(
+            matches!(&items[1], StreamItem::ShellOutput { command, .. } if command == "cargo test"),
+            "the chunk follows: {items:?}"
+        );
     }
 }

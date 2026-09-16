@@ -558,12 +558,14 @@ impl App {
                 CoreEvent::ToolOutput {
                     tool,
                     worker,
+                    call_id,
                     stdout,
                     stderr,
                 } => Some(AppMessage::Session(SessionMessage::Chat(
                     ChatMessage::ToolOutput {
                         tool,
                         worker,
+                        call_id,
                         stdout,
                         stderr,
                     },

@@ -16,6 +16,10 @@ const SHELL_STREAM_INTERVAL_MS: u64 = 100;
 #[derive(Debug, Clone)]
 pub struct ShellChunk {
     pub worker: Option<String>,
+    /// The exact command line of the call that produced this chunk: with
+    /// several concurrent `run_shell` calls of one agent, this is what
+    /// correlates a streamed chunk back to its own call.
+    pub command: String,
     pub stdout: String,
     pub stderr: String,
 }
@@ -65,11 +69,12 @@ impl ShellOutputTx {
         }
     }
 
-    async fn send_streams(&self, stdout: &[u8], stderr: &[u8]) {
+    async fn send_streams(&self, command: &str, stdout: &[u8], stderr: &[u8]) {
         let _ = self
             .tx
             .send(ShellChunk {
                 worker: self.worker.clone(),
+                command: command.to_string(),
                 stdout: self.stream_text(stdout),
                 stderr: self.stream_text(stderr),
             })
@@ -194,7 +199,7 @@ pub(crate) async fn run_shell_command(
                             let _ = child.kill().await;
                             let status =
                                 child.wait().await.map_err(|e| format!("wait shell: {e}"))?;
-                            shell_tx.send_streams(&out, &err).await;
+                            shell_tx.send_streams(command, &out, &err).await;
                             guard.disarm();
                             return Ok(ShellRun {
                                 status,
@@ -207,7 +212,7 @@ pub(crate) async fn run_shell_command(
                         }
                         if last_emit.elapsed() >= interval {
                             last_emit = std::time::Instant::now();
-                            shell_tx.send_streams(&out, &err).await;
+                            shell_tx.send_streams(command, &out, &err).await;
                         }
                     }
                     None => {
@@ -248,7 +253,7 @@ pub(crate) async fn run_shell_command(
                 }
                 let _ = child.kill().await;
                 let status = child.wait().await.map_err(|e| format!("wait shell: {e}"))?;
-                shell_tx.send_streams(&out, &err).await;
+                shell_tx.send_streams(command, &out, &err).await;
                 guard.disarm();
                 return Ok(ShellRun {
                     status,

@@ -22,4 +22,5 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
+rig-agent = { version = "0.42", features = ["test-utils"] }
+tokio = { workspace = true, features = ["time"] }

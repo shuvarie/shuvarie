@@ -61,6 +61,11 @@ pub enum Event {
     ToolOutput {
         tool: String,
         worker: Option<String>,
+        /// The `run_shell` call this streamed chunk belongs to, resolved by
+        /// the core from the chunk's command against the still-running calls;
+        /// `None` when ambiguous or already settled, in which case the UI
+        /// falls back to the name+worker match.
+        call_id: Option<String>,
         stdout: String,
         stderr: String,
     },

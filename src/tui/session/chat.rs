@@ -145,6 +145,10 @@ pub enum ChatMessage {
     ToolOutput {
         tool: String,
         worker: Option<String>,
+        /// The call id the core resolved for this streamed chunk (the shell
+        /// call it was produced by); `None` when ambiguous, in which case the
+        /// name+worker fallback routes it.
+        call_id: Option<String>,
         stdout: String,
         stderr: String,
     },
@@ -455,10 +459,11 @@ impl Chat {
             ChatMessage::ToolOutput {
                 tool,
                 worker,
+                call_id,
                 stdout,
                 stderr,
             } => {
-                let updated = self.with_running_tool(&tool, &worker, None, |block| {
+                let updated = self.with_running_tool(&tool, &worker, call_id.as_deref(), |block| {
                     block.update(BlockMessage::Tool(ToolMessage::Output { stdout, stderr }))
                 });
                 if updated {
@@ -1221,10 +1226,11 @@ impl Chat {
         );
     }
 
-    /// Find the still-running block a finish belongs to and apply it. A
-    /// finish carries the provider's call id, so batched calls of one tool
-    /// (all `Running` at once) each land on their own block; the name+worker
-    /// match is only a fallback for finishes without an id.
+    /// Find the still-running block a finish or streamed shell chunk belongs
+    /// to and apply it. Both carry the provider's call id when the core could
+    /// resolve it, so batched calls of one tool (all `Running` at once — and
+    /// their streamed shell output) each land on their own block; the
+    /// name+worker match is only a fallback for events without an id.
     fn with_running_tool(
         &mut self,
         name: &str,
@@ -2300,6 +2306,66 @@ mod tests {
         assert!(
             one_done < second_header,
             "the first block's body precedes the second block: {text}"
+        );
+    }
+
+    #[test]
+    fn concurrent_shell_chunks_stream_into_their_own_blocks() {
+        // One agent (here the run_tests worker) runs two `run_shell` calls in
+        // one batch: streamed output chunks carry the call id the core
+        // resolved, so each lands on its own block — the name+worker match
+        // alone would route every chunk to the last-created block.
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "go".into(),
+        });
+        chat.update(ChatMessage::WorkerStarted {
+            name: "run_tests".into(),
+            args: serde_json::json!({ "task": "verify" }),
+            call_id: Some("w1".into()),
+        });
+        chat.update(ChatMessage::ToolStarted {
+            name: "run_shell".into(),
+            args: serde_json::json!({ "command": "cargo test" }),
+            worker: Some("run_tests".into()),
+            call_id: Some("s1".into()),
+        });
+        chat.update(ChatMessage::ToolStarted {
+            name: "run_shell".into(),
+            args: serde_json::json!({ "command": "cargo clippy" }),
+            worker: Some("run_tests".into()),
+            call_id: Some("s2".into()),
+        });
+        chat.update(ChatMessage::ToolOutput {
+            tool: "run_shell".into(),
+            worker: Some("run_tests".into()),
+            call_id: Some("s2".into()),
+            stdout: "clippy tail".into(),
+            stderr: String::new(),
+        });
+        chat.update(ChatMessage::ToolOutput {
+            tool: "run_shell".into(),
+            worker: Some("run_tests".into()),
+            call_id: Some("s1".into()),
+            stdout: "test tail".into(),
+            stderr: String::new(),
+        });
+        let text = render_turn_lines(&chat, None, 80).unwrap();
+        let test_block = text
+            .find("test tail")
+            .expect("the first block got its chunk");
+        let clippy_block = text
+            .find("clippy tail")
+            .expect("the second block got its chunk");
+        let test_header = text.find("cargo test").expect("first shell header");
+        let clippy_header = text.find("cargo clippy").expect("second shell header");
+        assert!(
+            test_header < test_block,
+            "the first block streams its own output: {text}"
+        );
+        assert!(
+            clippy_header < clippy_block && test_block < clippy_header,
+            "the second block streams its own output below the first: {text}"
         );
     }
 
@@ -3806,6 +3872,7 @@ mod tests {
         chat.update(ChatMessage::ToolOutput {
             tool: "run_shell".into(),
             worker: None,
+            call_id: None,
             stdout: "partial output".into(),
             stderr: String::new(),
         });

@@ -269,7 +269,11 @@ impl ProviderClient {
         let usage = Arc::clone(&req.usage);
         let tracker = crate::context_hook::UsageTracker::new();
         let budget = req.context_budget.clone();
-        let file_hook = FileChangeHook::new();
+        let file_hook = FileChangeHook::new().with_early_finish(
+            std::collections::HashSet::new(),
+            Some(req.name.clone()),
+            activity_tx.clone(),
+        );
         match &self.list {
             ListImpl::OpenAi(c) => {
                 let agent = agent_with_tools(
@@ -407,11 +411,14 @@ impl ProviderClient {
         }
         let worker_names: std::collections::HashSet<String> =
             workers.iter().map(|w| w.name().to_string()).collect();
-        let receivers: Vec<tokio::sync::mpsc::Receiver<StreamItem>> = workers
+        let mut receivers: Vec<tokio::sync::mpsc::Receiver<StreamItem>> = workers
             .iter_mut()
             .filter_map(crate::agent::WorkerAgent::take_activity_receiver)
             .collect();
-        let file_hook = FileChangeHook::new();
+        let (early_tx, early_rx) = tokio::sync::mpsc::channel(64);
+        let file_hook =
+            FileChangeHook::new().with_early_finish(worker_names.clone(), None, early_tx);
+        receivers.push(early_rx);
 
         async fn build(
             agent: rig_agent::agent::Agent,
@@ -427,146 +434,7 @@ impl ProviderClient {
                 .stream_chat(prompt, history)
                 .max_turns(max_turns)
                 .await;
-            let mut tool_called = false;
-            let mut turn_text = TurnText::default();
-            let mut tool_names: std::collections::HashMap<String, String> =
-                std::collections::HashMap::new();
-            let mut pending_workers: std::collections::VecDeque<String> =
-                std::collections::VecDeque::new();
-            let tracker_clone = tracker.clone();
-            let main = stream.map(move |item| match item {
-                Ok(rig_agent::agent::MultiTurnStreamItem::StreamAssistantItem(
-                    rig_core::streaming::StreamedAssistantContent::Text(t),
-                )) => StreamItem::Delta {
-                    text: turn_text.push(t.text),
-                },
-                Ok(rig_agent::agent::MultiTurnStreamItem::StreamAssistantItem(
-                    rig_core::streaming::StreamedAssistantContent::Reasoning { reasoning, .. },
-                )) => {
-                    let text = reasoning.display_text();
-                    if text.is_empty() {
-                        StreamItem::Delta {
-                            text: String::new(),
-                        }
-                    } else {
-                        StreamItem::Reasoning { text }
-                    }
-                }
-                Ok(rig_agent::agent::MultiTurnStreamItem::StreamAssistantItem(
-                    rig_core::streaming::StreamedAssistantContent::ReasoningDelta {
-                        reasoning, ..
-                    },
-                )) => {
-                    if reasoning.is_empty() {
-                        StreamItem::Delta {
-                            text: String::new(),
-                        }
-                    } else {
-                        StreamItem::Reasoning { text: reasoning }
-                    }
-                }
-                Ok(rig_agent::agent::MultiTurnStreamItem::StreamAssistantItem(
-                    rig_core::streaming::StreamedAssistantContent::ToolCall {
-                        tool_call,
-                        internal_call_id,
-                    },
-                )) => {
-                    tool_called = true;
-                    turn_text.tool_called();
-                    let name = tool_call.function.name.clone();
-                    if worker_names.contains(&name) {
-                        pending_workers.push_back(name.clone());
-                        StreamItem::WorkerStart {
-                            name,
-                            args: tool_call.function.arguments,
-                            call_id: internal_call_id,
-                        }
-                    } else {
-                        tool_names.insert(internal_call_id.clone(), name.clone());
-                        StreamItem::ToolStart {
-                            name,
-                            args: tool_call.function.arguments,
-                            worker: None,
-                            call_id: internal_call_id,
-                        }
-                    }
-                }
-                Ok(rig_agent::agent::MultiTurnStreamItem::StreamUserItem(
-                    rig_core::streaming::StreamedUserContent::ToolResult {
-                        tool_result,
-                        internal_call_id,
-                    },
-                )) => {
-                    let mut output = String::new();
-                    for content in tool_result.content.iter() {
-                        if let Some(text) = content.as_text() {
-                            if !output.is_empty() {
-                                output.push('\n');
-                            }
-                            output.push_str(text);
-                        }
-                    }
-                    let captured = file_hook.take(&internal_call_id);
-                    let mut ok = !captured.failed;
-                    if output.is_empty() {
-                        ok = false;
-                        output = String::from("(no output)");
-                    }
-                    let name = tool_names.remove(&internal_call_id);
-                    match name {
-                        Some(name) => StreamItem::ToolResult {
-                            name,
-                            output,
-                            ok,
-                            worker: None,
-                            file_change: captured.file_change,
-                            streams: captured.shell,
-                            call_id: internal_call_id,
-                        },
-                        None => StreamItem::WorkerResult {
-                            name: pending_workers.pop_front().unwrap_or_default(),
-                            output,
-                            ok,
-                            call_id: internal_call_id,
-                        },
-                    }
-                }
-                Ok(rig_agent::agent::MultiTurnStreamItem::FinalResponse(resp)) => {
-                    let text = if turn_text.is_empty() && tool_called {
-                        String::new()
-                    } else {
-                        turn_text.take()
-                    };
-                    StreamItem::Done {
-                        text,
-                        usage: resp.usage,
-                    }
-                }
-                Ok(rig_agent::agent::MultiTurnStreamItem::CompletionCall(call)) => {
-                    tracker_clone.record(call.usage);
-                    StreamItem::Usage {
-                        usage: call.usage,
-                        worker: None,
-                    }
-                }
-                Ok(_) => StreamItem::Delta {
-                    text: String::new(),
-                },
-                Err(e) => {
-                    let message = e.to_string();
-                    if message.contains(crate::context_hook::OVERFLOW_REASON) {
-                        StreamItem::Overflow
-                    } else if let Some(failure) = crate::retry::classify_connection_error(&e) {
-                        StreamItem::ConnectionError {
-                            message,
-                            reason: failure.reason,
-                        }
-                    } else {
-                        StreamItem::Error { message }
-                    }
-                }
-            });
-            Box::pin(merge_streams(main, receivers))
+            map_agent_stream(stream, receivers, worker_names, tracker, file_hook)
         }
 
         match &self.list {
@@ -756,7 +624,7 @@ async fn run_worker_agent(
                     tool_result,
                     internal_call_id,
                 },
-            )) => {
+            )) if !file_hook.surfaced_early(&internal_call_id) => {
                 let tool_name = tool_names.remove(&internal_call_id).unwrap_or_default();
                 let captured = file_hook.take(&internal_call_id);
                 let mut output = String::new();
@@ -817,6 +685,164 @@ async fn run_worker_agent(
         guard.reasoning_tokens += usage_aggregate.reasoning_tokens;
     }
     Ok(turn_text.take())
+}
+
+/// Map rig's agent stream onto shuvarie's `StreamItem`s, merging in the
+/// worker-activity receivers. The `file_hook`'s early-finish channel, when
+/// wired, surfaces each tool result the moment its call completes; the
+/// buffered rig results of those calls are dropped here.
+fn map_agent_stream(
+    stream: rig_agent::agent::StreamingResult,
+    receivers: Vec<tokio::sync::mpsc::Receiver<StreamItem>>,
+    worker_names: std::collections::HashSet<String>,
+    tracker: std::sync::Arc<crate::context_hook::UsageTracker>,
+    file_hook: FileChangeHook,
+) -> StreamStream {
+    let mut tool_called = false;
+    let mut turn_text = TurnText::default();
+    let mut tool_names: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut pending_workers: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    let tracker_clone = tracker.clone();
+    let main = stream.map(move |item| match item {
+        Ok(rig_agent::agent::MultiTurnStreamItem::StreamAssistantItem(
+            rig_core::streaming::StreamedAssistantContent::Text(t),
+        )) => StreamItem::Delta {
+            text: turn_text.push(t.text),
+        },
+        Ok(rig_agent::agent::MultiTurnStreamItem::StreamAssistantItem(
+            rig_core::streaming::StreamedAssistantContent::Reasoning { reasoning, .. },
+        )) => {
+            let text = reasoning.display_text();
+            if text.is_empty() {
+                StreamItem::Delta {
+                    text: String::new(),
+                }
+            } else {
+                StreamItem::Reasoning { text }
+            }
+        }
+        Ok(rig_agent::agent::MultiTurnStreamItem::StreamAssistantItem(
+            rig_core::streaming::StreamedAssistantContent::ReasoningDelta { reasoning, .. },
+        )) => {
+            if reasoning.is_empty() {
+                StreamItem::Delta {
+                    text: String::new(),
+                }
+            } else {
+                StreamItem::Reasoning { text: reasoning }
+            }
+        }
+        Ok(rig_agent::agent::MultiTurnStreamItem::StreamAssistantItem(
+            rig_core::streaming::StreamedAssistantContent::ToolCall {
+                tool_call,
+                internal_call_id,
+            },
+        )) => {
+            tool_called = true;
+            turn_text.tool_called();
+            let name = tool_call.function.name.clone();
+            if worker_names.contains(&name) {
+                pending_workers.push_back(name.clone());
+                StreamItem::WorkerStart {
+                    name,
+                    args: tool_call.function.arguments,
+                    call_id: internal_call_id,
+                }
+            } else {
+                tool_names.insert(internal_call_id.clone(), name.clone());
+                StreamItem::ToolStart {
+                    name,
+                    args: tool_call.function.arguments,
+                    worker: None,
+                    call_id: internal_call_id,
+                }
+            }
+        }
+        Ok(rig_agent::agent::MultiTurnStreamItem::StreamUserItem(
+            rig_core::streaming::StreamedUserContent::ToolResult {
+                tool_result: _,
+                internal_call_id,
+            },
+        )) if file_hook.surfaced_early(&internal_call_id) => StreamItem::Delta {
+            text: String::new(),
+        },
+        Ok(rig_agent::agent::MultiTurnStreamItem::StreamUserItem(
+            rig_core::streaming::StreamedUserContent::ToolResult {
+                tool_result,
+                internal_call_id,
+            },
+        )) => {
+            let mut output = String::new();
+            for content in tool_result.content.iter() {
+                if let Some(text) = content.as_text() {
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output.push_str(text);
+                }
+            }
+            let captured = file_hook.take(&internal_call_id);
+            let mut ok = !captured.failed;
+            if output.is_empty() {
+                ok = false;
+                output = String::from("(no output)");
+            }
+            let name = tool_names.remove(&internal_call_id);
+            match name {
+                Some(name) => StreamItem::ToolResult {
+                    name,
+                    output,
+                    ok,
+                    worker: None,
+                    file_change: captured.file_change,
+                    streams: captured.shell,
+                    call_id: internal_call_id,
+                },
+                None => StreamItem::WorkerResult {
+                    name: pending_workers.pop_front().unwrap_or_default(),
+                    output,
+                    ok,
+                    call_id: internal_call_id,
+                },
+            }
+        }
+        Ok(rig_agent::agent::MultiTurnStreamItem::FinalResponse(resp)) => {
+            let text = if turn_text.is_empty() && tool_called {
+                String::new()
+            } else {
+                turn_text.take()
+            };
+            StreamItem::Done {
+                text,
+                usage: resp.usage,
+            }
+        }
+        Ok(rig_agent::agent::MultiTurnStreamItem::CompletionCall(call)) => {
+            tracker_clone.record(call.usage);
+            StreamItem::Usage {
+                usage: call.usage,
+                worker: None,
+            }
+        }
+        Ok(_) => StreamItem::Delta {
+            text: String::new(),
+        },
+        Err(e) => {
+            let message = e.to_string();
+            if message.contains(crate::context_hook::OVERFLOW_REASON) {
+                StreamItem::Overflow
+            } else if let Some(failure) = crate::retry::classify_connection_error(&e) {
+                StreamItem::ConnectionError {
+                    message,
+                    reason: failure.reason,
+                }
+            } else {
+                StreamItem::Error { message }
+            }
+        }
+    });
+    Box::pin(merge_streams(main, receivers))
 }
 
 fn merge_streams(
@@ -1046,5 +1072,361 @@ mod tests {
         let client = ProviderClient::build(selune::ProviderType::Ollama, None, None).unwrap();
         let out = client.embed("m", 384, &[]).await.unwrap();
         assert!(out.is_empty());
+    }
+    mod early_tool_results {
+        use super::*;
+        use crate::tool::{ToolContext, ToolExecutionError, ToolOutput, into_dynamic};
+        use rig_agent::agent::AgentBuilder;
+        use rig_agent::streaming::StreamingChat;
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+        use std::collections::HashSet;
+
+        struct InstantTool;
+
+        impl Tool for InstantTool {
+            const NAME: &'static str = "instant";
+            type Args = serde_json::Value;
+            type Output = ToolOutput;
+            type Error = ToolExecutionError;
+
+            fn description(&self) -> String {
+                "finishes immediately".to_string()
+            }
+
+            fn parameters(&self) -> serde_json::Value {
+                json!({"type": "object", "properties": {}})
+            }
+
+            async fn call(
+                &self,
+                _ctx: &mut ToolContext,
+                _args: Self::Args,
+            ) -> std::result::Result<Self::Output, Self::Error> {
+                Ok::<ToolOutput, ToolExecutionError>(ToolOutput::text("instant done"))
+            }
+        }
+
+        /// A tool that blocks until released, so a batch mate's result has a
+        /// window to surface first.
+        #[derive(Clone)]
+        struct ControlledTool {
+            release: Arc<tokio::sync::Notify>,
+        }
+
+        impl ControlledTool {
+            fn new(release: Arc<tokio::sync::Notify>) -> Self {
+                Self { release }
+            }
+        }
+
+        impl Tool for ControlledTool {
+            const NAME: &'static str = "controlled";
+            type Args = serde_json::Value;
+            type Output = ToolOutput;
+            type Error = ToolExecutionError;
+
+            fn description(&self) -> String {
+                "waits for release".to_string()
+            }
+
+            fn parameters(&self) -> serde_json::Value {
+                json!({"type": "object", "properties": {}})
+            }
+
+            async fn call(
+                &self,
+                _ctx: &mut ToolContext,
+                _args: Self::Args,
+            ) -> std::result::Result<Self::Output, Self::Error> {
+                self.release.notified().await;
+                Ok::<ToolOutput, ToolExecutionError>(ToolOutput::text("controlled done"))
+            }
+        }
+
+        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+        fn batch_model(slow_tool: &str) -> MockCompletionModel {
+            MockCompletionModel::from_stream_turns([
+                vec![
+                    MockStreamEvent::tool_call("call-instant", "instant", json!({})),
+                    MockStreamEvent::tool_call("call-controlled", slow_tool, json!({})),
+                    MockStreamEvent::final_response_with_default_usage(),
+                ],
+                vec![
+                    MockStreamEvent::text("done"),
+                    MockStreamEvent::final_response_with_default_usage(),
+                ],
+            ])
+        }
+
+        async fn agent_stream(
+            model: MockCompletionModel,
+            tools: Vec<DynamicTool>,
+            worker_names: HashSet<String>,
+        ) -> StreamStream {
+            let (early_tx, early_rx) = tokio::sync::mpsc::channel(16);
+            let file_hook =
+                FileChangeHook::new().with_early_finish(worker_names.clone(), None, early_tx);
+            let agent = AgentBuilder::new(model)
+                .dynamic_tools(tools)
+                .add_hook(file_hook.clone())
+                .build();
+            let stream = agent
+                .stream_chat(
+                    rig_core::message::Message::user("go"),
+                    Vec::<rig_core::message::Message>::new(),
+                )
+                .max_turns(2)
+                .await;
+            map_agent_stream(
+                stream,
+                vec![early_rx],
+                worker_names,
+                crate::context_hook::UsageTracker::new(),
+                file_hook,
+            )
+        }
+
+        fn results_named(items: &[StreamItem], name: &str) -> usize {
+            items
+                .iter()
+                .filter(|item| matches!(item, StreamItem::ToolResult { name: n, .. } if n == name))
+                .count()
+        }
+
+        fn all_results(items: &[StreamItem]) -> usize {
+            items
+                .iter()
+                .filter(|item| matches!(item, StreamItem::ToolResult { .. }))
+                .count()
+        }
+
+        #[tokio::test]
+        async fn fast_tool_result_surfaces_while_slow_tool_still_runs() {
+            let release = Arc::new(tokio::sync::Notify::new());
+            let tools = vec![
+                into_dynamic("instant", InstantTool),
+                into_dynamic("controlled", ControlledTool::new(release.clone())),
+            ];
+            let mut stream = agent_stream(batch_model("controlled"), tools, HashSet::new()).await;
+
+            let mut items = Vec::new();
+            loop {
+                let item = tokio::time::timeout(TIMEOUT, stream.next())
+                    .await
+                    .expect("stream stalled before the slow tool started")
+                    .expect("stream ended before the slow tool started");
+                if matches!(&item, StreamItem::ToolStart { name, .. } if name == "controlled") {
+                    break;
+                }
+                items.push(item);
+            }
+            // The slow tool is now blocked on release. The fast tool's result
+            // must already be surfaceable — rig only flushes its buffered
+            // results once the whole batch settles.
+            let early = loop {
+                let item = tokio::time::timeout(TIMEOUT, stream.next())
+                    .await
+                    .expect("the fast tool's result never surfaced while the slow tool runs")
+                    .expect("stream ended before the fast result surfaced");
+                let fast =
+                    matches!(&item, StreamItem::ToolResult { name, .. } if name == "instant");
+                items.push(item);
+                if fast {
+                    break true;
+                }
+            };
+            release.notify_one();
+            loop {
+                let Some(item) = tokio::time::timeout(TIMEOUT, stream.next())
+                    .await
+                    .expect("stream stalled before the batch settled")
+                else {
+                    break;
+                };
+                items.push(item);
+            }
+
+            assert!(
+                early,
+                "the fast tool's result must surface while the slow tool still runs"
+            );
+            assert_eq!(
+                results_named(&items, "instant"),
+                1,
+                "the buffered duplicate must be dropped"
+            );
+            assert_eq!(all_results(&items), 2);
+            assert!(items.iter().any(
+                |item| matches!(item, StreamItem::ToolResult { name, output, ok: true, .. }
+                    if name == "controlled" && output == "controlled done")
+            ));
+            assert!(
+                items
+                    .iter()
+                    .any(|item| matches!(item, StreamItem::Done { text, .. } if text == "done"))
+            );
+        }
+
+        #[tokio::test]
+        async fn worker_named_tool_surfaces_as_worker_result() {
+            let release = Arc::new(tokio::sync::Notify::new());
+            let tools = vec![
+                into_dynamic("instant", InstantTool),
+                into_dynamic("edit_files", ControlledTool::new(release.clone())),
+            ];
+            let mut stream = agent_stream(
+                batch_model("edit_files"),
+                tools,
+                HashSet::from(["edit_files".to_string()]),
+            )
+            .await;
+
+            let mut items = Vec::new();
+            loop {
+                let item = tokio::time::timeout(TIMEOUT, stream.next())
+                    .await
+                    .expect("stream stalled before the worker tool started")
+                    .expect("stream ended before the worker tool started");
+                if matches!(&item, StreamItem::WorkerStart { name, .. } if name == "edit_files") {
+                    break;
+                }
+                items.push(item);
+            }
+            // The worker tool is blocked on release; the fast tool's result
+            // must already be surfaceable.
+            loop {
+                let item = tokio::time::timeout(TIMEOUT, stream.next())
+                    .await
+                    .expect("the fast tool's result never surfaced while the worker tool runs")
+                    .expect("stream ended before the fast result surfaced");
+                let fast =
+                    matches!(&item, StreamItem::ToolResult { name, .. } if name == "instant");
+                items.push(item);
+                if fast {
+                    break;
+                }
+            }
+            release.notify_one();
+            loop {
+                let Some(item) = tokio::time::timeout(TIMEOUT, stream.next())
+                    .await
+                    .expect("stream stalled while the batch settles")
+                else {
+                    break;
+                };
+                items.push(item);
+            }
+
+            let worker_results: Vec<_> = items
+                .iter()
+                .filter(
+                    |item| matches!(item, StreamItem::WorkerResult { name, .. } if name == "edit_files"),
+                )
+                .collect();
+            assert_eq!(worker_results.len(), 1, "exactly one early worker result");
+            assert!(matches!(
+                worker_results[0],
+                StreamItem::WorkerResult {
+                    output,
+                    ok: true,
+                    ..
+                } if output == "controlled done"
+            ));
+            assert_eq!(results_named(&items, "edit_files"), 0);
+            assert_eq!(results_named(&items, "instant"), 1);
+            assert!(
+                items
+                    .iter()
+                    .any(|item| matches!(item, StreamItem::Done { text, .. } if text == "done"))
+            );
+        }
+
+        #[tokio::test]
+        async fn worker_internal_tool_results_surface_early() {
+            let release = Arc::new(tokio::sync::Notify::new());
+            let tools = vec![
+                into_dynamic("instant", InstantTool),
+                into_dynamic("controlled", ControlledTool::new(release.clone())),
+            ];
+            let (activity_tx, mut activity_rx) = tokio::sync::mpsc::channel(64);
+            let file_hook = FileChangeHook::new().with_early_finish(
+                HashSet::new(),
+                Some("run_tests".to_string()),
+                activity_tx.clone(),
+            );
+            let agent = AgentBuilder::new(batch_model("controlled"))
+                .dynamic_tools(tools)
+                .add_hook(file_hook.clone())
+                .build();
+            let usage = Arc::new(std::sync::Mutex::new(crate::TokenUsage::default()));
+            let runner = tokio::spawn(run_worker_agent(
+                agent,
+                "run_tests",
+                rig_core::message::Message::user("task"),
+                activity_tx,
+                usage,
+                2,
+                file_hook,
+            ));
+
+            // The worker's activity is a single FIFO channel: the batch's
+            // start items surface before any tool runs, so break once the
+            // slow tool starts, then observe the fast tool's result while
+            // the slow tool is still blocked.
+            let mut items = Vec::new();
+            loop {
+                let item = tokio::time::timeout(TIMEOUT, activity_rx.recv())
+                    .await
+                    .expect("stream stalled before the slow tool started")
+                    .expect("activity channel closed before the slow tool finished");
+                if matches!(&item, StreamItem::ToolStart { name, .. } if name == "controlled") {
+                    break;
+                }
+                items.push(item);
+            }
+            loop {
+                let item = tokio::time::timeout(TIMEOUT, activity_rx.recv())
+                    .await
+                    .expect("the fast tool's result never surfaced while the slow tool runs")
+                    .expect("activity channel closed before the fast result surfaced");
+                let fast =
+                    matches!(&item, StreamItem::ToolResult { name, .. } if name == "instant");
+                items.push(item);
+                if fast {
+                    break;
+                }
+            }
+            let early = true;
+            release.notify_one();
+            loop {
+                let Some(item) = tokio::time::timeout(TIMEOUT, activity_rx.recv())
+                    .await
+                    .expect("stream stalled while the batch settles")
+                else {
+                    break;
+                };
+                items.push(item);
+            }
+            let result = runner.await.unwrap().expect("worker run ok");
+
+            assert_eq!(result, "done");
+            assert!(
+                early,
+                "the fast tool's result must surface while the slow tool still runs"
+            );
+            assert_eq!(
+                results_named(&items, "instant"),
+                1,
+                "the buffered duplicate must be dropped"
+            );
+            assert_eq!(results_named(&items, "controlled"), 1);
+            for name in ["instant", "controlled"] {
+                assert!(items.iter().any(
+                    |item| matches!(item, StreamItem::ToolResult { name: n, worker: Some(w), .. }
+                        if n == name && w == "run_tests")
+                ));
+            }
+        }
     }
 }

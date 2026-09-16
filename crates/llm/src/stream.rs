@@ -41,6 +41,18 @@ pub enum StreamItem {
         ok: bool,
         call_id: String,
     },
+    /// A live `run_shell` output chunk, merged into the turn stream from the
+    /// shared shell-output channel. `worker` tags the owning agent (`None` for
+    /// the main agent); `command` is the exact command line of the call that
+    /// produced it, so a consumer holding the pending calls' args can resolve
+    /// the chunk to its own call even when an agent runs several shells
+    /// concurrently.
+    ShellOutput {
+        worker: Option<String>,
+        command: String,
+        stdout: String,
+        stderr: String,
+    },
     /// Usage for one completed provider request within the run. Emitted once
     /// per agent iteration (main stream and workers), so consumers can track
     /// token consumption before the run finishes. `worker` is `None` for the

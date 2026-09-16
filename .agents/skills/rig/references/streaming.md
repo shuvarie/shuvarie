@@ -88,6 +88,8 @@ pub enum MultiTurnStreamItem {
 
 - `ToolResult { tool_result, internal_call_id }` — a tool result; `internal_call_id` correlates with the originating `StreamedAssistantContent::ToolCall`.
 
+> **Per-batch buffering**: rig surfaces the batch's `ToolExecutionCommitted` + `ToolResult` items only after **every** tool call of the batch settles (in call order), so a fast call's result is not surfaced while a slow sibling still runs. Shuvarie works around this per-call: the `FileChangeHook`'s early-finish channel (`shuvarie-llm`'s `with_early_finish`) surfaces each result the moment its call completes, and `provider.rs::map_agent_stream` drops the later buffered duplicates via `FileChangeHook::surfaced_early`.
+
 > **Correlating tool calls and results**: use `internal_call_id` (a per-run rig correlator on `StreamedAssistantContent::ToolCall`, `StreamedUserContent::ToolResult`, and `MultiTurnStreamItem::ToolExecutionCommitted`). The durable provider handles live on `ToolCall::id` / `ToolResult::call` (see `completions.md`). A `ToolResult`'s `name` field is the *executed* tool's name — which can differ from the model's call when a hook repaired it.
 
 ## Streaming to stdout
