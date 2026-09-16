@@ -7,6 +7,7 @@ pub enum CommandAction {
     OpenSessionPicker,
     OpenTree,
     OpenScenePicker,
+    OpenVariantPicker,
     NewSession,
     EditTitle,
     UndoLastTurn,
@@ -17,12 +18,13 @@ pub enum CommandAction {
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 12] = [
+    pub const ALL: [CommandAction; 13] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::OpenSessionPicker,
         CommandAction::OpenTree,
         CommandAction::OpenScenePicker,
+        CommandAction::OpenVariantPicker,
         CommandAction::NewSession,
         CommandAction::EditTitle,
         CommandAction::UndoLastTurn,
@@ -39,6 +41,7 @@ impl CommandAction {
             CommandAction::OpenSessionPicker => "sessions",
             CommandAction::OpenTree => "tree",
             CommandAction::OpenScenePicker => "scene",
+            CommandAction::OpenVariantPicker => "variant",
             CommandAction::NewSession => "new",
             CommandAction::EditTitle => "title",
             CommandAction::UndoLastTurn => "undo",
@@ -54,7 +57,9 @@ impl CommandAction {
     pub fn takes_args(self) -> bool {
         matches!(
             self,
-            CommandAction::EditTitle | CommandAction::OpenScenePicker
+            CommandAction::EditTitle
+                | CommandAction::OpenScenePicker
+                | CommandAction::OpenVariantPicker
         )
     }
 }
@@ -103,6 +108,12 @@ pub fn default_commands() -> Vec<CommandEntry> {
             name: "Switch scene",
             description: "Pick the scene the agent runs under",
             action: CommandAction::OpenScenePicker,
+            available: true,
+        },
+        CommandEntry {
+            name: "Select variant",
+            description: "Pick the model's reasoning effort",
+            action: CommandAction::OpenVariantPicker,
             available: true,
         },
         CommandEntry {
@@ -349,6 +360,28 @@ mod tests {
                 args: None
             }),
             "whitespace-only remainder is no args"
+        );
+        assert_eq!(
+            parse_command("/variant"),
+            Some(ParsedCommand {
+                action: CommandAction::OpenVariantPicker,
+                args: None
+            })
+        );
+        assert_eq!(
+            parse_command("/variant   "),
+            Some(ParsedCommand {
+                action: CommandAction::OpenVariantPicker,
+                args: None
+            }),
+            "whitespace-only remainder is no args"
+        );
+        assert_eq!(
+            parse_command("/variant HIGH"),
+            Some(ParsedCommand {
+                action: CommandAction::OpenVariantPicker,
+                args: Some("HIGH".into())
+            })
         );
     }
 

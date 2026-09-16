@@ -20,10 +20,16 @@ pub enum Command {
     SetActiveModel {
         model: String,
     },
-    /// Cycle the active model's reasoning-effort variant (Ctrl+T), wrapping
-    /// from the last Selune catalog variant back to the first. A no-op when
-    /// the active model has no catalog variants.
+    /// Cycle the active model's reasoning-effort variant (Ctrl+T): forward
+    /// through the Selune catalog's variants, wrapping past the last back to
+    /// the unset default. A no-op when the active model is not in the catalog.
     CycleVariant,
+    /// Set the active model's reasoning-effort variant directly
+    /// (`/variant [name]`). The TUI validates the value against the catalog
+    /// before sending; `None` selects the unset default.
+    SelectVariant {
+        variant: Option<String>,
+    },
     SaveConfig,
     NewSession,
     SendMessage {

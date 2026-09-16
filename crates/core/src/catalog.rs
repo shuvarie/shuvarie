@@ -199,16 +199,28 @@ pub fn model_variants(model: &selune::Model) -> &[String] {
         .unwrap_or(&[])
 }
 
+/// The variant a cycle step lands on: one of the model's declared
+/// reasoning-effort values or the unset default the cycle wraps back to
+/// after the last declared one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NextVariant {
+    /// Clear the variant — the cycle wrapped past the last declared option.
+    Default,
+    /// The next declared reasoning-effort variant.
+    Set(String),
+}
+
 /// The reasoning-effort variant following `current` for the catalog model
-/// matching `model_id` under `provider`'s catalog id, wrapping from the last
-/// declared variant back to the first. An unset or unknown current restarts
-/// the cycle at the first variant. `None` when the provider or model is not
-/// in the catalog or the model declares no variants.
+/// matching `model_id` under `provider`'s catalog id. The cycle runs unset →
+/// first variant → … → last variant → unset; an unset or unknown current
+/// starts at the first variant, and a stale current on a model without
+/// declared variants cycles back to the default. `None` when the provider or
+/// model is not in the catalog (a no-op).
 pub fn next_variant(
     provider: &ProviderConfig,
     model_id: &str,
     current: Option<&str>,
-) -> Option<String> {
+) -> Option<NextVariant> {
     next_variant_in(&providers(), provider, model_id, current)
 }
 
@@ -217,17 +229,22 @@ fn next_variant_in(
     provider: &ProviderConfig,
     model_id: &str,
     current: Option<&str>,
-) -> Option<String> {
+) -> Option<NextVariant> {
     let id = provider.catalog_id()?;
     let entry = find_provider(providers, id)?;
     let model = find_model(entry, model_id)?;
     let variants = model_variants(model);
-    variants.first()?;
-    let index = match current.and_then(|c| variants.iter().position(|v| v == c)) {
-        Some(i) => (i + 1) % variants.len(),
-        None => 0,
-    };
-    Some(variants[index].clone())
+    match current.and_then(|c| variants.iter().position(|v| v == c)) {
+        Some(i) => match variants.get(i + 1) {
+            Some(next) => Some(NextVariant::Set(next.clone())),
+            None => Some(NextVariant::Default),
+        },
+        None => match (current.is_some(), variants.first()) {
+            (_, Some(first)) => Some(NextVariant::Set(first.clone())),
+            (true, None) => Some(NextVariant::Default),
+            (false, None) => None,
+        },
+    }
 }
 
 /// Fill a model's missing runtime context length from the catalog, if known.
@@ -633,21 +650,28 @@ mod tests {
     }
 
     #[test]
-    fn next_variant_cycles_with_wraparound() {
+    fn next_variant_cycles_through_the_default() {
         let providers = vec![variant_provider(vec![effort_model(
             "gpt-5.4",
             &["low", "medium", "high"],
         )])];
         let pc = ProviderConfig::new("acme", "openai", None, None).with_catalog(Some("acme"));
-        let next =
-            |current: Option<&str>| next_variant_in(&providers, &pc, "gpt-5.4", current).unwrap();
-        assert_eq!(next(None), "low", "unset current starts at the first");
-        assert_eq!(next(Some("low")), "medium");
-        assert_eq!(next(Some("medium")), "high");
-        assert_eq!(next(Some("high")), "low", "last wraps to the first");
+        let next = |current: Option<&str>| next_variant_in(&providers, &pc, "gpt-5.4", current);
+        assert_eq!(
+            next(None),
+            Some(NextVariant::Set("low".into())),
+            "unset current starts at the first"
+        );
+        assert_eq!(next(Some("low")), Some(NextVariant::Set("medium".into())));
+        assert_eq!(next(Some("medium")), Some(NextVariant::Set("high".into())));
+        assert_eq!(
+            next(Some("high")),
+            Some(NextVariant::Default),
+            "last wraps to the default"
+        );
         assert_eq!(
             next(Some("xhigh")),
-            "low",
+            Some(NextVariant::Set("low".into())),
             "unknown current restarts the cycle"
         );
     }
@@ -660,8 +684,8 @@ mod tests {
         )])];
         let pc = ProviderConfig::new("acme", "openai", None, None).with_catalog(Some("acme"));
         assert_eq!(
-            next_variant_in(&providers, &pc, "claude-opus-4-6", None).unwrap(),
-            "low",
+            next_variant_in(&providers, &pc, "claude-opus-4-6", None),
+            Some(NextVariant::Set("low".into())),
             "the dated alias resolves"
         );
     }
@@ -674,6 +698,17 @@ mod tests {
         assert_eq!(
             next_variant_in(&providers, &pc, "unknown-model", None),
             None
+        );
+    }
+
+    #[test]
+    fn next_variant_clears_a_stale_variant_without_catalog_variants() {
+        let providers = vec![variant_provider(vec![plain_model("gpt-4o")])];
+        let pc = ProviderConfig::new("acme", "openai", None, None).with_catalog(Some("acme"));
+        assert_eq!(
+            next_variant_in(&providers, &pc, "gpt-4o", Some("high")),
+            Some(NextVariant::Default),
+            "a variant the model no longer declares cycles back to the default"
         );
     }
 

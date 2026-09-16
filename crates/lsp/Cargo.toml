@@ -12,7 +12,7 @@ async-lsp = { version = "0.2", default-features = false, features = ["omni-trait
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-util", "process"] }
+tokio = { workspace = true, features = ["io-util", "process", "time"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 tower = "0.5"
 

@@ -606,7 +606,10 @@ pub async fn run(
                             });
                         if let Some(next) = next {
                             if let Some(active) = ctx.connections.active.as_mut() {
-                                active.variant = Some(next);
+                                active.variant = match next {
+                                    crate::catalog::NextVariant::Set(variant) => Some(variant),
+                                    crate::catalog::NextVariant::Default => None,
+                                };
                             }
                             persist(
                                 &ctx.config,
@@ -617,6 +620,20 @@ pub async fn run(
                             )
                             .await;
                         }
+                    }
+                    Command::SelectVariant { variant } => {
+                        let Some(active) = ctx.connections.active.as_mut() else {
+                            continue;
+                        };
+                        active.variant = variant;
+                        persist(
+                            &ctx.config,
+                            &ctx.connections,
+                            config_path.as_deref(),
+                            connections_path.as_deref(),
+                            &ctx.event_tx,
+                        )
+                        .await;
                     }
                     Command::SaveConfig => {
                         persist(

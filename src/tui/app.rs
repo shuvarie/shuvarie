@@ -29,6 +29,7 @@ use super::session_picker::{SessionPicker, SessionPickerEffect, SessionPickerMes
 use super::sidebar::SidebarMessage;
 use super::spinner::SpinnerKind;
 use super::title::{TitleEffect, TitleMessage, TitlePopup};
+use super::variant;
 use super::warning::{WarningMessage, WarningPopup};
 use super::welcome::{Welcome, WelcomeEffect, WelcomeMessage};
 use super::workspace::WorkspaceInfo;
@@ -46,6 +47,7 @@ pub enum Overlay {
     TitleEdit,
     Tree,
     Scene,
+    Variant,
 }
 
 pub enum AppMessage {
@@ -67,6 +69,7 @@ pub enum AppMessage {
     SessionPicker(SessionPickerMessage),
     Tree(TreeMessage),
     Scene(scene::SceneMessage),
+    Variant(variant::VariantMessage),
     /// The configured scene set (startup), for the switcher; `warnings`
     /// carries one message per same-level scene conflict.
     ScenesLoaded {
@@ -169,6 +172,7 @@ pub struct App {
     pub session_picker: SessionPicker,
     pub tree_popup: TreePopup,
     pub scene_picker: scene::ScenePicker,
+    pub variant_picker: variant::VariantPicker,
     pub history_search: HistorySearch,
     pub title_popup: TitlePopup,
     pub warning: WarningPopup,
@@ -196,6 +200,24 @@ fn catalog_context_length(connections: &Connections) -> Option<u64> {
     let providers = shuvarie_core::catalog::providers();
     let provider = shuvarie_core::catalog::find_provider(&providers, id)?;
     shuvarie_core::catalog::context_length(provider, model).map(|c| c.max(0) as u64)
+}
+
+/// The active model's reasoning-effort variants from the Selune catalog, in
+/// declared order — the list the `/variant` selector and its argument
+/// validate against. `None` without an active provider/model or when the
+/// catalog model declares no variants.
+fn catalog_variants(connections: &Connections) -> Option<Vec<String>> {
+    let active = connections.active.as_ref()?;
+    let model = active.model.as_deref()?;
+    let id = connections
+        .providers
+        .get(&active.provider)
+        .and_then(|pc| pc.catalog_id())?;
+    let providers = shuvarie_core::catalog::providers();
+    let provider = shuvarie_core::catalog::find_provider(&providers, id)?;
+    let entry = shuvarie_core::catalog::find_model(provider, model)?;
+    let variants = shuvarie_core::catalog::model_variants(entry);
+    (!variants.is_empty()).then(|| variants.to_vec())
 }
 
 impl App {
@@ -252,6 +274,7 @@ impl App {
             session_picker: SessionPicker::new(),
             tree_popup: TreePopup::new(),
             scene_picker: scene::ScenePicker::new(),
+            variant_picker: variant::VariantPicker::new(),
             history_search: HistorySearch::new(),
             title_popup: TitlePopup::new(),
             warning: WarningPopup::new(),
@@ -394,6 +417,9 @@ impl App {
                         }
                         Overlay::Scene => {
                             return self.scene_picker.map_event(&key).map(AppMessage::Scene);
+                        }
+                        Overlay::Variant => {
+                            return self.variant_picker.map_event(&key).map(AppMessage::Variant);
                         }
                         Overlay::HistorySearch => {
                             return self
@@ -727,7 +753,8 @@ impl App {
             | Overlay::ConfirmQuit
             | Overlay::SessionPicker
             | Overlay::Tree
-            | Overlay::Scene => None,
+            | Overlay::Scene
+            | Overlay::Variant => None,
             Overlay::ModelPicker => {
                 let flat = super::components::flatten_newlines(text);
                 let mut msg = None;
@@ -823,6 +850,18 @@ impl App {
                             self.ctx.send(shuvarie_core::Command::SwitchScene { name });
                         }
                         scene::SceneEffect::Close => self.close_overlay(),
+                    }
+                }
+            }
+            AppMessage::Variant(m) => {
+                if let Some(effect) = self.variant_picker.update(m) {
+                    match effect {
+                        variant::VariantEffect::Set { variant } => {
+                            self.close_overlay();
+                            self.ctx
+                                .send(shuvarie_core::Command::SelectVariant { variant });
+                        }
+                        variant::VariantEffect::Close => self.close_overlay(),
                     }
                 }
             }
@@ -1045,7 +1084,8 @@ impl App {
                     | Overlay::ConfirmQuit
                     | Overlay::TitleEdit
                     | Overlay::Tree
-                    | Overlay::Scene => {}
+                    | Overlay::Scene
+                    | Overlay::Variant => {}
                 }
             }
             AppMessage::ConfigSaved => {
@@ -1332,6 +1372,53 @@ impl App {
         self.ctx.send(shuvarie_core::Command::ListSessions);
     }
 
+    /// Opens the variant selector, or with an argument (`/variant <name>`)
+    /// picks it directly: `default` clears the variant, a declared value
+    /// (case-insensitive) selects it in canonical casing, anything else shows
+    /// an error listing what the model declares.
+    fn open_variant_picker(&mut self, args: Option<String>) {
+        let Some(active) = self.ctx.connections.active.as_ref() else {
+            self.session.update(SessionMessage::ShowError {
+                error: "no active model".into(),
+            });
+            return;
+        };
+        let Some(model) = active.model.clone() else {
+            self.session.update(SessionMessage::ShowError {
+                error: "no active model".into(),
+            });
+            return;
+        };
+        let current = active.variant.clone();
+        match catalog_variants(&self.ctx.connections) {
+            Some(variants) => match args {
+                None => {
+                    self.variant_picker.open(&variants, current.as_deref());
+                    self.overlay = Overlay::Variant;
+                }
+                Some(arg) => {
+                    if let Some(variant) = variant::resolve_arg(&variants, &arg) {
+                        self.ctx
+                            .send(shuvarie_core::Command::SelectVariant { variant });
+                    } else {
+                        self.session.update(SessionMessage::ShowError {
+                            error: format!(
+                                "unknown variant `{arg}` — available: {}, {}",
+                                variant::DEFAULT_VARIANT,
+                                variants.join(", ")
+                            ),
+                        });
+                    }
+                }
+            },
+            None => {
+                self.session.update(SessionMessage::ShowError {
+                    error: format!("model {model} has no variants"),
+                });
+            }
+        }
+    }
+
     /// Records the session's current scene (`None` = built-in Default) and
     /// updates the sidebar's scene line.
     fn set_scene(&mut self, name: Option<String>) {
@@ -1419,6 +1506,9 @@ impl App {
                     self.overlay = Overlay::Scene;
                 }
             }
+            CommandAction::OpenVariantPicker => {
+                self.open_variant_picker(args);
+            }
             CommandAction::NewSession => {
                 self.save_scroll();
                 self.session.update(SessionMessage::Reset);
@@ -1472,6 +1562,7 @@ impl App {
         self.history_search.close();
         self.confirm_quit.close();
         self.title_popup.close();
+        self.variant_picker.close();
         if self.welcome.open {
             self.welcome.close();
         }
@@ -1541,6 +1632,7 @@ impl App {
         self.session_picker.view(frame, area);
         self.tree_popup.view(frame, area);
         self.scene_picker.view(frame, area);
+        self.variant_picker.view(frame, area);
         self.history_search.view(frame, area);
         self.command_menu.view(frame, area);
         self.title_popup.view(frame, area);
@@ -1925,5 +2017,153 @@ mod tests {
         });
         assert!(!app.warning.open);
         assert!(app.scene_entries.is_empty());
+    }
+
+    fn connected_variant() -> Connections {
+        let mut connections = Connections::default();
+        let provider = shuvarie_core::ProviderConfig::new("Ollama Cloud", "ollama", None, None)
+            .with_catalog(Some("ollama-cloud"));
+        connections
+            .providers
+            .insert("ollama-cloud".into(), provider);
+        connections.active = Some(shuvarie_core::Active {
+            provider: "ollama-cloud".into(),
+            model: Some("glm-5.3-flash".into()),
+            variant: None,
+        });
+        connections
+    }
+
+    #[test]
+    fn catalog_variants_resolves_the_tagged_ollama_cloud_model() {
+        assert_eq!(
+            catalog_variants(&connected_variant()),
+            Some(vec!["low".into(), "high".into(), "max".into()])
+        );
+    }
+
+    #[test]
+    fn catalog_variants_is_none_for_a_model_without_variants() {
+        assert_eq!(catalog_variants(&connected()), None);
+        assert_eq!(catalog_variants(&Connections::default()), None);
+    }
+
+    #[tokio::test]
+    async fn variant_command_with_a_valid_argument_sends_select_variant() {
+        let (mut app, mut rx) = app_with_rx(connected_variant());
+        active_session(&mut app);
+        app.run_command(CommandAction::OpenVariantPicker, Some("HIGH".into()));
+        assert!(matches!(app.overlay, Overlay::None), "no popup opens");
+        let cmd = rx.recv().await.unwrap();
+        assert!(
+            matches!(
+                cmd,
+                shuvarie_core::Command::SelectVariant {
+                    variant: Some(ref v)
+                } if v == "high"
+            ),
+            "the canonical casing is sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn variant_command_default_argument_clears_the_variant() {
+        let (mut app, mut rx) = app_with_rx(connected_variant());
+        active_session(&mut app);
+        app.run_command(CommandAction::OpenVariantPicker, Some("Default".into()));
+        let cmd = rx.recv().await.unwrap();
+        assert!(matches!(
+            cmd,
+            shuvarie_core::Command::SelectVariant { variant: None }
+        ));
+    }
+
+    #[test]
+    fn variant_command_with_an_invalid_argument_shows_an_error() {
+        let (mut app, mut rx) = app_with_rx(connected_variant());
+        active_session(&mut app);
+        app.run_command(CommandAction::OpenVariantPicker, Some("bogus".into()));
+        assert!(app.session.error.is_some(), "an error is shown");
+        let error = app.session.error.unwrap();
+        assert!(
+            error.contains("unknown variant `bogus`")
+                && error.contains("available: default, low, high, max"),
+            "the error names the accepted values: {error}"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing is sent for an invalid pick"
+        );
+    }
+
+    #[test]
+    fn variant_command_without_argument_opens_the_selector() {
+        let (mut app, mut rx) = app_with_rx(connected_variant());
+        active_session(&mut app);
+        app.ctx.connections.active.as_mut().unwrap().variant = Some("max".into());
+        app.run_command(CommandAction::OpenVariantPicker, None);
+        assert!(matches!(app.overlay, Overlay::Variant));
+        assert!(app.variant_picker.open);
+        assert_eq!(
+            app.variant_picker.selected, 3,
+            "the current pick is preselected"
+        );
+        assert!(rx.try_recv().is_err(), "no command until Enter");
+    }
+
+    #[test]
+    fn variant_command_on_a_model_without_variants_shows_an_error() {
+        let (mut app, mut rx) = app_with_rx(connected());
+        active_session(&mut app);
+        app.run_command(CommandAction::OpenVariantPicker, None);
+        assert!(matches!(app.overlay, Overlay::None), "no popup opens");
+        assert_eq!(
+            app.session.error.as_deref(),
+            Some("model claude-sonnet-4-5 has no variants")
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn variant_command_without_a_model_shows_an_error() {
+        let (mut app, mut rx) = app_with_rx(Connections::default());
+        app.welcome.close();
+        app.overlay = Overlay::None;
+        app.run_command(CommandAction::OpenVariantPicker, Some("high".into()));
+        assert_eq!(app.session.error.as_deref(), Some("no active model"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn the_variant_overlay_captures_keys_and_select_sends_the_pick() {
+        let (mut app, mut rx) = app_with_rx(connected_variant());
+        active_session(&mut app);
+        app.run_command(CommandAction::OpenVariantPicker, None);
+        let down = termina::event::KeyEvent::new(
+            termina::event::KeyCode::Down,
+            termina::event::Modifiers::empty(),
+        );
+        let enter = termina::event::KeyEvent::new(
+            termina::event::KeyCode::Enter,
+            termina::event::Modifiers::empty(),
+        );
+        assert!(matches!(
+            app.map_event(Event::Terminal(TermEvent::Key(down))),
+            Some(AppMessage::Variant(variant::VariantMessage::Next))
+        ));
+        app.update(AppMessage::Variant(variant::VariantMessage::Next));
+        assert!(matches!(
+            app.map_event(Event::Terminal(TermEvent::Key(enter))),
+            Some(AppMessage::Variant(variant::VariantMessage::Select))
+        ));
+        app.update(AppMessage::Variant(variant::VariantMessage::Select));
+        assert!(matches!(app.overlay, Overlay::None), "the picker closes");
+        let cmd = rx.try_recv().unwrap();
+        assert!(matches!(
+            cmd,
+            shuvarie_core::Command::SelectVariant {
+                variant: Some(ref v)
+            } if v == "low"
+        ));
     }
 }
