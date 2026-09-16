@@ -34,3 +34,8 @@ result-*
 
 # Ignore automatically generated direnv output
 .direnv
+
+#-- nsis --#
+
+# Installer output produced by makensis
+nsis/*.exe
