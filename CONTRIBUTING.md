@@ -28,6 +28,12 @@ In a feature branch, you can name them whatever you want.
 
 However, in `main` or a `rel` branch, or a pull request, a commit summary is expected to follow the [Conventional Commit style](https://www.conventionalcommits.org/en/v1.0.0/).
 
+### Language
+
+Always use English for description, comments, and UI text, unless for special needs.
+
+Usage of other languages will probably lead to immediate close/reject, even if the maintainer understands the language.
+
 ## Develop with an LLM
 
 As an AI tool project, we encourage our contributors to use AI **constructively**, **pragmatically**, and **educatively**.
