@@ -50,6 +50,8 @@ pub enum Overlay {
 
 pub enum AppMessage {
     OpenCommandMenu,
+    /// Cycle the active model's reasoning-effort variant (Ctrl+T).
+    CycleModelVariant,
     RequestQuit,
     ConfirmQuit,
     CancelQuit,
@@ -211,6 +213,7 @@ impl App {
         }
         let initial_provider = connections.active.as_ref().map(|a| a.provider.clone());
         let initial_model = connections.active.as_ref().and_then(|a| a.model.clone());
+        let initial_variant = connections.active.as_ref().and_then(|a| a.variant.clone());
         let initial_display = initial_provider
             .as_deref()
             .and_then(|id| connections.providers.get(id).map(|p| p.name.clone()));
@@ -227,6 +230,7 @@ impl App {
                 s.update(SessionMessage::UpdateConfig {
                     provider: initial_display,
                     model: initial_model,
+                    variant: initial_variant,
                     context_length: initial_context_length,
                 });
                 s.sidebar
@@ -430,6 +434,9 @@ impl App {
                             }
                             KeyCode::Char('r') if ctrl(&key) => {
                                 return Some(AppMessage::HistorySearch(HistorySearchMessage::Open));
+                            }
+                            KeyCode::Char('t') | KeyCode::Char('T') if ctrl(&key) => {
+                                return Some(AppMessage::CycleModelVariant);
                             }
                             _ => {}
                         },
@@ -744,6 +751,9 @@ impl App {
                 self.update_command_availability();
                 self.command_menu.open();
                 self.overlay = Overlay::CommandMenu;
+            }
+            AppMessage::CycleModelVariant => {
+                self.ctx.send(shuvarie_core::Command::CycleVariant);
             }
             AppMessage::RequestQuit => {
                 self.confirm_quit.open();
@@ -1133,6 +1143,12 @@ impl App {
                         self.session.update(SessionMessage::UpdateConfig {
                             provider: self.provider_display_name(&provider_name),
                             model: current.map(|m| m.to_string()),
+                            variant: self
+                                .ctx
+                                .connections
+                                .active
+                                .as_ref()
+                                .and_then(|a| a.variant.clone()),
                             context_length: self.active_context_length(),
                         });
                     }
@@ -1503,6 +1519,12 @@ impl App {
                     .active
                     .as_ref()
                     .and_then(|a| a.model.clone()),
+                variant: self
+                    .ctx
+                    .connections
+                    .active
+                    .as_ref()
+                    .and_then(|a| a.variant.clone()),
                 context_length: self.active_context_length(),
             });
         }
@@ -1747,6 +1769,23 @@ mod tests {
         app.update(AppMessage::RequestQuit);
         assert!(app.confirm_quit.open, "quit prompt opens");
         assert!(matches!(app.overlay, Overlay::ConfirmQuit));
+    }
+
+    #[tokio::test]
+    async fn ctrl_t_maps_to_cycle_variant_and_sends_the_command() {
+        let (mut app, mut rx) = app_with_rx(connected());
+        active_session(&mut app);
+        let key =
+            termina::event::KeyEvent::new(KeyCode::Char('t'), termina::event::Modifiers::CONTROL);
+        assert!(matches!(
+            app.map_event(Event::Terminal(TermEvent::Key(key))),
+            Some(AppMessage::CycleModelVariant)
+        ));
+        app.update(AppMessage::CycleModelVariant);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            shuvarie_core::Command::CycleVariant
+        ));
     }
 
     #[test]

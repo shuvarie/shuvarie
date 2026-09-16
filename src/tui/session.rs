@@ -93,6 +93,7 @@ pub enum SessionMessage {
     UpdateConfig {
         provider: Option<String>,
         model: Option<String>,
+        variant: Option<String>,
         context_length: Option<u64>,
     },
     QuestionAsked {
@@ -218,6 +219,7 @@ pub struct SessionScreen {
     pub sidebar: Sidebar,
     provider: Option<String>,
     model: Option<String>,
+    variant: Option<String>,
     pub session_id: Option<uuid::Uuid>,
     pub session_title: Option<String>,
     pub error: Option<String>,
@@ -246,6 +248,7 @@ impl SessionScreen {
             sidebar: Sidebar::new(),
             provider: None,
             model: None,
+            variant: None,
             session_id: None,
             session_title: None,
             error: None,
@@ -593,10 +596,12 @@ impl SessionScreen {
             SessionMessage::UpdateConfig {
                 provider,
                 model,
+                variant,
                 context_length,
             } => {
                 self.provider = provider;
                 self.model = model;
+                self.variant = variant;
                 self.sidebar
                     .update(SidebarMessage::UpdateConfig { context_length });
                 None
@@ -977,6 +982,10 @@ impl SessionScreen {
             if let Some(m) = &self.model {
                 spans.push(Span::raw(":").fg(theme::TEXT_MUTED));
                 spans.push(Span::raw(m.clone()).fg(theme::TEXT_DIM));
+                if let Some(v) = &self.variant {
+                    spans.push(Span::raw(":").fg(theme::TEXT_MUTED));
+                    spans.push(Span::raw(v.clone()).fg(theme::ACCENT));
+                }
             }
             Line::from(spans)
         });
@@ -1386,6 +1395,7 @@ mod tests {
         screen.update(SessionMessage::UpdateConfig {
             provider: Some("Anthropic".into()),
             model: Some("claude-sonnet-4-5".into()),
+            variant: None,
             context_length: Some(200_000),
         });
         assert_eq!(screen.provider.as_deref(), Some("Anthropic"));
@@ -1401,6 +1411,37 @@ mod tests {
         assert!(
             !sidebar_row.contains("Anthropic"),
             "sidebar must not show the provider: {sidebar_row:?}"
+        );
+    }
+
+    #[test]
+    fn variant_renders_after_the_model_on_status_row() {
+        let mut screen = SessionScreen::new();
+        screen.update(SessionMessage::UpdateConfig {
+            provider: Some("Anthropic".into()),
+            model: Some("claude-sonnet-4-5".into()),
+            variant: Some("high".into()),
+            context_length: Some(200_000),
+        });
+
+        let buf = draw(&screen, 80, 24);
+        let status_row = content_row_text(&buf, 22);
+        assert!(
+            status_row.ends_with("Anthropic:claude-sonnet-4-5:high"),
+            "status row: {status_row:?}"
+        );
+
+        screen.update(SessionMessage::UpdateConfig {
+            provider: Some("Anthropic".into()),
+            model: Some("claude-sonnet-4-5".into()),
+            variant: None,
+            context_length: Some(200_000),
+        });
+        let buf = draw(&screen, 80, 24);
+        let status_row = content_row_text(&buf, 22);
+        assert!(
+            status_row.ends_with("Anthropic:claude-sonnet-4-5"),
+            "variant dropped from the display when unset: {status_row:?}"
         );
     }
 

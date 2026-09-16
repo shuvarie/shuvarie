@@ -188,6 +188,48 @@ pub fn context_length(provider: &Provider, model_id: &str) -> Option<i64> {
     find_model(provider, model_id).and_then(|m| m.limit.context)
 }
 
+/// The reasoning-effort variants of a catalog model, in declared order.
+/// Empty for models without an effort-typed option carrying values.
+pub fn model_variants(model: &selune::Model) -> &[String] {
+    model
+        .reasoning_options
+        .iter()
+        .find(|o| o.r#type == "effort" && !o.values.is_empty())
+        .map(|o| o.values.as_slice())
+        .unwrap_or(&[])
+}
+
+/// The reasoning-effort variant following `current` for the catalog model
+/// matching `model_id` under `provider`'s catalog id, wrapping from the last
+/// declared variant back to the first. An unset or unknown current restarts
+/// the cycle at the first variant. `None` when the provider or model is not
+/// in the catalog or the model declares no variants.
+pub fn next_variant(
+    provider: &ProviderConfig,
+    model_id: &str,
+    current: Option<&str>,
+) -> Option<String> {
+    next_variant_in(&providers(), provider, model_id, current)
+}
+
+fn next_variant_in(
+    providers: &[Provider],
+    provider: &ProviderConfig,
+    model_id: &str,
+    current: Option<&str>,
+) -> Option<String> {
+    let id = provider.catalog_id()?;
+    let entry = find_provider(providers, id)?;
+    let model = find_model(entry, model_id)?;
+    let variants = model_variants(model);
+    variants.first()?;
+    let index = match current.and_then(|c| variants.iter().position(|v| v == c)) {
+        Some(i) => (i + 1) % variants.len(),
+        None => 0,
+    };
+    Some(variants[index].clone())
+}
+
 /// Fill a model's missing runtime context length from the catalog, if known.
 pub fn enrich(provider: &Provider, info: &mut shuvarie_llm::Model) {
     if info.context_length.is_none()
@@ -547,6 +589,108 @@ mod tests {
             [("glm-5.3", 1_310_720), ("glm-5.3-flash:cloud", 1_310_720)],
         );
         assert_eq!(context_length(&provider, "glm-5.3-flash"), Some(1_310_720));
+    }
+
+    fn effort_model(id: &str, values: &[&str]) -> selune::Model {
+        let mut model = plain_model(id);
+        model.reasoning = true;
+        model.reasoning_options = vec![selune::ReasoningOption {
+            r#type: "effort".to_string(),
+            values: values.iter().map(|v| v.to_string()).collect(),
+            min: None,
+            max: None,
+        }];
+        model
+    }
+
+    fn plain_model(id: &str) -> selune::Model {
+        selune::Model {
+            id: id.to_string(),
+            name: id.to_string(),
+            reasoning: false,
+            reasoning_options: Vec::new(),
+            attachment: false,
+            limit: selune::ModelLimit::default(),
+            cost: selune::ModelCost::default(),
+            options: None,
+        }
+    }
+
+    fn variant_provider(models: Vec<selune::Model>) -> Provider {
+        Provider {
+            models,
+            ..catalog_provider("acme", None, None)
+        }
+    }
+
+    #[test]
+    fn model_variants_reads_the_effort_option() {
+        let model = effort_model("gpt-5.4", &["low", "medium", "high"]);
+        assert_eq!(
+            model_variants(&model),
+            ["low", "medium", "high"].map(str::to_string).as_slice()
+        );
+    }
+
+    #[test]
+    fn next_variant_cycles_with_wraparound() {
+        let providers = vec![variant_provider(vec![effort_model(
+            "gpt-5.4",
+            &["low", "medium", "high"],
+        )])];
+        let pc = ProviderConfig::new("acme", "openai", None, None).with_catalog(Some("acme"));
+        let next =
+            |current: Option<&str>| next_variant_in(&providers, &pc, "gpt-5.4", current).unwrap();
+        assert_eq!(next(None), "low", "unset current starts at the first");
+        assert_eq!(next(Some("low")), "medium");
+        assert_eq!(next(Some("medium")), "high");
+        assert_eq!(next(Some("high")), "low", "last wraps to the first");
+        assert_eq!(
+            next(Some("xhigh")),
+            "low",
+            "unknown current restarts the cycle"
+        );
+    }
+
+    #[test]
+    fn next_variant_matches_model_ids_loosely() {
+        let providers = vec![variant_provider(vec![effort_model(
+            "claude-opus-4-6-20251101",
+            &["low", "medium", "high"],
+        )])];
+        let pc = ProviderConfig::new("acme", "openai", None, None).with_catalog(Some("acme"));
+        assert_eq!(
+            next_variant_in(&providers, &pc, "claude-opus-4-6", None).unwrap(),
+            "low",
+            "the dated alias resolves"
+        );
+    }
+
+    #[test]
+    fn next_variant_is_none_without_catalog_variants() {
+        let providers = vec![variant_provider(vec![plain_model("gpt-4o")])];
+        let pc = ProviderConfig::new("acme", "openai", None, None).with_catalog(Some("acme"));
+        assert_eq!(next_variant_in(&providers, &pc, "gpt-4o", None), None);
+        assert_eq!(
+            next_variant_in(&providers, &pc, "unknown-model", None),
+            None
+        );
+    }
+
+    #[test]
+    fn next_variant_is_none_for_unknown_catalog_id() {
+        let providers = vec![variant_provider(vec![effort_model(
+            "gpt-5.4",
+            &["low", "high"],
+        )])];
+        let pc = ProviderConfig::new("acme", "openai", None, None).with_catalog(Some("elsewhere"));
+        assert_eq!(next_variant_in(&providers, &pc, "gpt-5.4", None), None);
+        let pc = ProviderConfig::new("acme", "ollama", None, None);
+        assert_eq!(
+            next_variant_in(&providers, &pc, "gpt-5.4", None),
+            None,
+            "no catalog id and `ollama` is not a catalog entry here"
+        );
     }
 
     #[test]

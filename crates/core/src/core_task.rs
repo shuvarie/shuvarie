@@ -575,6 +575,7 @@ pub async fn run(
                     Command::SetActiveModel { model } => {
                         if let Some(active) = ctx.connections.active.as_mut() {
                             active.model = Some(model);
+                            active.variant = None;
                         }
                         persist(
                             &ctx.config,
@@ -584,6 +585,38 @@ pub async fn run(
                             &ctx.event_tx,
                         )
                         .await;
+                    }
+                    Command::CycleVariant => {
+                        let (provider, model, current) = match ctx.connections.active.as_ref() {
+                            Some(active) => (
+                                active.provider.clone(),
+                                active.model.clone(),
+                                active.variant.clone(),
+                            ),
+                            None => continue,
+                        };
+                        let next = ctx
+                            .connections
+                            .providers
+                            .get(&provider)
+                            .and_then(|pc| {
+                                model.as_deref().and_then(|model| {
+                                    crate::catalog::next_variant(pc, model, current.as_deref())
+                                })
+                            });
+                        if let Some(next) = next {
+                            if let Some(active) = ctx.connections.active.as_mut() {
+                                active.variant = Some(next);
+                            }
+                            persist(
+                                &ctx.config,
+                                &ctx.connections,
+                                config_path.as_deref(),
+                                connections_path.as_deref(),
+                                &ctx.event_tx,
+                            )
+                            .await;
+                        }
                     }
                     Command::SaveConfig => {
                         persist(

@@ -20,6 +20,10 @@ pub enum Command {
     SetActiveModel {
         model: String,
     },
+    /// Cycle the active model's reasoning-effort variant (Ctrl+T), wrapping
+    /// from the last Selune catalog variant back to the first. A no-op when
+    /// the active model has no catalog variants.
+    CycleVariant,
     SaveConfig,
     NewSession,
     SendMessage {
