@@ -229,12 +229,12 @@ struct Scroll {
 }
 
 /// How [`Chat::apply_session`] seeds the viewport scroll: restore the
-/// persisted position (session load), pin to the top (fork), or keep the
-/// current viewport (unused).
+/// persisted position (session load) or keep the current viewport (forks —
+/// the live sticky flag and content anchor carry over: the retained path
+/// prefix is unchanged, so the anchor still names the same content, and an
+/// anchor beyond the shortened tail clamps to the bottom on the next paint).
 enum ScrollInit {
     Restore,
-    Top,
-    #[allow(dead_code)]
     Keep,
 }
 
@@ -508,7 +508,7 @@ impl Chat {
                 self.commit_interrupted()
             }
             ChatMessage::Load { session } => self.apply_session(session, ScrollInit::Restore),
-            ChatMessage::Forked { session } => self.apply_session(session, ScrollInit::Top),
+            ChatMessage::Forked { session } => self.apply_session(session, ScrollInit::Keep),
             ChatMessage::Reset => {
                 *self.turns.borrow_mut() = Vec::new();
                 *self.in_flight.borrow_mut() = None;
@@ -1337,10 +1337,10 @@ impl Chat {
         self.interrupted = interrupted;
         self.toggled.clear();
         let mut scroll_state = self.scroll.borrow_mut();
-        scroll_state.pending_anchor = None;
-        scroll_state.anchor = None;
         match scroll {
             ScrollInit::Restore => {
+                scroll_state.pending_anchor = None;
+                scroll_state.anchor = None;
                 scroll_state.sticky_bottom = saved_scroll.sticky;
                 if !saved_scroll.sticky {
                     scroll_state.pending_anchor = saved_scroll
@@ -1348,11 +1348,11 @@ impl Chat {
                         .map(|(turn, row)| (turn as usize, row as u32));
                 }
             }
-            ScrollInit::Top => {
-                scroll_state.offset = 0;
-                scroll_state.sticky_bottom = false;
+            ScrollInit::Keep => {
+                if !scroll_state.sticky_bottom {
+                    scroll_state.pending_anchor = scroll_state.anchor;
+                }
             }
-            ScrollInit::Keep => {}
         }
     }
 
@@ -2857,6 +2857,97 @@ mod tests {
             reloaded.scroll.borrow().sticky_bottom,
             "restore re-pins the viewport to the bottom"
         );
+    }
+
+    #[test]
+    fn fork_keeps_the_scrolled_viewport() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::Load {
+            session: est_hostile_session(60),
+        });
+        for _ in 0..3000 {
+            chat.update(ChatMessage::ScrollDown);
+        }
+        draw(&chat, 80, 20);
+        for _ in 0..400 {
+            chat.update(ChatMessage::ScrollUp);
+        }
+        draw(&chat, 80, 20);
+        assert!(!chat.scroll.borrow().sticky_bottom);
+        let held_anchor = chat.scroll.borrow().anchor;
+
+        chat.update(ChatMessage::Forked {
+            session: est_hostile_session(59),
+        });
+        draw(&chat, 80, 20);
+        assert_eq!(
+            chat.scroll.borrow().anchor,
+            held_anchor,
+            "undo keeps the viewport on the same content"
+        );
+        draw(&chat, 80, 20);
+        assert_eq!(
+            chat.scroll.borrow().anchor,
+            held_anchor,
+            "the kept anchor holds across frames"
+        );
+        assert!(!chat.scroll.borrow().sticky_bottom);
+    }
+
+    #[test]
+    fn fork_of_the_anchored_turn_clamps_to_the_bottom() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::Load {
+            session: est_hostile_session(30),
+        });
+        for _ in 0..3000 {
+            chat.update(ChatMessage::ScrollDown);
+        }
+        draw(&chat, 80, 20);
+        chat.update(ChatMessage::ScrollUp);
+        draw(&chat, 80, 20);
+        assert!(!chat.scroll.borrow().sticky_bottom);
+        let (turn, _) = chat
+            .scroll
+            .borrow()
+            .anchor
+            .expect("a released viewport holds an anchor");
+        assert!(
+            turn >= 57,
+            "one scroll-up must reach the final turns for this test"
+        );
+
+        chat.update(ChatMessage::Forked {
+            session: est_hostile_session(turn / 2),
+        });
+        draw(&chat, 80, 20);
+        assert!(
+            chat.scroll.borrow().sticky_bottom,
+            "an anchor in the forked-away tail lands at the bottom"
+        );
+    }
+
+    #[test]
+    fn fork_keeps_sticky_bottom() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::Load {
+            session: est_hostile_session(30),
+        });
+        for _ in 0..3000 {
+            chat.update(ChatMessage::ScrollDown);
+        }
+        draw(&chat, 80, 20);
+        assert!(chat.scroll.borrow().sticky_bottom);
+
+        chat.update(ChatMessage::Forked {
+            session: est_hostile_session(29),
+        });
+        draw(&chat, 80, 20);
+        assert!(
+            chat.scroll.borrow().sticky_bottom,
+            "undo at the bottom stays pinned to the shortened history"
+        );
+        assert!(chat.scroll.borrow().anchor.is_none());
     }
 
     fn session_with_user_turns(count: usize) -> shuvarie_core::Session {
