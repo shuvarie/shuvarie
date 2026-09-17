@@ -4,7 +4,7 @@
 ; per-machine installation mode (MultiUser.nsh).
 ;
 ; Build (from this directory, after building the release binary):
-;   makensis /DVERSION=0.1.0 /DBINARY="..\target\release\shuvarie.exe" installer.nsi
+;   makensis /DVERSION=<version> /DBINARY="..\target\release\shuvarie.exe" installer.nsi
 ;
 ; Silent install:
 ;   shuvarie-setup.exe /S [/AllUsers | /CurrentUser]
@@ -14,7 +14,7 @@
 ; Compile-time configuration (overridable with /D switches)
 ; ---------------------------------------------------------------------------
 
-!define /IfNDef VERSION "0.1.0"
+!define /IfNDef VERSION "0.2.0"
 !define /IfNDef APP_NAME "shuvarie"
 !define /IfNDef EXE_FILE_NAME "shuvarie.exe"
 !define /IfNDef PUBLISHER "Charles Dong"

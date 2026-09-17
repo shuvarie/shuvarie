@@ -28,7 +28,7 @@ Requires [NSIS 3](https://nsis.sourceforge.io) (Unicode build) and a release
 binary. From this directory:
 
 ```sh
-makensis /DVERSION=0.1.0 /DBINARY="..\target\x86_64-pc-windows-msvc\release\shuvarie.exe" installer.nsi
+makensis /DVERSION=<version> /DBINARY="..\target\x86_64-pc-windows-msvc\release\shuvarie.exe" installer.nsi
 ```
 
 The script compiles against the files relative to its own directory
@@ -40,7 +40,7 @@ from the repository root. `/DBINARY` is expected to be an
 
 | Switch | Default | Description |
 | --- | --- | --- |
-| `/DVERSION` | `0.1.0` | Version string; must be three components (x.y.z) |
+| `/DVERSION` | Crate version | Version string; must be three components (x.y.z) |
 | `/DBINARY` | `../target/release/shuvarie.exe` | Path to the release binary |
 | `/DOUT_FILE` | `shuvarie-setup-<version>.exe` | Installer output path |
 | `/DAPP_NAME` | `shuvarie` | Product name used everywhere |

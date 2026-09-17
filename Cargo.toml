@@ -54,7 +54,7 @@ members = ["crates/*"]
 exclude = ["vendor/frameplay", "vendor/selune"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["Charles Dong <chardon_cs@proton.me>"]
 license = "MIT"
@@ -71,12 +71,12 @@ reqwest = "0.13"
 selune = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-shuvarie-config = { path = "crates/config", version = "0.1" }
-shuvarie-core = { path = "crates/core", version = "0.1" }
-shuvarie-db = { path = "crates/db", version = "0.1" }
-shuvarie-highlight = { path = "crates/highlight", version = "0.1" }
-shuvarie-llm = { path = "crates/llm", version = "0.1" }
-shuvarie-lsp = { path = "crates/lsp", version = "0.1" }
+shuvarie-config = { path = "crates/config", version = "0.2" }
+shuvarie-core = { path = "crates/core", version = "0.2" }
+shuvarie-db = { path = "crates/db", version = "0.2" }
+shuvarie-highlight = { path = "crates/highlight", version = "0.2" }
+shuvarie-llm = { path = "crates/llm", version = "0.2" }
+shuvarie-lsp = { path = "crates/lsp", version = "0.2" }
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
