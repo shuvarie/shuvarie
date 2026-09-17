@@ -8,7 +8,7 @@
 # Artifacts per platform:
 #   Linux   - tar.gz, .deb (libc6, libgcc-s1), .rpm   (fpm; glibc 2.17 via zig)
 #   macOS   - tar.gz, .dmg                            (hdiutil)
-#   Windows - .zip, NSIS installer                    (install-nsis action)
+#   Windows - .zip, NSIS installer                    (zigbuild cross on Linux; apt makensis)
 
 name: Release
 
@@ -208,21 +208,13 @@ jobs:
 
   windows:
     name: Windows (${{ matrix.target }})
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        target: [x86_64-pc-windows-msvc, aarch64-pc-windows-msvc]
+        target: [x86_64-pc-windows-gnullvm, aarch64-pc-windows-gnullvm]
     steps:
       - uses: actions/checkout@v7
-
-      # NSIS is not preinstalled on the runner image; this action installs a
-      # verified distribution from SourceForge (with the strlen_8192 patch and
-      # the EnVar plugin) and shims makensis onto PATH.
-      - name: Install NSIS
-        uses: repolevedavaj/install-nsis@v1
-        with:
-          nsis-version: '3.12'
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -233,6 +225,54 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+
+      # Windows cross-compiles from Linux too: the gnullvm targets are the
+      # LLVM-MinGW flavor, and zig provides the matching MinGW-w64 runtime,
+      # the C compiler for native dependencies, and the arch-specific dlltool
+      # that rustc needs for the import libraries.
+      - name: Install cargo-zigbuild
+        run: PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --quiet cargo-zigbuild
+
+      # makensis from the distro package cross-builds Windows installers on
+      # Linux; MUI2, MultiUser, x64 and the System plugin are all included.
+      - name: Install NSIS
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -qy nsis zip
+
+      # turso_sdk_kit's build script compiles its Windows version resource by
+      # invoking bare `windres`, which does not exist in a cross environment
+      # (mingw-w64 packages ship no aarch64 one either). Shim it to llvm-rc:
+      # its .res output is arch-neutral, and the COFF linker embeds it for
+      # whichever arch is being linked.
+      - name: Install windres shim
+        run: |
+          llvm_rc="$(command -v llvm-rc || true)"
+          if [ -z "$llvm_rc" ]; then
+            llvm_rc="$(ls /usr/lib/llvm-*/bin/llvm-rc 2>/dev/null | sort -V | tail -n 1)"
+          fi
+          if [ -z "$llvm_rc" ]; then
+            sudo apt-get install -qy llvm
+            llvm_rc="$(command -v llvm-rc)"
+          fi
+          mkdir -p "$HOME/.windres-shim"
+          ln -sf "$(readlink -f "$llvm_rc")" "$HOME/.windres-shim/llvm-rc"
+          cat > "$HOME/.windres-shim/windres" <<'EOF'
+          #!/bin/sh
+          # turso_sdk_kit's build script calls: windres <input.rc> -O coff -o <out>
+          src=
+          out=
+          while [ $# -gt 0 ]; do
+            case "$1" in
+              -o) out=$2; shift 2 ;;
+              -O) shift 2 ;;
+              *) src=$1; shift ;;
+            esac
+          done
+          exec llvm-rc /FO "$out" "$src"
+          EOF
+          chmod +x "$HOME/.windres-shim/windres"
+          echo "$HOME/.windres-shim" >> "$GITHUB_PATH"
 
       - name: Resolve release version
         shell: bash
@@ -250,33 +290,41 @@ jobs:
             echo "VERSION=${version}" >> "$GITHUB_ENV"
           fi
 
-      # x86_64 builds natively; aarch64 uses the preinstalled VS ARM64 tools.
+      # mimalloc v3 uses __DATE__/__TIME__ for its version banner; zig cc
+      # promotes -Wdate-time to an error, so relax it back to a warning.
       - name: Build
-        run: cargo build --locked --release --target ${{ matrix.target }} --bin shuvarie
+        env:
+          CFLAGS_x86_64_pc_windows_gnullvm: "-Wno-error=date-time"
+          CFLAGS_aarch64_pc_windows_gnullvm: "-Wno-error=date-time"
+        run: cargo zigbuild --locked --release --target ${{ matrix.target }} --bin shuvarie
 
       - name: Stage files
-        shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path "dist/shuvarie-$env:VERSION" | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/shuvarie.exe" -Destination "dist/shuvarie-$env:VERSION/"
-          Copy-Item LICENSE, README.md -Destination "dist/shuvarie-$env:VERSION/"
+          mkdir -p "dist/shuvarie-${VERSION}"
+          cp "target/${{ matrix.target }}/release/shuvarie.exe" "dist/shuvarie-${VERSION}/shuvarie.exe"
+          cp LICENSE README.md "dist/shuvarie-${VERSION}/"
 
       - name: Create .zip archive
-        shell: pwsh
-        run: >
-          Compress-Archive -Path "dist/shuvarie-$env:VERSION"
-          -DestinationPath "shuvarie-$env:VERSION-${{ matrix.target }}.zip" -Force
+        run: |
+          cd dist
+          zip -r "../shuvarie-${VERSION}-${{ matrix.target }}.zip" "shuvarie-${VERSION}"
 
       # makensis runs inside nsis/ so the script's relative paths
       # (SOURCE_ROOT = "..") resolve to the repository root. NSIS produces an
-      # x86-unicode installer; the payload binary is the arch-specific one
-      # (amd64 or arm64).
+      # x86 installer; the payload binary is the arch-specific one (amd64 or
+      # arm64).
       - name: Create NSIS installer
-        shell: pwsh
         working-directory: nsis
         run: |
-          $arch = if ("${{ matrix.target }}".StartsWith("x86_64")) { "amd64" } else { "arm64" }
-          makensis /DVERSION=$env:VERSION /DBINARY="../target/${{ matrix.target }}/release/shuvarie.exe" /DOUT_FILE="shuvarie-setup-$env:VERSION-$arch.exe" installer.nsi
+          case "${{ matrix.target }}" in
+            x86_64-*) arch=amd64 ;;
+            aarch64-*) arch=arm64 ;;
+            *) echo "::error::Unsupported target: ${{ matrix.target }}"; exit 1 ;;
+          esac
+          makensis -DVERSION="${VERSION}" \
+            -DBINARY="../target/${{ matrix.target }}/release/shuvarie.exe" \
+            -DOUT_FILE="shuvarie-setup-${VERSION}-${arch}.exe" \
+            installer.nsi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
