@@ -733,10 +733,10 @@ mod tests {
 
     #[test]
     fn global_skill_dirs_precedence() {
-        let home = Path::new("/home/tester");
-        let global = Path::new("/home/tester/.config/shuvarie");
+        let home = dirs::home_dir().expect("a home dir for this platform");
+        let global = shuvarie_config::config_dir().expect("a config dir for this platform");
         assert_eq!(
-            global_skill_dirs(Some(home), Some(global)),
+            global_skill_dirs(Some(&home), Some(&global)),
             vec![global.join("skills"), home.join(".agents").join("skills"),]
         );
         assert!(global_skill_dirs(None, None).is_empty());
