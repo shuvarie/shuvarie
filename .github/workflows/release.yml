@@ -8,7 +8,7 @@
 # Artifacts per platform:
 #   Linux   - tar.gz, .deb (libc6, libgcc-s1), .rpm   (fpm; glibc 2.17 via zig)
 #   macOS   - tar.gz, .dmg                            (hdiutil)
-#   Windows - .zip, NSIS installer                    (preinstalled makensis)
+#   Windows - .zip, NSIS installer                    (install-nsis action)
 
 name: Release
 
@@ -216,6 +216,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # NSIS is not preinstalled on the runner image; this action installs a
+      # verified distribution from SourceForge (with the strlen_8192 patch and
+      # the EnVar plugin) and shims makensis onto PATH.
+      - name: Install NSIS
+        uses: repolevedavaj/install-nsis@v1
+        with:
+          nsis-version: '3.12'
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -260,9 +268,9 @@ jobs:
           -DestinationPath "shuvarie-$env:VERSION-${{ matrix.target }}.zip" -Force
 
       # makensis runs inside nsis/ so the script's relative paths
-      # (SOURCE_ROOT = "..") resolve to the repository root. The runner's NSIS
-      # produces an x86-unicode installer; the payload binary is the
-      # arch-specific one (amd64 or arm64).
+      # (SOURCE_ROOT = "..") resolve to the repository root. NSIS produces an
+      # x86-unicode installer; the payload binary is the arch-specific one
+      # (amd64 or arm64).
       - name: Create NSIS installer
         shell: pwsh
         working-directory: nsis
