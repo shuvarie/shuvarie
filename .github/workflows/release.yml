@@ -90,8 +90,19 @@ jobs:
             echo "RPM_ARCH=${rpm_arch}"
           } >> "$GITHUB_ENV"
 
+      # The system gem directory on the runner is root-owned, so install fpm
+      # into a user-owned gem home instead (plain `gem install` fails with
+      # Gem::FilePermissionError). GEM_PATH/GITHUB_PATH carry the binstub into
+      # the packaging steps below.
       - name: Install fpm
-        run: gem install --no-document fpm
+        env:
+          GEM_HOME: ${{ runner.temp }}/gem
+          GEM_PATH: ${{ runner.temp }}/gem
+        run: |
+          echo "GEM_HOME=${GEM_HOME}" >> "$GITHUB_ENV"
+          echo "GEM_PATH=${GEM_PATH}" >> "$GITHUB_ENV"
+          echo "${GEM_HOME}/bin" >> "$GITHUB_PATH"
+          gem install --no-document fpm
 
       - name: Create .deb package
         run: >
