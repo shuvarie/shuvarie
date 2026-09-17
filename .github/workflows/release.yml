@@ -327,6 +327,11 @@ jobs:
             -DBINARY="../target/${{ matrix.target }}/release/shuvarie.exe" \
             -DOUT_FILE="shuvarie-setup-${VERSION}-${arch}.exe" \
             installer.nsi
+          # Move the installer to the workspace root so the artifact below
+          # stays flat (upload-artifact keeps paths relative to the least
+          # common ancestor of its globs, and a nested nsis/ dir breaks the
+          # release job's flat `sha256sum *` / `dist/*` handling).
+          mv "shuvarie-setup-${VERSION}-${arch}.exe" ..
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
@@ -334,7 +339,7 @@ jobs:
           name: release-windows-${{ matrix.target }}
           path: |
             shuvarie-*.zip
-            nsis/shuvarie-setup-*.exe
+            shuvarie-setup-*.exe
           if-no-files-found: error
           retention-days: 1
 
