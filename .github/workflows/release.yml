@@ -1,0 +1,312 @@
+# Release pipeline: build shuvarie for Linux, macOS and Windows (x86_64 +
+# aarch64), package each platform, and publish a *draft* GitHub release.
+#
+# Triggers on a pushed `v*` tag (cut from a `rel/*` branch). Tag pushes are
+# repo-global in git, so the branch cannot be enforced here; `workflow_dispatch`
+# exists for dry runs - the release job is skipped unless the run is on a tag.
+#
+# Artifacts per platform:
+#   Linux   - tar.gz, .deb (libc6, libgcc-s1), .rpm   (fpm; glibc 2.17 via zig)
+#   macOS   - tar.gz, .dmg                            (hdiutil)
+#   Windows - .zip, NSIS installer                    (preinstalled makensis)
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cargo-zigbuild
+        run: PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --quiet cargo-zigbuild
+
+      - name: Resolve release version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "shuvarie") | .version')"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            if [[ "$tag" != "$version" ]]; then
+              echo "::error::Tag ${GITHUB_REF_NAME} does not match workspace version ${version}"
+              exit 1
+            fi
+            echo "VERSION=${tag}" >> "$GITHUB_ENV"
+          else
+            # Dry run (workflow_dispatch): fall back to the workspace version
+            echo "VERSION=${version}" >> "$GITHUB_ENV"
+          fi
+
+      # Zig links against glibc 2.17 (RHEL 7 era) so the binaries run on old
+      # distributions, for both amd64 and arm64.
+      - name: Build
+        run: cargo zigbuild --locked --release --target "${{ matrix.target }}.2.17" --bin shuvarie
+
+      - name: Stage files
+        run: |
+          mkdir -p "dist/shuvarie-${VERSION}"
+          cp "target/${{ matrix.target }}/release/shuvarie" "dist/shuvarie-${VERSION}/shuvarie"
+          cp LICENSE README.md "dist/shuvarie-${VERSION}/"
+
+      - name: Create tarball
+        run: tar -czf "shuvarie-${VERSION}-${{ matrix.target }}.tar.gz" -C dist "shuvarie-${VERSION}"
+
+      - name: Map package architectures
+        run: |
+          case "${{ matrix.target }}" in
+            x86_64-*) deb_arch=amd64; rpm_arch=x86_64 ;;
+            aarch64-*) deb_arch=arm64; rpm_arch=aarch64 ;;
+            *) echo "::error::Unsupported target: ${{ matrix.target }}"; exit 1 ;;
+          esac
+          {
+            echo "DEB_ARCH=${deb_arch}"
+            echo "RPM_ARCH=${rpm_arch}"
+          } >> "$GITHUB_ENV"
+
+      - name: Install fpm
+        run: gem install --no-document fpm
+
+      - name: Create .deb package
+        run: >
+          fpm -s dir -t deb -n shuvarie -v "${VERSION}" -a "$DEB_ARCH"
+          --license "MIT"
+          --maintainer "Charles Dong <chardon_cs@proton.me>"
+          --url "${{ github.server_url }}/${{ github.repository }}"
+          --description "Blazingly fast AI coding TUI for chivalrous people"
+          --depends "libc6" --depends "libgcc-s1"
+          "dist/shuvarie-${VERSION}/shuvarie=/usr/bin/shuvarie"
+          "dist/shuvarie-${VERSION}/LICENSE=/usr/share/licenses/shuvarie/LICENSE"
+          "dist/shuvarie-${VERSION}/LICENSE=/usr/share/doc/shuvarie/copyright"
+          "dist/shuvarie-${VERSION}/README.md=/usr/share/doc/shuvarie/README.md"
+
+      - name: Create .rpm package
+        run: >
+          fpm -s dir -t rpm --rpm-os linux -n shuvarie -v "${VERSION}" -a "$RPM_ARCH"
+          --license "MIT"
+          --maintainer "Charles Dong <chardon_cs@proton.me>"
+          --url "${{ github.server_url }}/${{ github.repository }}"
+          --description "Blazingly fast AI coding TUI for chivalrous people"
+          --depends "glibc"
+          "dist/shuvarie-${VERSION}/shuvarie=/usr/bin/shuvarie"
+          "dist/shuvarie-${VERSION}/LICENSE=/usr/share/licenses/shuvarie/LICENSE"
+          "dist/shuvarie-${VERSION}/README.md=/usr/share/doc/shuvarie/README.md"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-linux-${{ matrix.target }}
+          path: |
+            shuvarie-*.tar.gz
+            shuvarie_*.deb
+            shuvarie-*.rpm
+          if-no-files-found: error
+
+  macos:
+    name: macOS (${{ matrix.target }})
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Resolve release version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "shuvarie") | .version')"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            if [[ "$tag" != "$version" ]]; then
+              echo "::error::Tag ${GITHUB_REF_NAME} does not match workspace version ${version}"
+              exit 1
+            fi
+            echo "VERSION=${tag}" >> "$GITHUB_ENV"
+          else
+            # Dry run (workflow_dispatch): fall back to the workspace version
+            echo "VERSION=${version}" >> "$GITHUB_ENV"
+          fi
+
+      # aarch64 builds natively; x86_64 cross-compiles with Apple's own
+      # toolchain (the macOS SDK on the runner is universal).
+      - name: Build
+        run: cargo build --locked --release --target ${{ matrix.target }} --bin shuvarie
+
+      - name: Stage files
+        run: |
+          mkdir -p "dist/shuvarie-${VERSION}"
+          cp "target/${{ matrix.target }}/release/shuvarie" "dist/shuvarie-${VERSION}/shuvarie"
+          cp LICENSE README.md "dist/shuvarie-${VERSION}/"
+
+      - name: Create tarball
+        run: tar -czf "shuvarie-${VERSION}-${{ matrix.target }}.tar.gz" -C dist "shuvarie-${VERSION}"
+
+      - name: Create .dmg image
+        run: |
+          hdiutil create \
+            -volname "Shuvarie ${VERSION}" \
+            -srcfolder "dist/shuvarie-${VERSION}" \
+            -format UDZO -ov \
+            "shuvarie-${VERSION}-${{ matrix.target }}.dmg"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-macos-${{ matrix.target }}
+          path: |
+            shuvarie-*.tar.gz
+            shuvarie-*.dmg
+          if-no-files-found: error
+
+  windows:
+    name: Windows (${{ matrix.target }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-msvc, aarch64-pc-windows-msvc]
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Resolve release version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "shuvarie") | .version')"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            if [[ "$tag" != "$version" ]]; then
+              echo "::error::Tag ${GITHUB_REF_NAME} does not match workspace version ${version}"
+              exit 1
+            fi
+            echo "VERSION=${tag}" >> "$GITHUB_ENV"
+          else
+            # Dry run (workflow_dispatch): fall back to the workspace version
+            echo "VERSION=${version}" >> "$GITHUB_ENV"
+          fi
+
+      # x86_64 builds natively; aarch64 uses the preinstalled VS ARM64 tools.
+      - name: Build
+        run: cargo build --locked --release --target ${{ matrix.target }} --bin shuvarie
+
+      - name: Stage files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "dist/shuvarie-$env:VERSION" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/shuvarie.exe" -Destination "dist/shuvarie-$env:VERSION/"
+          Copy-Item LICENSE, README.md -Destination "dist/shuvarie-$env:VERSION/"
+
+      - name: Create .zip archive
+        shell: pwsh
+        run: >
+          Compress-Archive -Path "dist/shuvarie-$env:VERSION"
+          -DestinationPath "shuvarie-$env:VERSION-${{ matrix.target }}.zip" -Force
+
+      # makensis runs inside nsis/ so the script's relative paths
+      # (SOURCE_ROOT = "..") resolve to the repository root. The runner's NSIS
+      # produces an x86-unicode installer; the payload binary is the
+      # arch-specific one (amd64 or arm64).
+      - name: Create NSIS installer
+        shell: pwsh
+        working-directory: nsis
+        run: |
+          $arch = if ("${{ matrix.target }}".StartsWith("x86_64")) { "amd64" } else { "arm64" }
+          makensis /DVERSION=$env:VERSION /DBINARY="../target/${{ matrix.target }}/release/shuvarie.exe" /DOUT_FILE="shuvarie-setup-$env:VERSION-$arch.exe" installer.nsi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-${{ matrix.target }}
+          path: |
+            shuvarie-*.zip
+            nsis/shuvarie-setup-*.exe
+          if-no-files-found: error
+
+  release:
+    name: Draft GitHub release
+    needs: [linux, macos, windows]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+
+      - name: Generate SHA-256 checksums
+        run: |
+          if [ -z "$(ls -A dist)" ]; then
+            echo "::error::No build artifacts were downloaded"
+            exit 1
+          fi
+          cd dist
+          sha256sum * > SHA256SUMS
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --draft --verify-tag --generate-notes \
+            --title "${GITHUB_REF_NAME}" \
+            dist/*
