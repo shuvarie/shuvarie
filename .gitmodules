@@ -1,6 +1,0 @@
-[submodule "vendor/selune"]
-	path = vendor/selune
-	url = git@github.com:chardoncs/selune.git
-[submodule "vendor/frameplay"]
-	path = vendor/frameplay
-	url = git@github.com:chardoncs/frameplay.git
