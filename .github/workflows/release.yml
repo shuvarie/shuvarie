@@ -138,6 +138,7 @@ jobs:
             shuvarie_*.deb
             shuvarie-*.rpm
           if-no-files-found: error
+          retention-days: 1
 
   macos:
     name: macOS (${{ matrix.target }})
@@ -205,6 +206,7 @@ jobs:
             shuvarie-*.tar.gz
             shuvarie-*.dmg
           if-no-files-found: error
+          retention-days: 1
 
   windows:
     name: Windows (${{ matrix.target }})
@@ -334,6 +336,7 @@ jobs:
             shuvarie-*.zip
             nsis/shuvarie-setup-*.exe
           if-no-files-found: error
+          retention-days: 1
 
   release:
     name: Draft GitHub release
