@@ -1,6 +1,5 @@
 use clap::{
-    Parser,
-    Subcommand,
+    Parser, Subcommand,
     builder::{
         Styles,
         styling::{AnsiColor, Style},
@@ -48,7 +47,9 @@ pub enum CliSubcommand {
         /// Path to session file
         #[arg(value_name = "DEST")]
         dest: String,
-    }
+    },
+    /// Update to the latest release
+    Update,
 }
 
 pub fn show_resume_hint(session_id: Uuid) {

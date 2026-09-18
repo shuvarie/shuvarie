@@ -1701,6 +1701,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5665,21 +5675,29 @@ dependencies = [
  "clap",
  "color-eyre",
  "dirs",
+ "flate2",
  "frameplay",
  "futures-util",
  "gix",
  "nucleo",
  "ratatui",
+ "reqwest",
  "selune",
+ "semver",
+ "serde",
  "serde_json",
+ "sha2 0.11.0",
  "shuvarie-core",
  "shuvarie-db",
  "shuvarie-highlight",
  "shuvarie-llm",
+ "tar",
+ "tempfile",
  "termina",
  "tokio",
  "unicode-width 0.2.2",
  "uuid",
+ "zip",
 ]
 
 [[package]]
@@ -6355,6 +6373,17 @@ name = "tap"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
+]
 
 [[package]]
 name = "tempfile"
@@ -7322,6 +7351,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "typed-path"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
+
+[[package]]
 name = "typeid"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8071,6 +8106,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix 1.1.5",
+]
+
+[[package]]
 name = "yaml_serde"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8200,6 +8245,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "zip"
+version = "8.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "indexmap",
+ "memchr",
+ "typed-path",
 ]
 
 [[package]]

@@ -12,16 +12,22 @@ repository.workspace = true
 clap = { version = "4.6.1", features = ["derive"] }
 color-eyre = "0.6.5"
 dirs.workspace = true
+flate2 = "1"
 frameplay = "0.2"
 futures-util.workspace = true
 gix = { version = "0.87", default-features = false, features = ["sha1"] }
 nucleo = "0.5"
+reqwest.workspace = true
 selune.workspace = true
+semver = "1"
+serde = { workspace = true }
 serde_json.workspace = true
+sha2 = "0.11"
 shuvarie-core.workspace = true
 shuvarie-db.workspace = true
 shuvarie-highlight.workspace = true
 shuvarie-llm.workspace = true
+tempfile.workspace = true
 termina = { version = "0.3", features = ["event-stream"] }
 tokio.workspace = true
 unicode-width.workspace = true
@@ -47,6 +53,14 @@ codegen-units = 1
 lto = "thin"
 opt-level = "s"
 strip = true
+
+[target.'cfg(unix)'.dependencies]
+tar = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+zip = { version = "8.6", default-features = false, features = [
+    "deflate-flate2-zlib-rs",
+] }
 
 [workspace]
 resolver = "3"

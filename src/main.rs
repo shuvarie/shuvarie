@@ -4,6 +4,7 @@ use tokio::sync::mpsc::channel;
 mod cli;
 mod trust;
 mod tui;
+mod update;
 
 use crate::cli::show_resume_hint;
 
@@ -28,6 +29,9 @@ async fn main() -> color_eyre::Result<()> {
             }
             Export { dest } => {
                 return cli::export_session(&mut store, &dest, args.session).await;
+            }
+            Update => {
+                return update::run().await;
             }
         }
     }
