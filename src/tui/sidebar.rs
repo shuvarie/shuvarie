@@ -84,6 +84,9 @@ pub enum SidebarMessage {
     SetWorkspace {
         workspace: WorkspaceInfo,
     },
+    /// Re-reads the git branch at the stored workspace path; sent at the
+    /// start of every turn so checkouts made between turns show up.
+    RefreshBranch,
     /// The session's current scene (`None` = the built-in Default scene,
     /// which hides the scene line).
     SetScene {
@@ -156,6 +159,9 @@ impl Sidebar {
             }
             SidebarMessage::SetWorkspace { workspace } => {
                 self.workspace = workspace;
+            }
+            SidebarMessage::RefreshBranch => {
+                self.workspace.refresh_branch();
             }
             SidebarMessage::SetScene { name } => {
                 self.scene = name;
@@ -1077,6 +1083,33 @@ mod tests {
 
         let sidebar = Sidebar::new();
         assert!(sidebar.workspace_line(80).spans.is_empty());
+    }
+
+    #[test]
+    fn refresh_branch_message_rereads_the_head() {
+        use crate::tui::workspace::testing::seed_git_repo;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::SetWorkspace {
+            workspace: WorkspaceInfo {
+                path: dir.path().to_path_buf(),
+                home: None,
+                branch: None,
+            },
+        });
+        assert!(
+            !text(sidebar.rendered_lines()).contains("⎇"),
+            "unset: no branch"
+        );
+
+        seed_git_repo(dir.path(), "turn-branch");
+        sidebar.update(SidebarMessage::RefreshBranch);
+        assert!(
+            text(sidebar.rendered_lines()).contains("⎇ turn-branch"),
+            "refreshed: {}",
+            text(sidebar.rendered_lines())
+        );
     }
 }
 
