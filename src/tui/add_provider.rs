@@ -587,7 +587,11 @@ impl AddProviderForm {
             }
             Some(k)
         } else {
-            None
+            // Optional-key transports (ollama, llamafile, the OAuth-backed
+            // ones): still honor a pasted key — it selects key-based auth over
+            // OAuth or anonymous local access.
+            let k = self.api_key.value.trim().to_string();
+            (!k.is_empty()).then_some(k)
         };
         let base_url = if self.base_url.value.trim().is_empty() {
             None

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -530,6 +530,15 @@ pub async fn run(
                             &ctx.connections,
                             config_path.as_deref(),
                             connections_path.as_deref(),
+                            &ctx.event_tx,
+                        )
+                        .await;
+                    }
+                    Command::AuthProviderLogin { name } => {
+                        handle_auth_provider_login(
+                            name,
+                            &ctx.connections.providers,
+                            &ctx.clients,
                             &ctx.event_tx,
                         )
                         .await;
@@ -3205,6 +3214,64 @@ pub(crate) fn device_code_handler(
     }))
 }
 
+/// Handle [`Command::AuthProviderLogin`]: drive sign-in for the provider to
+/// completion — a cached or pasted credential resolves immediately, a missing
+/// one runs the interactive device flow. An already-cached client is reused so
+/// concurrent auth (e.g. a model listing that kicked the flow off) shares one
+/// serialized device flow; otherwise a temporary client is built and the
+/// token lands in the shared on-disk cache for later clients. The flow polls
+/// for minutes while the user authorizes in a browser, so it runs off the
+/// command loop and reports its outcome as [`Event::AuthSuccess`] /
+/// [`Event::AuthFailed`], tagged with the provider's display name (the same
+/// identifier [`Event::AuthPrompt`] carries). Unknown providers and
+/// client-build failures report immediately.
+async fn handle_auth_provider_login(
+    name: String,
+    providers: &BTreeMap<String, ProviderConfig>,
+    clients: &HashMap<String, ProviderClient>,
+    event_tx: &Sender<Event>,
+) {
+    let Some(pc) = providers.get(&name) else {
+        let error = format!("unknown provider '{name}'");
+        let _ = event_tx
+            .send(Event::AuthFailed {
+                provider: name,
+                error,
+            })
+            .await;
+        return;
+    };
+    let display = pc.name.clone();
+    let client = match clients.get(&name) {
+        Some(client) => client.clone(),
+        None => match build_client(pc, event_tx) {
+            Ok(client) => client,
+            Err(error) => {
+                let _ = event_tx
+                    .send(Event::AuthFailed {
+                        provider: display,
+                        error,
+                    })
+                    .await;
+                return;
+            }
+        },
+    };
+    let event_tx = event_tx.clone();
+    tokio::spawn(async move {
+        let outcome = match client.authorize().await {
+            Ok(()) => Event::AuthSuccess {
+                provider: display.clone(),
+            },
+            Err(e) => Event::AuthFailed {
+                provider: display.clone(),
+                error: e.to_string(),
+            },
+        };
+        let _ = event_tx.send(outcome).await;
+    });
+}
+
 async fn persist_stream_error(
     assistant_message_id: Option<u64>,
     text_segments: &[shuvarie_db::TextSegment],
@@ -3354,6 +3421,60 @@ mod tests {
             device_code_handler(ProviderType::Openai, "openai".into(), &tx).is_none(),
             "api-key transports need no device-code handler"
         );
+    }
+
+    #[tokio::test]
+    async fn auth_provider_login_reports_unknown_provider() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(4);
+        handle_auth_provider_login("ghost".into(), &BTreeMap::new(), &HashMap::new(), &tx).await;
+        match rx.try_recv().expect("failure reported") {
+            Event::AuthFailed { provider, error } => {
+                assert_eq!(provider, "ghost");
+                assert!(error.contains("unknown provider"), "{error}");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_provider_login_with_a_static_key_succeeds_off_loop() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(4);
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "ChatGPT".to_string(),
+            ProviderConfig::new("ChatGPT", "chatgpt", Some("tok".into()), None),
+        );
+        handle_auth_provider_login("ChatGPT".into(), &providers, &HashMap::new(), &tx).await;
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("event within timeout")
+            .expect("channel open");
+        match event {
+            Event::AuthSuccess { provider } => assert_eq!(provider, "ChatGPT"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_provider_login_on_api_key_transport_reports_failure() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(4);
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "OpenAI".to_string(),
+            ProviderConfig::new("OpenAI", "openai", Some("sk-x".into()), None),
+        );
+        handle_auth_provider_login("OpenAI".into(), &providers, &HashMap::new(), &tx).await;
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("event within timeout")
+            .expect("channel open");
+        match event {
+            Event::AuthFailed { provider, error } => {
+                assert_eq!(provider, "OpenAI");
+                assert!(error.contains("OAuth sign-in"), "{error}");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]

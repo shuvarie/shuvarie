@@ -12,6 +12,7 @@ use crate::tui::utils::ctrl;
 use super::add_provider::{
     AddProviderForm, AddProviderMessage, AddProviderOutcome, AddProviderStage,
 };
+use super::auth::{AuthMessage, AuthPopup};
 use super::command_menu::{CommandMenu, CommandMenuMessage};
 use super::commands::CommandAction;
 use super::components::TextAreaMessage;
@@ -149,6 +150,7 @@ pub enum AppMessage {
     ShellWarning {
         message: String,
     },
+    Auth(AuthMessage),
     Warning(WarningMessage),
     /// The render loop's spinner wake: refresh the animated spinner renders.
     SpinnerUpdate,
@@ -159,6 +161,8 @@ pub enum AppMessage {
 pub enum AppEffect {
     Quit,
     CopyToClipboard(String),
+    /// Launch the OAuth verification URL in the platform browser.
+    OpenBrowser(String),
 }
 
 pub struct App {
@@ -177,6 +181,7 @@ pub struct App {
     pub history_search: HistorySearch,
     pub title_popup: TitlePopup,
     pub warning: WarningPopup,
+    pub auth: AuthPopup,
     pub models: HashMap<String, Vec<Model>>,
     registry: RegistryEntry,
     pending_model_pick: Option<String>,
@@ -286,6 +291,7 @@ impl App {
             history_search: HistorySearch::new(),
             title_popup: TitlePopup::new(),
             warning,
+            auth: AuthPopup::new(),
             models: HashMap::new(),
             registry,
             pending_model_pick: None,
@@ -378,6 +384,13 @@ impl App {
                 },
                 TermEvent::Paste(text) => self.map_paste(&text),
                 TermEvent::Key(key) => {
+                    // Transient OAuth device-flow prompt: swallows one key
+                    // press (o/Enter opens the browser, others dismiss),
+                    // leaving the underlying overlay untouched.
+                    if self.auth.open {
+                        return self.auth.map_event(&key).map(AppMessage::Auth);
+                    }
+
                     // Transient warning popup: swallows one key press and
                     // dismisses, leaving the underlying overlay untouched.
                     if self.warning.open {
@@ -751,19 +764,25 @@ impl App {
                     provider,
                     verification_uri,
                     user_code,
-                } => Some(AppMessage::ShellWarning {
-                    message: format!(
-                        "Sign in with {provider}:\n1) Visit {verification_uri}\n2) Enter code: {user_code}\nDo not share this device code."
-                    ),
-                }),
+                } => Some(AppMessage::Auth(AuthMessage::Prompt {
+                    provider,
+                    verification_uri,
+                    user_code,
+                })),
+                CoreEvent::AuthSuccess { provider } => {
+                    Some(AppMessage::Auth(AuthMessage::Succeeded { provider }))
+                }
+                CoreEvent::AuthFailed { provider, error } => {
+                    Some(AppMessage::Auth(AuthMessage::Failed { provider, error }))
+                }
             },
         }
     }
 
     /// Bracketed-paste payload routing. Text-entry surfaces accept the paste;
-    /// navigation-only overlays and the transient warning popup drop it.
+    /// navigation-only overlays and the transient popups drop it.
     fn map_paste(&self, text: &str) -> Option<AppMessage> {
-        if self.warning.open {
+        if self.auth.open || self.warning.open {
             return None;
         }
         match self.overlay {
@@ -966,6 +985,15 @@ impl App {
                             base_url,
                         } => {
                             let id = uuid::Uuid::now_v7().to_string();
+                            let transport = shuvarie_core::catalog::provider_type(&kind);
+                            // OAuth-backed transports with no pasted key sign
+                            // in through the device flow right away, so the
+                            // verification URL + user code surface immediately.
+                            let oauth_login = api_key.is_none()
+                                && matches!(
+                                    transport,
+                                    selune::ProviderType::Chatgpt | selune::ProviderType::Copilot
+                                );
                             let pc = shuvarie_core::ProviderConfig::new(
                                 name.clone(),
                                 kind,
@@ -981,8 +1009,13 @@ impl App {
                             self.ctx.send(shuvarie_core::Command::SetActiveProvider {
                                 name: id.clone(),
                             });
-                            self.ctx
-                                .send(shuvarie_core::Command::ListModels { provider_name: id });
+                            self.ctx.send(shuvarie_core::Command::ListModels {
+                                provider_name: id.clone(),
+                            });
+                            if oauth_login {
+                                self.ctx
+                                    .send(shuvarie_core::Command::AuthProviderLogin { name: id });
+                            }
                             self.close_overlay();
                         }
                         AddProviderOutcome::None => {}
@@ -1336,6 +1369,32 @@ impl App {
             AppMessage::Warning(m) => {
                 self.warning.update(m);
             }
+            AppMessage::Auth(AuthMessage::Prompt {
+                provider,
+                verification_uri,
+                user_code,
+            }) => {
+                self.auth.start(provider, verification_uri, user_code);
+            }
+            AppMessage::Auth(AuthMessage::Succeeded { provider }) => {
+                if self.auth.matches(&provider) {
+                    self.auth.close();
+                }
+                self.warning.open(format!("Signed in with {provider}."));
+            }
+            AppMessage::Auth(AuthMessage::Failed { provider, error }) => {
+                if self.auth.matches(&provider) {
+                    self.auth.close();
+                }
+                self.warning
+                    .open(format!("Sign-in with {provider} failed: {error}"));
+            }
+            AppMessage::Auth(AuthMessage::Dismiss) => self.auth.close(),
+            AppMessage::Auth(AuthMessage::OpenBrowser { url }) => {
+                // The popup stays up while the provider polls; the browser
+                // launch is fire-and-forget.
+                return Some(AppEffect::OpenBrowser(url));
+            }
             AppMessage::SpinnerUpdate => {
                 self.session.update(SessionMessage::SpinnerUpdate);
             }
@@ -1588,6 +1647,34 @@ impl App {
             CommandAction::ToggleSidebar => {
                 self.session.sidebar.update(SidebarMessage::Toggle);
             }
+            CommandAction::Login => {
+                // Optional argument names a connection; default to the active
+                // provider. A missing/unknown provider surfaces as an
+                // AuthFailed notice from the core.
+                let name = args
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|a| !a.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        self.ctx
+                            .connections
+                            .active
+                            .as_ref()
+                            .map(|a| a.provider.clone())
+                    });
+                match name {
+                    Some(name) => {
+                        self.ctx
+                            .send(shuvarie_core::Command::AuthProviderLogin { name });
+                    }
+                    None => {
+                        self.session.update(SessionMessage::ShowError {
+                            error: "no active provider to sign in to".into(),
+                        });
+                    }
+                }
+            }
             CommandAction::Quit => {
                 if self.session.is_streaming() {
                     self.ctx.send(shuvarie_core::Command::CancelStream);
@@ -1684,6 +1771,7 @@ impl App {
         self.command_menu.view(frame, area);
         self.title_popup.view(frame, area);
         self.confirm_quit.view(frame, area);
+        self.auth.view(frame, area);
         self.warning.view(frame, area);
     }
 }
@@ -1797,6 +1885,140 @@ mod tests {
             Some(200_000),
             "connection model alias `claude-sonnet-4-5` must map to the dated catalog entry"
         );
+    }
+
+    fn oauth_connected() -> Connections {
+        let mut connections = Connections::default();
+        let provider = shuvarie_core::ProviderConfig::new("ChatGPT", "chatgpt", None, None);
+        connections.providers.insert("chatgpt".into(), provider);
+        connections.active = Some(shuvarie_core::Active {
+            provider: "chatgpt".into(),
+            model: None,
+            variant: None,
+        });
+        connections
+    }
+
+    #[test]
+    fn auth_prompt_opens_popup_and_outcome_closes_it_with_notice() {
+        let mut app = app_with(oauth_connected());
+        app.update(AppMessage::Auth(AuthMessage::Prompt {
+            provider: "ChatGPT".into(),
+            verification_uri: "https://auth.openai.com/codex/device".into(),
+            user_code: "ABCD-1234".into(),
+        }));
+        assert!(app.auth.open, "prompt opens the popup");
+
+        // Success closes the matching popup and surfaces a notice.
+        app.update(AppMessage::Auth(AuthMessage::Succeeded {
+            provider: "ChatGPT".into(),
+        }));
+        assert!(!app.auth.open, "success closes the popup");
+        assert!(app.warning.open, "success surfaces a notice");
+    }
+
+    #[test]
+    fn auth_failure_for_another_provider_leaves_the_popup_open() {
+        let mut app = app_with(oauth_connected());
+        app.update(AppMessage::Auth(AuthMessage::Prompt {
+            provider: "ChatGPT".into(),
+            verification_uri: "https://auth.openai.com/codex/device".into(),
+            user_code: "ABCD-1234".into(),
+        }));
+        app.update(AppMessage::Auth(AuthMessage::Failed {
+            provider: "GitHub Copilot".into(),
+            error: "timed out".into(),
+        }));
+        assert!(app.auth.open, "an unrelated failure keeps the prompt up");
+
+        app.update(AppMessage::Auth(AuthMessage::Failed {
+            provider: "ChatGPT".into(),
+            error: "timed out".into(),
+        }));
+        assert!(!app.auth.open);
+        assert!(app.warning.open);
+    }
+
+    #[test]
+    fn auth_open_browser_returns_an_open_browser_effect() {
+        let mut app = app_with(oauth_connected());
+        let effect = app.update(AppMessage::Auth(AuthMessage::OpenBrowser {
+            url: "https://auth.openai.com/codex/device".into(),
+        }));
+        let Some(AppEffect::OpenBrowser(url)) = &effect else {
+            panic!("expected an OpenBrowser effect, got {effect:?}");
+        };
+        assert_eq!(url, "https://auth.openai.com/codex/device");
+    }
+
+    #[tokio::test]
+    async fn login_command_targets_the_active_provider() {
+        let (mut app, mut rx) = app_with_rx(oauth_connected());
+        app.run_command(CommandAction::Login, None);
+        match rx.try_recv().expect("login command sent") {
+            shuvarie_core::Command::AuthProviderLogin { name } => assert_eq!(name, "chatgpt"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn login_command_accepts_a_provider_argument() {
+        let (mut app, mut rx) = app_with_rx(oauth_connected());
+        app.run_command(CommandAction::Login, Some("anthropic".into()));
+        match rx.try_recv().expect("login command sent") {
+            shuvarie_core::Command::AuthProviderLogin { name } => assert_eq!(name, "anthropic"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn login_command_without_a_provider_is_a_noop() {
+        let (mut app, mut rx) = app_with_rx(Connections::default());
+        app.run_command(CommandAction::Login, None);
+        assert!(
+            rx.try_recv().is_err(),
+            "no active provider: nothing to sign in to"
+        );
+    }
+
+    #[tokio::test]
+    async fn submitting_a_keyless_oauth_provider_kicks_off_sign_in() {
+        let (mut app, mut rx) = app_with_rx(Connections::default());
+        app.open_add_provider();
+        app.update(AppMessage::AddProvider(AddProviderMessage::OpenCustom));
+        let form = app.add_provider_form.as_mut().unwrap();
+        form.name.set("ChatGPT");
+        form.kind.set("chatgpt");
+        form.api_key.clear();
+        app.update(AppMessage::AddProvider(AddProviderMessage::Submit));
+        let mut saw_login = false;
+        while let Ok(cmd) = rx.try_recv() {
+            if matches!(cmd, shuvarie_core::Command::AuthProviderLogin { .. }) {
+                saw_login = true;
+            }
+        }
+        assert!(
+            saw_login,
+            "keyless chatgpt submit must send AuthProviderLogin"
+        );
+    }
+
+    #[tokio::test]
+    async fn submitting_an_oauth_provider_with_a_key_skips_sign_in() {
+        let (mut app, mut rx) = app_with_rx(Connections::default());
+        app.open_add_provider();
+        app.update(AppMessage::AddProvider(AddProviderMessage::OpenCustom));
+        let form = app.add_provider_form.as_mut().unwrap();
+        form.name.set("ChatGPT");
+        form.kind.set("chatgpt");
+        form.api_key.set("tok");
+        app.update(AppMessage::AddProvider(AddProviderMessage::Submit));
+        while let Ok(cmd) = rx.try_recv() {
+            assert!(
+                !matches!(cmd, shuvarie_core::Command::AuthProviderLogin { .. }),
+                "a pasted key must not trigger the device flow: {cmd:?}"
+            );
+        }
     }
 
     #[test]

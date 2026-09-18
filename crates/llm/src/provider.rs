@@ -381,6 +381,39 @@ impl ProviderClient {
         })
     }
 
+    /// Run OAuth sign-in to completion for an OAuth-backed provider (`chatgpt`,
+    /// `copilot`). Reuses a cached credential when present and valid, refreshes
+    /// an expired one, and otherwise runs the interactive device flow — firing
+    /// the device-code callback supplied at build time, which surfaces the
+    /// verification URL + user code to the user. Resolves once the client holds
+    /// a usable token, so it can be awaited off the update loop. Providers
+    /// without OAuth sign-in return an error instead of blocking.
+    pub async fn authorize(&self) -> Result<()> {
+        match &self.list {
+            ListImpl::ChatGpt(client) => client
+                .authorize()
+                .await
+                .map_err(|e| LlmError::Provider(e.to_string())),
+            ListImpl::Copilot(client) => client
+                .authorize()
+                .await
+                .map_err(|e| LlmError::Provider(e.to_string())),
+            _ => Err(LlmError::Provider(format!(
+                "{} does not use OAuth sign-in; configure an API key instead",
+                self.kind_name()
+            ))),
+        }
+    }
+
+    /// Lowercase kebab-case transport name for user-facing messages.
+    fn kind_name(&self) -> &'static str {
+        match self.kind {
+            ProviderType::Chatgpt => "chatgpt",
+            ProviderType::Copilot => "copilot",
+            _ => "this provider",
+        }
+    }
+
     pub fn kind(&self) -> ProviderType {
         self.kind
     }
@@ -1670,6 +1703,33 @@ mod tests {
         for key in ["sk-x", "copilot-key", ""] {
             assert!(!is_github_token(key), "{key}");
         }
+    }
+
+    #[tokio::test]
+    async fn authorize_with_a_static_key_resolves_without_network() {
+        use selune::ProviderType::*;
+        // ChatGPT's AccessToken source and Copilot's plain API-key source both
+        // answer auth_context() directly — no HTTP, no cache files touched.
+        let chatgpt = ProviderClient::build(Chatgpt, Some("tok"), None).unwrap();
+        chatgpt
+            .authorize()
+            .await
+            .expect("static access token authorizes");
+        let copilot = ProviderClient::build(Copilot, Some("copilot-key"), None).unwrap();
+        copilot
+            .authorize()
+            .await
+            .expect("static api key authorizes");
+    }
+
+    #[tokio::test]
+    async fn authorize_rejects_non_oauth_kinds() {
+        let client = ProviderClient::build(selune::ProviderType::Openai, Some("k"), None).unwrap();
+        let err = client.authorize().await.expect_err("no OAuth for openai");
+        assert!(
+            err.to_string().contains("OAuth sign-in"),
+            "error should explain the limitation: {err}"
+        );
     }
 
     #[test]

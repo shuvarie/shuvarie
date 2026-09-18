@@ -264,6 +264,19 @@ pub enum Event {
         verification_uri: String,
         user_code: String,
     },
+    /// An OAuth device-flow sign-in completed: the provider holds a usable
+    /// credential (a fresh browser authorization, or a cached/refreshed token
+    /// accepted during a [`Command::AuthProviderLogin`] check).
+    AuthSuccess {
+        provider: String,
+    },
+    /// An OAuth sign-in failed or the client could not authorize: the device
+    /// flow timed out or was declined, the provider does not use OAuth sign-in
+    /// (an API key is required), or the connection name is unknown.
+    AuthFailed {
+        provider: String,
+        error: String,
+    },
     /// The configured scene set for the scene switcher, sent at startup:
     /// the built-in Default first, then the configured scenes in name order
     /// with their optional descriptions. Entries carry their switch identity
