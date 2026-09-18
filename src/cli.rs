@@ -1,5 +1,6 @@
 use clap::{
     Parser,
+    Subcommand,
     builder::{
         Styles,
         styling::{AnsiColor, Style},
@@ -21,27 +22,33 @@ pub struct Cli {
     #[arg(short, long)]
     pub current: bool,
     /// Resume a session
-    #[arg(short = 's', long, conflicts_with = "current", value_name = "UUID")]
+    #[arg(short, long, conflicts_with = "current", value_name = "UUID")]
     pub session: Option<uuid::Uuid>,
     /// Use a certain config file
     #[arg(long, value_name = "FILE")]
     pub config: Option<PathBuf>,
     /// Run in a certain directory
-    #[arg(short, long, value_name = "DIR")]
+    #[arg(value_name = "WORK_DIR")]
     pub dir: Option<PathBuf>,
-    /// Import a session from a JSON file (as written by --export-session)
-    #[arg(long, value_name = "FILE", conflicts_with = "export_session")]
-    pub import_session: Option<PathBuf>,
-    /// Export a session as JSON ([FILE]); with -s exports that session,
-    /// otherwise the most recent one. Without a value the file is named
-    /// `<session-id>-<timestamp>.json` in the working directory
-    #[arg(
-        long,
-        value_name = "FILE",
-        num_args = 0..=1,
-        default_missing_value = ""
-    )]
-    pub export_session: Option<String>,
+
+    #[command(subcommand)]
+    pub command: Option<CliSubcommand>,
+}
+
+#[derive(Subcommand)]
+pub enum CliSubcommand {
+    /// Import session
+    Import {
+        /// Path to session file
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+    },
+    /// Export session
+    Export {
+        /// Path to session file
+        #[arg(value_name = "DEST")]
+        dest: String,
+    }
 }
 
 pub fn show_resume_hint(session_id: Uuid) {

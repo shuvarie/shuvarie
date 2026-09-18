@@ -19,11 +19,17 @@ async fn main() -> color_eyre::Result<()> {
 
     let mut store = shuvarie_db::Store::open(&shuvarie_db::Store::default_path()).await?;
 
-    if let Some(path) = args.import_session.as_deref() {
-        return cli::import_session(&mut store, path).await;
-    }
-    if let Some(dest) = args.export_session.as_deref() {
-        return cli::export_session(&mut store, dest, args.session).await;
+    if let Some(cmd) = args.command {
+        use cli::CliSubcommand::*;
+
+        match cmd {
+            Import { file } => {
+                return cli::import_session(&mut store, &file).await;
+            }
+            Export { dest } => {
+                return cli::export_session(&mut store, &dest, args.session).await;
+            }
+        }
     }
 
     let Some(trust::Resolved {
