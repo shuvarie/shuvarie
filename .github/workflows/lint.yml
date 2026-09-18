@@ -17,6 +17,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v7
+      with:
+        submodules: true
     - uses: dtolnay/rust-toolchain@stable
     - name: Lint
       run: cargo clippy
