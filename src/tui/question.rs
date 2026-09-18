@@ -292,6 +292,9 @@ impl QuestionUI {
             let text = self.typing_buffer.value.trim().to_string();
             if !text.is_empty() {
                 self.custom_answers[self.current] = Some(text);
+                // The picked marker moves to the custom answer: drop any
+                // picked options so the saved text is the only marked row.
+                self.picked[self.current].clear();
                 self.typing_custom = false;
                 self.typing_buffer.clear();
                 return self.advance_after_answer();
@@ -343,16 +346,26 @@ impl QuestionUI {
         if self.cursor == custom_idx && q.custom {
             self.typing_custom = true;
             self.typing_buffer.clear();
+            // Re-editing a saved custom answer: preload it so it can be
+            // edited instead of retyped.
+            let saved = self.custom_answers[self.current].clone();
+            if let Some(text) = saved {
+                self.typing_buffer.insert_str(&text);
+            }
             return None;
         }
         if q.multiple {
             if !self.picked[self.current].remove(&self.cursor) {
                 self.picked[self.current].insert(self.cursor);
             }
+            if !self.picked[self.current].is_empty() {
+                self.custom_answers[self.current] = None;
+            }
             return None;
         }
         self.picked[self.current].clear();
         self.picked[self.current].insert(self.cursor);
+        self.custom_answers[self.current] = None;
         self.advance_after_answer()
     }
 
@@ -468,8 +481,16 @@ impl QuestionUI {
             spans.push(Span::raw("✎ ").fg(theme::text_muted()));
             match saved {
                 Some(text) => {
-                    spans.push(Span::raw("✓ ").fg(theme::success()));
-                    spans.push(truncate_span(&text, width.saturating_sub(6), theme::text()));
+                    // A saved custom answer is the picked row: the green dot
+                    // (or checkbox) lives here instead of on any option.
+                    let marker = if q.multiple { "[x] " } else { "● " };
+                    let used = 4 + marker.chars().count();
+                    spans.push(Span::raw(marker).fg(theme::success()));
+                    spans.push(truncate_span(
+                        &text,
+                        width.saturating_sub(used as u16),
+                        theme::text(),
+                    ));
                 }
                 None => {
                     spans.push(Span::raw("Type your own answer").fg(theme::text_dim()));
@@ -594,6 +615,26 @@ mod tests {
         ui
     }
 
+    fn custom_ui(multiple: bool, count: usize) -> QuestionUI {
+        let mut ui = QuestionUI::new();
+        ui.open(
+            1,
+            (0..count)
+                .map(|_| QuestionPrompt {
+                    question: "Which one?".into(),
+                    header: "Pick".into(),
+                    options: vec![QuestionOption {
+                        label: "label".into(),
+                        description: String::new(),
+                    }],
+                    multiple,
+                    custom: true,
+                })
+                .collect(),
+        );
+        ui
+    }
+
     fn texts(lines: &[Line<'static>]) -> Vec<String> {
         lines
             .iter()
@@ -654,5 +695,64 @@ mod tests {
         let texts = texts(&ui.build_lines(40, usize::MAX));
         assert_eq!(texts[4], "     one");
         assert_eq!(texts[5], "     two");
+    }
+
+    fn type_custom(ui: &mut QuestionUI, text: &str) {
+        ui.update(QuestionMessage::Down);
+        ui.update(QuestionMessage::Toggle);
+        assert!(ui.typing_custom);
+        for c in text.chars() {
+            ui.update(QuestionMessage::CustomInput(c));
+        }
+        ui.update(QuestionMessage::Toggle);
+        assert!(!ui.typing_custom);
+    }
+
+    #[test]
+    fn saved_custom_answer_takes_the_picked_marker() {
+        let mut ui = custom_ui(true, 1);
+        ui.update(QuestionMessage::Toggle); // pick option 0
+        type_custom(&mut ui, "hi");
+        assert!(ui.picked[0].is_empty());
+        assert_eq!(ui.custom_answers[0].as_deref(), Some("hi"));
+        let texts = texts(&ui.build_lines(40, usize::MAX));
+        assert_eq!(texts[3], "  [ ] 1 label");
+        assert_eq!(texts[4], "▶ ✎ [x] hi");
+    }
+
+    #[test]
+    fn saved_custom_answer_shows_the_green_dot() {
+        let mut ui = custom_ui(false, 2);
+        type_custom(&mut ui, "hi");
+        let texts = texts(&ui.build_lines(40, usize::MAX));
+        assert_eq!(texts[3], "    1 label");
+        assert_eq!(texts[4], "▶ ✎ ● hi");
+    }
+
+    #[test]
+    fn reselecting_custom_row_preloads_the_saved_answer() {
+        let mut ui = custom_ui(true, 1);
+        type_custom(&mut ui, "draft answer");
+        ui.update(QuestionMessage::Toggle); // select the custom row again
+        assert!(ui.typing_custom);
+        assert_eq!(ui.typing_buffer.value, "draft answer");
+        ui.update(QuestionMessage::Escape); // cancel keeps the save
+        assert!(!ui.typing_custom);
+        assert_eq!(ui.typing_buffer.value, "");
+        assert_eq!(ui.custom_answers[0].as_deref(), Some("draft answer"));
+    }
+
+    #[test]
+    fn picking_an_option_after_custom_clears_the_custom_answer() {
+        let mut ui = custom_ui(false, 2);
+        type_custom(&mut ui, "hi");
+        ui.update(QuestionMessage::Up); // back to option 0
+        ui.update(QuestionMessage::Toggle);
+        assert!(ui.custom_answers[0].is_none());
+        assert!(ui.picked[0].contains(&0));
+        assert_eq!(ui.build_answers()[0], vec!["label".to_string()]);
+        let texts = texts(&ui.build_lines(40, usize::MAX));
+        assert_eq!(texts[3], "▶ ● 1 label");
+        assert_eq!(texts[4], "  ✎ Type your own answer");
     }
 }
