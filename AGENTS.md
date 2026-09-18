@@ -39,6 +39,8 @@ cargo fmt --check
 
 ## Issues and pull requests
 
+Do not auto commit or post issues/PRs unless the user asks.
+
 Reviewing PRs:
 
 - Do not run `gh pr checkout`, `git switch`, or otherwise move the worktree to the PR branch unless the user explicitly asks.
