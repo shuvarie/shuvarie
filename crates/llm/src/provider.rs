@@ -1,7 +1,7 @@
 use futures_util::StreamExt;
 use selune::ProviderType;
-use std::sync::Arc;
 
+use crate::auth::DeviceCodeHandler;
 use crate::message::ChatMsg;
 use crate::stream::{StreamItem, StreamStream};
 use crate::tool::{DynamicTool, FileChangeHook};
@@ -64,6 +64,33 @@ fn openai_builder(key: &str, base_url: Option<&str>) -> rig_core::providers::ope
     }
 }
 
+/// GitHub token formats (`gho_`, `ghp_`, `ghu_`, `ghs_`, `ghr_`, fine-grained
+/// `github_pat_`). A pasted Copilot credential that looks like one is a GitHub
+/// token to exchange for a Copilot API key, not a Copilot API key itself.
+fn is_github_token(token: &str) -> bool {
+    ["gho_", "ghp_", "ghu_", "ghs_", "ghr_", "github_pat_"]
+        .iter()
+        .any(|prefix| token.starts_with(prefix))
+}
+
+/// The ChatGPT subscription backend has no model-listing endpoint; rig's
+/// known model constants stand in (the caller enriches them with catalog
+/// metadata by id).
+fn chatgpt_builtin_models() -> Vec<crate::Model> {
+    // ChatGPT's Codex surface has no model-listing endpoint; these are the
+    // models OpenAI recommends for subscription sign-in per the official
+    // Codex models page (the API-facing rig constants lag behind).
+    [
+        ("gpt-6-astra", "GPT-6 Astra"),
+        ("gpt-5.6-sol", "GPT-5.6 Sol"),
+        ("gpt-5.6-terra", "GPT-5.6 Terra"),
+        ("gpt-5.6-luna", "GPT-5.6 Luna"),
+    ]
+    .into_iter()
+    .map(|(id, name)| rig_core::model::Model::new(id, name))
+    .collect()
+}
+
 #[derive(Debug, Clone)]
 enum ListImpl {
     OpenAi(rig_core::providers::openai::Client),
@@ -71,6 +98,48 @@ enum ListImpl {
     Anthropic(rig_core::providers::anthropic::Client),
     Gemini(rig_core::providers::gemini::Client),
     Ollama(rig_core::providers::ollama::Client),
+    ChatGpt(rig_core::providers::chatgpt::Client),
+    Copilot(rig_core::providers::copilot::Client),
+    Azure(rig_core::providers::azure::Client),
+    Cohere(rig_core::providers::cohere::Client),
+    Deepseek(rig_core::providers::deepseek::Client),
+    Doubleword(rig_core::providers::doubleword::Client),
+    Groq(rig_core::providers::groq::Client),
+    Huggingface(rig_core::providers::huggingface::Client),
+    Hyperbolic(rig_core::providers::hyperbolic::Client),
+    Llamafile(rig_core::providers::llamafile::Client),
+    Minimax(rig_core::providers::minimax::Client),
+    Mira(rig_core::providers::mira::Client),
+    Mistral(rig_core::providers::mistral::Client),
+    Moonshot(rig_core::providers::moonshot::Client),
+    Perplexity(rig_core::providers::perplexity::Client),
+    Together(rig_core::providers::together::Client),
+    Venice(rig_core::providers::venice::Client),
+    Voyageai(rig_core::providers::voyageai::Client),
+    Xai(rig_core::providers::xai::Client),
+    Xiaomimimo(rig_core::providers::xiaomimimo::Client),
+    Zai(rig_core::providers::zai::Client),
+}
+
+/// Build a dedicated rig client for a key-transport provider: `builder()` →
+/// `.api_key(key)`, optional `.base_url(url)`, then `build()`. Shared by every
+/// provider whose rig module only needs a key and an optional endpoint
+/// override; the module path supplies provider-specific defaults and request
+/// quirks.
+macro_rules! keyed_client {
+    ($provider:ident, $variant:ident, $api_key:expr, $base_url:expr) => {{
+        let key = $api_key.ok_or(LlmError::Provider("API key required".into()))?;
+        let client = rig_core::providers::$provider::Client::builder().api_key(key);
+        let client = match $base_url.as_deref() {
+            Some(url) => client.base_url(url),
+            None => client,
+        };
+        ListImpl::$variant(
+            client
+                .build()
+                .map_err(|e| LlmError::Provider(e.to_string()))?,
+        )
+    }};
 }
 
 impl ProviderClient {
@@ -78,6 +147,20 @@ impl ProviderClient {
         kind: ProviderType,
         api_key: Option<&str>,
         base_url: Option<&str>,
+    ) -> Result<Self> {
+        Self::build_with_device_code(kind, api_key, base_url, None)
+    }
+
+    /// Like [`ProviderClient::build`], with an optional device-code callback
+    /// for the OAuth-backed providers (`chatgpt`, `copilot`). With a callback,
+    /// signing in without an API key runs the interactive device flow and
+    /// surfaces the prompt; without one, a missing token fails fast with an
+    /// actionable sign-in error instead of blocking on an unattended flow.
+    pub fn build_with_device_code(
+        kind: ProviderType,
+        api_key: Option<&str>,
+        base_url: Option<&str>,
+        on_device_code: Option<DeviceCodeHandler>,
     ) -> Result<Self> {
         let base_url = base_url
             .map(str::trim)
@@ -147,14 +230,148 @@ impl ProviderClient {
                         .map_err(|e| LlmError::Provider(e.to_string()))?,
                 )
             }
-            ProviderType::Azure | ProviderType::Bedrock | ProviderType::GoogleVertex => {
-                // These providers are not yet wired to a dedicated rig client;
-                // fall back to an OpenAI-compatible client at the configured URL.
+            ProviderType::Bedrock | ProviderType::GoogleVertex => {
+                // These providers have no rig client (rig 0.42 does not ship
+                // bedrock or vertexai transports); fall back to an
+                // OpenAI-compatible client at the configured URL.
                 let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
                 let client = openai_builder(key, base_url.as_deref())
                     .build()
                     .map_err(|e| LlmError::Provider(e.to_string()))?;
                 ListImpl::OpenAi(client)
+            }
+            ProviderType::Chatgpt => {
+                let mut builder = rig_core::providers::chatgpt::Client::builder();
+                if let Some(url) = base_url.as_deref() {
+                    builder = builder.base_url(url);
+                }
+                let builder = match api_key.map(str::trim).filter(|k| !k.is_empty()) {
+                    Some(token) => builder.api_key(token),
+                    None => builder.oauth(),
+                };
+                // rig's default merges a generic assistant preamble into every
+                // request; shuvarie always supplies its own preamble, so drop
+                // it and tag the backend's telemetry with this app.
+                let builder = builder.default_instructions("").originator("shuvarie");
+                let builder = match on_device_code {
+                    Some(handler) => {
+                        builder
+                            .allow_device_flow(true)
+                            .on_device_code(move |prompt| {
+                                handler(crate::auth::DeviceCodePrompt {
+                                    verification_uri: prompt.verification_uri,
+                                    user_code: prompt.user_code,
+                                });
+                            })
+                    }
+                    None => builder.allow_device_flow(false),
+                };
+                ListImpl::ChatGpt(
+                    builder
+                        .build()
+                        .map_err(|e| LlmError::Provider(e.to_string()))?,
+                )
+            }
+            ProviderType::Copilot => {
+                let mut builder = rig_core::providers::copilot::Client::builder();
+                if let Some(url) = base_url.as_deref() {
+                    builder = builder.base_url(url);
+                }
+                let builder = match api_key.map(str::trim).filter(|k| !k.is_empty()) {
+                    Some(token) if is_github_token(token) => builder.github_access_token(token),
+                    Some(key) => builder.api_key(key),
+                    None => builder.oauth(),
+                };
+                let builder = match on_device_code {
+                    Some(handler) => {
+                        builder
+                            .allow_device_flow(true)
+                            .on_device_code(move |prompt| {
+                                handler(crate::auth::DeviceCodePrompt {
+                                    verification_uri: prompt.verification_uri,
+                                    user_code: prompt.user_code,
+                                });
+                            })
+                    }
+                    None => builder.allow_device_flow(false),
+                };
+                ListImpl::Copilot(
+                    builder
+                        .build()
+                        .map_err(|e| LlmError::Provider(e.to_string()))?,
+                )
+            }
+            ProviderType::Azure => {
+                let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
+                // rig's Azure extension carries an empty default base URL:
+                // the resource endpoint (https://{name}.openai.azure.com) is
+                // required on the connection.
+                let endpoint = base_url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|u| !u.is_empty())
+                    .ok_or(LlmError::Provider("Azure endpoint required".into()))?;
+                ListImpl::Azure(
+                    rig_core::providers::azure::Client::builder()
+                        .api_key(key)
+                        .azure_endpoint(endpoint.to_string())
+                        .build()
+                        .map_err(|e| LlmError::Provider(e.to_string()))?,
+                )
+            }
+            ProviderType::Llamafile => {
+                let client = rig_core::providers::llamafile::Client::builder();
+                let client = if let Some(url) = base_url.as_deref() {
+                    client.base_url(url)
+                } else {
+                    client
+                };
+                ListImpl::Llamafile(
+                    client
+                        .api_key(rig_core::client::Nothing)
+                        .build()
+                        .map_err(|e| LlmError::Provider(e.to_string()))?,
+                )
+            }
+            ProviderType::Cohere => keyed_client!(cohere, Cohere, api_key, base_url),
+            ProviderType::Deepseek => keyed_client!(deepseek, Deepseek, api_key, base_url),
+            ProviderType::Doubleword => {
+                keyed_client!(doubleword, Doubleword, api_key, base_url)
+            }
+            ProviderType::Groq => keyed_client!(groq, Groq, api_key, base_url),
+            ProviderType::Huggingface => {
+                keyed_client!(huggingface, Huggingface, api_key, base_url)
+            }
+            ProviderType::Hyperbolic => {
+                keyed_client!(hyperbolic, Hyperbolic, api_key, base_url)
+            }
+            ProviderType::Minimax => keyed_client!(minimax, Minimax, api_key, base_url),
+            ProviderType::Mira => keyed_client!(mira, Mira, api_key, base_url),
+            ProviderType::Mistral => keyed_client!(mistral, Mistral, api_key, base_url),
+            ProviderType::Moonshot => keyed_client!(moonshot, Moonshot, api_key, base_url),
+            ProviderType::Perplexity => {
+                keyed_client!(perplexity, Perplexity, api_key, base_url)
+            }
+            ProviderType::Together => keyed_client!(together, Together, api_key, base_url),
+            ProviderType::Venice => keyed_client!(venice, Venice, api_key, base_url),
+            ProviderType::Xai => keyed_client!(xai, Xai, api_key, base_url),
+            ProviderType::Xiaomimimo => {
+                keyed_client!(xiaomimimo, Xiaomimimo, api_key, base_url)
+            }
+            ProviderType::Zai => keyed_client!(zai, Zai, api_key, base_url),
+            ProviderType::Voyageai => {
+                let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
+                let client = rig_core::providers::voyageai::Client::builder().api_key(key);
+                let client = if let Some(url) = base_url.as_deref() {
+                    client.base_url(url)
+                } else {
+                    client
+                };
+                ListImpl::Voyageai(
+                    client
+                        .build()
+                        .map_err(|e| LlmError::Provider(e.to_string()))?,
+                )
             }
         };
         Ok(Self {
@@ -181,68 +398,41 @@ impl ProviderClient {
                 | ProviderType::Google
                 | ProviderType::Ollama
                 | ProviderType::Vercel
+                | ProviderType::Copilot
+                | ProviderType::Azure
+                | ProviderType::Cohere
+                | ProviderType::Doubleword
+                | ProviderType::Llamafile
+                | ProviderType::Mistral
+                | ProviderType::Together
+                | ProviderType::Venice
+                | ProviderType::Voyageai
         )
     }
 
     pub async fn embed(&self, model: &str, dims: usize, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        use rig_core::client::EmbeddingsClient;
-        use rig_core::embeddings::EmbeddingsBuilder;
-
         if texts.is_empty() {
             return Ok(Vec::new());
         }
 
-        let embeddings = match &self.list {
-            ListImpl::OpenAi(c) => {
-                let model = c.embedding_model(model);
-                EmbeddingsBuilder::new(model)
-                    .documents(texts.to_vec())
-                    .map_err(|e| LlmError::Embedding(e.to_string()))?
-                    .build()
-                    .await
-                    .map_err(|e| LlmError::Embedding(e.to_string()))?
-            }
-            ListImpl::OpenRouter(c) => {
-                let model = c.embedding_model(model);
-                EmbeddingsBuilder::new(model)
-                    .documents(texts.to_vec())
-                    .map_err(|e| LlmError::Embedding(e.to_string()))?
-                    .build()
-                    .await
-                    .map_err(|e| LlmError::Embedding(e.to_string()))?
-            }
-            ListImpl::Gemini(c) => {
-                let model = c.embedding_model(model);
-                EmbeddingsBuilder::new(model)
-                    .documents(texts.to_vec())
-                    .map_err(|e| LlmError::Embedding(e.to_string()))?
-                    .build()
-                    .await
-                    .map_err(|e| LlmError::Embedding(e.to_string()))?
-            }
-            ListImpl::Ollama(c) => {
-                let model = c.embedding_model_with_ndims(model, dims);
-                EmbeddingsBuilder::new(model)
-                    .documents(texts.to_vec())
-                    .map_err(|e| LlmError::Embedding(e.to_string()))?
-                    .build()
-                    .await
-                    .map_err(|e| LlmError::Embedding(e.to_string()))?
-            }
-            _ => {
-                return Err(LlmError::Embedding(
-                    "provider does not support embeddings".into(),
-                ));
-            }
-        };
-
-        let mut out = Vec::with_capacity(embeddings.len());
-        for (_, emb) in embeddings {
-            for embedding in emb.iter() {
-                out.push(embedding.vec.iter().map(|&v| v as f32).collect());
-            }
+        match &self.list {
+            ListImpl::OpenAi(c) => embed_via(c, model, None, texts.to_vec()).await,
+            ListImpl::OpenRouter(c) => embed_via(c, model, None, texts.to_vec()).await,
+            ListImpl::Gemini(c) => embed_via(c, model, None, texts.to_vec()).await,
+            ListImpl::Ollama(c) => embed_via(c, model, Some(dims), texts.to_vec()).await,
+            ListImpl::Copilot(c) => embed_via(c, model, None, texts.to_vec()).await,
+            ListImpl::Azure(c) => embed_via(c, model, None, texts.to_vec()).await,
+            ListImpl::Cohere(c) => embed_via(c, model, None, texts.to_vec()).await,
+            ListImpl::Doubleword(c) => embed_via(c, model, None, texts.to_vec()).await,
+            ListImpl::Llamafile(c) => embed_via(c, model, None, texts.to_vec()).await,
+            ListImpl::Mistral(c) => embed_via(c, model, None, texts.to_vec()).await,
+            ListImpl::Together(c) => embed_via(c, model, None, texts.to_vec()).await,
+            ListImpl::Venice(c) => embed_via(c, model, None, texts.to_vec()).await,
+            ListImpl::Voyageai(c) => embed_via(c, model, None, texts.to_vec()).await,
+            _ => Err(LlmError::Embedding(
+                "provider does not support embeddings".into(),
+            )),
         }
-        Ok(out)
     }
 
     pub async fn list_models(&self) -> Result<Vec<crate::Model>> {
@@ -254,6 +444,33 @@ impl ProviderClient {
             ListImpl::Anthropic(c) => c.list_models().await,
             ListImpl::Gemini(c) => c.list_models().await,
             ListImpl::Ollama(c) => c.list_models().await,
+            ListImpl::ChatGpt(_) => {
+                return Ok(chatgpt_builtin_models());
+            }
+            ListImpl::Copilot(c) => c.list_models().await,
+            ListImpl::Deepseek(c) => c.list_models().await,
+            ListImpl::Groq(c) => c.list_models().await,
+            ListImpl::Minimax(c) => c.list_models().await,
+            ListImpl::Mira(c) => c.list_models().await,
+            ListImpl::Mistral(c) => c.list_models().await,
+            ListImpl::Moonshot(c) => c.list_models().await,
+            ListImpl::Venice(c) => c.list_models().await,
+            ListImpl::Xiaomimimo(c) => c.list_models().await,
+            ListImpl::Azure(_)
+            | ListImpl::Cohere(_)
+            | ListImpl::Doubleword(_)
+            | ListImpl::Huggingface(_)
+            | ListImpl::Hyperbolic(_)
+            | ListImpl::Llamafile(_)
+            | ListImpl::Perplexity(_)
+            | ListImpl::Together(_)
+            | ListImpl::Voyageai(_)
+            | ListImpl::Xai(_)
+            | ListImpl::Zai(_) => {
+                return Err(LlmError::Model(
+                    "provider does not support model listing".into(),
+                ));
+            }
         }
         .map_err(|e| LlmError::Model(e.to_string()))?;
 
@@ -264,121 +481,34 @@ impl ProviderClient {
         &self,
         req: &crate::agent::WorkerRequest,
     ) -> std::result::Result<String, String> {
-        let user_msg = rig_core::message::Message::user(req.task.clone());
-        let activity_tx = req.activity_tx.clone();
-        let usage = Arc::clone(&req.usage);
-        let tracker = crate::context_hook::UsageTracker::new();
-        let budget = req.context_budget.clone();
-        let file_hook = FileChangeHook::new().with_early_finish(
-            std::collections::HashSet::new(),
-            Some(req.name.clone()),
-            activity_tx.clone(),
-        );
         match &self.list {
-            ListImpl::OpenAi(c) => {
-                let agent = agent_with_tools(
-                    c,
-                    &req.model,
-                    Some(&req.preamble),
-                    req.tools.clone(),
-                    budget,
-                    tracker,
-                    file_hook.clone(),
-                );
-                run_worker_agent(
-                    agent,
-                    &req.name,
-                    user_msg,
-                    activity_tx,
-                    usage,
-                    req.max_turns,
-                    file_hook,
-                )
-                .await
-            }
-            ListImpl::OpenRouter(c) => {
-                let agent = agent_with_tools(
-                    c,
-                    &req.model,
-                    Some(&req.preamble),
-                    req.tools.clone(),
-                    budget,
-                    tracker,
-                    file_hook.clone(),
-                );
-                run_worker_agent(
-                    agent,
-                    &req.name,
-                    user_msg,
-                    activity_tx,
-                    usage,
-                    req.max_turns,
-                    file_hook,
-                )
-                .await
-            }
-            ListImpl::Anthropic(c) => {
-                let agent = agent_with_tools(
-                    c,
-                    &req.model,
-                    Some(&req.preamble),
-                    req.tools.clone(),
-                    budget,
-                    tracker,
-                    file_hook.clone(),
-                );
-                run_worker_agent(
-                    agent,
-                    &req.name,
-                    user_msg,
-                    activity_tx,
-                    usage,
-                    req.max_turns,
-                    file_hook,
-                )
-                .await
-            }
-            ListImpl::Gemini(c) => {
-                let agent = agent_with_tools(
-                    c,
-                    &req.model,
-                    Some(&req.preamble),
-                    req.tools.clone(),
-                    budget,
-                    tracker,
-                    file_hook.clone(),
-                );
-                run_worker_agent(
-                    agent,
-                    &req.name,
-                    user_msg,
-                    activity_tx,
-                    usage,
-                    req.max_turns,
-                    file_hook,
-                )
-                .await
-            }
-            ListImpl::Ollama(c) => {
-                let agent = agent_with_tools(
-                    c,
-                    &req.model,
-                    Some(&req.preamble),
-                    req.tools.clone(),
-                    budget,
-                    tracker,
-                    file_hook.clone(),
-                );
-                run_worker_agent(
-                    agent,
-                    &req.name,
-                    user_msg,
-                    activity_tx,
-                    usage,
-                    req.max_turns,
-                    file_hook,
-                )
-                .await
+            ListImpl::OpenAi(c) => worker_via(c, req).await,
+            ListImpl::OpenRouter(c) => worker_via(c, req).await,
+            ListImpl::Anthropic(c) => worker_via(c, req).await,
+            ListImpl::Gemini(c) => worker_via(c, req).await,
+            ListImpl::Ollama(c) => worker_via(c, req).await,
+            ListImpl::ChatGpt(c) => worker_via(c, req).await,
+            ListImpl::Copilot(c) => worker_via(c, req).await,
+            ListImpl::Azure(c) => worker_via(c, req).await,
+            ListImpl::Cohere(c) => worker_via(c, req).await,
+            ListImpl::Deepseek(c) => worker_via(c, req).await,
+            ListImpl::Doubleword(c) => worker_via(c, req).await,
+            ListImpl::Groq(c) => worker_via(c, req).await,
+            ListImpl::Huggingface(c) => worker_via(c, req).await,
+            ListImpl::Hyperbolic(c) => worker_via(c, req).await,
+            ListImpl::Llamafile(c) => worker_via(c, req).await,
+            ListImpl::Minimax(c) => worker_via(c, req).await,
+            ListImpl::Mira(c) => worker_via(c, req).await,
+            ListImpl::Mistral(c) => worker_via(c, req).await,
+            ListImpl::Moonshot(c) => worker_via(c, req).await,
+            ListImpl::Perplexity(c) => worker_via(c, req).await,
+            ListImpl::Together(c) => worker_via(c, req).await,
+            ListImpl::Venice(c) => worker_via(c, req).await,
+            ListImpl::Xai(c) => worker_via(c, req).await,
+            ListImpl::Xiaomimimo(c) => worker_via(c, req).await,
+            ListImpl::Zai(c) => worker_via(c, req).await,
+            ListImpl::Voyageai(_) => {
+                Err("voyageai supports embeddings only, not completions".to_string())
             }
         }
     }
@@ -395,8 +525,6 @@ impl ProviderClient {
         max_turns: usize,
         context_budget: Option<crate::context_hook::ContextBudget>,
     ) -> StreamStream {
-        use rig_agent::streaming::StreamingChat;
-
         let tracker = crate::context_hook::UsageTracker::new();
         let tracker_for_hook = tracker.clone();
         let user_msg = rig_core::message::Message::user(prompt.to_string());
@@ -420,131 +548,572 @@ impl ProviderClient {
             FileChangeHook::new().with_early_finish(worker_names.clone(), None, early_tx);
         receivers.push(early_rx);
 
-        async fn build(
-            agent: rig_agent::agent::Agent,
-            prompt: rig_core::message::Message,
-            history: Vec<rig_core::message::Message>,
-            receivers: Vec<tokio::sync::mpsc::Receiver<StreamItem>>,
-            worker_names: std::collections::HashSet<String>,
-            file_hook: FileChangeHook,
-            max_turns: usize,
-            tracker: std::sync::Arc<crate::context_hook::UsageTracker>,
-        ) -> StreamStream {
-            let stream = agent
-                .stream_chat(prompt, history)
-                .max_turns(max_turns)
-                .await;
-            map_agent_stream(stream, receivers, worker_names, tracker, file_hook)
-        }
-
         match &self.list {
             ListImpl::OpenAi(c) => {
-                build(
-                    agent_with_tools(
-                        c,
-                        model,
-                        preamble,
-                        dynamic,
-                        context_budget,
-                        tracker_for_hook,
-                        file_hook.clone(),
-                    ),
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
-                    file_hook,
                     max_turns,
                     tracker,
                 )
                 .await
             }
             ListImpl::OpenRouter(c) => {
-                build(
-                    agent_with_tools(
-                        c,
-                        model,
-                        preamble,
-                        dynamic,
-                        context_budget,
-                        tracker_for_hook,
-                        file_hook.clone(),
-                    ),
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
-                    file_hook,
                     max_turns,
                     tracker,
                 )
                 .await
             }
             ListImpl::Anthropic(c) => {
-                build(
-                    agent_with_tools(
-                        c,
-                        model,
-                        preamble,
-                        dynamic,
-                        context_budget,
-                        tracker_for_hook,
-                        file_hook.clone(),
-                    ),
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
-                    file_hook,
                     max_turns,
                     tracker,
                 )
                 .await
             }
             ListImpl::Gemini(c) => {
-                build(
-                    agent_with_tools(
-                        c,
-                        model,
-                        preamble,
-                        dynamic,
-                        context_budget,
-                        tracker_for_hook,
-                        file_hook.clone(),
-                    ),
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
-                    file_hook,
                     max_turns,
                     tracker,
                 )
                 .await
             }
             ListImpl::Ollama(c) => {
-                build(
-                    agent_with_tools(
-                        c,
-                        model,
-                        preamble,
-                        dynamic,
-                        context_budget,
-                        tracker_for_hook,
-                        file_hook.clone(),
-                    ),
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
                     user_msg,
                     rig_history,
                     receivers,
                     worker_names,
-                    file_hook,
                     max_turns,
                     tracker,
                 )
                 .await
             }
+            ListImpl::ChatGpt(c) => {
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
+                    user_msg,
+                    rig_history,
+                    receivers,
+                    worker_names,
+                    max_turns,
+                    tracker,
+                )
+                .await
+            }
+            ListImpl::Copilot(c) => {
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
+                    user_msg,
+                    rig_history,
+                    receivers,
+                    worker_names,
+                    max_turns,
+                    tracker,
+                )
+                .await
+            }
+            ListImpl::Azure(c) => {
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
+                    user_msg,
+                    rig_history,
+                    receivers,
+                    worker_names,
+                    max_turns,
+                    tracker,
+                )
+                .await
+            }
+            ListImpl::Cohere(c) => {
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
+                    user_msg,
+                    rig_history,
+                    receivers,
+                    worker_names,
+                    max_turns,
+                    tracker,
+                )
+                .await
+            }
+            ListImpl::Deepseek(c) => {
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
+                    user_msg,
+                    rig_history,
+                    receivers,
+                    worker_names,
+                    max_turns,
+                    tracker,
+                )
+                .await
+            }
+            ListImpl::Doubleword(c) => {
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
+                    user_msg,
+                    rig_history,
+                    receivers,
+                    worker_names,
+                    max_turns,
+                    tracker,
+                )
+                .await
+            }
+            ListImpl::Groq(c) => {
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
+                    user_msg,
+                    rig_history,
+                    receivers,
+                    worker_names,
+                    max_turns,
+                    tracker,
+                )
+                .await
+            }
+            ListImpl::Huggingface(c) => {
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
+                    user_msg,
+                    rig_history,
+                    receivers,
+                    worker_names,
+                    max_turns,
+                    tracker,
+                )
+                .await
+            }
+            ListImpl::Hyperbolic(c) => {
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
+                    user_msg,
+                    rig_history,
+                    receivers,
+                    worker_names,
+                    max_turns,
+                    tracker,
+                )
+                .await
+            }
+            ListImpl::Llamafile(c) => {
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
+                    user_msg,
+                    rig_history,
+                    receivers,
+                    worker_names,
+                    max_turns,
+                    tracker,
+                )
+                .await
+            }
+            ListImpl::Minimax(c) => {
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
+                    user_msg,
+                    rig_history,
+                    receivers,
+                    worker_names,
+                    max_turns,
+                    tracker,
+                )
+                .await
+            }
+            ListImpl::Mira(c) => {
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
+                    user_msg,
+                    rig_history,
+                    receivers,
+                    worker_names,
+                    max_turns,
+                    tracker,
+                )
+                .await
+            }
+            ListImpl::Mistral(c) => {
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
+                    user_msg,
+                    rig_history,
+                    receivers,
+                    worker_names,
+                    max_turns,
+                    tracker,
+                )
+                .await
+            }
+            ListImpl::Moonshot(c) => {
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
+                    user_msg,
+                    rig_history,
+                    receivers,
+                    worker_names,
+                    max_turns,
+                    tracker,
+                )
+                .await
+            }
+            ListImpl::Perplexity(c) => {
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
+                    user_msg,
+                    rig_history,
+                    receivers,
+                    worker_names,
+                    max_turns,
+                    tracker,
+                )
+                .await
+            }
+            ListImpl::Together(c) => {
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
+                    user_msg,
+                    rig_history,
+                    receivers,
+                    worker_names,
+                    max_turns,
+                    tracker,
+                )
+                .await
+            }
+            ListImpl::Venice(c) => {
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
+                    user_msg,
+                    rig_history,
+                    receivers,
+                    worker_names,
+                    max_turns,
+                    tracker,
+                )
+                .await
+            }
+            ListImpl::Xai(c) => {
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
+                    user_msg,
+                    rig_history,
+                    receivers,
+                    worker_names,
+                    max_turns,
+                    tracker,
+                )
+                .await
+            }
+            ListImpl::Xiaomimimo(c) => {
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
+                    user_msg,
+                    rig_history,
+                    receivers,
+                    worker_names,
+                    max_turns,
+                    tracker,
+                )
+                .await
+            }
+            ListImpl::Zai(c) => {
+                stream_via(
+                    c,
+                    model,
+                    preamble,
+                    dynamic,
+                    context_budget,
+                    tracker_for_hook,
+                    file_hook,
+                    user_msg,
+                    rig_history,
+                    receivers,
+                    worker_names,
+                    max_turns,
+                    tracker,
+                )
+                .await
+            }
+            ListImpl::Voyageai(_) => Box::pin(futures_util::stream::iter([StreamItem::Error {
+                message: "voyageai supports embeddings only, not completions".into(),
+            }])),
         }
     }
+}
+
+/// Embed `texts` through any rig [`EmbeddingsClient`], converting to `f32`
+/// vectors. `ndims` targets providers whose embedding dimension is chosen
+/// per request (e.g. Ollama).
+async fn embed_via<C>(
+    client: &C,
+    model: &str,
+    ndims: Option<usize>,
+    texts: Vec<String>,
+) -> Result<Vec<Vec<f32>>>
+where
+    C: rig_core::client::EmbeddingsClient,
+    C::EmbeddingModel: rig_core::embeddings::EmbeddingModel,
+{
+    use rig_core::embeddings::EmbeddingsBuilder;
+
+    let model = match ndims {
+        Some(dims) => client.embedding_model_with_ndims(model, dims),
+        None => client.embedding_model(model),
+    };
+    let embeddings = EmbeddingsBuilder::new(model)
+        .documents(texts)
+        .map_err(|e| LlmError::Embedding(e.to_string()))?
+        .build()
+        .await
+        .map_err(|e| LlmError::Embedding(e.to_string()))?;
+    Ok(embeddings
+        .into_iter()
+        .flat_map(|(_, embeddings)| embeddings)
+        .map(|embedding| embedding.vec.iter().map(|&v| v as f32).collect())
+        .collect())
+}
+
+/// Run a worker-agent request against any completion-capable rig client.
+async fn worker_via<C>(
+    client: &C,
+    req: &crate::agent::WorkerRequest,
+) -> std::result::Result<String, String>
+where
+    C: rig_core::client::CompletionClient + rig_agent::client::AgentClientExt,
+    C::CompletionModel: 'static,
+{
+    let user_msg = rig_core::message::Message::user(req.task.clone());
+    let activity_tx = req.activity_tx.clone();
+    let usage = std::sync::Arc::clone(&req.usage);
+    let tracker = crate::context_hook::UsageTracker::new();
+    let file_hook = FileChangeHook::new().with_early_finish(
+        std::collections::HashSet::new(),
+        Some(req.name.clone()),
+        activity_tx.clone(),
+    );
+    let agent = agent_with_tools(
+        client,
+        &req.model,
+        Some(&req.preamble),
+        req.tools.clone(),
+        req.context_budget.clone(),
+        tracker,
+        file_hook.clone(),
+    );
+    run_worker_agent(
+        agent,
+        &req.name,
+        user_msg,
+        activity_tx,
+        usage,
+        req.max_turns,
+        file_hook,
+    )
+    .await
+}
+
+/// Stream a chat turn through any completion-capable rig client.
+#[allow(clippy::too_many_arguments)]
+async fn stream_via<C>(
+    client: &C,
+    model: &str,
+    preamble: Option<&str>,
+    dynamic: Vec<DynamicTool>,
+    context_budget: Option<crate::context_hook::ContextBudget>,
+    tracker_for_hook: std::sync::Arc<crate::context_hook::UsageTracker>,
+    file_hook: FileChangeHook,
+    user_msg: rig_core::message::Message,
+    rig_history: Vec<rig_core::message::Message>,
+    receivers: Vec<tokio::sync::mpsc::Receiver<StreamItem>>,
+    worker_names: std::collections::HashSet<String>,
+    max_turns: usize,
+    tracker: std::sync::Arc<crate::context_hook::UsageTracker>,
+) -> StreamStream
+where
+    C: rig_core::client::CompletionClient + rig_agent::client::AgentClientExt,
+    C::CompletionModel: 'static,
+{
+    use rig_agent::streaming::StreamingChat;
+
+    let agent = agent_with_tools(
+        client,
+        model,
+        preamble,
+        dynamic,
+        context_budget,
+        tracker_for_hook,
+        file_hook.clone(),
+    );
+    let stream = agent
+        .stream_chat(user_msg, rig_history)
+        .max_turns(max_turns)
+        .await;
+    map_agent_stream(stream, receivers, worker_names, tracker, file_hook)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1016,7 +1585,7 @@ mod tests {
     async fn worker_missing_task_returns_error() {
         let client = ProviderClient::build(selune::ProviderType::Ollama, None, None).unwrap();
         let (_activity_tx, _activity_rx) = tokio::sync::mpsc::channel::<StreamItem>(8);
-        let usage = Arc::new(std::sync::Mutex::new(crate::TokenUsage::default()));
+        let usage = std::sync::Arc::new(std::sync::Mutex::new(crate::TokenUsage::default()));
         let worker = crate::agent::WorkerAgent::new(
             "test_worker",
             "a test worker",
@@ -1041,8 +1610,16 @@ mod tests {
     #[test]
     fn supports_embeddings_by_provider() {
         use selune::ProviderType::*;
-        let ok = [Openai, OpenaiCompat, Openrouter, Google, Ollama, Vercel];
-        let no = [Anthropic, Azure, Bedrock, GoogleVertex];
+        let ok = [
+            Openai,
+            OpenaiCompat,
+            Openrouter,
+            Google,
+            Ollama,
+            Vercel,
+            Copilot,
+        ];
+        let no = [Anthropic, Bedrock, GoogleVertex, Chatgpt];
         for p in ok {
             let client = ProviderClient::build(p, Some("k"), None).unwrap();
             assert!(
@@ -1054,6 +1631,61 @@ mod tests {
             let client = ProviderClient::build(p, Some("k"), None).unwrap();
             assert!(!client.supports_embeddings(), "{p:?} should not");
         }
+        // Azure and the embeddings-capable transports from the rig survey;
+        // Azure's resource endpoint is required at build time.
+        let azure =
+            ProviderClient::build(Azure, Some("k"), Some("https://res.openai.azure.com")).unwrap();
+        assert!(azure.supports_embeddings());
+        for p in [
+            Cohere, Doubleword, Llamafile, Mistral, Together, Venice, Voyageai,
+        ] {
+            let client = ProviderClient::build(p, Some("k"), None).unwrap();
+            assert!(
+                client.supports_embeddings(),
+                "{p:?} should support embeddings"
+            );
+        }
+    }
+
+    #[test]
+    fn auth_backed_clients_build_with_and_without_a_key() {
+        use selune::ProviderType::*;
+        for kind in [Chatgpt, Copilot] {
+            let keyed = ProviderClient::build(kind, Some("tok"), None).unwrap();
+            assert_eq!(keyed.kind(), kind);
+            let oauth = ProviderClient::build(kind, None, None).unwrap();
+            assert_eq!(oauth.kind(), kind);
+            let handler: crate::auth::DeviceCodeHandler = std::sync::Arc::new(|_| {});
+            let prompted =
+                ProviderClient::build_with_device_code(kind, None, None, Some(handler)).unwrap();
+            assert_eq!(prompted.kind(), kind);
+        }
+    }
+
+    #[test]
+    fn github_token_prefixes_route_to_the_exchange_flow() {
+        for token in ["gho_x", "ghp_x", "ghu_x", "ghs_x", "ghr_x", "github_pat_x"] {
+            assert!(is_github_token(token), "{token}");
+        }
+        for key in ["sk-x", "copilot-key", ""] {
+            assert!(!is_github_token(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn chatgpt_builtin_models_carry_the_codex_recommended_set() {
+        let models = chatgpt_builtin_models();
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&"gpt-6-astra"), "{ids:?}");
+        assert!(ids.contains(&"gpt-5.6-sol"), "{ids:?}");
+        assert!(models.iter().all(|m| m.name.is_some()), "{ids:?}");
+    }
+
+    #[tokio::test]
+    async fn chatgpt_list_models_returns_builtin_constants() {
+        let client = ProviderClient::build(selune::ProviderType::Chatgpt, None, None).unwrap();
+        let models = client.list_models().await.unwrap();
+        assert!(!models.is_empty());
     }
 
     #[tokio::test]
@@ -1110,11 +1742,11 @@ mod tests {
         /// window to surface first.
         #[derive(Clone)]
         struct ControlledTool {
-            release: Arc<tokio::sync::Notify>,
+            release: std::sync::Arc<tokio::sync::Notify>,
         }
 
         impl ControlledTool {
-            fn new(release: Arc<tokio::sync::Notify>) -> Self {
+            fn new(release: std::sync::Arc<tokio::sync::Notify>) -> Self {
                 Self { release }
             }
         }
@@ -1203,7 +1835,7 @@ mod tests {
 
         #[tokio::test]
         async fn fast_tool_result_surfaces_while_slow_tool_still_runs() {
-            let release = Arc::new(tokio::sync::Notify::new());
+            let release = std::sync::Arc::new(tokio::sync::Notify::new());
             let tools = vec![
                 into_dynamic("instant", InstantTool),
                 into_dynamic("controlled", ControlledTool::new(release.clone())),
@@ -1270,7 +1902,7 @@ mod tests {
 
         #[tokio::test]
         async fn worker_named_tool_surfaces_as_worker_result() {
-            let release = Arc::new(tokio::sync::Notify::new());
+            let release = std::sync::Arc::new(tokio::sync::Notify::new());
             let tools = vec![
                 into_dynamic("instant", InstantTool),
                 into_dynamic("edit_files", ControlledTool::new(release.clone())),
@@ -1344,7 +1976,7 @@ mod tests {
 
         #[tokio::test]
         async fn worker_internal_tool_results_surface_early() {
-            let release = Arc::new(tokio::sync::Notify::new());
+            let release = std::sync::Arc::new(tokio::sync::Notify::new());
             let tools = vec![
                 into_dynamic("instant", InstantTool),
                 into_dynamic("controlled", ControlledTool::new(release.clone())),
@@ -1359,7 +1991,7 @@ mod tests {
                 .dynamic_tools(tools)
                 .add_hook(file_hook.clone())
                 .build();
-            let usage = Arc::new(std::sync::Mutex::new(crate::TokenUsage::default()));
+            let usage = std::sync::Arc::new(std::sync::Mutex::new(crate::TokenUsage::default()));
             let runner = tokio::spawn(run_worker_agent(
                 agent,
                 "run_tests",

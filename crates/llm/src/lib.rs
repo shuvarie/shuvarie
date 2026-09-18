@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod auth;
 mod context_hook;
 mod error;
 pub mod file_change;
@@ -12,6 +13,7 @@ pub mod usage;
 
 pub use agent::WorkerAgent;
 pub use agent::WorkerRequest;
+pub use auth::{DeviceCodeHandler, DeviceCodePrompt};
 pub use context_hook::{
     ContextBudget, ContextHook, OVERFLOW_REASON, UsageTracker, estimate_text_tokens,
 };

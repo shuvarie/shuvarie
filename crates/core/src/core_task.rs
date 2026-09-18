@@ -9,7 +9,7 @@ use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 
 use shuvarie_db::{LockAcquire, SESSION_LOCK_HEARTBEAT_MS, Store};
-use shuvarie_llm::{FileChange, ProviderClient, TokenUsage};
+use shuvarie_llm::{DeviceCodeHandler, FileChange, ProviderClient, TokenUsage};
 
 use crate::command::Command;
 use crate::embeddings::{self, EmbeddingSetup};
@@ -339,7 +339,7 @@ pub async fn run(
             .map(|r| r.unwrap_or_default())
             .unwrap_or_default();
     }
-    let embedding_setup = embeddings::setup(&config, &connections, &mut clients);
+    let embedding_setup = embeddings::setup(&config, &connections, &mut clients, &event_tx);
     if let Some(setup) = embedding_setup.clone() {
         let store_backfill = store.clone();
         tokio::spawn(async move {
@@ -473,7 +473,12 @@ pub async fn run(
                         };
                     }
                     Command::ListModels { provider_name } => {
-                        let client = match client_for(&mut ctx.clients, &mut ctx.connections, &provider_name) {
+                        let client = match client_for(
+                            &mut ctx.clients,
+                            &mut ctx.connections,
+                            &ctx.event_tx,
+                            &provider_name,
+                        ) {
                             Ok(c) => c,
                             Err(e) => {
                                 let _ = ctx.event_tx
@@ -558,7 +563,7 @@ pub async fn run(
                             active.provider = name.clone();
                             if !ctx.clients.contains_key(&name)
                                 && let Some(pc) = ctx.connections.providers.get(&name)
-                                && let Ok(client) = build_client(pc)
+                                && let Ok(client) = build_client(pc, &ctx.event_tx)
                             {
                                 ctx.clients.insert(name.clone(), client);
                             }
@@ -992,6 +997,7 @@ pub async fn run(
                             match client_for(
                                 &mut ctx.clients,
                                 &mut ctx.connections,
+                                &ctx.event_tx,
                                 &active.provider,
                             ) {
                                 Ok(c) => Some((c.clone(), model)),
@@ -1854,7 +1860,12 @@ impl CoreCtx {
                 .await;
             return;
         };
-        let client = match client_for(&mut self.clients, &mut self.connections, &provider_name) {
+        let client = match client_for(
+            &mut self.clients,
+            &mut self.connections,
+            &self.event_tx,
+            &provider_name,
+        ) {
             Ok(c) => c.clone(),
             Err(e) => {
                 let _ = self.event_tx.send(Event::StreamError { error: e }).await;
@@ -2188,6 +2199,7 @@ fn dismiss_pending_permissions(
 fn client_for<'a>(
     clients: &'a mut HashMap<String, ProviderClient>,
     connections: &'a mut Connections,
+    event_tx: &Sender<Event>,
     name: &str,
 ) -> Result<&'a ProviderClient, String> {
     if !clients.contains_key(name) {
@@ -2195,7 +2207,7 @@ fn client_for<'a>(
             .providers
             .get(name)
             .ok_or_else(|| format!("provider '{name}' not found"))?;
-        let client = build_client(pc)?;
+        let client = build_client(pc, event_tx)?;
         clients.insert(name.to_string(), client);
     }
     Ok(clients.get(name).unwrap())
@@ -3154,11 +3166,43 @@ async fn export_session(
     Ok(path)
 }
 
-fn build_client(pc: &ProviderConfig) -> Result<ProviderClient, String> {
+fn build_client(pc: &ProviderConfig, event_tx: &Sender<Event>) -> Result<ProviderClient, String> {
     let kind = crate::catalog::provider_type(&pc.kind);
     let base_url = crate::catalog::base_url_for(&pc.kind, pc.base_url.as_deref());
-    ProviderClient::build(kind, pc.api_key.as_deref(), base_url.as_deref())
-        .map_err(|e| e.to_string())
+    let on_device_code = device_code_handler(kind, pc.name.clone(), event_tx);
+    ProviderClient::build_with_device_code(
+        kind,
+        pc.api_key.as_deref(),
+        base_url.as_deref(),
+        on_device_code,
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// The device-code prompt handler for the OAuth-backed providers (ChatGPT,
+/// Copilot): forwards each sign-in prompt to the TUI as
+/// [`Event::AuthPrompt`]. `try_send` because the callback runs deep inside
+/// the streaming stack; a full event channel drops the prompt and the flow
+/// simply times out later. `None` for every other transport.
+pub(crate) fn device_code_handler(
+    kind: selune::ProviderType,
+    provider: String,
+    event_tx: &Sender<Event>,
+) -> Option<DeviceCodeHandler> {
+    if !matches!(
+        kind,
+        selune::ProviderType::Chatgpt | selune::ProviderType::Copilot
+    ) {
+        return None;
+    }
+    let event_tx = event_tx.clone();
+    Some(Arc::new(move |prompt: shuvarie_llm::DeviceCodePrompt| {
+        let _ = event_tx.try_send(Event::AuthPrompt {
+            provider: provider.clone(),
+            verification_uri: prompt.verification_uri,
+            user_code: prompt.user_code,
+        });
+    }))
 }
 
 async fn persist_stream_error(
@@ -3280,6 +3324,37 @@ mod tests {
     use selune::ProviderType;
     use shuvarie_llm::StreamItem;
     use shuvarie_llm::TokenUsage;
+
+    #[test]
+    fn device_code_handler_forwards_prompts_for_oauth_backed_kinds_only() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(4);
+        let handler = device_code_handler(ProviderType::Chatgpt, "ChatGPT".into(), &tx)
+            .expect("chatgpt gets a handler");
+        handler(shuvarie_llm::DeviceCodePrompt {
+            verification_uri: "https://auth.openai.com/codex/device".into(),
+            user_code: "ABCD-1234".into(),
+        });
+        match rx.try_recv().expect("prompt forwarded") {
+            Event::AuthPrompt {
+                provider,
+                verification_uri,
+                user_code,
+            } => {
+                assert_eq!(provider, "ChatGPT");
+                assert_eq!(verification_uri, "https://auth.openai.com/codex/device");
+                assert_eq!(user_code, "ABCD-1234");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(
+            device_code_handler(ProviderType::Copilot, "copilot".into(), &tx).is_some(),
+            "copilot gets a handler"
+        );
+        assert!(
+            device_code_handler(ProviderType::Openai, "openai".into(), &tx).is_none(),
+            "api-key transports need no device-code handler"
+        );
+    }
 
     #[test]
     fn retry_schedule_escalates_and_caps() {

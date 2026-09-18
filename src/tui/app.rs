@@ -747,6 +747,15 @@ impl App {
                     Some(AppMessage::Session(SessionMessage::ShowError { error }))
                 }
                 CoreEvent::ShellWarning { message } => Some(AppMessage::ShellWarning { message }),
+                CoreEvent::AuthPrompt {
+                    provider,
+                    verification_uri,
+                    user_code,
+                } => Some(AppMessage::ShellWarning {
+                    message: format!(
+                        "Sign in with {provider}:\n1) Visit {verification_uri}\n2) Enter code: {user_code}\nDo not share this device code."
+                    ),
+                }),
             },
         }
     }

@@ -255,6 +255,15 @@ pub enum Event {
     ShellWarning {
         message: String,
     },
+    /// An OAuth-backed provider (ChatGPT, Copilot) started a device-code
+    /// sign-in: the user must visit `verification_uri` and enter `user_code`
+    /// in the browser; the provider completes sign-in automatically while it
+    /// polls. Surfaced as a dismissible popup like [`Event::ShellWarning`].
+    AuthPrompt {
+        provider: String,
+        verification_uri: String,
+        user_code: String,
+    },
     /// The configured scene set for the scene switcher, sent at startup:
     /// the built-in Default first, then the configured scenes in name order
     /// with their optional descriptions. Entries carry their switch identity

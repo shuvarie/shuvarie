@@ -75,7 +75,7 @@ pub enum AddProviderOutcome {
 }
 
 /// The rig transports a connection can use, in picker order.
-const TRANSPORTS: [(selune::ProviderType, &str); 10] = [
+const TRANSPORTS: [(selune::ProviderType, &str); 30] = [
     (selune::ProviderType::Openai, "OpenAI"),
     (
         selune::ProviderType::OpenaiCompat,
@@ -89,6 +89,26 @@ const TRANSPORTS: [(selune::ProviderType, &str); 10] = [
     (selune::ProviderType::Bedrock, "AWS Bedrock"),
     (selune::ProviderType::GoogleVertex, "Google Vertex AI"),
     (selune::ProviderType::Ollama, "Ollama (local)"),
+    (selune::ProviderType::Llamafile, "Llamafile (local)"),
+    (selune::ProviderType::Chatgpt, "ChatGPT (subscription)"),
+    (selune::ProviderType::Copilot, "GitHub Copilot"),
+    (selune::ProviderType::Cohere, "Cohere"),
+    (selune::ProviderType::Deepseek, "DeepSeek"),
+    (selune::ProviderType::Doubleword, "Doubleword"),
+    (selune::ProviderType::Groq, "Groq"),
+    (selune::ProviderType::Huggingface, "Hugging Face Router"),
+    (selune::ProviderType::Hyperbolic, "Hyperbolic"),
+    (selune::ProviderType::Minimax, "MiniMax (OpenAI surface)"),
+    (selune::ProviderType::Mira, "Mira"),
+    (selune::ProviderType::Mistral, "Mistral AI"),
+    (selune::ProviderType::Moonshot, "Moonshot AI"),
+    (selune::ProviderType::Perplexity, "Perplexity"),
+    (selune::ProviderType::Together, "Together AI"),
+    (selune::ProviderType::Venice, "Venice AI"),
+    (selune::ProviderType::Voyageai, "Voyage AI (embeddings)"),
+    (selune::ProviderType::Xai, "xAI"),
+    (selune::ProviderType::Xiaomimimo, "Xiaomi MiMo"),
+    (selune::ProviderType::Zai, "Z.ai"),
 ];
 
 pub struct AddProviderForm {
@@ -588,7 +608,7 @@ impl AddProviderForm {
     /// Whether the provider being configured demands a non-empty API key: the
     /// catalog entry's requirement for a registry origin, else the typed
     /// catalog id's entry when it resolves, else the transport (everything
-    /// but local Ollama).
+    /// but the local runtimes and the OAuth-backed subscriptions).
     fn key_required(&self) -> bool {
         match &self.origin {
             Some(provider) => shuvarie_core::catalog::requires_api_key(provider),
@@ -604,7 +624,12 @@ impl AddProviderForm {
                 }
                 !matches!(
                     shuvarie_core::catalog::parse_provider_type(kind),
-                    Some(selune::ProviderType::Ollama)
+                    Some(
+                        selune::ProviderType::Ollama
+                            | selune::ProviderType::Llamafile
+                            | selune::ProviderType::Chatgpt
+                            | selune::ProviderType::Copilot
+                    )
                 )
             }
         }
@@ -882,6 +907,57 @@ mod tests {
         let mut form = form();
         form.open_details(None);
         form
+    }
+
+    #[test]
+    fn transports_cover_every_provider_type_and_parse() {
+        let seen: std::collections::HashSet<selune::ProviderType> =
+            TRANSPORTS.iter().map(|(t, _)| *t).collect();
+        for (ptype, _) in TRANSPORTS {
+            let name = shuvarie_core::catalog::provider_type_name(ptype);
+            assert_eq!(
+                shuvarie_core::catalog::parse_provider_type(name),
+                Some(ptype),
+                "{name} should parse"
+            );
+        }
+        // Every variant must be pickable in the form.
+        let all = [
+            selune::ProviderType::Openai,
+            selune::ProviderType::OpenaiCompat,
+            selune::ProviderType::Openrouter,
+            selune::ProviderType::Vercel,
+            selune::ProviderType::Anthropic,
+            selune::ProviderType::Google,
+            selune::ProviderType::Azure,
+            selune::ProviderType::Bedrock,
+            selune::ProviderType::GoogleVertex,
+            selune::ProviderType::Ollama,
+            selune::ProviderType::Chatgpt,
+            selune::ProviderType::Copilot,
+            selune::ProviderType::Cohere,
+            selune::ProviderType::Deepseek,
+            selune::ProviderType::Doubleword,
+            selune::ProviderType::Groq,
+            selune::ProviderType::Huggingface,
+            selune::ProviderType::Hyperbolic,
+            selune::ProviderType::Llamafile,
+            selune::ProviderType::Minimax,
+            selune::ProviderType::Mira,
+            selune::ProviderType::Mistral,
+            selune::ProviderType::Moonshot,
+            selune::ProviderType::Perplexity,
+            selune::ProviderType::Together,
+            selune::ProviderType::Venice,
+            selune::ProviderType::Voyageai,
+            selune::ProviderType::Xai,
+            selune::ProviderType::Xiaomimimo,
+            selune::ProviderType::Zai,
+        ];
+        for ptype in all {
+            assert!(seen.contains(&ptype), "{ptype:?} missing from TRANSPORTS");
+        }
+        assert_eq!(seen.len(), TRANSPORTS.len(), "duplicates in TRANSPORTS");
     }
 
     #[test]
