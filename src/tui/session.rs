@@ -754,6 +754,10 @@ impl SessionScreen {
                 None
             }
             SessionMessage::TurnStarted { content, steered } => {
+                // The start of a turn re-reads the git branch, so checkouts
+                // made between turns (e.g. in another terminal) update the
+                // sidebar and the collapsed footer.
+                self.sidebar.update(SidebarMessage::RefreshBranch);
                 if steered {
                     self.chat.update(ChatMessage::SteeredDispatched);
                 }
@@ -1944,6 +1948,49 @@ mod tests {
         });
         assert!(screen.chat.has_steered(), "one entry should remain");
         assert!(screen.is_busy());
+    }
+
+    #[test]
+    fn turn_started_refreshes_the_git_branch() {
+        use crate::tui::workspace::testing::seed_git_repo;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut screen = SessionScreen::new();
+        screen.sidebar.update(SidebarMessage::SetWorkspace {
+            workspace: WorkspaceInfo {
+                path: dir.path().to_path_buf(),
+                home: None,
+                branch: None,
+            },
+        });
+        let body = |screen: &SessionScreen| {
+            screen
+                .sidebar
+                .rendered_lines()
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(!body(&screen).contains("⎇"), "no branch before the turn");
+
+        // The user checked out another branch since startup; the next turn
+        // start should pick it up.
+        seed_git_repo(dir.path(), "turn-branch");
+        screen.update(SessionMessage::TurnStarted {
+            content: "hello".into(),
+            steered: false,
+        });
+        assert!(
+            body(&screen).contains("⎇ turn-branch"),
+            "branch refreshed at turn start: {}",
+            body(&screen)
+        );
     }
 
     #[test]

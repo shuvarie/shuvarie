@@ -17,11 +17,18 @@ impl WorkspaceInfo {
     pub fn detect() -> Self {
         let path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let home = dirs::home_dir();
-        let branch = gix::discover(&path).ok().and_then(|repo| {
-            let head = repo.head().ok()?;
-            branch_name(&head)
-        });
+        let branch = detect_branch(&path);
         Self { path, home, branch }
+    }
+
+    /// Re-read the git branch at the known workspace path. Sent when a turn
+    /// starts, so checkouts made between turns (e.g. in another terminal) are
+    /// picked up by the sidebar and the collapsed footer.
+    pub fn refresh_branch(&mut self) {
+        if self.path.as_os_str().is_empty() {
+            return;
+        }
+        self.branch = detect_branch(&self.path);
     }
 
     /// The expanded-sidebar section above Context: the path line plus the
@@ -62,6 +69,12 @@ impl WorkspaceInfo {
         }
         truncate_spans(spans, max_cols)
     }
+}
+
+fn detect_branch(path: &Path) -> Option<String> {
+    let repo = gix::discover(path).ok()?;
+    let head = repo.head().ok()?;
+    branch_name(&head)
 }
 
 fn branch_name(head: &gix::Head<'_>) -> Option<String> {
@@ -222,6 +235,22 @@ fn comps_of(path: &Path) -> Vec<String> {
     path.components()
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect()
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::path::Path;
+
+    /// Seeds a minimal git worktree at `dir` whose `HEAD` points at
+    /// `refs/heads/{branch}` (unborn: no commit is written). Enough for
+    /// `gix::discover` + `head()` to resolve, without shelling out to git.
+    pub(crate) fn seed_git_repo(dir: &Path, branch: &str) {
+        let git_dir = dir.join(".git");
+        std::fs::create_dir_all(git_dir.join("refs/heads")).expect("create .git/refs/heads");
+        std::fs::create_dir_all(git_dir.join("objects")).expect("create .git/objects");
+        std::fs::write(git_dir.join("HEAD"), format!("ref: refs/heads/{branch}\n"))
+            .expect("write HEAD");
+    }
 }
 
 #[cfg(test)]
@@ -431,5 +460,44 @@ mod tests {
             fg(&spans),
             vec![Some(theme::text_muted()), Some(theme::text())]
         );
+    }
+
+    #[test]
+    fn refresh_branch_reads_head_at_workspace_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        testing::seed_git_repo(dir.path(), "feature-x");
+        let mut info = WorkspaceInfo {
+            path: dir.path().to_path_buf(),
+            home: None,
+            branch: None,
+        };
+
+        info.refresh_branch();
+        assert_eq!(info.branch.as_deref(), Some("feature-x"));
+
+        // A checkout between turns is picked up by the next refresh.
+        testing::seed_git_repo(dir.path(), "main");
+        info.refresh_branch();
+        assert_eq!(info.branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn refresh_branch_clears_when_not_a_repository() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut info = WorkspaceInfo {
+            path: dir.path().to_path_buf(),
+            home: None,
+            branch: Some("stale".into()),
+        };
+        info.refresh_branch();
+        assert_eq!(info.branch, None, "a vanished repo clears the branch");
+    }
+
+    #[test]
+    fn refresh_branch_keeps_default_workspace_untouched() {
+        let mut info = WorkspaceInfo::default();
+        info.refresh_branch();
+        assert_eq!(info.branch, None);
+        assert!(info.path.as_os_str().is_empty());
     }
 }
