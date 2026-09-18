@@ -11,6 +11,15 @@ pub enum Command {
         id: String,
         config: ProviderConfig,
     },
+    /// Sign in to an OAuth-backed provider (`chatgpt`, `copilot`) through the
+    /// device flow: the verification URL + user code surface as
+    /// [`crate::Event::AuthPrompt`], and completion or failure arrives as
+    /// [`crate::Event::AuthSuccess`] / [`crate::Event::AuthFailed`]. A cached
+    /// or pasted credential is verified in place; providers without OAuth
+    /// sign-in report a failure explaining that.
+    AuthProviderLogin {
+        name: String,
+    },
     RemoveProvider {
         name: String,
     },

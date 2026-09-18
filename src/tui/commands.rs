@@ -15,11 +15,15 @@ pub enum CommandAction {
     Replay,
     Reload,
     ToggleSidebar,
+    /// Sign in to the active provider (or the one named as an argument) when
+    /// it is OAuth-backed (`chatgpt`, `copilot`): runs the device flow and
+    /// surfaces the verification URL + user code.
+    Login,
     Quit,
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 14] = [
+    pub const ALL: [CommandAction; 15] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::OpenSessionPicker,
@@ -33,6 +37,7 @@ impl CommandAction {
         CommandAction::Replay,
         CommandAction::Reload,
         CommandAction::ToggleSidebar,
+        CommandAction::Login,
         CommandAction::Quit,
     ];
 
@@ -51,6 +56,7 @@ impl CommandAction {
             CommandAction::Replay => "replay",
             CommandAction::Reload => "reload",
             CommandAction::ToggleSidebar => "sidebar",
+            CommandAction::Login => "login",
             CommandAction::Quit => "quit",
         }
     }
@@ -64,6 +70,7 @@ impl CommandAction {
                 | CommandAction::Export
                 | CommandAction::OpenScenePicker
                 | CommandAction::OpenVariantPicker
+                | CommandAction::Login
         )
     }
 }
@@ -154,6 +161,12 @@ pub fn default_commands() -> Vec<CommandEntry> {
             name: "Toggle sidebar",
             description: "Collapse or expand the sidebar",
             action: CommandAction::ToggleSidebar,
+            available: true,
+        },
+        CommandEntry {
+            name: "Sign in",
+            description: "OAuth sign-in for the active provider",
+            action: CommandAction::Login,
             available: true,
         },
         CommandEntry {

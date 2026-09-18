@@ -5456,8 +5456,6 @@ dependencies = [
 [[package]]
 name = "selune"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "434d87241117f08875937462622d75d3730a336b057d5c67146d819e31b4f81a"
 dependencies = [
  "reqwest",
  "serde",

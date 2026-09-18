@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 
+use tokio::sync::mpsc::Sender;
+
 use shuvarie_db::Store;
 use shuvarie_llm::ProviderClient;
 
+use crate::event::Event;
 use shuvarie_config::Config;
 use shuvarie_config::Connections;
 
@@ -20,6 +23,7 @@ pub fn setup(
     config: &Config,
     connections: &Connections,
     clients: &mut HashMap<String, ProviderClient>,
+    event_tx: &Sender<Event>,
 ) -> Option<EmbeddingSetup> {
     if config.embedding.disabled {
         return None;
@@ -35,7 +39,15 @@ pub fn setup(
         Some(c) => c.clone(),
         None => {
             let base_url = crate::catalog::base_url_for(&pc.kind, pc.base_url.as_deref());
-            let c = ProviderClient::build(kind, pc.api_key.as_deref(), base_url.as_deref()).ok()?;
+            let on_device_code =
+                crate::core_task::device_code_handler(kind, pc.name.clone(), event_tx);
+            let c = ProviderClient::build_with_device_code(
+                kind,
+                pc.api_key.as_deref(),
+                base_url.as_deref(),
+                on_device_code,
+            )
+            .ok()?;
             clients.insert(provider_name.clone(), c.clone());
             c
         }
@@ -64,6 +76,10 @@ pub fn default_model(kind: selune::ProviderType) -> String {
     match kind {
         selune::ProviderType::Ollama => "nomic-embed-text".to_string(),
         selune::ProviderType::Google => "gemini-embedding-001".to_string(),
+        selune::ProviderType::Cohere => "embed-english-v4.0".to_string(),
+        selune::ProviderType::Mistral => "mistral-embed".to_string(),
+        selune::ProviderType::Voyageai => "voyage-3.5".to_string(),
+        selune::ProviderType::Llamafile => "LLaMA_CPP".to_string(),
         _ => "text-embedding-3-small".to_string(),
     }
 }
@@ -71,6 +87,9 @@ pub fn default_model(kind: selune::ProviderType) -> String {
 pub fn default_dims(kind: selune::ProviderType) -> usize {
     match kind {
         selune::ProviderType::Ollama => 768,
+        selune::ProviderType::Cohere => 1536,
+        selune::ProviderType::Mistral => 1024,
+        selune::ProviderType::Voyageai => 1024,
         _ => 1536,
     }
 }

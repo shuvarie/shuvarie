@@ -14,6 +14,7 @@ use self::app::{App, AppEffect, AppMessage};
 
 pub mod add_provider;
 mod app;
+mod auth;
 mod command_menu;
 mod commands;
 mod components;
@@ -255,9 +256,9 @@ where
     }
 }
 
-/// Apply a mapped message, recording a quit request on `AppEffect::Quit` and
+/// Apply a mapped message, recording a quit request on `AppEffect::Quit`,
 /// writing `AppEffect::CopyToClipboard` as OSC 52 (the render loop owns the
-/// terminal). Returns `true` if there was a message to apply.
+/// terminal), and launching the browser for `AppEffect::OpenBrowser`.
 fn apply_msg(app: &mut App, terminal: &mut PlatformTerminal, msg: Option<AppMessage>) -> bool {
     if let Some(msg) = msg {
         match app.update(msg) {
@@ -266,6 +267,7 @@ fn apply_msg(app: &mut App, terminal: &mut PlatformTerminal, msg: Option<AppMess
                 let _ = write!(terminal, "{}", escape::set_clipboard(&text));
                 let _ = terminal.flush();
             }
+            Some(AppEffect::OpenBrowser(url)) => auth::open_in_browser(&url),
             None => {}
         }
         true

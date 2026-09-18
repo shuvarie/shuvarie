@@ -312,7 +312,10 @@ pub fn is_connectable(provider: &ProviderConfig) -> bool {
         return catalog_requires_key(catalog, has_key);
     }
     match parse_provider_type(&provider.kind) {
-        Some(selune::ProviderType::Ollama) => true,
+        Some(selune::ProviderType::Ollama | selune::ProviderType::Llamafile) => true,
+        // OAuth-backed subscription providers: connectable without a pasted
+        // API key; sign-in resolves lazily through rig's device-flow cache.
+        Some(selune::ProviderType::Chatgpt | selune::ProviderType::Copilot) => true,
         Some(_) => has_key,
         None => catalog_requires_key(&provider.kind, has_key),
     }
@@ -420,6 +423,26 @@ pub fn provider_type_name(kind: selune::ProviderType) -> &'static str {
         selune::ProviderType::Bedrock => "bedrock",
         selune::ProviderType::GoogleVertex => "google-vertex",
         selune::ProviderType::Ollama => "ollama",
+        selune::ProviderType::Chatgpt => "chatgpt",
+        selune::ProviderType::Copilot => "copilot",
+        selune::ProviderType::Cohere => "cohere",
+        selune::ProviderType::Deepseek => "deepseek",
+        selune::ProviderType::Doubleword => "doubleword",
+        selune::ProviderType::Groq => "groq",
+        selune::ProviderType::Huggingface => "huggingface",
+        selune::ProviderType::Hyperbolic => "hyperbolic",
+        selune::ProviderType::Llamafile => "llamafile",
+        selune::ProviderType::Minimax => "minimax",
+        selune::ProviderType::Mira => "mira",
+        selune::ProviderType::Mistral => "mistral",
+        selune::ProviderType::Moonshot => "moonshot",
+        selune::ProviderType::Perplexity => "perplexity",
+        selune::ProviderType::Together => "together",
+        selune::ProviderType::Venice => "venice",
+        selune::ProviderType::Voyageai => "voyageai",
+        selune::ProviderType::Xai => "xai",
+        selune::ProviderType::Xiaomimimo => "xiaomimimo",
+        selune::ProviderType::Zai => "zai",
     }
 }
 
@@ -741,6 +764,26 @@ mod tests {
             ("bedrock", ProviderType::Bedrock),
             ("google-vertex", ProviderType::GoogleVertex),
             ("ollama", ProviderType::Ollama),
+            ("chatgpt", ProviderType::Chatgpt),
+            ("copilot", ProviderType::Copilot),
+            ("cohere", ProviderType::Cohere),
+            ("deepseek", ProviderType::Deepseek),
+            ("doubleword", ProviderType::Doubleword),
+            ("groq", ProviderType::Groq),
+            ("huggingface", ProviderType::Huggingface),
+            ("hyperbolic", ProviderType::Hyperbolic),
+            ("llamafile", ProviderType::Llamafile),
+            ("minimax", ProviderType::Minimax),
+            ("mira", ProviderType::Mira),
+            ("mistral", ProviderType::Mistral),
+            ("moonshot", ProviderType::Moonshot),
+            ("perplexity", ProviderType::Perplexity),
+            ("together", ProviderType::Together),
+            ("venice", ProviderType::Venice),
+            ("voyageai", ProviderType::Voyageai),
+            ("xai", ProviderType::Xai),
+            ("xiaomimimo", ProviderType::Xiaomimimo),
+            ("zai", ProviderType::Zai),
         ] {
             assert_eq!(parse_provider_type(name), Some(expected), "{name}");
             assert_eq!(provider_type_name(expected), name);
@@ -836,6 +879,16 @@ mod tests {
         assert!(is_connectable(&keyed));
         let blank_key = ProviderConfig::new("remote", "anthropic", Some("  ".into()), None);
         assert!(!is_connectable(&blank_key));
+        let chatgpt = ProviderConfig::new("chatgpt", "chatgpt", None, None);
+        assert!(is_connectable(&chatgpt), "OAuth-backed: no key required");
+        let copilot = ProviderConfig::new("copilot", "copilot", None, None);
+        assert!(is_connectable(&copilot), "OAuth-backed: no key required");
+        let copilot_keyed = ProviderConfig::new("copilot", "copilot", Some("ghp-x".into()), None);
+        assert!(is_connectable(&copilot_keyed));
+        let llamafile = ProviderConfig::new("llamafile", "llamafile", None, None);
+        assert!(is_connectable(&llamafile), "local runtime: no key required");
+        let deepseek = ProviderConfig::new("deepseek", "deepseek", None, None);
+        assert!(!is_connectable(&deepseek), "keyed transport needs a key");
     }
 
     #[test]
