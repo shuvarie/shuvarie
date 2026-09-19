@@ -426,6 +426,55 @@ async fn set_title_renames_without_touching_updated_at() {
 }
 
 #[tokio::test]
+async fn set_title_if_swaps_only_when_title_is_unchanged() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store
+        .create_session("provisional", None, None, None)
+        .await
+        .unwrap();
+    let other = store
+        .create_session("other", None, None, None)
+        .await
+        .unwrap();
+
+    // A mismatched expectation (including the wrong session's title) is a
+    // no-op that reports `false`.
+    assert!(
+        !store
+            .set_title_if(id, "not the title", "generated")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .set_title_if(other, "provisional", "generated")
+            .await
+            .unwrap()
+    );
+    assert_eq!(store.load_session(id).await.unwrap().title, "provisional");
+
+    // The matching expectation swaps the title.
+    assert!(
+        store
+            .set_title_if(id, "provisional", "generated")
+            .await
+            .unwrap()
+    );
+    assert_eq!(store.load_session(id).await.unwrap().title, "generated");
+
+    // After the swap the old expectation no longer matches, so a repeated
+    // (racing) write cannot clobber a manual rename in between.
+    store.set_title(id, "manual rename").await.unwrap();
+    assert!(
+        !store
+            .set_title_if(id, "provisional", "generated")
+            .await
+            .unwrap()
+    );
+    assert_eq!(store.load_session(id).await.unwrap().title, "manual rename");
+}
+
+#[tokio::test]
 async fn search_finds_messages_across_sessions_ranked() {
     let mut store = Store::open_in_memory().await.unwrap();
     let s1 = store

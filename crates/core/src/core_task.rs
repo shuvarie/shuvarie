@@ -854,6 +854,7 @@ pub async fn run(
                                 let _ = ctx
                                     .event_tx
                                     .send(Event::SessionTitleChanged {
+                                        id,
                                         title: title.to_string(),
                                     })
                                     .await;
@@ -1759,8 +1760,59 @@ impl CoreCtx {
                         }
                         let _ = self
                             .event_tx
-                            .send(Event::SessionCreated { id, title, scene })
+                            .send(Event::SessionCreated {
+                                id,
+                                title: title.clone(),
+                                scene,
+                            })
                             .await;
+                        // Draft the session title with the provider's default
+                        // small model in the background: the provisional
+                        // `title_for` heuristic stands until the generated
+                        // title arrives, and the compare-and-swap write
+                        // upgrades it only while no manual rename has landed
+                        // meanwhile. Fire-and-forget — a failed or empty
+                        // generation keeps the provisional title.
+                        if let Some((name, model)) = crate::title::small_model(&self.connections)
+                            && let Ok(client) = client_for(
+                                &mut self.clients,
+                                &mut self.connections,
+                                &self.event_tx,
+                                &name,
+                            )
+                            .cloned()
+                        {
+                            let mut store = self.store.clone();
+                            let event_tx = self.event_tx.clone();
+                            let session = s.clone();
+                            let provisional = title;
+                            let prompt = content.clone();
+                            tokio::spawn(async move {
+                                let Some(generated) =
+                                    crate::title::generate(&client, &model, &prompt).await
+                                else {
+                                    return;
+                                };
+                                if let Ok(true) =
+                                    store.set_title_if(id, &provisional, &generated).await
+                                {
+                                    // Only when the in-memory title is still
+                                    // the provisional one: a manual rename
+                                    // that landed after the swap wins instead.
+                                    let mut guard = session.lock().await;
+                                    if guard.title.as_deref() == Some(provisional.as_str()) {
+                                        guard.title = Some(generated.clone());
+                                        drop(guard);
+                                        let _ = event_tx
+                                            .send(Event::SessionTitleChanged {
+                                                id,
+                                                title: generated,
+                                            })
+                                            .await;
+                                    }
+                                }
+                            });
+                        }
                     }
                     Err(e) => {
                         let _ = self
