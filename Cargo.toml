@@ -33,6 +33,7 @@ tokio.workspace = true
 unicode-width.workspace = true
 uuid.workspace = true
 
+# Ratatui
 [dependencies.ratatui]
 version = "0.30.2"
 default-features = false
@@ -45,7 +46,6 @@ features = [
     "underline-color",
     "unstable-backend-writer",
     "unstable-rendered-line-info",
-    "widget-calendar",
 ]
 
 [profile.release]
