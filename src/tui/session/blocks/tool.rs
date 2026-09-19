@@ -483,6 +483,18 @@ impl ToolBlock {
             "question" | "apply_patch" => {
                 header.push(Span::raw(self.name.clone()).fg(theme::text()).bold());
             }
+            "skill" => {
+                let skill_name = args.get("skill").and_then(Value::as_str).unwrap_or("");
+                header.push(Span::raw(self.name.clone()).fg(theme::text()).bold());
+                if !skill_name.is_empty() {
+                    let avail = inner_w.saturating_sub(spans_width(&header) + 1);
+                    let display: String = skill_name.chars().take(avail).collect();
+                    header.push(Span::raw(format!(" {display}")).fg(theme::accent()).bold());
+                }
+                if let Some(resource) = args.get("path").and_then(Value::as_str) {
+                    header.push(Span::raw(format!(" · {resource}")).fg(theme::text_muted()));
+                }
+            }
             "todo" => {
                 header.push(Span::raw("todo").fg(theme::text()).bold());
                 if let Some(summary) = todo_op_summary(args) {
@@ -1554,6 +1566,30 @@ mod tests {
         assert!(!text.contains("core/"), "output leaked: {text}");
         assert!(!text.contains("more lines"), "hint leaked: {text}");
         assert_eq!(block.est().tool_rows, 0);
+    }
+
+    #[test]
+    fn collapsed_skill_hides_successful_output() {
+        let env = ChatEnv {
+            rev: 0,
+            lsp_diagnostics: &BTreeMap::new(),
+        };
+        let mut block = ToolBlock::new("skill", r#"{"skill":"tokio"}"#.to_string(), None, None);
+        block.update(ToolMessage::Finish {
+            ok: true,
+            output: "# Tokio\nYou are an expert in async runtime internals.".to_string(),
+            stderr: String::new(),
+            file_change: None,
+            duration_ms: 5,
+        });
+        let text = block_text(&block, &env);
+        assert!(text.contains("skill tokio"), "header/body: {text}");
+        assert!(!text.contains("expert"), "output leaked: {text}");
+        assert!(!text.contains("more lines"), "hint leaked: {text}");
+        assert_eq!(block.est().tool_rows, 0);
+        block.toggle();
+        let text = block_text(&block, &env);
+        assert!(text.contains("expert"), "toggled body: {text}");
     }
 
     #[test]

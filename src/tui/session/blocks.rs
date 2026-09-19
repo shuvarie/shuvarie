@@ -32,14 +32,14 @@ pub(super) fn format_duration_ms(ms: u64) -> String {
 /// calls where timing is worth the extra row. Thinking blocks time themselves
 /// in the reasoning header.
 pub(super) fn shows_elapsed(name: &str) -> bool {
-    name == "run_shell" || name == "explore_workspace"
+    matches!(name, "run_shell" | "explore_workspace")
 }
 
 /// Tool blocks whose successful output is not previewed when collapsed: file
-/// contents and directory listings the header already summarizes. Failed
-/// calls keep their (short) error message visible.
+/// contents, directory listings, and loaded skill instructions the header
+/// already summarizes. Failed calls keep their (short) error message visible.
 pub(super) fn hides_output_when_collapsed(name: &str) -> bool {
-    name == "read_file" || name == "list_dir"
+    matches!(name, "read_file" | "list_dir" | "skill")
 }
 
 /// One chat block: a TEA model per variant for the stateful kinds, unit
