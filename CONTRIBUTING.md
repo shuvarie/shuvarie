@@ -8,8 +8,8 @@ Shuvarie is a terminal-first AI tool (or so-called "harness") that prioritizes a
 
 ### Branches
 
-- `main`: the development branch (think about it as the "mainline").
-- `rel/<version>`: release branch, for patching, tagging, and releasing a specific minor version.
+- `main`: the development/trunk branch.
+- `rel/<version>`: release branch, for patching, tagging, and releasing a specific minor version. `rel` branches are created only for patching without leaking `main` features in.
 - `feat/*`: feature branch, for new feature development or bugfixes that require a longer period of time.
 
 When you submit a pull request (PR), it should go to `main`. The commits (especially bugfixes) might get cherrypicked into specific `rel` branch.

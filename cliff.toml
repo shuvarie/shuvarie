@@ -2,7 +2,10 @@
 # https://git-cliff.org/docs/configuration
 
 [changelog]
-header = "# Changelog"
+header = """
+# Changelog
+
+"""
 # Used by `--prepend` to remove the previous header.
 header_marker = "<!-- git-cliff: end of header -->"
 # A Tera template to be rendered for each release in the changelog.

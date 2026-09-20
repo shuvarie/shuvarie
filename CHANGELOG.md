@@ -1,4 +1,5 @@
 # Changelog
+
 ## [unreleased]
 
 ### 🚀 Features
@@ -22,3 +23,4 @@
 
 - Update debug version display
 - Introduce git-cliff
+- Configure git-cliff
