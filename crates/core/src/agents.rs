@@ -41,7 +41,7 @@ const WORKERS: [WorkerSpec; 3] = [
     },
 ];
 
-/// Builds the worker roster under the scene: `subagents { disabled #true }`
+/// Builds the worker roster under the scene: `subagents { disabled }`
 /// empties the roster, a worker override replaces its built-in preamble (an
 /// interlude appends to it — worker runs are single-shot with fresh history)
 /// and gates its tool set, and a disabled worker disappears from the roster

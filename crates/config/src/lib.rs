@@ -690,7 +690,8 @@ pub struct RegistriesConfig {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RegistryEntry {
-    /// Stored inverted in the file as `disabled #true`; omitted = enabled.
+    /// Stored inverted in the file as a bare `disabled` switch; omitted =
+    /// enabled.
     pub disabled: bool,
 
     /// Prefer the remote (hosted) catalog over the embedded offline one.
@@ -999,8 +1000,10 @@ impl SceneToolVerb {
 /// layer's value).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolOverride {
-    /// `None` = unspecified, `Some(false)` = explicitly enabled (re-enabling
-    /// under `disable-all`), `Some(true)` = disabled.
+    /// `None` = unspecified, `Some(true)` = disabled (the bare `disabled`
+    /// switch in config), `Some(false)` = explicitly enabled (re-enabling a
+    /// tool under `disable-all`; built programmatically — the config switch
+    /// has no "off" form).
     pub disabled: Option<bool>,
 
     /// `None` = unspecified, `Some(true)` = the tool always asks first.
@@ -1529,7 +1532,7 @@ pub enum TitleConfig {
         system_prompt: Option<String>,
     },
     /// No automatic titling: sessions start as `Untitled session` until
-    /// renamed by hand (`disabled #true`).
+    /// renamed by hand (the `disabled` switch).
     Disabled,
 }
 
@@ -2144,7 +2147,7 @@ mod tests {
                 frame-rate 30
             }
             skills {
-                disabled #true
+                disabled
                 dirs "a" "b"
             }
         "#;
@@ -2180,15 +2183,15 @@ mod tests {
     }
 
     #[test]
-    fn disabled_bools_round_trip() {
+    fn disabled_switches_round_trip() {
         let text = r#"
             embedding {
-                disabled #true
+                disabled
                 provider "openai"
                 dimensions 1536
             }
                         context {
-                                disabled #true
+                                disabled
                                 reserved 5000
                                 keep-recent-tokens 10000
                                 tool-output-max-chars 1000
@@ -2214,7 +2217,7 @@ mod tests {
     fn lsp_servers_layout() {
         let text = r#"
             lsp {
-                disabled #true
+                disabled
                 servers {
                     rust {
                         command "rust-analyzer"
@@ -2245,7 +2248,7 @@ mod tests {
     }
 
     #[test]
-    fn bare_disabled_nodes_parse_as_defaults() {
+    fn bare_disabled_switch_sets_the_flag() {
         let text = r#"
             embedding {
                 disabled
@@ -2254,10 +2257,24 @@ mod tests {
             shell
         "#;
         let parsed = config_kdl::from_kdl(text).unwrap();
-        assert!(!parsed.embedding.disabled);
-        assert_eq!(parsed.embedding, EmbeddingConfig::default());
+        assert!(parsed.embedding.disabled);
         assert_eq!(parsed.agent, AgentConfig::default());
         assert_eq!(parsed.shell, ShellConfig::default());
+    }
+
+    #[test]
+    fn disabled_switch_takes_no_arguments() {
+        for text in [
+            "embedding {\n    disabled #true\n}",
+            "embedding {\n    disabled #false\n}",
+            "embedding {\n    disabled \"yes\"\n}",
+        ] {
+            let err = config_kdl::from_kdl(text).unwrap_err();
+            assert!(
+                err.to_string().contains("takes no arguments"),
+                "{text}\n{err}"
+            );
+        }
     }
 
     #[test]
@@ -2391,10 +2408,10 @@ mod tests {
 
     #[test]
     fn ui_title_disabled_round_trips() {
-        let parsed = config_kdl::from_kdl("ui { title { disabled #true } }").unwrap();
+        let parsed = config_kdl::from_kdl("ui { title { disabled } }").unwrap();
         assert_eq!(parsed.ui.title, TitleConfig::Disabled);
         let text = config_kdl::to_kdl(&parsed).unwrap();
-        assert!(text.contains("disabled #true"), "body: {text}");
+        assert!(text.contains("disabled"), "body: {text}");
         let reparsed = config_kdl::from_kdl(&text).unwrap();
         assert_eq!(parsed, reparsed);
         assert!(
@@ -2470,7 +2487,7 @@ mod tests {
                 "at most one",
             ),
             (
-                "ui {\n    title {\n        disabled #true\n        first-user-prompt\n    }\n}",
+                "ui {\n    title {\n        disabled\n        first-user-prompt\n    }\n}",
                 "at most one",
             ),
             ("ui { title { bogus } }", "unknown node `bogus` in `title`"),
@@ -2498,8 +2515,8 @@ mod tests {
                 "ui { title { first-user-prompt max-chars=-1 } }",
                 "out of range",
             ),
-            ("ui { title { disabled } }", "must be `#true`"),
-            ("ui { title { disabled #false } }", "must be `#true`"),
+            ("ui { title { disabled #true } }", "takes no arguments"),
+            ("ui { title { disabled #false } }", "takes no arguments"),
             (
                 "ui { title { by-llm { system-prompt \"\" } } }",
                 "must not be empty",
@@ -2568,7 +2585,7 @@ mod tests {
                 max-turns 4
             }
             skills {
-                disabled #true
+                disabled
                 dirs "g"
             }
             "#,
@@ -2644,7 +2661,7 @@ mod tests {
             &top,
             r#"
             lsp {
-                disabled #true
+                disabled
                 servers {
                     rust {
                         command "/custom/rust-analyzer"
@@ -2788,7 +2805,7 @@ mod tests {
         let text = r#"
             registries {
                 selune {
-                    disabled #true
+                    disabled
                     remote-first #true
                 }
             }
@@ -2832,7 +2849,7 @@ mod tests {
                     remote-first #true
                 }
                 vendor-x {
-                    disabled #true
+                    disabled
                 }
                 vendor-y
             }
@@ -2876,12 +2893,12 @@ mod tests {
     fn registries_duplicate_entry_is_an_error() {
         for text in [
             r"registries {
-                selune { disabled #true }
+                selune { disabled }
                 selune
             }",
             r"registries {
                 vendor-x
-                vendor-x { disabled #true }
+                vendor-x { disabled }
             }",
         ] {
             let err = config_kdl::from_kdl(text).unwrap_err();
@@ -2906,7 +2923,7 @@ mod tests {
                     remote-first #true
                 }
                 vendor-global {
-                    disabled #true
+                    disabled
                 }
             }
             "#,
@@ -3646,7 +3663,7 @@ mod tests {
                 scene name="Plan" {
                     description "Plan before acting"
                     subagents {
-                        disabled #true
+                        disabled
                         editor {
                             system-prompts {
                                 prelude """
@@ -3661,7 +3678,7 @@ Now we're in Plan mode: plan first, no edits.
                             tools {
                                 enable-all
                                 tool "edit_file" {
-                                    disabled #true
+                                    disabled
                                 }
                             }
                         }
@@ -3687,7 +3704,7 @@ Now we're in Plan mode: plan first, no edits.
                     tools {
                         disable-all
                         tool "write_file" "edit_file" {
-                            disabled #true
+                            disabled
                             ask #false
                         }
                         tool "run_shell" {
@@ -3698,7 +3715,7 @@ Now we're in Plan mode: plan first, no edits.
                 scene name="Build" {
                     tools {
                         tool "run_shell" {
-                            disabled #true
+                            disabled
                         }
                     }
                 }
@@ -3829,19 +3846,23 @@ Now we're in Plan mode: plan first, no edits.
                 "requires `disabled` or `ask`",
             ),
             (
-                "scenes {\n    scene name=\"A\" {\n        tools {\n            tool \"x\" { disabled #true }\n            tool \"x\" { ask #true }\n        }\n    }\n}",
+                "scenes { scene name=\"A\" { tools { tool \"x\" { disabled #false } } } }",
+                "takes no arguments",
+            ),
+            (
+                "scenes {\n    scene name=\"A\" {\n        tools {\n            tool \"x\" { disabled }\n            tool \"x\" { ask #true }\n        }\n    }\n}",
                 "duplicate",
             ),
             (
-                "scenes { scene name=\"A\" { tools { tool 42 { disabled #true } } } }",
+                "scenes { scene name=\"A\" { tools { tool 42 { disabled } } } }",
                 "tool name",
             ),
             (
-                "scenes { scene name=\"A\" { tools { tool { disabled #true } } } }",
+                "scenes { scene name=\"A\" { tools { tool { disabled } } } }",
                 "at least one tool name",
             ),
             (
-                "scenes {\n    scene name=\"A\" {\n        tools {\n            enable-all { disabled #true }\n        }\n    }\n}",
+                "scenes {\n    scene name=\"A\" {\n        tools {\n            enable-all { disabled }\n        }\n    }\n}",
                 "takes no children",
             ),
             (

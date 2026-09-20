@@ -153,7 +153,7 @@ impl ToolScene {
 
     /// Whether the tool is built into the roster at all: under `disable-all`
     /// only explicitly re-enabled tools survive, otherwise per-tool
-    /// `disabled #true` removes them.
+    /// `disabled` removes them.
     pub fn allows(&self, tool: &str) -> bool {
         let disabled = self.overrides.get(tool).and_then(|o| o.disabled);
         match self.verb {
@@ -367,25 +367,36 @@ mod tests {
 
     #[test]
     fn tool_scene_verbs_and_overrides() {
-        let scene = plan_scene(
-            r#"
-            scenes {
-                scene name="Plan" {
-                    tools {
-                        disable-all
-                        tool "read_file" "grep" {
-                            disabled #false
-                        }
-                        tool "run_shell" {
-                            disabled #false
-                            ask #true
-                        }
-                    }
-                }
-            }
-        "#,
-        );
-        let tools = scene.tools();
+        // Under `disable-all` only tools explicitly re-enabled with
+        // `disabled: Some(false)` survive. The config `disabled` switch has
+        // no "off" form, so these overrides are built programmatically.
+        let tools_cfg = SceneToolsConfig {
+            verb: Some(SceneToolVerb::DisableAll),
+            tools: BTreeMap::from([
+                (
+                    "read_file".to_string(),
+                    ToolOverride {
+                        disabled: Some(false),
+                        ask: None,
+                    },
+                ),
+                (
+                    "grep".to_string(),
+                    ToolOverride {
+                        disabled: Some(false),
+                        ask: None,
+                    },
+                ),
+                (
+                    "run_shell".to_string(),
+                    ToolOverride {
+                        disabled: Some(false),
+                        ask: Some(true),
+                    },
+                ),
+            ]),
+        };
+        let tools = ToolScene::build(Some(&tools_cfg));
         assert!(!tools.allows("write_file"), "disable-all removes tools");
         assert!(tools.allows("read_file"), "explicit re-enable survives");
         assert!(tools.allows("grep"));
@@ -399,7 +410,7 @@ mod tests {
                     tools {
                         ask-all
                         tool "read_file" {
-                            disabled #true
+                            disabled
                         }
                     }
                 }

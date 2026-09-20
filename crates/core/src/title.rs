@@ -6,7 +6,7 @@
 //! it in a fire-and-forget side call (no tools, one turn). The provisional
 //! heuristic title (`core_task::title_for`) stands until the generated title
 //! arrives; the compare-and-swap store write upgrades it without clobbering
-//! a manual rename that landed meanwhile. `disabled #true` skips automatic
+//! a manual rename that landed meanwhile. `disabled` skips automatic
 //! titling entirely.
 
 use std::sync::{Arc, Mutex};

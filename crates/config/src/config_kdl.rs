@@ -150,6 +150,32 @@ fn scalar_bool(input: &str, node: &KdlNode) -> Result<Option<bool>> {
     }
 }
 
+/// A bare switch node (`disabled`): no arguments, no children — its presence
+/// alone sets the flag to `true`. Any argument (the old `disabled #true`
+/// form) is an error.
+fn switch_flag(input: &str, node: &KdlNode) -> Result<Option<bool>> {
+    if !node.entries().is_empty() {
+        return Err(node_error(
+            input,
+            node,
+            format!(
+                "`{}` takes no arguments (it is a switch)",
+                node.name().value()
+            ),
+            None,
+        ));
+    }
+    if node.children().is_some() {
+        return Err(node_error(
+            input,
+            node,
+            format!("`{}` takes no children", node.name().value()),
+            None,
+        ));
+    }
+    Ok(Some(true))
+}
+
 fn scalar_string(input: &str, node: &KdlNode) -> Result<Option<String>> {
     match scalar_value(input, node)? {
         None => Ok(None),
@@ -355,18 +381,8 @@ fn parse_title_by_llm(node: &KdlNode, input: &str) -> Result<TitleConfig> {
 }
 
 fn parse_title_disabled(node: &KdlNode, input: &str) -> Result<TitleConfig> {
-    if node.children().is_some() {
-        return Err(node_error(
-            input,
-            node,
-            "`disabled` takes no children",
-            None,
-        ));
-    }
-    match scalar_bool(input, node)? {
-        Some(true) => Ok(TitleConfig::Disabled),
-        _ => Err(node_error(input, node, "`disabled` must be `#true`", None)),
-    }
+    switch_flag(input, node)?;
+    Ok(TitleConfig::Disabled)
 }
 
 fn parse_theme_pref(input: &str, node: &KdlNode) -> Result<Option<String>> {
@@ -401,7 +417,7 @@ fn parse_embedding(node: &KdlNode, input: &str) -> Result<EmbeddingConfig> {
     let mut dimensions = None;
     for child in child_nodes(node) {
         match child.name().value() {
-            "disabled" => set_once(input, child, &mut disabled, scalar_bool(input, child))?,
+            "disabled" => set_once(input, child, &mut disabled, switch_flag(input, child))?,
             "provider" => set_once(input, child, &mut provider, scalar_string(input, child))?,
             "model" => set_once(input, child, &mut model, scalar_string(input, child))?,
             "dimensions" => set_once(input, child, &mut dimensions, scalar_u32(input, child))?,
@@ -454,7 +470,7 @@ fn parse_lsp(node: &KdlNode, input: &str) -> Result<LspConfigRepr> {
     let mut servers = None;
     for child in child_nodes(node) {
         match child.name().value() {
-            "disabled" => set_once(input, child, &mut disabled, scalar_bool(input, child))?,
+            "disabled" => set_once(input, child, &mut disabled, switch_flag(input, child))?,
             "servers" => {
                 set_once(input, child, &mut servers, parse_servers(child, input))?;
             }
@@ -529,7 +545,7 @@ fn parse_skills(node: &KdlNode, input: &str) -> Result<SkillsConfig> {
     let mut dirs = None;
     for child in child_nodes(node) {
         match child.name().value() {
-            "disabled" => set_once(input, child, &mut disabled, scalar_bool(input, child))?,
+            "disabled" => set_once(input, child, &mut disabled, switch_flag(input, child))?,
             "dirs" => set_once(input, child, &mut dirs, scalar_string_vec(input, child))?,
             _ => {}
         }
@@ -553,7 +569,7 @@ fn parse_context(node: &KdlNode, input: &str) -> Result<ContextConfig> {
     let mut fallback_context_length = None;
     for child in child_nodes(node) {
         match child.name().value() {
-            "disabled" => set_once(input, child, &mut disabled, scalar_bool(input, child))?,
+            "disabled" => set_once(input, child, &mut disabled, switch_flag(input, child))?,
             "reserved" => set_once(input, child, &mut reserved, scalar_u64(input, child))?,
             "keep-recent-tokens" => {
                 set_once(
@@ -651,7 +667,7 @@ fn parse_registry_entry(node: &KdlNode, input: &str) -> Result<RegistryEntry> {
     let mut remote_first = None;
     for child in child_nodes(node) {
         match child.name().value() {
-            "disabled" => set_once(input, child, &mut disabled, scalar_bool(input, child))?,
+            "disabled" => set_once(input, child, &mut disabled, switch_flag(input, child))?,
             "remote-first" => {
                 set_once(input, child, &mut remote_first, scalar_bool(input, child))?;
             }
@@ -1476,7 +1492,7 @@ fn parse_subagents(node: &KdlNode, input: &str) -> Result<SubagentsConfig> {
     let mut workers = BTreeMap::new();
     for child in child_nodes(node) {
         match child.name().value() {
-            "disabled" => set_once(input, child, &mut disabled, scalar_bool(input, child))?,
+            "disabled" => set_once(input, child, &mut disabled, switch_flag(input, child))?,
             name => {
                 let worker = parse_subagent(child, input)?;
                 if workers.insert(name.to_string(), worker).is_some() {
@@ -1509,7 +1525,7 @@ fn parse_subagent(node: &KdlNode, input: &str) -> Result<SubagentConfig> {
     let mut tools = None;
     for child in child_nodes(node) {
         match child.name().value() {
-            "disabled" => set_once(input, child, &mut disabled, scalar_bool(input, child))?,
+            "disabled" => set_once(input, child, &mut disabled, switch_flag(input, child))?,
             "thinking" => set_once(input, child, &mut thinking, scalar_bool(input, child))?,
             "system-prompts" => set_once(
                 input,
@@ -1718,7 +1734,7 @@ fn parse_scene_verb(input: &str, node: &KdlNode) -> Result<SceneToolVerb> {
 }
 
 /// One `tool` node: several tool name arguments sharing one override
-/// (`tool "a" "b" { disabled #true }` ≡ two entries).
+/// (`tool "a" "b" { disabled }` ≡ two entries).
 fn parse_tool_overrides(node: &KdlNode, input: &str) -> Result<Vec<(String, ToolOverride)>> {
     check_props(input, node, &[])?;
     let mut names = Vec::new();
@@ -1747,7 +1763,7 @@ fn parse_tool_overrides(node: &KdlNode, input: &str) -> Result<Vec<(String, Tool
     let mut ask = None;
     for child in child_nodes(node) {
         match child.name().value() {
-            "disabled" => set_once(input, child, &mut disabled, scalar_bool(input, child))?,
+            "disabled" => set_once(input, child, &mut disabled, switch_flag(input, child))?,
             "ask" => set_once(input, child, &mut ask, scalar_bool(input, child))?,
             other => {
                 return Err(node_error(
@@ -1893,7 +1909,7 @@ fn title_node(cfg: &TitleConfig) -> KdlNode {
             }
             children.push(by_llm);
         }
-        TitleConfig::Disabled => children.push(value_node("disabled", true)),
+        TitleConfig::Disabled => children.push(KdlNode::new("disabled")),
     }
     let mut title = KdlNode::new("title");
     let mut body = KdlDocument::new();
@@ -1905,7 +1921,7 @@ fn title_node(cfg: &TitleConfig) -> KdlNode {
 fn embedding_node(cfg: &EmbeddingConfig) -> Option<KdlNode> {
     let mut children = Vec::new();
     if cfg.disabled {
-        children.push(value_node("disabled", true));
+        children.push(KdlNode::new("disabled"));
     }
     if let Some(provider) = &cfg.provider {
         children.push(value_node("provider", provider.as_str()));
@@ -1934,7 +1950,7 @@ fn agent_node(cfg: &AgentConfig) -> Option<KdlNode> {
 fn lsp_node(cfg: &LspConfigRepr) -> Option<KdlNode> {
     let mut children = Vec::new();
     if cfg.disabled {
-        children.push(value_node("disabled", true));
+        children.push(KdlNode::new("disabled"));
     }
     if !cfg.servers.is_empty() {
         let mut servers = KdlNode::new("servers");
@@ -1968,7 +1984,7 @@ fn server_spec_node(name: &str, spec: &LspServerSpecRepr) -> KdlNode {
 fn skills_node(cfg: &SkillsConfig) -> Option<KdlNode> {
     let mut children = Vec::new();
     if cfg.disabled {
-        children.push(value_node("disabled", true));
+        children.push(KdlNode::new("disabled"));
     }
     children.extend(string_vec_node("dirs", &cfg.dirs));
     section_node("skills", children)
@@ -1978,7 +1994,7 @@ fn context_node(cfg: &ContextConfig) -> Option<KdlNode> {
     let defaults = ContextConfig::default();
     let mut children = Vec::new();
     if cfg.disabled {
-        children.push(value_node("disabled", true));
+        children.push(KdlNode::new("disabled"));
     }
     if cfg.reserved != defaults.reserved {
         children.push(int_node("reserved", cfg.reserved));
@@ -2231,7 +2247,7 @@ fn subagents_node(cfg: &SubagentsConfig) -> Option<KdlNode> {
     }
     let mut children = Vec::new();
     if cfg.disabled {
-        children.push(value_node("disabled", true));
+        children.push(KdlNode::new("disabled"));
     }
     for (name, worker) in &cfg.workers {
         children.push(subagent_node(name, worker));
@@ -2242,7 +2258,7 @@ fn subagents_node(cfg: &SubagentsConfig) -> Option<KdlNode> {
 fn subagent_node(name: &str, worker: &SubagentConfig) -> KdlNode {
     let mut children = Vec::new();
     if worker.disabled {
-        children.push(value_node("disabled", true));
+        children.push(KdlNode::new("disabled"));
     }
     children.extend(system_prompts_node(&worker.system_prompts));
     if let Some(thinking) = worker.thinking {
@@ -2304,8 +2320,8 @@ fn tool_override_node(name: &str, tool: &ToolOverride) -> KdlNode {
     let mut node = KdlNode::new("tool");
     node.push(KdlEntry::new(name.to_string()));
     let mut children = Vec::new();
-    if let Some(disabled) = tool.disabled {
-        children.push(value_node("disabled", disabled));
+    if tool.disabled == Some(true) {
+        children.push(KdlNode::new("disabled"));
     }
     if let Some(ask) = tool.ask {
         children.push(value_node("ask", ask));
@@ -2377,7 +2393,7 @@ fn multiline_string_repr(text: &str) -> Option<String> {
 fn registry_entry_node(name: &str, entry: RegistryEntry) -> KdlNode {
     let mut children = Vec::new();
     if entry.disabled {
-        children.push(value_node("disabled", true));
+        children.push(KdlNode::new("disabled"));
     }
     if entry.remote_first {
         children.push(value_node("remote-first", true));

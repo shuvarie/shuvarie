@@ -218,7 +218,7 @@ fn agent_config_round_trip_with_limits() {
 
 #[test]
 fn agent_config_defaults_when_section_absent() {
-    let kdl = "embedding {\n    disabled #true\n}\n";
+    let kdl = "embedding {\n    disabled\n}\n";
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("config.kdl");
     std::fs::write(&path, kdl).expect("write");
@@ -258,10 +258,10 @@ fn config_with_lsp_servers_round_trip() {
     assert!(saved.contains("servers {"), "new layout:\n{saved}");
     assert!(saved.contains("rust {") || saved.contains("\"rust\" {"));
     assert!(saved.contains("no-auto-start #true"));
-    assert!(saved.contains("disabled #true"));
+    assert!(saved.contains("disabled\n"));
 
     // hand-written form parses too
-    let hand = "lsp {\n    disabled #true\n    servers {\n        rust {\n            command \"rust-analyzer\"\n            no-auto-start #true\n        }\n    }\n}\n";
+    let hand = "lsp {\n    disabled\n    servers {\n        rust {\n            command \"rust-analyzer\"\n            no-auto-start #true\n        }\n    }\n}\n";
     let dir2 = tempfile::tempdir().expect("tempdir");
     let path2 = dir2.path().join("config.kdl");
     std::fs::write(&path2, hand).expect("write");
