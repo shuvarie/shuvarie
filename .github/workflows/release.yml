@@ -8,6 +8,7 @@
 #
 # Artifacts per platform:
 #   Linux   - tar.gz, .deb (libc6, libgcc-s1), .rpm   (fpm; glibc 2.17 via zig)
+#   Linux   - tar.gz (musl, fully static)             (zigbuild cross on Linux)
 #   macOS   - tar.gz, .dmg                            (hdiutil)
 #   Windows - .zip, NSIS installer                    (zigbuild cross on Linux; apt makensis)
 
@@ -138,6 +139,68 @@ jobs:
             shuvarie-*.tar.gz
             shuvarie_*.deb
             shuvarie-*.rpm
+          if-no-files-found: error
+          retention-days: 1
+
+  linux-musl:
+    name: Linux (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cargo-zigbuild
+        run: PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --quiet cargo-zigbuild
+
+      - name: Resolve release version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "shuvarie") | .version')"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            if [[ "$tag" != "$version" ]]; then
+              echo "::error::Tag ${GITHUB_REF_NAME} does not match workspace version ${version}"
+              exit 1
+            fi
+            echo "VERSION=${tag}" >> "$GITHUB_ENV"
+          else
+            # Dry run (workflow_dispatch): fall back to the workspace version
+            echo "VERSION=${version}" >> "$GITHUB_ENV"
+          fi
+
+      # musl targets are fully static: zig provides the musl runtime and libc
+      # headers, so no glibc version pinning applies here.
+      - name: Build
+        run: cargo zigbuild --locked --release --target ${{ matrix.target }} --bin shuvarie
+
+      - name: Stage files
+        run: |
+          mkdir -p "dist/shuvarie-${VERSION}"
+          cp "target/${{ matrix.target }}/release/shuvarie" "dist/shuvarie-${VERSION}/shuvarie"
+          cp LICENSE README.md "dist/shuvarie-${VERSION}/"
+
+      - name: Create tarball
+        run: tar -czf "shuvarie-${VERSION}-${{ matrix.target }}.tar.gz" -C dist "shuvarie-${VERSION}"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-linux-musl-${{ matrix.target }}
+          path: |
+            shuvarie-*.tar.gz
           if-no-files-found: error
           retention-days: 1
 
@@ -346,7 +409,7 @@ jobs:
 
   release:
     name: Publish GitHub release
-    needs: [linux, macos, windows]
+    needs: [linux, linux-musl, macos, windows]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
