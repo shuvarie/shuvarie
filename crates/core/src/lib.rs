@@ -16,6 +16,7 @@ pub mod shell;
 pub mod skills;
 #[cfg(test)]
 pub(crate) mod test_util;
+pub mod title;
 pub mod tool_record;
 pub mod tools;
 pub mod truncate;

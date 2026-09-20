@@ -182,9 +182,12 @@ pub enum Event {
     SessionDeleted {
         id: uuid::Uuid,
     },
-    /// The active session's title changed (a `/title` edit); the TUI updates
-    /// its title bar and terminal tab title.
+    /// A session's title changed: a `/title` edit, or a background
+    /// small-model generation replacing the provisional first-prompt
+    /// heuristic. The TUI updates its title bar and terminal tab title when
+    /// the changed session is the active one.
     SessionTitleChanged {
+        id: uuid::Uuid,
         title: String,
     },
     SessionError {

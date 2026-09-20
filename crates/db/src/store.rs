@@ -1160,6 +1160,28 @@ impl Store {
         Ok(())
     }
 
+    /// Compare-and-swap rename: replaces the title only while it still holds
+    /// `expected`. The background title generator uses this to upgrade the
+    /// provisional title without clobbering a manual rename that happened
+    /// meanwhile. Returns whether the row was updated; like [`Self::set_title`],
+    /// `updated_at` is untouched.
+    pub async fn set_title_if(
+        &mut self,
+        id: uuid::Uuid,
+        expected: &str,
+        title: &str,
+    ) -> Result<bool> {
+        let updated =
+            toasty::sql::statement("UPDATE sessions SET title = ?1 WHERE id = ?2 AND title = ?3")
+                .bind_typed(title, db::Type::Text)
+                .bind_typed(id.as_bytes().to_vec(), db::Type::Blob)
+                .bind_typed(expected, db::Type::Text)
+                .exec(&mut self.db)
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?;
+        Ok(updated > 0)
+    }
+
     /// Set the session's active scene. A raw update bypasses the model's
     /// auto-timestamp, so `updated_at` is untouched and a scene switch never
     /// reorders the session list.

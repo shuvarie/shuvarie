@@ -180,6 +180,7 @@ fn parse_ui(node: &KdlNode, input: &str) -> Result<UiPrefs> {
     let mut sidebar = None;
     let mut copy_on_select = None;
     let mut theme = None;
+    let mut title = None;
     for child in child_nodes(node) {
         match child.name().value() {
             "frame-rate" => set_once(input, child, &mut frame_rate, scalar_u32(input, child))?,
@@ -188,6 +189,7 @@ fn parse_ui(node: &KdlNode, input: &str) -> Result<UiPrefs> {
                 set_once(input, child, &mut copy_on_select, scalar_bool(input, child))?;
             }
             "theme" => set_once(input, child, &mut theme, parse_theme_pref(input, child))?,
+            "title" => set_once(input, child, &mut title, parse_title(child, input))?,
             _ => {}
         }
     }
@@ -202,7 +204,169 @@ fn parse_ui(node: &KdlNode, input: &str) -> Result<UiPrefs> {
         prefs.copy_on_select = value;
     }
     prefs.theme = theme;
+    prefs.title = title.unwrap_or_default();
     Ok(prefs)
+}
+
+/// `title { … }` — how a new session's title is drafted. The three
+/// alternatives are mutually exclusive; an absent (or empty) `title` keeps
+/// the default `first-user-prompt` policy.
+fn parse_title(node: &KdlNode, input: &str) -> Result<Option<TitleConfig>> {
+    if node.entries().iter().any(|entry| entry.name().is_none()) {
+        return Err(node_error(
+            input,
+            node,
+            "`title` takes no positional arguments",
+            None,
+        ));
+    }
+    let mut first_user_prompt = None;
+    let mut by_llm = None;
+    let mut disabled = None;
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "first-user-prompt" => set_once(
+                input,
+                child,
+                &mut first_user_prompt,
+                parse_title_first_user_prompt(child, input).map(Some),
+            )?,
+            "by-llm" => set_once(
+                input,
+                child,
+                &mut by_llm,
+                parse_title_by_llm(child, input).map(Some),
+            )?,
+            "disabled" => set_once(
+                input,
+                child,
+                &mut disabled,
+                parse_title_disabled(child, input).map(Some),
+            )?,
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!(
+                        "unknown node `{other}` in `title` (expected `first-user-prompt`, \
+                         `by-llm`, or `disabled`)"
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    match (first_user_prompt, by_llm, disabled) {
+        (None, None, None) => Ok(None),
+        (Some(policy), None, None) | (None, Some(policy), None) | (None, None, Some(policy)) => {
+            Ok(Some(policy))
+        }
+        _ => Err(node_error(
+            input,
+            node,
+            "`title` takes at most one of `first-user-prompt`, `by-llm`, or `disabled`",
+            None,
+        )),
+    }
+}
+
+fn parse_title_first_user_prompt(node: &KdlNode, input: &str) -> Result<TitleConfig> {
+    if node.entries().iter().any(|entry| entry.name().is_none()) {
+        return Err(node_error(
+            input,
+            node,
+            "`first-user-prompt` takes no positional arguments",
+            None,
+        ));
+    }
+    if node.children().is_some() {
+        return Err(node_error(
+            input,
+            node,
+            "`first-user-prompt` takes no children",
+            None,
+        ));
+    }
+    for entry in node.entries() {
+        let name = entry.name().map(|n| n.value()).unwrap_or_default();
+        if name != "max-chars" {
+            return Err(node_error(
+                input,
+                node,
+                format!("unknown property `{name}` (expected `max-chars`)"),
+                None,
+            ));
+        }
+    }
+    let max_chars = property_usize(input, node, "max-chars")?;
+    if max_chars.is_some_and(|value| value == 0) {
+        return Err(node_error(
+            input,
+            node,
+            "`max-chars` must be greater than zero",
+            None,
+        ));
+    }
+    Ok(TitleConfig::FirstUserPrompt {
+        max_chars: max_chars.unwrap_or(DEFAULT_TITLE_PROMPT_CHARS),
+    })
+}
+
+fn parse_title_by_llm(node: &KdlNode, input: &str) -> Result<TitleConfig> {
+    if node.entries().iter().any(|entry| entry.name().is_none()) {
+        return Err(node_error(
+            input,
+            node,
+            "`by-llm` takes no positional arguments",
+            None,
+        ));
+    }
+    let mut provider = None;
+    let mut model = None;
+    let mut system_prompt = None;
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "provider" => set_once(input, child, &mut provider, scalar_string(input, child))?,
+            "model" => set_once(input, child, &mut model, scalar_string(input, child))?,
+            "system-prompt" => set_once(
+                input,
+                child,
+                &mut system_prompt,
+                parse_prompt_text(input, child, "system-prompt"),
+            )?,
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!(
+                        "unknown node `{other}` in `by-llm` (expected `provider`, \
+                         `model`, or `system-prompt`)"
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    Ok(TitleConfig::ByLlm {
+        provider,
+        model,
+        system_prompt,
+    })
+}
+
+fn parse_title_disabled(node: &KdlNode, input: &str) -> Result<TitleConfig> {
+    if node.children().is_some() {
+        return Err(node_error(
+            input,
+            node,
+            "`disabled` takes no children",
+            None,
+        ));
+    }
+    match scalar_bool(input, node)? {
+        Some(true) => Ok(TitleConfig::Disabled),
+        _ => Err(node_error(input, node, "`disabled` must be `#true`", None)),
+    }
 }
 
 fn parse_theme_pref(input: &str, node: &KdlNode) -> Result<Option<String>> {
@@ -749,6 +913,25 @@ fn property_string(input: &str, node: &KdlNode, name: &str) -> Result<Option<Str
             match entry.value() {
                 KdlValue::String(value) => found = Some(value.clone()),
                 _ => return Err(type_error(input, node, "a string")),
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// The value of a single named integer property entry, when present.
+fn property_usize(input: &str, node: &KdlNode, name: &str) -> Result<Option<usize>> {
+    let mut found = None;
+    for entry in node.entries() {
+        if entry.name().is_some_and(|n| n.value() == name) {
+            if found.is_some() {
+                return Err(duplicate(input, node, name));
+            }
+            match entry.value() {
+                KdlValue::Integer(value) => {
+                    found = Some(usize::try_from(*value).map_err(|_| range_error(input, node))?);
+                }
+                _ => return Err(type_error(input, node, "an integer")),
             }
         }
     }
@@ -1669,7 +1852,54 @@ fn ui_node(cfg: &UiPrefs) -> Option<KdlNode> {
     if let Some(theme) = &cfg.theme {
         children.push(value_node("theme", theme.as_str()));
     }
+    if cfg.title != defaults.title {
+        children.push(title_node(&cfg.title));
+    }
     section_node("ui", children)
+}
+
+/// Builds `title { … }` — the session title policy. Only called with a
+/// non-default policy, so the node always gets children.
+fn title_node(cfg: &TitleConfig) -> KdlNode {
+    let mut children = Vec::new();
+    match cfg {
+        TitleConfig::FirstUserPrompt { max_chars } => {
+            let mut node = KdlNode::new("first-user-prompt");
+            if *max_chars != DEFAULT_TITLE_PROMPT_CHARS {
+                node.push(KdlEntry::new_prop("max-chars", *max_chars as i128));
+            }
+            children.push(node);
+        }
+        TitleConfig::ByLlm {
+            provider,
+            model,
+            system_prompt,
+        } => {
+            let mut by_llm = KdlNode::new("by-llm");
+            let mut fields = Vec::new();
+            if let Some(provider) = provider {
+                fields.push(value_node("provider", provider.as_str()));
+            }
+            if let Some(model) = model {
+                fields.push(value_node("model", model.as_str()));
+            }
+            if let Some(system_prompt) = system_prompt {
+                fields.push(prompt_node("system-prompt", system_prompt));
+            }
+            if !fields.is_empty() {
+                let mut body = KdlDocument::new();
+                body.nodes_mut().extend(fields);
+                by_llm.set_children(body);
+            }
+            children.push(by_llm);
+        }
+        TitleConfig::Disabled => children.push(value_node("disabled", true)),
+    }
+    let mut title = KdlNode::new("title");
+    let mut body = KdlDocument::new();
+    body.nodes_mut().extend(children);
+    title.set_children(body);
+    title
 }
 
 fn embedding_node(cfg: &EmbeddingConfig) -> Option<KdlNode> {

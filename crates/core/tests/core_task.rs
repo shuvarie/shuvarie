@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use shuvarie_core::{
     Active, Command, Config, Connections, Event, ProviderConfig, Session, StartupSession,
-    TrustGrants, run,
+    TitleConfig, TrustGrants, run,
 };
 use shuvarie_db::Store;
 
@@ -112,6 +112,202 @@ fn permissions_for_tests() -> std::sync::Arc<shuvarie_core::permissions::Permiss
         )
         .unwrap(),
     )
+}
+
+/// A minimal OpenAI-compatible chat-completions mock: any request gets one SSE
+/// response whose single text delta carries `reply`, then `data: [DONE]`.
+fn spawn_mock_openai(reply: &'static str) -> std::net::SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else {
+                break;
+            };
+            use std::io::{Read, Write};
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let mut header_end = None;
+            while header_end.is_none() {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(_) => break,
+                }
+                header_end = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4);
+            }
+            if let Some(end) = header_end {
+                let head = String::from_utf8_lossy(&buf[..end]).to_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        if name.trim() == "content-length" {
+                            value.trim().parse::<usize>().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0);
+                while buf.len() < end + length {
+                    match stream.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        Err(_) => break,
+                    }
+                }
+            }
+            let sse = format!(
+                "data: {{\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"sequence_number\":1,\"delta\":\"{reply}\"}}\n\n
+data: {{\"type\":\"response.completed\",\"sequence_number\":2,\"response\":{{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"test-model\",\"output\":[],\"tools\":[]}}}}\n\n
+data: [DONE]\n\n"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                sse.len(),
+                sse
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    addr
+}
+
+/// The `ui.title` `by-llm` policy: the session is created with the
+/// provisional first-prompt title, and the configured provider's model drafts
+/// the real title in a background call once the first prompt is in.
+#[tokio::test]
+async fn by_llm_drafts_the_session_title_after_the_first_user_prompt() {
+    let addr = spawn_mock_openai("Mocked title");
+    let mut connections = empty_connections();
+    connections.providers.insert(
+        "mock".into(),
+        ProviderConfig::new(
+            "mock",
+            "openai-compat",
+            Some("sk-test".into()),
+            Some(format!("http://{addr}/v1")),
+        ),
+    );
+    connections.active = Some(Active {
+        provider: "mock".into(),
+        model: Some("test-model".into()),
+        variant: None,
+    });
+    let mut config = empty_config();
+    config.ui.title = TitleConfig::ByLlm {
+        provider: None,
+        model: Some("test-model".into()),
+        system_prompt: None,
+    };
+
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let handle = tokio::spawn(run(
+        config,
+        connections,
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        shuvarie_core::SceneSet {
+            scenes: Default::default(),
+            warnings: Vec::new(),
+        },
+        cmd_rx,
+        event_tx,
+    ));
+    recv_skills_loaded(&mut event_rx).await;
+
+    cmd_tx
+        .send(Command::SendMessage {
+            content: "hello world".into(),
+        })
+        .await
+        .unwrap();
+
+    // The session is created with the provisional first-prompt title, and a
+    // later `SessionTitleChanged` upgrades it to the model's reply.
+    let mut provisional: Option<String> = None;
+    let mut generated: Option<String> = None;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while generated.is_none() {
+        let ev = tokio::time::timeout(deadline - tokio::time::Instant::now(), event_rx.recv())
+            .await
+            .expect("timed out waiting for title events")
+            .expect("core task ended");
+        match ev {
+            Event::SessionCreated { title, .. } => provisional = Some(title),
+            Event::SessionTitleChanged { title, .. } => generated = Some(title),
+            _ => {}
+        }
+    }
+    assert_eq!(provisional.as_deref(), Some("hello world"));
+    assert_eq!(generated.as_deref(), Some("Mocked title"));
+
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+/// The default `first-user-prompt` policy never spawns a title generation:
+/// the provisional title stands and no `SessionTitleChanged` is ever sent.
+#[tokio::test]
+async fn default_title_policy_never_triggers_generation() {
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let handle = tokio::spawn(run(
+        empty_config(),
+        dead_endpoint_connections(),
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        shuvarie_core::SceneSet {
+            scenes: Default::default(),
+            warnings: Vec::new(),
+        },
+        cmd_rx,
+        event_tx,
+    ));
+    recv_skills_loaded(&mut event_rx).await;
+
+    cmd_tx
+        .send(Command::SendMessage {
+            content: "hello world".into(),
+        })
+        .await
+        .unwrap();
+
+    let mut saw_created = false;
+    while !saw_created {
+        let ev = event_rx.recv().await.expect("core task ended");
+        if let Event::SessionCreated { title, .. } = ev {
+            assert_eq!(title, "hello world");
+            saw_created = true;
+        }
+    }
+
+    // The turn itself fails against the dead endpoint; no title generation
+    // runs for this policy, so no title change may arrive in the window.
+    let drain = tokio::time::timeout(std::time::Duration::from_millis(300), async {
+        while let Some(ev) = event_rx.recv().await {
+            if matches!(ev, Event::SessionTitleChanged { .. }) {
+                panic!("title generation ran under the default policy");
+            }
+        }
+    })
+    .await;
+    assert!(
+        drain.is_err(),
+        "no SessionTitleChanged under the default policy"
+    );
+
+    drop(cmd_tx);
+    let _ = handle.await;
 }
 
 #[tokio::test]

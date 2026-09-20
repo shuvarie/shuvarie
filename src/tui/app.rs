@@ -124,6 +124,7 @@ pub enum AppMessage {
         scene: Option<String>,
     },
     SessionTitleChanged {
+        id: uuid::Uuid,
         title: String,
     },
     SessionDeleted {
@@ -522,8 +523,8 @@ impl App {
                 CoreEvent::SessionCreated { id, title, scene } => {
                     Some(AppMessage::SessionCreated { id, title, scene })
                 }
-                CoreEvent::SessionTitleChanged { title } => {
-                    Some(AppMessage::SessionTitleChanged { title })
+                CoreEvent::SessionTitleChanged { id, title } => {
+                    Some(AppMessage::SessionTitleChanged { id, title })
                 }
                 CoreEvent::TokenReceived { content } => Some(AppMessage::Session(
                     SessionMessage::Chat(ChatMessage::TokenReceived { content }),
@@ -1279,8 +1280,12 @@ impl App {
                 self.session_picker.active_id = Some(id);
                 self.set_scene(scene);
             }
-            AppMessage::SessionTitleChanged { title } => {
-                self.session.session_title = Some(title);
+            AppMessage::SessionTitleChanged { id, title } => {
+                // A late background generation for a switched-away session
+                // must not clobber the active session's header.
+                if self.session.session_id == Some(id) {
+                    self.session.session_title = Some(title);
+                }
             }
             AppMessage::SessionsLoaded { sessions } => {
                 self.session_picker.set_sessions(sessions);
@@ -2212,6 +2217,7 @@ mod tests {
         // The header only moves when the core echoes the change back.
         assert_eq!(app.session.session_title.as_deref(), Some("Old"));
         app.update(AppMessage::SessionTitleChanged {
+            id: app.session.session_id.unwrap(),
             title: "Oldz".into(),
         });
         assert_eq!(app.session.session_title.as_deref(), Some("Oldz"));
@@ -2223,6 +2229,7 @@ mod tests {
         active_session(&mut app);
         app.session.session_title = Some("Before".into());
         app.update(AppMessage::SessionTitleChanged {
+            id: app.session.session_id.unwrap(),
             title: "After".into(),
         });
         assert_eq!(app.session.session_title.as_deref(), Some("After"));
