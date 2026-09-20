@@ -103,15 +103,18 @@ fn parse_tag(tag: &str) -> color_eyre::Result<Version> {
 }
 
 /// The Rust target triple of the release archive for this platform, decided at
-/// compile time to match the release workflow's build matrix.
+/// compile time to match the release workflow's build matrix. musl builds ask
+/// for the musl tarball: a glibc binary will not run on a musl system.
 fn target_triple() -> color_eyre::Result<&'static str> {
-    match (OS, ARCH) {
-        ("linux", "x86_64") => Ok("x86_64-unknown-linux-gnu"),
-        ("linux", "aarch64") => Ok("aarch64-unknown-linux-gnu"),
-        ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
-        ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
-        ("windows", "x86_64") => Ok("x86_64-pc-windows-gnullvm"),
-        ("windows", "aarch64") => Ok("aarch64-pc-windows-gnullvm"),
+    match (OS, ARCH, cfg!(target_env = "musl")) {
+        ("linux", "x86_64", true) => Ok("x86_64-unknown-linux-musl"),
+        ("linux", "x86_64", false) => Ok("x86_64-unknown-linux-gnu"),
+        ("linux", "aarch64", true) => Ok("aarch64-unknown-linux-musl"),
+        ("linux", "aarch64", false) => Ok("aarch64-unknown-linux-gnu"),
+        ("macos", "x86_64", _) => Ok("x86_64-apple-darwin"),
+        ("macos", "aarch64", _) => Ok("aarch64-apple-darwin"),
+        ("windows", "x86_64", _) => Ok("x86_64-pc-windows-gnullvm"),
+        ("windows", "aarch64", _) => Ok("aarch64-pc-windows-gnullvm"),
         _ => bail!(
             "self-update is unsupported on {OS}-{ARCH}; download a release from https://github.com/shuvarie/shuvarie/releases"
         ),
