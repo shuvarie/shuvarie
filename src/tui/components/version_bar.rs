@@ -14,10 +14,10 @@ pub struct VersionBar {
 impl VersionBar {
     pub fn new(alignment: HorizontalAlignment) -> Self {
         const VERSION: &str = env!("CARGO_PKG_VERSION");
-        let version = match option_env!("GIT_COMMIT_SHORT_HASH") {
-            Some(hash) => format!("v{VERSION}-{hash}"),
-            None => format!("v{VERSION}"),
-        };
+        let mut version = format!("v{VERSION}");
+        if cfg!(debug_assertions) {
+            version += "-dev";
+        }
 
         Self {
             line: Line::from(vec![
