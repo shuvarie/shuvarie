@@ -24,6 +24,10 @@ pub enum AuthMessage {
     Dismiss,
     /// Popup keybind: launch the verification URL in the platform browser.
     OpenBrowser { url: String },
+    /// Popup keybind: copy the verification URL to the clipboard.
+    CopyUrl { url: String },
+    /// Popup keybind: copy the user code to the clipboard.
+    CopyCode { code: String },
 }
 
 /// Transient OAuth device-flow prompt (ChatGPT/Codex, GitHub Copilot). Not
@@ -31,12 +35,14 @@ pub enum AuthMessage {
 /// polls for the browser authorization. Any key dismisses it — sign-in keeps
 /// running and the outcome (`AuthSuccess`/`AuthFailed`) still arrives as a
 /// notice — except `o`/Enter, which launches the verification URL in a
-/// browser.
+/// browser, and `y`/`c`, which copy the URL/code without dismissing.
 pub struct AuthPopup {
     pub open: bool,
     provider: String,
     verification_uri: String,
     user_code: String,
+    /// One-shot confirmation for a copy keybind, cleared on dismiss.
+    feedback: Option<&'static str>,
 }
 
 impl AuthPopup {
@@ -46,6 +52,7 @@ impl AuthPopup {
             provider: String::new(),
             verification_uri: String::new(),
             user_code: String::new(),
+            feedback: None,
         }
     }
 
@@ -53,11 +60,17 @@ impl AuthPopup {
         self.provider = provider;
         self.verification_uri = verification_uri;
         self.user_code = user_code;
+        self.feedback = None;
         self.open = true;
     }
 
     pub fn close(&mut self) {
         self.open = false;
+    }
+
+    /// Confirm a clipboard copy with a transient message.
+    pub fn copied(&mut self, feedback: &'static str) {
+        self.feedback = Some(feedback);
     }
 
     /// Whether this popup is showing a prompt for `provider`.
@@ -72,6 +85,12 @@ impl AuthPopup {
         match key.code {
             KeyCode::Char('o') | KeyCode::Enter => Some(AuthMessage::OpenBrowser {
                 url: self.verification_uri.clone(),
+            }),
+            KeyCode::Char('y') => Some(AuthMessage::CopyUrl {
+                url: self.verification_uri.clone(),
+            }),
+            KeyCode::Char('c') => Some(AuthMessage::CopyCode {
+                code: self.user_code.clone(),
             }),
             _ => Some(AuthMessage::Dismiss),
         }
@@ -112,19 +131,28 @@ impl AuthPopup {
                 Style::new().fg(theme::text_muted()),
             )),
         ];
+        let feedback_rows = u16::from(self.feedback.is_some());
         frame.render_widget(
             Paragraph::new(body).wrap(Wrap { trim: false }),
             Rect::new(
                 inner.x,
                 inner.y,
                 inner.width,
-                inner.height.saturating_sub(1),
+                inner.height.saturating_sub(1 + feedback_rows),
             ),
         );
+        if let Some(f) = self.feedback {
+            frame.render_widget(
+                Paragraph::new(Span::styled(f, Style::new().fg(theme::accent()))),
+                Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1),
+            );
+        }
 
         frame.render_widget(
             Paragraph::new(theme::help_line(&[
                 ("o", "open in browser"),
+                ("y", "copy URL"),
+                ("c", "copy code"),
                 ("any key", "dismiss"),
             ]))
             .fg(theme::text_muted()),
@@ -207,6 +235,28 @@ mod tests {
                 "{code:?} should dismiss"
             );
         }
+    }
+
+    #[test]
+    fn y_and_c_copy_the_url_and_code_without_dismissing() {
+        let popup = open_popup();
+        match popup.map_event(&key(KeyCode::Char('y'))).expect("mapped") {
+            AuthMessage::CopyUrl { url } => assert_eq!(url, URL),
+            other => panic!("unexpected message: {other:?}"),
+        }
+        match popup.map_event(&key(KeyCode::Char('c'))).expect("mapped") {
+            AuthMessage::CopyCode { code } => assert_eq!(code, "ABCD-1234"),
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn copy_feedback_shows_and_clears_on_restart() {
+        let mut popup = open_popup();
+        popup.copied("URL copied to clipboard");
+        assert_eq!(popup.feedback, Some("URL copied to clipboard"));
+        popup.start("GitHub Copilot".into(), URL.into(), "ABCD-1234".into());
+        assert_eq!(popup.feedback, None, "a new prompt starts clean");
     }
 
     #[test]

@@ -257,7 +257,11 @@ impl AddProviderForm {
                     self.base_url.set(&url);
                 }
                 self.api_key.clear();
-                self.field = FormField::ApiKey;
+                self.field = if provider.oauth_device_login() {
+                    FormField::Name
+                } else {
+                    FormField::ApiKey
+                };
             }
             None => {
                 self.name.clear();
@@ -277,14 +281,20 @@ impl AddProviderForm {
             FormField::Name => FormField::Kind,
             FormField::Kind => FormField::Catalog,
             FormField::Catalog => FormField::BaseUrl,
-            FormField::BaseUrl => FormField::ApiKey,
+            FormField::BaseUrl => match self.oauth_login() {
+                true => FormField::Name,
+                false => FormField::ApiKey,
+            },
             FormField::ApiKey => FormField::Name,
         };
     }
 
     fn prev_field(&mut self) {
         self.field = match self.field {
-            FormField::Name => FormField::ApiKey,
+            FormField::Name => match self.oauth_login() {
+                true => FormField::BaseUrl,
+                false => FormField::ApiKey,
+            },
             FormField::Kind => FormField::Name,
             FormField::Catalog => FormField::Kind,
             FormField::BaseUrl => FormField::Catalog,
@@ -587,9 +597,10 @@ impl AddProviderForm {
             }
             Some(k)
         } else {
-            // Optional-key transports (ollama, llamafile, the OAuth-backed
-            // ones): still honor a pasted key — it selects key-based auth over
-            // OAuth or anonymous local access.
+            // Optional-key transports (ollama, llamafile; OAuth2 device-flow
+            // kinds render a sign-in line instead of this field): still honor
+            // a pasted key — it selects key-based auth over OAuth or
+            // anonymous local access.
             let k = self.api_key.value.trim().to_string();
             (!k.is_empty()).then_some(k)
         };
@@ -609,11 +620,32 @@ impl AddProviderForm {
         }
     }
 
-    /// Whether the provider being configured demands a non-empty API key: the
-    /// catalog entry's requirement for a registry origin, else the typed
-    /// catalog id's entry when it resolves, else the transport (everything
-    /// but the local runtimes and the OAuth-backed subscriptions).
+    /// Whether the provider being configured signs in through the OAuth2
+    /// device flow: a registry origin consults its catalog entry's `auth`
+    /// field, a custom provider resolves the typed kind + catalog id.
+    fn oauth_login(&self) -> bool {
+        match &self.origin {
+            Some(provider) => provider.oauth_device_login(),
+            None => {
+                let kind = self.kind.value.trim();
+                let catalog = self.catalog.value.trim();
+                shuvarie_core::catalog::oauth_device_login_kind(
+                    kind,
+                    (!catalog.is_empty()).then_some(catalog),
+                )
+            }
+        }
+    }
+
+    /// Whether the provider being configured demands a non-empty API key:
+    /// OAuth2 device-flow providers never do; otherwise the catalog entry's
+    /// requirement for a registry origin, else the typed catalog id's entry
+    /// when it resolves, else the transport (everything but the local
+    /// runtimes).
     fn key_required(&self) -> bool {
+        if self.oauth_login() {
+            return false;
+        }
         match &self.origin {
             Some(provider) => shuvarie_core::catalog::requires_api_key(provider),
             None => {
@@ -628,12 +660,7 @@ impl AddProviderForm {
                 }
                 !matches!(
                     shuvarie_core::catalog::parse_provider_type(kind),
-                    Some(
-                        selune::ProviderType::Ollama
-                            | selune::ProviderType::Llamafile
-                            | selune::ProviderType::Chatgpt
-                            | selune::ProviderType::Copilot
-                    )
+                    Some(selune::ProviderType::Ollama | selune::ProviderType::Llamafile)
                 )
             }
         }
@@ -826,12 +853,22 @@ impl AddProviderForm {
         let catalog_line =
             self.field_line("Catalog", &self.catalog, FormField::Catalog, catalog_suffix);
         let url_line = self.field_line("Base URL", &self.base_url, FormField::BaseUrl, "");
-        let key_suffix = if self.key_required() {
-            ""
+        let key_line = if self.oauth_login() {
+            Line::from(vec![
+                Span::styled("Sign in   ".to_string(), Style::new().fg(theme::text_dim())),
+                Span::styled(
+                    "  device flow — opens your browser on submit",
+                    Style::new().fg(theme::text_muted()),
+                ),
+            ])
         } else {
-            "  (not required)"
+            let key_suffix = if self.key_required() {
+                ""
+            } else {
+                "  (not required)"
+            };
+            self.field_line("API key", &self.api_key, FormField::ApiKey, key_suffix)
         };
-        let key_line = self.field_line("API key", &self.api_key, FormField::ApiKey, key_suffix);
 
         let lines = vec![name_line, kind_line, catalog_line, url_line, key_line];
         let body = Paragraph::new(lines).wrap(Wrap { trim: false });
@@ -872,6 +909,7 @@ mod tests {
             name: name.to_string(),
             id: InferenceProvider(id.to_string()),
             api_key: Some("$KEY".into()),
+            auth: None,
             api_endpoint: Some("https://api.example.com/v1".into()),
             doc: None,
             r#type: Some(ptype),
@@ -911,6 +949,12 @@ mod tests {
         let mut form = form();
         form.open_details(None);
         form
+    }
+
+    fn oauth_provider(id: &str, name: &str, ptype: selune::ProviderType) -> Provider {
+        let mut p = catalog_provider(id, name, ptype);
+        p.auth = Some(selune::AuthMethod::Oauth2Device);
+        p
     }
 
     #[test]
@@ -1117,6 +1161,56 @@ mod tests {
 
         form.catalog.set("openai");
         assert!(form.key_required(), "catalog entry with api_key");
+    }
+
+    #[test]
+    fn oauth_kind_skips_the_api_key_field() {
+        let mut form = custom_form();
+        form.name.set("ChatGPT");
+        form.kind.set("chatgpt");
+        assert!(form.oauth_login(), "chatgpt is an OAuth2 device-flow kind");
+        assert!(
+            !form.key_required(),
+            "OAuth2 device-flow needs no pasted key"
+        );
+        form.field = FormField::BaseUrl;
+        form.update(AddProviderMessage::NextField);
+        assert_eq!(form.field, FormField::Name, "navigation skips ApiKey");
+        form.update(AddProviderMessage::PrevField);
+        assert_eq!(form.field, FormField::BaseUrl, "navigation skips ApiKey");
+        assert!(matches!(
+            form.update(AddProviderMessage::Submit),
+            AddProviderOutcome::Submit { api_key: None, .. }
+        ));
+    }
+
+    #[test]
+    fn non_oauth_kind_keeps_the_api_key_field() {
+        let mut form = custom_form();
+        form.name.set("Acme");
+        form.kind.set("openai-compat");
+        assert!(!form.oauth_login());
+        assert!(form.key_required());
+        form.field = FormField::BaseUrl;
+        form.update(AddProviderMessage::NextField);
+        assert_eq!(form.field, FormField::ApiKey);
+    }
+
+    #[test]
+    fn oauth_registry_origin_focuses_name() {
+        let mut form = form();
+        form.open_details(Some(&oauth_provider(
+            "chatgpt",
+            "ChatGPT",
+            selune::ProviderType::Chatgpt,
+        )));
+        assert_eq!(
+            form.field,
+            FormField::Name,
+            "OAuth2 origin has no key field"
+        );
+        assert!(form.oauth_login());
+        assert!(!form.key_required());
     }
 
     #[test]

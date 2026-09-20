@@ -297,6 +297,36 @@ pub fn requires_api_key(provider: &Provider) -> bool {
     provider.api_key.is_some()
 }
 
+/// The transports rig implements the OAuth2 device flow on (ChatGPT,
+/// Copilot). A capability check — what the client can run — not the auth
+/// policy; see [`oauth_device_login_kind`] for that.
+pub fn supports_device_flow(kind: selune::ProviderType) -> bool {
+    matches!(
+        kind,
+        selune::ProviderType::Chatgpt | selune::ProviderType::Copilot
+    )
+}
+
+/// Whether sign-in for a connection runs the OAuth2 device flow instead of
+/// asking for an API key. The Selune catalog entry for the connection's
+/// catalog id governs via its `auth` field; a kind with no resolvable catalog
+/// entry falls back to [`supports_device_flow`].
+pub fn oauth_device_login(pc: &ProviderConfig) -> bool {
+    oauth_device_login_kind(&pc.kind, pc.catalog.as_deref())
+}
+
+/// [`oauth_device_login`] for a raw kind + optional Selune catalog id.
+pub fn oauth_device_login_kind(kind: &str, catalog: Option<&str>) -> bool {
+    oauth_device_login_kind_in(&providers(), kind, catalog)
+}
+
+fn oauth_device_login_kind_in(providers: &[Provider], kind: &str, catalog: Option<&str>) -> bool {
+    match find_provider(providers, catalog.unwrap_or(kind)) {
+        Some(entry) => entry.oauth_device_login(),
+        None => parse_provider_type(kind).is_some_and(supports_device_flow),
+    }
+}
+
 /// Whether the provider is configured enough to open a connection. An
 /// explicit `catalog` entry governs (its `api_key` requirement); otherwise
 /// the transport decides: a key is required unless it's a local one
@@ -315,7 +345,7 @@ pub fn is_connectable(provider: &ProviderConfig) -> bool {
         Some(selune::ProviderType::Ollama | selune::ProviderType::Llamafile) => true,
         // OAuth-backed subscription providers: connectable without a pasted
         // API key; sign-in resolves lazily through rig's device-flow cache.
-        Some(selune::ProviderType::Chatgpt | selune::ProviderType::Copilot) => true,
+        Some(_) if oauth_device_login(provider) => true,
         Some(_) => has_key,
         None => catalog_requires_key(&provider.kind, has_key),
     }
@@ -498,6 +528,7 @@ mod tests {
             name: id.to_string(),
             id: InferenceProvider(id.to_string()),
             api_key: None,
+            auth: None,
             api_endpoint: endpoint.map(str::to_string),
             r#type,
             doc: None,
@@ -907,5 +938,48 @@ mod tests {
         let pc = ProviderConfig::new("copilot", "openai-compat", None, None)
             .with_catalog(Some("copilot"));
         assert!(is_connectable(&pc), "catalog entry needs no key");
+    }
+
+    #[test]
+    fn oauth_device_login_reads_the_catalog_auth_field() {
+        let mut chatgpt = catalog_provider("chatgpt", Some(ProviderType::Chatgpt), None);
+        chatgpt.auth = Some(selune::AuthMethod::Oauth2Device);
+        let providers = vec![
+            chatgpt,
+            catalog_provider("openai", Some(ProviderType::Openai), None),
+        ];
+        assert!(oauth_device_login_kind_in(&providers, "chatgpt", None));
+        assert!(oauth_device_login_kind_in(
+            &providers,
+            "chatgpt",
+            Some("chatgpt")
+        ));
+        assert!(!oauth_device_login_kind_in(&providers, "openai", None));
+        // An unmarked entry governs even when the transport is device-flow
+        // capable.
+        assert!(!oauth_device_login_kind_in(
+            &providers,
+            "chatgpt",
+            Some("openai")
+        ));
+        // No resolvable entry falls back to the transport capability.
+        assert!(oauth_device_login_kind_in(
+            &providers,
+            "chatgpt",
+            Some("missing")
+        ));
+        assert!(!oauth_device_login_kind_in(
+            &providers,
+            "openai",
+            Some("missing")
+        ));
+    }
+
+    #[test]
+    fn oauth_device_login_embedded_catalog_marks_the_subscription_providers() {
+        assert!(oauth_device_login_kind("chatgpt", None));
+        assert!(oauth_device_login_kind("copilot", None));
+        assert!(!oauth_device_login_kind("anthropic", None));
+        assert!(!oauth_device_login_kind("not-a-kind", None));
     }
 }

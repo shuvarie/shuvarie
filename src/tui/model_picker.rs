@@ -552,6 +552,7 @@ mod tests {
             name: name.to_string(),
             id: InferenceProvider(id.to_string()),
             api_key: None,
+            auth: None,
             api_endpoint: None,
             doc: None,
             r#type: None,

@@ -3188,9 +3188,9 @@ fn build_client(pc: &ProviderConfig, event_tx: &Sender<Event>) -> Result<Provide
     .map_err(|e| e.to_string())
 }
 
-/// The device-code prompt handler for the OAuth-backed providers (ChatGPT,
-/// Copilot): forwards each sign-in prompt to the TUI as
-/// [`Event::AuthPrompt`]. `try_send` because the callback runs deep inside
+/// The device-code prompt handler for the transports rig runs the OAuth2
+/// device flow on (ChatGPT, Copilot): forwards each sign-in prompt to the TUI
+/// as [`Event::AuthPrompt`]. `try_send` because the callback runs deep inside
 /// the streaming stack; a full event channel drops the prompt and the flow
 /// simply times out later. `None` for every other transport.
 pub(crate) fn device_code_handler(
@@ -3198,10 +3198,7 @@ pub(crate) fn device_code_handler(
     provider: String,
     event_tx: &Sender<Event>,
 ) -> Option<DeviceCodeHandler> {
-    if !matches!(
-        kind,
-        selune::ProviderType::Chatgpt | selune::ProviderType::Copilot
-    ) {
+    if !crate::catalog::supports_device_flow(kind) {
         return None;
     }
     let event_tx = event_tx.clone();

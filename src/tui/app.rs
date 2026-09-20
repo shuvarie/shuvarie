@@ -985,15 +985,6 @@ impl App {
                             base_url,
                         } => {
                             let id = uuid::Uuid::now_v7().to_string();
-                            let transport = shuvarie_core::catalog::provider_type(&kind);
-                            // OAuth-backed transports with no pasted key sign
-                            // in through the device flow right away, so the
-                            // verification URL + user code surface immediately.
-                            let oauth_login = api_key.is_none()
-                                && matches!(
-                                    transport,
-                                    selune::ProviderType::Chatgpt | selune::ProviderType::Copilot
-                                );
                             let pc = shuvarie_core::ProviderConfig::new(
                                 name.clone(),
                                 kind,
@@ -1001,6 +992,10 @@ impl App {
                                 base_url,
                             )
                             .with_catalog(catalog);
+                            // OAuth2 device-flow providers sign in right
+                            // away, so the verification URL + user code
+                            // surface immediately.
+                            let oauth_login = shuvarie_core::catalog::oauth_device_login(&pc);
                             self.pending_model_pick = Some(id.clone());
                             self.ctx.send(shuvarie_core::Command::AddProvider {
                                 id: id.clone(),
@@ -1395,6 +1390,14 @@ impl App {
                 // launch is fire-and-forget.
                 return Some(AppEffect::OpenBrowser(url));
             }
+            AppMessage::Auth(AuthMessage::CopyUrl { url }) => {
+                self.auth.copied("URL copied to clipboard");
+                return Some(AppEffect::CopyToClipboard(url));
+            }
+            AppMessage::Auth(AuthMessage::CopyCode { code }) => {
+                self.auth.copied("Code copied to clipboard");
+                return Some(AppEffect::CopyToClipboard(code));
+            }
             AppMessage::SpinnerUpdate => {
                 self.session.update(SessionMessage::SpinnerUpdate);
             }
@@ -1646,34 +1649,6 @@ impl App {
             }
             CommandAction::ToggleSidebar => {
                 self.session.sidebar.update(SidebarMessage::Toggle);
-            }
-            CommandAction::Login => {
-                // Optional argument names a connection; default to the active
-                // provider. A missing/unknown provider surfaces as an
-                // AuthFailed notice from the core.
-                let name = args
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|a| !a.is_empty())
-                    .map(str::to_string)
-                    .or_else(|| {
-                        self.ctx
-                            .connections
-                            .active
-                            .as_ref()
-                            .map(|a| a.provider.clone())
-                    });
-                match name {
-                    Some(name) => {
-                        self.ctx
-                            .send(shuvarie_core::Command::AuthProviderLogin { name });
-                    }
-                    None => {
-                        self.session.update(SessionMessage::ShowError {
-                            error: "no active provider to sign in to".into(),
-                        });
-                    }
-                }
             }
             CommandAction::Quit => {
                 if self.session.is_streaming() {
@@ -1952,36 +1927,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn login_command_targets_the_active_provider() {
-        let (mut app, mut rx) = app_with_rx(oauth_connected());
-        app.run_command(CommandAction::Login, None);
-        match rx.try_recv().expect("login command sent") {
-            shuvarie_core::Command::AuthProviderLogin { name } => assert_eq!(name, "chatgpt"),
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn login_command_accepts_a_provider_argument() {
-        let (mut app, mut rx) = app_with_rx(oauth_connected());
-        app.run_command(CommandAction::Login, Some("anthropic".into()));
-        match rx.try_recv().expect("login command sent") {
-            shuvarie_core::Command::AuthProviderLogin { name } => assert_eq!(name, "anthropic"),
-            other => panic!("unexpected command: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn login_command_without_a_provider_is_a_noop() {
-        let (mut app, mut rx) = app_with_rx(Connections::default());
-        app.run_command(CommandAction::Login, None);
-        assert!(
-            rx.try_recv().is_err(),
-            "no active provider: nothing to sign in to"
-        );
-    }
-
-    #[tokio::test]
     async fn submitting_a_keyless_oauth_provider_kicks_off_sign_in() {
         let (mut app, mut rx) = app_with_rx(Connections::default());
         app.open_add_provider();
@@ -2004,7 +1949,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submitting_an_oauth_provider_with_a_key_skips_sign_in() {
+    async fn submitting_an_oauth_provider_always_kicks_off_sign_in() {
         let (mut app, mut rx) = app_with_rx(Connections::default());
         app.open_add_provider();
         app.update(AppMessage::AddProvider(AddProviderMessage::OpenCustom));
@@ -2013,10 +1958,32 @@ mod tests {
         form.kind.set("chatgpt");
         form.api_key.set("tok");
         app.update(AppMessage::AddProvider(AddProviderMessage::Submit));
+        let mut saw_login = false;
+        while let Ok(cmd) = rx.try_recv() {
+            if matches!(cmd, shuvarie_core::Command::AuthProviderLogin { .. }) {
+                saw_login = true;
+            }
+        }
+        assert!(
+            saw_login,
+            "OAuth2 device-flow kinds always kick off sign-in"
+        );
+    }
+
+    #[tokio::test]
+    async fn submitting_a_non_oauth_provider_sends_no_sign_in() {
+        let (mut app, mut rx) = app_with_rx(Connections::default());
+        app.open_add_provider();
+        app.update(AppMessage::AddProvider(AddProviderMessage::OpenCustom));
+        let form = app.add_provider_form.as_mut().unwrap();
+        form.name.set("Acme");
+        form.kind.set("openai");
+        form.api_key.set("tok");
+        app.update(AppMessage::AddProvider(AddProviderMessage::Submit));
         while let Ok(cmd) = rx.try_recv() {
             assert!(
                 !matches!(cmd, shuvarie_core::Command::AuthProviderLogin { .. }),
-                "a pasted key must not trigger the device flow: {cmd:?}"
+                "key-based kinds must not trigger the device flow: {cmd:?}"
             );
         }
     }
