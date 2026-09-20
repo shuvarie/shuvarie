@@ -1,16 +1,20 @@
-//! LLM-based session title generation: right after a session's first user
-//! prompt creates the session, the active provider's default small model
-//! drafts a title for it in a fire-and-forget side call (no tools, one turn).
-//! The provisional heuristic title (`core_task::title_for`) stands until the
-//! generated title arrives; the compare-and-swap store write upgrades it
-//! without clobbering a manual rename that landed meanwhile.
+//! Session title drafting. The policy comes from `ui.title` in the config:
+//! by default the title is (part of) the session's first user prompt, with no
+//! LLM involved; `by-llm { … }` opts into the LLM drafting described here —
+//! right after a session's first user prompt creates the session, the
+//! configured (or active) provider's default small model drafts a title for
+//! it in a fire-and-forget side call (no tools, one turn). The provisional
+//! heuristic title (`core_task::title_for`) stands until the generated title
+//! arrives; the compare-and-swap store write upgrades it without clobbering
+//! a manual rename that landed meanwhile. `disabled #true` skips automatic
+//! titling entirely.
 
 use std::sync::{Arc, Mutex};
 
 use shuvarie_config::Connections;
 use shuvarie_llm::{ProviderClient, StreamItem, TokenUsage, WorkerRequest};
 
-const TITLE_PREAMBLE: &str = "\
+const DEFAULT_TITLE_PREAMBLE: &str = "\
 You write session titles for an agentic coding assistant. You will be given \
 the user's first message in a new session. Reply with a short title that \
 names the session's task or topic.\n\n\
@@ -26,23 +30,40 @@ const PROMPT_MAX_CHARS: usize = 2_000;
 /// Cap for the generated title.
 const TITLE_MAX_CHARS: usize = 64;
 
-/// The active connection's default small model, per the Selune catalog: the
-/// provider connection name (so callers reuse the cached client) and the
-/// model id. `None` when no provider is active, its catalog entry is
-/// unknown, or the catalog defines no models.
-pub fn small_model(connections: &Connections) -> Option<(String, String)> {
-    let active = connections.active.as_ref()?;
-    let pc = connections.providers.get(&active.provider)?;
+/// The provider connection name and model id a title call should run on: the
+/// configured provider/model when given, otherwise the active connection and
+/// its catalog's default small model. `None` when the (active or configured)
+/// provider connection is unknown, has no catalog entry, or defines no small
+/// model — and for an unset provider when no provider is active.
+pub fn resolve_model(
+    connections: &Connections,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Option<(String, String)> {
+    let name = match provider {
+        Some(name) => name.to_string(),
+        None => connections.active.as_ref()?.provider.clone(),
+    };
+    let pc = connections.providers.get(&name)?;
+    if let Some(model) = model {
+        return Some((name, model.to_string()));
+    }
     let providers = crate::catalog::providers();
     let catalog = crate::catalog::find_provider(&providers, pc.catalog_id()?)?;
     let model = catalog.default_small_model()?.to_string();
-    Some((active.provider.clone(), model))
+    Some((name, model))
 }
 
-/// Ask `model` to title the session from the user's first prompt. Returns
-/// the sanitized reply, or `None` when the call failed or the reply is
-/// empty — the provisional title stands in both cases.
-pub async fn generate(client: &ProviderClient, model: &str, prompt: &str) -> Option<String> {
+/// Ask `model` to title the session from the user's first prompt. `preamble`
+/// overrides the built-in title system prompt. Returns the sanitized reply,
+/// or `None` when the call failed or the reply is empty — the provisional
+/// title stands in both cases.
+pub async fn generate(
+    client: &ProviderClient,
+    model: &str,
+    preamble: Option<&str>,
+    prompt: &str,
+) -> Option<String> {
     let prompt: String = prompt.trim().chars().take(PROMPT_MAX_CHARS).collect();
     if prompt.is_empty() {
         return None;
@@ -56,7 +77,7 @@ pub async fn generate(client: &ProviderClient, model: &str, prompt: &str) -> Opt
         client: client.clone(),
         name: "title".to_string(),
         model: model.to_string(),
-        preamble: TITLE_PREAMBLE.to_string(),
+        preamble: preamble.unwrap_or(DEFAULT_TITLE_PREAMBLE).to_string(),
         task,
         tools: Vec::new(),
         activity_tx,
@@ -130,37 +151,72 @@ mod tests {
         assert_eq!(clean("..."), None);
     }
 
-    #[test]
-    fn small_model_resolves_the_active_provider_catalog_entry() {
+    fn connections_with(provider: &str, catalog_id: &str) -> Connections {
         let mut connections = Connections::default();
         connections.providers.insert(
-            "Anthropic".to_string(),
-            ProviderConfig::new("Anthropic", "anthropic", None, None),
+            provider.to_string(),
+            ProviderConfig::new(provider, catalog_id, None, None),
         );
+        connections
+    }
+
+    #[test]
+    fn resolve_model_defaults_to_the_active_provider_small_model() {
+        let mut connections = connections_with("Anthropic", "anthropic");
         connections.active = Some(Active {
             provider: "Anthropic".to_string(),
             model: Some("claude-sonnet-4-5".to_string()),
             variant: None,
         });
-        let (name, model) = small_model(&connections).unwrap();
+        let (name, model) = resolve_model(&connections, None, None).unwrap();
         assert_eq!(name, "Anthropic");
         // The active model is ignored: the catalog's default small model wins.
         assert_eq!(model, "claude-haiku-4-5-20251001");
     }
 
     #[test]
-    fn small_model_skips_without_an_active_provider_or_catalog_entry() {
-        assert_eq!(small_model(&Connections::default()), None);
-        let mut connections = Connections::default();
+    fn resolve_model_honors_the_configured_provider_and_model() {
+        let mut connections = connections_with("Anthropic", "anthropic");
         connections.providers.insert(
-            "weird".to_string(),
-            ProviderConfig::new("Weird", "not-a-catalog-id", None, None),
+            "Openai".to_string(),
+            ProviderConfig::new("Openai", "openai", None, None),
         );
         connections.active = Some(Active {
-            provider: "weird".to_string(),
-            model: None,
+            provider: "Anthropic".to_string(),
+            model: Some("claude-sonnet-4-5".to_string()),
             variant: None,
         });
-        assert_eq!(small_model(&connections), None);
+        // An explicit provider: its own catalog's default small model.
+        let (name, model) = resolve_model(&connections, Some("Openai"), None).unwrap();
+        assert_eq!(name, "Openai");
+        assert_eq!(model, "gpt-5.6-luna");
+        // An explicit model is used verbatim, skipping the catalog.
+        let (name, model) =
+            resolve_model(&connections, Some("Openai"), Some("gpt-5-nano")).unwrap();
+        assert_eq!(name, "Openai");
+        assert_eq!(model, "gpt-5-nano");
+    }
+
+    #[test]
+    fn resolve_model_skips_without_an_active_or_known_provider() {
+        assert_eq!(resolve_model(&Connections::default(), None, None), None);
+        let connections = connections_with("weird", "not-a-catalog-id");
+        assert_eq!(resolve_model(&connections, None, None), None);
+        // An unknown configured provider never resolves, active or not.
+        assert_eq!(resolve_model(&connections, Some("ghost"), None), None);
+        let unlisted = Connections {
+            active: Some(Active {
+                provider: "ghost".to_string(),
+                model: None,
+                variant: None,
+            }),
+            ..Connections::default()
+        };
+        assert_eq!(resolve_model(&unlisted, None, None), None);
+        // But an explicit model needs no catalog entry.
+        assert_eq!(
+            resolve_model(&connections, Some("weird"), Some("m")),
+            Some(("weird".to_string(), "m".to_string()))
+        );
     }
 }

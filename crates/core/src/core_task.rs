@@ -19,7 +19,7 @@ use crate::question::{AnswerResponse, QuestionGate, QuestionRequest};
 use crate::session::Session;
 use crate::shell::Shell;
 use shuvarie_config::Config;
-use shuvarie_config::{Connections, ProviderConfig, TrustGrants};
+use shuvarie_config::{Connections, ProviderConfig, TitleConfig, TrustGrants};
 
 /// How a streamed turn ended, reported back to the run loop so it can decide
 /// whether to auto-continue after a context overflow.
@@ -1499,12 +1499,15 @@ struct PendingToolCall {
     started: std::time::Instant,
 }
 
-fn title_for(content: &str) -> String {
+/// The provisional title for a new session: a trimmed prefix of the first
+/// user prompt, capped at `max_chars` (the `ui.title` `first-user-prompt`
+/// `max-chars`), or "Untitled session" for an empty prompt.
+fn title_for(content: &str, max_chars: usize) -> String {
     let trimmed = content.trim();
     if trimmed.is_empty() {
         "Untitled session".to_string()
     } else {
-        trimmed.chars().take(48).collect()
+        trimmed.chars().take(max_chars).collect()
     }
 }
 
@@ -1730,7 +1733,11 @@ impl CoreCtx {
         {
             let mut guard = s.lock().await;
             if guard.id.is_none() {
-                let title = title_for(&content);
+                let title_cfg = self.config.ui.title.clone();
+                let title = match &title_cfg {
+                    TitleConfig::Disabled => "Untitled session".to_string(),
+                    _ => title_for(&content, title_cfg.prompt_max_chars()),
+                };
                 let scene = guard.scene.take().or_else(|| self.scenes.default.clone());
                 match self
                     .store
@@ -1766,14 +1773,23 @@ impl CoreCtx {
                                 scene,
                             })
                             .await;
-                        // Draft the session title with the provider's default
-                        // small model in the background: the provisional
-                        // `title_for` heuristic stands until the generated
-                        // title arrives, and the compare-and-swap write
-                        // upgrades it only while no manual rename has landed
-                        // meanwhile. Fire-and-forget — a failed or empty
-                        // generation keeps the provisional title.
-                        if let Some((name, model)) = crate::title::small_model(&self.connections)
+                        // Draft the session title in the background when
+                        // `ui.title` selects the `by-llm` policy: the
+                        // provisional `title_for` heuristic stands until the
+                        // generated title arrives, and the compare-and-swap
+                        // write upgrades it only while no manual rename has
+                        // landed meanwhile. Fire-and-forget — a failed or
+                        // empty generation keeps the provisional title.
+                        if let TitleConfig::ByLlm {
+                            provider: cfg_provider,
+                            model: cfg_model,
+                            system_prompt: cfg_system_prompt,
+                        } = &title_cfg
+                            && let Some((name, model)) = crate::title::resolve_model(
+                                &self.connections,
+                                cfg_provider.as_deref(),
+                                cfg_model.as_deref(),
+                            )
                             && let Ok(client) = client_for(
                                 &mut self.clients,
                                 &mut self.connections,
@@ -1787,9 +1803,15 @@ impl CoreCtx {
                             let session = s.clone();
                             let provisional = title;
                             let prompt = content.clone();
+                            let preamble = cfg_system_prompt.clone();
                             tokio::spawn(async move {
-                                let Some(generated) =
-                                    crate::title::generate(&client, &model, &prompt).await
+                                let Some(generated) = crate::title::generate(
+                                    &client,
+                                    &model,
+                                    preamble.as_deref(),
+                                    &prompt,
+                                )
+                                .await
                                 else {
                                     return;
                                 };

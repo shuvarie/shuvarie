@@ -498,6 +498,7 @@ mod tests {
             name: id.to_string(),
             id: InferenceProvider(id.to_string()),
             api_key: None,
+            auth: None,
             api_endpoint: endpoint.map(str::to_string),
             r#type,
             doc: None,
