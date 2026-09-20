@@ -67,3 +67,6 @@ endif
 win-installer: build-win
 	makensis $(MAKENSIS_D)VERSION="$(VERSION)" $(MAKENSIS_D)OUT_FILE="$(CURDIR)/nsis/shuvarie-setup-$(VERSION).exe" $(MAKENSIS_D)BINARY="$(CURDIR)/$(WIN_EXE)" nsis/installer.nsi
 	@echo "Windows installer written to nsis/shuvarie-setup-$(VERSION).exe"
+
+changelog:
+	git-cliff -o ./CHANGELOG.md
