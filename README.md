@@ -1,3 +1,7 @@
+> [!WARNING]
+>
+> This is a legacy branch for patching the 0.1.x release. Future changes will continue at trunk.
+
 # <p align="center">⚔️⚜️ シュヴァリエ ⚜️⚔️
 
 *Haiku:*
