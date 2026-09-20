@@ -69,4 +69,4 @@ win-installer: build-win
 	@echo "Windows installer written to nsis/shuvarie-setup-$(VERSION).exe"
 
 changelog:
-	git-cliff -o ./CHANGELOG.md
+	git cliff v0.1.0..HEAD -o ./CHANGELOG.md
