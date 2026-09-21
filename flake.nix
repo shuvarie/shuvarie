@@ -83,6 +83,7 @@
               cargo
               clippy
               git
+              just
               rust-analyzer
               rustc
               rustfmt
