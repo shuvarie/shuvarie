@@ -234,10 +234,11 @@ fn body_snippet(body: &str) -> String {
 mod tests {
     use super::*;
     use crate::test_util::new_ctx;
+    use shuvarie_config::DUCKDUCKGO_LITE_URL;
 
     fn config(kind: WebSearchKind) -> WebSearchConfig {
         WebSearchConfig {
-            enabled: true,
+            disabled: false,
             url: "https://search.example/api".to_string(),
             kind,
             headers: Default::default(),
@@ -273,8 +274,8 @@ mod tests {
     fn search_query_url_appends_mapped_param() {
         let params = WebSearchParams::default_for(WebSearchKind::ToMarkdown);
         assert_eq!(
-            search_query_url("https://html.duckduckgo.com/html/", &params, "rust async").unwrap(),
-            "https://html.duckduckgo.com/html/?q=rust%20async"
+            search_query_url(DUCKDUCKGO_LITE_URL, &params, "rust async").unwrap(),
+            "https://lite.duckduckgo.com/lite/?q=rust%20async"
         );
         assert_eq!(
             search_query_url("https://a/?x=1", &params, "q").unwrap(),

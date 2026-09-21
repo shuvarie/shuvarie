@@ -17,11 +17,12 @@ pub enum CommandAction {
     McpServers,
     McpReconnect,
     ToggleSidebar,
+    Search,
     Quit,
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 16] = [
+    pub const ALL: [CommandAction; 17] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::OpenSessionPicker,
@@ -37,6 +38,7 @@ impl CommandAction {
         CommandAction::McpServers,
         CommandAction::McpReconnect,
         CommandAction::ToggleSidebar,
+        CommandAction::Search,
         CommandAction::Quit,
     ];
 
@@ -57,6 +59,7 @@ impl CommandAction {
             CommandAction::McpServers => "mcp",
             CommandAction::McpReconnect => "mcp-reconnect",
             CommandAction::ToggleSidebar => "sidebar",
+            CommandAction::Search => "search",
             CommandAction::Quit => "quit",
         }
     }
@@ -71,6 +74,7 @@ impl CommandAction {
                 | CommandAction::McpReconnect
                 | CommandAction::OpenScenePicker
                 | CommandAction::OpenVariantPicker
+                | CommandAction::Search
         )
     }
 }
@@ -173,6 +177,12 @@ pub fn default_commands() -> Vec<CommandEntry> {
             name: "Toggle sidebar",
             description: "Collapse or expand the sidebar",
             action: CommandAction::ToggleSidebar,
+            available: true,
+        },
+        CommandEntry {
+            name: "Search chat",
+            description: "Highlight text in the chat live",
+            action: CommandAction::Search,
             available: true,
         },
         CommandEntry {
@@ -463,6 +473,24 @@ mod tests {
         assert_eq!(parse_command(""), None);
         assert_eq!(parse_command("/undo now"), None);
         assert_eq!(parse_command(":/undo"), None);
+    }
+
+    #[test]
+    fn parse_recognizes_search_command() {
+        assert_eq!(
+            parse_command("/search"),
+            Some(ParsedCommand {
+                action: CommandAction::Search,
+                args: None
+            })
+        );
+        assert_eq!(
+            parse_command(":SEARCH foo bar"),
+            Some(ParsedCommand {
+                action: CommandAction::Search,
+                args: Some("foo bar".into())
+            })
+        );
     }
 
     #[test]

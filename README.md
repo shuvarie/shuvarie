@@ -39,7 +39,7 @@ With [Nix](https://nixos.org) (flakes enabled), from a checkout:
 ```sh
 nix run .            # try it
 nix profile install .  # keep it
-nix develop          # toolchain shell (rustc, cargo, clippy, rustfmt, rust-analyzer)
+nix develop          # toolchain shell (rustc, cargo, clippy, rustfmt, rust-analyzer, just)
 ```
 
 Or with a Rust toolchain:

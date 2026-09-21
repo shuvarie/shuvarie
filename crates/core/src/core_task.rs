@@ -2029,12 +2029,8 @@ impl CoreCtx {
                 None => AGENT_PREAMBLE.to_string(),
             },
         };
-        let web_search = self
-            .config
-            .tools
-            .web_search
-            .as_ref()
-            .filter(|cfg| cfg.enabled);
+        let web_search_config = self.config.tools.effective_web_search();
+        let web_search = web_search_config.as_ref();
         let base = if web_search.is_some() {
             format!(
                 "{base}\n\nWeb search is available through the `web_search` tool: use it for \
