@@ -14,10 +14,29 @@ static CWD_LOCK: Mutex<()> = Mutex::new(());
 /// intentionally held across `await` points to serialize tests that touch
 /// the process cwd, and `#[tokio::test]` runs on a single-threaded
 /// runtime, so a std guard cannot stall other tasks on the executor.
-pub(crate) struct CwdGuard(#[allow(dead_code)] MutexGuard<'static, ()>);
+///
+/// Dropping restores the cwd the guard found: without that, a finished
+/// cwd test leaves the process parked in its (deleted) tempdir, and any
+/// concurrent test that spawns a child pinned to an explicit cwd fails
+/// with ENOENT.
+pub(crate) struct CwdGuard {
+    original: std::path::PathBuf,
+    #[allow(dead_code)]
+    lock: MutexGuard<'static, ()>,
+}
 
 pub(crate) fn lock_cwd() -> CwdGuard {
-    CwdGuard(CWD_LOCK.lock().unwrap_or_else(|err| err.into_inner()))
+    let lock = CWD_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    let original = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    CwdGuard { original, lock }
+}
+
+impl Drop for CwdGuard {
+    fn drop(&mut self) {
+        // Runs before the mutex guard field drops, so the cwd is restored
+        // while the lock is still held.
+        let _ = std::env::set_current_dir(&self.original);
+    }
 }
 
 /// A scratch working directory with the cwd lock held: tests that touch

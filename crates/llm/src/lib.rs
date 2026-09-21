@@ -28,6 +28,6 @@ pub use retry::{ConnectionFailure, classify_connection_error};
 pub use stream::{StreamItem, StreamStream};
 pub use tool::{
     DynamicTool, FileChangeHook, PortableDynamicTool, Tool, ToolContext, ToolDefinition,
-    ToolErrorKind, ToolExecutionError, ToolOutput, ToolSet, into_dynamic,
+    ToolErrorKind, ToolExecutionError, ToolOutput, ToolResult, ToolSet, into_dynamic,
 };
 pub use usage::{TokenUsage, context_footprint, read_tokens};

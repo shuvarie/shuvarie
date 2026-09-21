@@ -1,4 +1,6 @@
 mod delete_file;
+#[cfg(test)]
+mod e2e_tests;
 mod edit_file;
 mod glob;
 mod grep;

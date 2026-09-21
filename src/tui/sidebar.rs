@@ -1,7 +1,9 @@
 use ratatui::layout::{Alignment, Rect};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph};
-use shuvarie_core::{LspStatus, ServerStatus, SidebarPref, Skill, SkillWarning};
+use shuvarie_core::{
+    LspStatus, McpStatus, McpStatusState, ServerStatus, SidebarPref, Skill, SkillWarning,
+};
 use shuvarie_llm::TokenUsage;
 use termina::event::{KeyCode, KeyEvent};
 
@@ -29,6 +31,7 @@ pub struct Sidebar {
     context: ContextDisplay,
     pub lsp_servers: Vec<LspStatus>,
     pub lsp_enabled: bool,
+    pub mcp_servers: Vec<McpStatus>,
     pub skills: Vec<Skill>,
     pub skill_warnings: Vec<SkillWarning>,
     pub todos_done: usize,
@@ -70,6 +73,9 @@ pub enum SidebarMessage {
     },
     UpdateLsp {
         servers: Vec<LspStatus>,
+    },
+    UpdateMcp {
+        servers: Vec<McpStatus>,
     },
     UpdateSkills {
         skills: Vec<Skill>,
@@ -116,6 +122,7 @@ impl Sidebar {
             context: ContextDisplay::new(),
             lsp_servers: Vec::new(),
             lsp_enabled: true,
+            mcp_servers: Vec::new(),
             skills: Vec::new(),
             skill_warnings: Vec::new(),
             todos_done: 0,
@@ -148,6 +155,9 @@ impl Sidebar {
             }
             SidebarMessage::UpdateLsp { servers } => {
                 self.lsp_servers = servers;
+            }
+            SidebarMessage::UpdateMcp { servers } => {
+                self.mcp_servers = servers;
             }
             SidebarMessage::UpdateSkills { skills, warnings } => {
                 self.skills = skills;
@@ -251,6 +261,17 @@ impl Sidebar {
                 }
             }
         }
+        if !self.mcp_servers.is_empty() {
+            spans.push(Span::raw("  │  ").fg(theme::text_muted()));
+            for (i, s) in self.mcp_servers.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::raw("  ").fg(theme::text_muted()));
+                }
+                spans.push(mcp_marker_span(s.state));
+                spans.push(Span::raw(" ").fg(theme::text_muted()));
+                spans.push(Span::raw(s.name.clone()).fg(theme::text()));
+            }
+        }
         Line::from(truncate_spans(spans, max_width))
     }
 
@@ -335,6 +356,33 @@ impl Sidebar {
         }
         lines.push(Line::from(""));
 
+        lines.push(Line::from("MCP").fg(theme::accent()).bold());
+        if self.mcp_servers.is_empty() {
+            lines.push(Line::from("  none").fg(theme::text_muted()));
+        } else {
+            for s in &self.mcp_servers {
+                let mut row = vec![
+                    Span::raw("  ").fg(theme::text_muted()),
+                    mcp_marker_span(s.state),
+                    Span::raw(" ").fg(theme::text_muted()),
+                    Span::raw(s.name.clone()).fg(theme::text()),
+                    Span::raw(format!(" {}", s.transport)).fg(theme::text_muted()),
+                ];
+                if s.tools > 0 {
+                    row.push(Span::raw(format!("  ⚙{}", s.tools)).fg(theme::text_dim()));
+                }
+                lines.push(Line::from(row));
+                if let Some(err) = &s.error {
+                    lines.push(
+                        Line::from(format!("    {err}"))
+                            .fg(theme::text_muted())
+                            .italic(),
+                    );
+                }
+            }
+        }
+        lines.push(Line::from(""));
+
         lines.push(Line::from("Skills").fg(theme::accent()).bold());
         if self.skills.is_empty() {
             lines.push(Line::from("  none").fg(theme::text_muted()));
@@ -392,6 +440,17 @@ fn server_marker(status: ServerStatus) -> Option<(&'static str, Color)> {
     }
 }
 
+/// Marker for an MCP server state. Unlike LSP the snapshot has no
+/// transitional state, so every state has a fixed marker.
+fn mcp_marker_span(state: McpStatusState) -> Span<'static> {
+    let (marker, color) = match state {
+        McpStatusState::Connected => ("✓", theme::success()),
+        McpStatusState::Configured => ("○", theme::text_muted()),
+        McpStatusState::Failed | McpStatusState::Crashed => ("✗", theme::error()),
+    };
+    Span::raw(marker).fg(color)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,6 +472,73 @@ mod tests {
     fn todos_section_hidden_when_empty() {
         let sidebar = Sidebar::new();
         assert!(!text(sidebar.rendered_lines()).contains("Todos"));
+    }
+
+    #[test]
+    fn mcp_section_lists_servers_with_state_transport_and_tools() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateMcp {
+            servers: vec![McpStatus {
+                name: "github".into(),
+                transport: "stdio",
+                state: McpStatusState::Connected,
+                tools: 3,
+                error: None,
+            }],
+        });
+        let rendered = text(sidebar.rendered_lines());
+        assert!(rendered.contains("MCP"), "body: {rendered}");
+        assert!(rendered.contains("✓ github stdio"), "body: {rendered}");
+        assert!(rendered.contains("⚙3"), "body: {rendered}");
+    }
+
+    #[test]
+    fn mcp_section_shows_error_line_for_failures() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateMcp {
+            servers: vec![McpStatus {
+                name: "github".into(),
+                transport: "http",
+                state: McpStatusState::Failed,
+                tools: 0,
+                error: Some("spawn failed: no such binary".into()),
+            }],
+        });
+        let rendered = text(sidebar.rendered_lines());
+        assert!(rendered.contains("✗ github http"), "body: {rendered}");
+        assert!(rendered.contains("spawn failed"), "body: {rendered}");
+    }
+
+    #[test]
+    fn mcp_section_renders_header_when_empty() {
+        let mut sidebar = Sidebar::new();
+        // The lines cache is built on the first update; nudge it with a
+        // no-op message so the empty-config rendering is checked.
+        sidebar.update(SidebarMessage::SetWidth { cols: 100 });
+        let rendered = text(sidebar.rendered_lines());
+        assert!(rendered.contains("MCP"), "body: {rendered}");
+        assert!(rendered.contains("none"), "body: {rendered}");
+    }
+
+    #[test]
+    fn collapsed_line_includes_mcp_servers() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateMcp {
+            servers: vec![McpStatus {
+                name: "deepwiki".into(),
+                transport: "http",
+                state: McpStatusState::Connected,
+                tools: 5,
+                error: None,
+            }],
+        });
+        let joined: String = sidebar
+            .collapsed_line(200)
+            .spans
+            .iter()
+            .map(|s| s.content.clone())
+            .collect();
+        assert!(joined.contains("deepwiki"), "{joined}");
     }
 
     #[test]

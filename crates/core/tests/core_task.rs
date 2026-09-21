@@ -47,7 +47,9 @@ fn temp_connections_path(name: &str) -> PathBuf {
     dir.join("shuvarie").join("connections.kdl")
 }
 
-async fn recv_skills_loaded(event_rx: &mut tokio::sync::mpsc::Receiver<Event>) {
+async fn recv_skills_loaded(
+    event_rx: &mut tokio::sync::mpsc::Receiver<Event>,
+) -> Vec<shuvarie_core::McpStatus> {
     let ev = event_rx.recv().await.expect("event");
     assert!(
         matches!(ev, Event::SkillsLoaded { .. }),
@@ -58,6 +60,11 @@ async fn recv_skills_loaded(event_rx: &mut tokio::sync::mpsc::Receiver<Event>) {
         matches!(ev, Event::ScenesLoaded { .. }),
         "expected ScenesLoaded as the second startup event, got {ev:?}"
     );
+    let ev = event_rx.recv().await.expect("event");
+    match ev {
+        Event::McpStatus { servers } => servers,
+        other => panic!("expected McpStatus as the third startup event, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -112,6 +119,182 @@ fn permissions_for_tests() -> std::sync::Arc<shuvarie_core::permissions::Permiss
         )
         .unwrap(),
     )
+}
+
+/// A stdio MCP server config whose command does not exist: connect attempts
+/// fail fast (spawn error), keeping the lifecycle tests deterministic.
+fn mcp_stdio_only_config(command: &str) -> shuvarie_config::McpConfig {
+    shuvarie_config::McpConfig {
+        stdio: std::collections::BTreeMap::from([(
+            "flaky".to_string(),
+            shuvarie_config::McpStdioConfig {
+                command: command.to_string(),
+                args: Vec::new(),
+                envs: Default::default(),
+            },
+        )]),
+        http: Default::default(),
+    }
+}
+
+fn expect_mcp_status(event: Event) -> Vec<shuvarie_core::McpStatus> {
+    match event {
+        Event::McpStatus { servers } => servers,
+        other => panic!("expected McpStatus, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn mcp_startup_snapshot_lists_configured_servers() {
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+
+    let mut config = empty_config();
+    config.tools.mcp = mcp_stdio_only_config("shuvarie-definitely-missing-binary-xyz");
+
+    let handle = tokio::spawn(run(
+        config,
+        empty_connections(),
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        shuvarie_core::SceneSet {
+            scenes: Default::default(),
+            warnings: Vec::new(),
+        },
+        cmd_rx,
+        event_tx,
+    ));
+    let servers = recv_skills_loaded(&mut event_rx).await;
+    assert_eq!(servers.len(), 1);
+    let server = &servers[0];
+    assert_eq!(server.name, "flaky");
+    assert_eq!(server.transport, "stdio");
+    assert_eq!(server.state, shuvarie_core::McpStatusState::Configured);
+    assert_eq!(server.tools, 0);
+    assert!(server.error.is_none());
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn mcp_list_reports_snapshot() {
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+
+    let handle = tokio::spawn(run(
+        empty_config(),
+        empty_connections(),
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        shuvarie_core::SceneSet {
+            scenes: Default::default(),
+            warnings: Vec::new(),
+        },
+        cmd_rx,
+        event_tx,
+    ));
+    assert!(recv_skills_loaded(&mut event_rx).await.is_empty());
+    cmd_tx.send(Command::McpList).await.unwrap();
+    assert!(expect_mcp_status(event_rx.recv().await.expect("event")).is_empty());
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn mcp_reconnect_unknown_server_errors_and_reports_status() {
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+
+    let handle = tokio::spawn(run(
+        empty_config(),
+        empty_connections(),
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        shuvarie_core::SceneSet {
+            scenes: Default::default(),
+            warnings: Vec::new(),
+        },
+        cmd_rx,
+        event_tx,
+    ));
+    recv_skills_loaded(&mut event_rx).await;
+    cmd_tx
+        .send(Command::McpReconnect {
+            name: "nope".into(),
+        })
+        .await
+        .unwrap();
+    let ev = event_rx.recv().await.expect("error event");
+    match ev {
+        Event::McpError { error } => assert!(error.contains("nope"), "{error}"),
+        other => panic!("expected McpError, got {other:?}"),
+    }
+    assert!(expect_mcp_status(event_rx.recv().await.expect("event")).is_empty());
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn mcp_reconnect_failure_shows_per_server_detail() {
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+
+    let mut config = empty_config();
+    config.tools.mcp = mcp_stdio_only_config("shuvarie-definitely-missing-binary-xyz");
+
+    let handle = tokio::spawn(run(
+        config,
+        empty_connections(),
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        shuvarie_core::SceneSet {
+            scenes: Default::default(),
+            warnings: Vec::new(),
+        },
+        cmd_rx,
+        event_tx,
+    ));
+    let servers = recv_skills_loaded(&mut event_rx).await;
+    assert_eq!(
+        servers[0].state,
+        shuvarie_core::McpStatusState::Configured,
+        "startup does not connect; the server shows as configured"
+    );
+    cmd_tx
+        .send(Command::McpReconnect {
+            name: "flaky".into(),
+        })
+        .await
+        .unwrap();
+    let ev = event_rx.recv().await.expect("error event");
+    match ev {
+        Event::McpError { error } => assert!(error.contains("flaky"), "{error}"),
+        other => panic!("expected McpError, got {other:?}"),
+    }
+    let servers = expect_mcp_status(event_rx.recv().await.expect("event"));
+    assert_eq!(servers[0].state, shuvarie_core::McpStatusState::Failed);
+    assert!(
+        servers[0].error.is_some(),
+        "the snapshot carries the detail"
+    );
+    drop(cmd_tx);
+    let _ = handle.await;
 }
 
 /// A minimal OpenAI-compatible chat-completions mock: any request gets one SSE
@@ -572,6 +755,7 @@ async fn send_while_streaming_is_steered() {
         .await
         .unwrap();
 
+    recv_skills_loaded(&mut event_rx).await;
     let mut saw_steered = false;
     for _ in 0..8 {
         match event_rx.recv().await {
@@ -889,6 +1073,7 @@ async fn send_message_persists_session_and_messages() {
         .await
         .unwrap();
     // Wait for the stream error (no real ollama running) after the session row is created.
+    recv_skills_loaded(&mut event_rx).await;
     let mut saw_error = false;
     for _ in 0..8 {
         match event_rx.recv().await {
@@ -946,6 +1131,7 @@ async fn load_current_emits_session_loaded_on_startup() {
 
     cmd_tx.send(Command::Ping).await.unwrap();
 
+    recv_skills_loaded(&mut event_rx).await;
     let mut saw_loaded = false;
     for _ in 0..3 {
         match event_rx.recv().await {
@@ -994,6 +1180,7 @@ async fn load_session_by_uuid_on_startup() {
 
     cmd_tx.send(Command::Ping).await.unwrap();
 
+    recv_skills_loaded(&mut event_rx).await;
     let mut saw_loaded = false;
     for _ in 0..3 {
         match event_rx.recv().await {
@@ -1039,6 +1226,7 @@ async fn load_missing_session_uuid_on_startup_errors() {
 
     cmd_tx.send(Command::Ping).await.unwrap();
 
+    recv_skills_loaded(&mut event_rx).await;
     let mut saw_error = false;
     for _ in 0..3 {
         match event_rx.recv().await {

@@ -10,7 +10,9 @@ use crate::stream::StreamItem;
 
 pub use rig_agent::tool::{DynamicTool, Tool, ToolContext, ToolSet};
 pub use rig_core::completion::ToolDefinition;
-pub use rig_core::tool::{PortableDynamicTool, ToolErrorKind, ToolExecutionError, ToolOutput};
+pub use rig_core::tool::{
+    PortableDynamicTool, ToolErrorKind, ToolExecutionError, ToolOutput, ToolResult,
+};
 
 /// Wrap a typed [`Tool`] as a [`DynamicTool`]. The tool reports host-only
 /// [`FileChange`]s via [`ToolContext::insert_result`]; a [`FileChangeHook`]

@@ -409,6 +409,14 @@ pub async fn run(
         })
         .await;
 
+    // Seed the sidebar's MCP section: every configured server shows as
+    // `Configured` until its first connect (no I/O here — just the specs).
+    let _ = event_tx
+        .send(Event::McpStatus {
+            servers: mcp.lock().await.status_snapshot(),
+        })
+        .await;
+
     let manager_turns = config.agent.effective_max_turns();
     let worker_turns = config.agent.effective_worker_max_turns();
     let max_output_chars = config.context.tool_output_max_chars;
@@ -1269,6 +1277,22 @@ pub async fn run(
                         // not as a dedicated event; the tool returns it directly.
                         let _ = text;
                     }
+                    Command::McpList => {
+                        let mgr = ctx.mcp.lock().await;
+                        emit_mcp_status(&mgr, &ctx.event_tx).await;
+                    }
+                    Command::McpReconnect { name } => {
+                        let mut mgr = ctx.mcp.lock().await;
+                        match mgr.reconnect(&name).await {
+                            Ok(()) => emit_mcp_status(&mgr, &ctx.event_tx).await,
+                            Err(error) => {
+                                // The error notice plus a snapshot in which
+                                // the server carries its failure detail.
+                                let _ = ctx.event_tx.send(Event::McpError { error }).await;
+                                emit_mcp_status(&mgr, &ctx.event_tx).await;
+                            }
+                        }
+                    }
                 }
             }
             _ = lsp_pump_tick.tick(), if ctx.lsp.try_lock().map(|m| m.has_active_servers()).unwrap_or(false) => {
@@ -1415,6 +1439,7 @@ pub async fn run(
     release_active_lock(&mut ctx).await;
 
     ctx.lsp.lock().await.shutdown_all().await;
+    ctx.mcp.lock().await.shutdown_all();
 }
 
 fn now_ms() -> i64 {
@@ -1435,6 +1460,14 @@ const SEARCH_LIMIT: u64 = 50;
 async fn emit_lsp_status(mgr: &shuvarie_lsp::LspManager, event_tx: &Sender<Event>) {
     let _ = event_tx
         .send(Event::LspStatus {
+            servers: mgr.status_snapshot(),
+        })
+        .await;
+}
+
+async fn emit_mcp_status(mgr: &shuvarie_mcp::McpManager, event_tx: &Sender<Event>) {
+    let _ = event_tx
+        .send(Event::McpStatus {
             servers: mgr.status_snapshot(),
         })
         .await;
@@ -2029,6 +2062,15 @@ impl CoreCtx {
                     errors.push(format!("MCP server '{name}': {error}"));
                 }
             }
+            // Surface the connect pass: connected servers (with their tool
+            // counts) show in the sidebar, failures show their per-server
+            // error line.
+            let _ = self
+                .event_tx
+                .send(Event::McpStatus {
+                    servers: manager.status_snapshot(),
+                })
+                .await;
             (manager.roster(), errors)
         };
         let tools = crate::tools::all_tools(

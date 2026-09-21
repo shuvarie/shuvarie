@@ -17,7 +17,6 @@ use shuvarie_llm::{Tool, ToolContext, ToolExecutionError, ToolOutput};
 use crate::permissions::Access;
 
 use super::run_shell::KillGuard;
-use super::workspace_root;
 use crate::truncate::truncate_output;
 
 /// How much of a stream is captured from a child process before the tail is
@@ -174,7 +173,6 @@ impl StdioTool {
                 builder.envs(self.envs.1.iter());
             }
             builder
-                .current_dir(workspace_root()?)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .stdin(if stdin.is_some() {
