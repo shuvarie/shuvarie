@@ -25,12 +25,14 @@ pub mod bash;
 pub mod blocks;
 pub mod chat;
 pub mod md_cache;
+pub mod search;
 pub mod segment;
 pub mod tree;
 pub mod virtualizer;
 
 pub use bash::BashMessage;
 pub use chat::ChatMessage;
+pub use search::{SearchMessage, SearchPrompt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseKind {
@@ -117,6 +119,9 @@ pub enum SessionMessage {
     /// A bash-mode (`!`) run's display-only popup: start, live output,
     /// finish, or Escape dismissal.
     Bash(bash::BashMessage),
+    /// Chat search mode: edits in the floating tooltip update the live
+    /// highlight needle; `SearchMessage::Exit` closes the mode.
+    Search(SearchMessage),
     /// A retryable connection failure; the core task re-sends the turn after
     /// `delay_ms`. Shows a red countdown in the status row.
     RetryScheduled {
@@ -220,6 +225,8 @@ pub struct SessionScreen {
     pub chat: chat::Chat,
     /// Floating display-only window for the latest bash-mode run.
     pub bash: bash::BashPopup,
+    /// Chat search mode: the floating needle tooltip and its state.
+    pub search: SearchPrompt,
     busy_kind: BusyKind,
     pub status: Option<String>,
     pub sidebar: Sidebar,
@@ -249,6 +256,7 @@ impl SessionScreen {
             slash: SlashMenu::new(),
             chat: chat::Chat::new(),
             bash: bash::BashPopup::new(),
+            search: SearchPrompt::new(),
             busy_kind: BusyKind::Idle,
             status: None,
             sidebar: Sidebar::new(),
@@ -320,6 +328,28 @@ impl SessionScreen {
             .map_err(|e| format!("failed to read skill {}: {e}", invocation.name))
     }
 
+    /// Enter chat search mode: open the floating tooltip seeded with
+    /// `initial` (the `/search <args>` form; `None` reopens with the previous
+    /// text) and highlight it in the chat right away.
+    pub fn open_search(&mut self, initial: Option<&str>) {
+        self.search.open(initial);
+        self.chat.set_search(self.search.needle());
+    }
+
+    /// Leave chat search mode and drop the live highlight (Escape, or the
+    /// session changing underneath).
+    fn close_search(&mut self) {
+        self.search.close();
+        self.chat.set_search(None);
+    }
+
+    /// Leave chat search mode on a session change: also drop the remembered
+    /// needle text so the next `/search` starts clean.
+    fn reset_search(&mut self) {
+        self.search.reset();
+        self.chat.set_search(None);
+    }
+
     pub fn map_event(&self, key: &KeyEvent) -> Option<SessionMessage> {
         if self.permission.open {
             return self
@@ -329,6 +359,26 @@ impl SessionScreen {
         }
         if self.question.open {
             return self.question.map_event(key).map(SessionMessage::Question);
+        }
+        // The search tooltip floats above the chat; while it is open keys
+        // edit the needle (Escape exits) before anything underneath sees
+        // them. Scroll keys fall through to the chat so matches can be
+        // browsed while highlighting stays live.
+        if self.search.is_open() {
+            if let Some(m) = self.search.map_event(key) {
+                return Some(SessionMessage::Search(m));
+            }
+            return match key.code {
+                KeyCode::Up => Some(SessionMessage::Chat(ChatMessage::ScrollUp)),
+                KeyCode::Down => Some(SessionMessage::Chat(ChatMessage::ScrollDown)),
+                KeyCode::Char('n') if ctrl(key) => {
+                    Some(SessionMessage::Chat(ChatMessage::ScrollDown))
+                }
+                KeyCode::Char('p') if ctrl(key) => {
+                    Some(SessionMessage::Chat(ChatMessage::ScrollUp))
+                }
+                _ => Some(SessionMessage::Search(SearchMessage::Swallow)),
+            };
         }
         // The bash popup floats above the chat; Escape dismisses it before
         // the event reaches anything underneath.
@@ -401,14 +451,20 @@ impl SessionScreen {
     }
 
     /// Bracketed-paste routing, mirroring `map_event`'s popup priority. A
-    /// question popup captures the paste for its custom-answer field; the
-    /// bash popup and slash menu leave the paste to the input area.
+    /// question popup captures the paste for its custom-answer field; search
+    /// mode captures it for the needle; the bash popup and slash menu leave
+    /// the paste to the input area.
     pub fn map_paste(&self, text: &str) -> Option<SessionMessage> {
         if self.permission.open {
             return None;
         }
         if self.question.open {
             return Some(SessionMessage::Question(QuestionMessage::CustomPaste(
+                text.to_string(),
+            )));
+        }
+        if self.search.is_open() {
+            return Some(SessionMessage::Search(SearchMessage::Paste(
                 text.to_string(),
             )));
         }
@@ -519,6 +575,16 @@ impl SessionScreen {
             }
             SessionMessage::Bash(m) => {
                 self.bash.update(m);
+                None
+            }
+            SessionMessage::Search(SearchMessage::Exit) => {
+                self.close_search();
+                None
+            }
+            SessionMessage::Search(m) => {
+                if self.search.update(m) {
+                    self.chat.set_search(self.search.needle());
+                }
                 None
             }
             SessionMessage::Sidebar(m) => {
@@ -696,6 +762,7 @@ impl SessionScreen {
             }
             SessionMessage::Reset => {
                 self.chat.update(ChatMessage::Reset);
+                self.reset_search();
                 self.busy_kind = BusyKind::Idle;
                 self.status = None;
                 self.retry = None;
@@ -720,6 +787,7 @@ impl SessionScreen {
                 self.status = None;
                 self.retry = None;
                 self.last_escape = None;
+                self.reset_search();
                 self.permission.close();
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
@@ -735,6 +803,7 @@ impl SessionScreen {
                 let cost = session.cost;
                 self.retry = None;
                 self.last_escape = None;
+                self.reset_search();
                 if prompt.is_some() {
                     self.busy_kind = BusyKind::Idle;
                     self.status = None;
@@ -1000,6 +1069,12 @@ impl SessionScreen {
         if !self.question.open {
             self.bash.view(frame, history_area, input_area);
         }
+
+        // The search tooltip floats over the chat's top-right corner; painted
+        // after everything else in the content column so it stays on top. The
+        // chat's paint pass reported the visible match count this frame.
+        self.search
+            .view(frame, history_area, self.chat.search_matches.get());
 
         let connection = self.provider.as_ref().map(|p| {
             let mut spans = vec![Span::raw(p.clone()).fg(theme::text())];
@@ -2437,5 +2512,133 @@ mod tests {
             screen.map_event(&key),
             Some(SessionMessage::Sidebar(SidebarMessage::Toggle))
         ));
+    }
+
+    #[test]
+    fn search_submit_parses_with_args() {
+        let mut screen = SessionScreen::new();
+        screen.input.width.set(40);
+        screen.input.buffer.set("/search foo bar");
+        assert!(matches!(
+            screen.update(SessionMessage::Text(TextAreaMessage::Submit)),
+            Some(SessionEffect::RunCommand {
+                action: CommandAction::Search,
+                args: Some(args)
+            }) if args == "foo bar"
+        ));
+        screen.input.buffer.set("/search");
+        assert!(matches!(
+            screen.update(SessionMessage::Text(TextAreaMessage::Submit)),
+            Some(SessionEffect::RunCommand {
+                action: CommandAction::Search,
+                args: None
+            })
+        ));
+    }
+
+    #[test]
+    fn escape_exits_search_and_clears_the_highlight() {
+        let mut screen = SessionScreen::new();
+        screen.open_search(Some("hi"));
+        assert!(screen.search.is_open());
+        assert_eq!(screen.chat.search_needle().as_deref(), Some("hi"));
+
+        let msg = screen.map_event(&KeyEvent::from(KeyCode::Escape));
+        assert!(matches!(
+            msg,
+            Some(SessionMessage::Search(SearchMessage::Exit))
+        ));
+        screen.update(msg.expect("mapped escape"));
+        assert!(!screen.search.is_open());
+        assert!(screen.chat.search_needle().is_none());
+    }
+
+    #[test]
+    fn session_change_resets_search_text() {
+        let mut screen = SessionScreen::new();
+        screen.open_search(Some("stale"));
+        screen.update(SessionMessage::Reset);
+        assert!(!screen.search.is_open());
+        assert!(screen.chat.search_needle().is_none());
+
+        screen.open_search(Some("stale"));
+        screen.update(SessionMessage::Forked {
+            session: shuvarie_core::Session::new(),
+            prompt: None,
+        });
+        assert!(!screen.search.is_open());
+        assert!(screen.chat.search_needle().is_none());
+    }
+
+    #[test]
+    fn search_edits_flow_into_the_chat_needle() {
+        let mut screen = SessionScreen::new();
+        screen.open_search(Some("ab"));
+        screen.update(SessionMessage::Search(SearchMessage::Insert('c')));
+        assert_eq!(screen.chat.search_needle().as_deref(), Some("abc"));
+        screen.update(SessionMessage::Search(SearchMessage::Backspace));
+        assert_eq!(screen.chat.search_needle().as_deref(), Some("ab"));
+    }
+
+    #[test]
+    fn search_mode_routes_keys_away_from_the_input() {
+        let mut screen = SessionScreen::new();
+        screen.open_search(Some("a"));
+
+        assert!(matches!(
+            screen.map_event(&KeyEvent::from(KeyCode::Char('x'))),
+            Some(SessionMessage::Search(SearchMessage::Insert('x')))
+        ));
+        assert!(matches!(
+            screen.map_event(&KeyEvent::from(KeyCode::Tab)),
+            Some(SessionMessage::Search(SearchMessage::Swallow))
+        ));
+        assert!(matches!(
+            screen.map_event(&KeyEvent::from(KeyCode::Left)),
+            Some(SessionMessage::Search(SearchMessage::CursorLeft))
+        ));
+        assert!(
+            matches!(
+                screen.map_event(&KeyEvent::from(KeyCode::Up)),
+                Some(SessionMessage::Chat(ChatMessage::ScrollUp))
+            ),
+            "scroll keys still reach the chat"
+        );
+        assert!(matches!(
+            screen.map_event(&KeyEvent::from(KeyCode::Down)),
+            Some(SessionMessage::Chat(ChatMessage::ScrollDown))
+        ));
+        assert_eq!(screen.input.buffer.value, "", "no leak into the prompt");
+    }
+
+    #[test]
+    fn search_mode_captures_paste() {
+        let mut screen = SessionScreen::new();
+        screen.open_search(Some("a"));
+        assert!(matches!(
+            screen.map_paste("xyz"),
+            Some(SessionMessage::Search(SearchMessage::Paste(p))) if p == "xyz"
+        ));
+    }
+
+    #[test]
+    fn search_tooltip_paints_over_the_history_top_right() {
+        let mut screen = SessionScreen::new();
+        screen.open_search(Some("zz"));
+        let buf = draw(&screen, 100, 30);
+        // The tooltip floats over the history pane's top-right corner: the
+        // needle row and the exit hint, with the "search" title above it.
+        let title = content_row_text(&buf, 1);
+        assert!(title.contains("search"), "title row: {title:?}");
+        let text_row = content_row_text(&buf, 3);
+        assert!(text_row.contains("zz"), "needle row: {text_row:?}");
+        assert!(
+            text_row.contains("no matches"),
+            "match label on an empty chat: {text_row:?}"
+        );
+        assert!(
+            title.trim_end().ends_with("search"),
+            "pinned to the right edge: {title:?}"
+        );
     }
 }

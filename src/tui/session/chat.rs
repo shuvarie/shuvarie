@@ -8,14 +8,14 @@ use shuvarie_core::tool_record::ToolRecord;
 use shuvarie_core::{DiagnosticInfo, Role};
 use shuvarie_db::{ReasoningSegment, StoredScroll, TextSegment};
 use shuvarie_llm::{FileChange, ShellStreams};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::MouseKind;
 use super::blocks::{
     Block, BlockMessage, ChatEnv, ContextBlock, ReasoningBlock, SteeredPrompt, SystemText,
     TextBlock, ToolBlock, ToolMessage, UserPrompt,
 };
-use super::segment::{BlockAddr, ResolvedRow, slice_visual, visual_row_text};
+use super::segment::{BlockAddr, ResolvedRow, Segment, slice_visual, visual_row_text};
 use super::virtualizer::{TurnData, TurnEst, TurnFlags, locate, paint_turn};
 use crate::tui::theme;
 
@@ -90,10 +90,18 @@ fn sel_columns(
     (x0, x1)
 }
 
-/// Paint the selection background over content-space `[x0, x1)` of one row,
+/// Paint a highlight background over content-space `[x0, x1)` of one row,
 /// translated into screen space, extending a boundary by one cell when a wide
 /// glyph straddles it.
-fn tint_row(buf: &mut Buffer, clip: Rect, content_width: u16, y: u16, mut x0: u16, mut x1: u16) {
+fn tint_row(
+    buf: &mut Buffer,
+    clip: Rect,
+    content_width: u16,
+    y: u16,
+    mut x0: u16,
+    mut x1: u16,
+    bg: Color,
+) {
     let right = clip.x.saturating_add(content_width);
     x0 = clip.x.saturating_add(x0.min(content_width));
     x1 = clip.x.saturating_add(x1.min(content_width));
@@ -108,9 +116,78 @@ fn tint_row(buf: &mut Buffer, clip: Rect, content_width: u16, y: u16, mut x0: u1
     }
     for x in x0..x1 {
         if let Some(cell) = buf.cell_mut((x, y)) {
-            cell.set_bg(theme::selection());
+            cell.set_bg(bg);
         }
     }
+}
+
+/// Tint the needle's occurrences in one wrapped row of a segment. Resolves
+/// the row back to its painted text, finds non-overlapping matches, maps them
+/// to content columns, and tints them. Returns the number of matches tinted
+/// (0 on padding rows and empty rows).
+fn tint_search_row(
+    seg: &Segment,
+    row_in_seg: u32,
+    content_width: u16,
+    clip: Rect,
+    screen_y: u16,
+    buf: &mut Buffer,
+    needle: &str,
+) -> usize {
+    let Some(resolved) = seg.locate_row(row_in_seg, content_width) else {
+        return 0;
+    };
+    let line = resolved.line();
+    let text = visual_row_text(
+        &line,
+        resolved.text_width,
+        resolved.trim,
+        resolved.wrap_index,
+    );
+    let bg = theme::search_match();
+    let mut count = 0;
+    for (start_col, end_col) in match_columns(&text, needle) {
+        let x0 = resolved.pad_x.saturating_add(start_col);
+        let x1 = resolved.pad_x.saturating_add(end_col);
+        if x0 < x1 {
+            tint_row(buf, clip, content_width, screen_y, x0, x1, bg);
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Non-overlapping display-column ranges of every `needle` occurrence in a
+/// painted row: `[(start_col, end_col)]` in display cells.
+fn match_columns(text: &str, needle: &str) -> Vec<(u16, u16)> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let needle_w = UnicodeWidthStr::width(needle) as u16;
+    let mut hits = Vec::new();
+    let mut bytes = 0usize;
+    let mut col = 0u16;
+    while bytes < text.len() {
+        if text[bytes..].starts_with(needle) {
+            hits.push((col, col.saturating_add(needle_w)));
+            for _ in 0..needle.chars().count() {
+                let (c, w) = advance(text, bytes);
+                bytes = w;
+                col += c;
+            }
+        } else {
+            let (c, w) = advance(text, bytes);
+            bytes = w;
+            col += c;
+        }
+    }
+    hits
+}
+
+/// Advance one char: returns its display width and the byte offset after it.
+fn advance(text: &str, bytes: usize) -> (u16, usize) {
+    let c = text[bytes..].chars().next().unwrap_or('\0');
+    (c.width().unwrap_or(0) as u16, bytes + c.len_utf8().max(1))
 }
 
 pub enum ChatMessage {
@@ -324,6 +401,13 @@ pub struct Chat {
     /// copy-on-select hook the session consumes.
     pending_copy: Cell<bool>,
     history_rect: Cell<Rect>,
+    /// The live chat-search needle (`None` = no highlight). Kept outside the
+    /// turn caches so per-keystroke updates never invalidate a render cache;
+    /// the tint pass applies it to the painted frame instead.
+    search: RefCell<Option<String>>,
+    /// Match tints painted in the last frame's visible window, reported to
+    /// the search tooltip.
+    pub(crate) search_matches: Cell<usize>,
 }
 
 impl Chat {
@@ -349,7 +433,21 @@ impl Chat {
             last_click: RefCell::new(None),
             pending_copy: Cell::new(false),
             history_rect: Cell::new(Rect::default()),
+            search: RefCell::new(None),
+            search_matches: Cell::new(0),
         }
+    }
+
+    /// Set the live search needle (`None` or empty clears the highlight).
+    pub(crate) fn set_search(&self, needle: Option<String>) {
+        *self.search.borrow_mut() = needle.filter(|text| !text.is_empty());
+        self.search_matches.set(0);
+    }
+
+    /// The live search needle, for tests.
+    #[cfg(test)]
+    pub(crate) fn search_needle(&self) -> Option<String> {
+        self.search.borrow().clone()
     }
 
     pub fn is_streaming(&self) -> bool {
@@ -818,6 +916,25 @@ impl Chat {
                 y += h;
             }
 
+            let needle = self.search.borrow().clone();
+            if let Some(needle) = needle {
+                let count = self.paint_search_overlay(
+                    &turns,
+                    &in_flight,
+                    &steered,
+                    &heights,
+                    turns_len,
+                    scroll_y,
+                    area,
+                    content_width,
+                    buf,
+                    &needle,
+                );
+                self.search_matches.set(count);
+            } else {
+                self.search_matches.set(0);
+            }
+
             if self.selection.borrow().is_some() {
                 self.paint_selection_overlay(
                     &turns,
@@ -906,12 +1023,84 @@ impl Chat {
                         }
                         let screen_y =
                             clip.y + u16::try_from(global - scroll_y).unwrap_or(u16::MAX);
-                        tint_row(buf, clip, content_width, screen_y, x0, x1);
+                        tint_row(
+                            buf,
+                            clip,
+                            content_width,
+                            screen_y,
+                            x0,
+                            x1,
+                            theme::selection(),
+                        );
                     }
                 }
             }
             y += h;
         }
+    }
+
+    /// Tint the search matches after the paint pass: each visible wrapped
+    /// row's painted text is matched against the needle and every occurrence
+    /// gets the search-match background. Returns the number of tints painted
+    /// — the tooltip's on-screen match count. Geometry-only, so no render
+    /// cache is touched; the needle is matched against each row's painted
+    /// text independently, so a needle split across a wrap boundary or two
+    /// adjacent segments is not highlighted (documented v1 limit).
+    #[allow(clippy::too_many_arguments)]
+    fn paint_search_overlay(
+        &self,
+        turns: &[TurnData],
+        in_flight: &Option<TurnData>,
+        steered: &[TurnData],
+        heights: &[u32],
+        turns_len: usize,
+        scroll_y: u32,
+        clip: Rect,
+        content_width: u16,
+        buf: &mut Buffer,
+        needle: &str,
+    ) -> usize {
+        let viewport = u32::from(clip.height);
+        let mut count = 0usize;
+        let mut y = 0u32;
+        for (i, h) in heights.iter().enumerate() {
+            let cache = if i < turns_len {
+                turns.get(i).and_then(|slot| slot.cache.as_ref())
+            } else if i == turns_len {
+                in_flight.as_ref().and_then(|slot| slot.cache.as_ref())
+            } else {
+                steered
+                    .get(i - turns_len - 1)
+                    .and_then(|slot| slot.cache.as_ref())
+            };
+            if let Some(cache) = cache {
+                let h = *h;
+                let lo = scroll_y.saturating_sub(y);
+                let hi = (scroll_y + viewport).saturating_sub(y).min(h);
+                for seg in &cache.segs {
+                    let seg_lo = seg.start.max(lo);
+                    let seg_hi = (seg.start + seg.height).min(hi);
+                    if seg_lo >= seg_hi {
+                        continue;
+                    }
+                    for row in seg_lo..seg_hi {
+                        let screen_y =
+                            clip.y + u16::try_from(y + row - scroll_y).unwrap_or(u16::MAX);
+                        count += tint_search_row(
+                            &seg.segment,
+                            row - seg.start,
+                            content_width,
+                            clip,
+                            screen_y,
+                            buf,
+                            needle,
+                        );
+                    }
+                }
+            }
+            y += h;
+        }
+        count
     }
 
     /// Borrow a turn slot by selection-space index: committed turns, then
@@ -4079,5 +4268,79 @@ mod tests {
             "real failure keeps the error marker: {text}"
         );
         assert!(!text.contains("⏹"), "no stop marker on a failure: {text}");
+    }
+
+    /// Cells painted with the search-match background, as `(x, y)` screen
+    /// positions.
+    fn search_tinted(buf: &ratatui::buffer::Buffer) -> Vec<(u16, u16)> {
+        let bg = theme::search_match();
+        let mut hits = Vec::new();
+        for y in 0..buf.area().height {
+            for x in 0..buf.area().width {
+                if buf[(x, y)].bg == bg {
+                    hits.push((x, y));
+                }
+            }
+        }
+        hits
+    }
+
+    #[test]
+    fn search_tints_needle_cells_in_painted_rows() {
+        let mut session = shuvarie_core::Session::new();
+        session.push_user("alpha needle gamma");
+        session.push_assistant("delta epsilon");
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::Load { session });
+
+        chat.set_search(Some("needle".into()));
+        let buf = draw(&chat, 80, 24);
+        let hits = search_tinted(&buf);
+        assert_eq!(
+            hits.len(),
+            "needle".chars().count(),
+            "exactly the needle's cells are tinted: {hits:?}"
+        );
+        let row = hits.first().map_or(String::new(), |&(_, y)| {
+            (0..buf.area().width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect()
+        });
+        assert!(row.contains("needle"), "tinted row shows the needle");
+        assert_eq!(
+            chat.search_matches.get(),
+            1,
+            "the tooltip gets the on-screen match count"
+        );
+
+        chat.set_search(Some("delta".into()));
+        let buf = draw(&chat, 80, 24);
+        assert!(
+            !search_tinted(&buf).is_empty(),
+            "a new needle re-tints its own rows"
+        );
+
+        chat.set_search(None);
+        let buf = draw(&chat, 80, 24);
+        assert!(search_tinted(&buf).is_empty(), "closing clears the tint");
+    }
+
+    #[test]
+    fn search_tint_counts_only_visible_rows() {
+        let mut session = shuvarie_core::Session::new();
+        for i in 0..40 {
+            session.push_user(format!("needle turn {i}"));
+            session.push_assistant("filler");
+        }
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::Load { session });
+        chat.set_search(Some("needle".into()));
+        draw(&chat, 80, 12);
+        let visible = chat.search_matches.get();
+        assert!(
+            visible < 40,
+            "only the viewport's matches are counted: {visible}"
+        );
+        assert!(visible > 0, "the sticky-bottom viewport shows matches");
     }
 }

@@ -59,6 +59,18 @@ pub fn selection() -> Color {
     paint(active().selection)
 }
 
+fn blend(a: Rgb, b: Rgb, t: f32) -> Rgb {
+    let mix = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
+    (mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2))
+}
+
+/// The chat search-match highlight: a golden tint blended between the
+/// selection background and the warning accent, distinct from both so
+/// matches never read as a mouse selection.
+pub fn search_match() -> Color {
+    paint(blend(active().selection, active().warning, 0.55))
+}
+
 pub fn text() -> Color {
     paint(active().text)
 }

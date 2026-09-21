@@ -1655,6 +1655,9 @@ impl App {
             CommandAction::ToggleSidebar => {
                 self.session.sidebar.update(SidebarMessage::Toggle);
             }
+            CommandAction::Search => {
+                self.session.open_search(args.as_deref());
+            }
             CommandAction::Quit => {
                 if self.session.is_streaming() {
                     self.ctx.send(shuvarie_core::Command::CancelStream);
