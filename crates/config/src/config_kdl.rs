@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use kdl::{KdlDocument, KdlEntry, KdlEntryFormat, KdlNode, KdlValue};
 
-use super::kdl_util::{autoformat, child_nodes, node_error, parse_document};
+use super::kdl_util::{at, autoformat, child_nodes, node_error, parse_document};
 use super::*;
 use crate::{Result, theme_key_label};
 
@@ -682,17 +682,523 @@ fn parse_registry_entry(node: &KdlNode, input: &str) -> Result<RegistryEntry> {
 
 fn parse_tools(node: &KdlNode, input: &str) -> Result<ToolsConfig> {
     let mut web_search = None;
+    let mut tools = BTreeMap::new();
+    let mut mcp = None;
     for child in child_nodes(node) {
-        if child.name().value() == "web-search" {
-            set_once(
+        match child.name().value() {
+            "web-search" => set_once(
                 input,
                 child,
                 &mut web_search,
                 parse_web_search(child, input),
-            )?;
+            )?,
+            "tool" => {
+                let (name, config) = parse_tool(child, input)?;
+                if tools.insert(name.clone(), config).is_some() {
+                    return Err(duplicate(input, child, &name));
+                }
+            }
+            "mcp" => set_once(input, child, &mut mcp, parse_mcp(child, input).map(Some))?,
+            _ => {}
         }
     }
-    Ok(ToolsConfig { web_search })
+    Ok(ToolsConfig {
+        web_search,
+        tools,
+        mcp: mcp.unwrap_or_default(),
+    })
+}
+
+/// `tool name="…" { description …; cmd …; input …; timeout …; params …;
+/// envs … }` — a user-defined tool: every call spawns a fresh process running
+/// `cmd` with the `{{param}}` placeholders replaced by the call's arguments.
+fn parse_tool(node: &KdlNode, input: &str) -> Result<(String, StdioToolConfig)> {
+    reject_positionals(input, node)?;
+    reject_unknown_props(input, node, &["name"])?;
+    let name = name_prop(input, node, "tool")?;
+    if name.starts_with("mcp__") {
+        return Err(node_error(
+            input,
+            node,
+            format!("`tool` name `{name}` starts with `mcp__`, which is reserved for MCP tools"),
+            None,
+        ));
+    }
+    let mut description = None;
+    let mut cmd = None;
+    let mut input_kind = None;
+    let mut timeout_secs = None;
+    let mut params = None;
+    let mut envs = None;
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "description" => set_once(input, child, &mut description, scalar_string(input, child))?,
+            "cmd" => set_once(input, child, &mut cmd, scalar_string_vec(input, child))?,
+            "input" => set_once(
+                input,
+                child,
+                &mut input_kind,
+                parse_tool_input(input, child).map(Some),
+            )?,
+            "timeout" => set_once(input, child, &mut timeout_secs, scalar_u64(input, child))?,
+            "params" => set_once(input, child, &mut params, parse_tool_params(child, input))?,
+            "envs" => set_once(input, child, &mut envs, parse_envs(child, input))?,
+            _ => {}
+        }
+    }
+    let cmd = cmd
+        .ok_or_else(|| node_error(input, node, format!("tool `{name}` requires a `cmd`"), None))?;
+    if timeout_secs.is_some_and(|secs| secs == 0) {
+        return Err(node_error(
+            input,
+            node,
+            "`timeout` must be at least one second",
+            None,
+        ));
+    }
+    let params = params.unwrap_or_default();
+    validate_cmd_placeholders(input, node, &cmd, &params)?;
+    Ok((
+        name,
+        StdioToolConfig {
+            description,
+            cmd,
+            input: input_kind,
+            timeout_secs: timeout_secs.unwrap_or(TOOL_DEFAULT_TIMEOUT_SECS),
+            params,
+            envs: envs.unwrap_or_default(),
+        },
+    ))
+}
+
+/// `input "json"` — pipe the resolved args object to the child's stdin as
+/// JSON on top of the templated argv.
+fn parse_tool_input(input: &str, node: &KdlNode) -> Result<ToolInputKind> {
+    let Some(value) = scalar_string(input, node)? else {
+        return Err(node_error(
+            input,
+            node,
+            "`input` takes a single string value",
+            None,
+        ));
+    };
+    match value.as_str() {
+        "json" => Ok(ToolInputKind::Json),
+        other => Err(node_error(
+            input,
+            node,
+            format!("`input` must be `json`, found `{other}`"),
+            None,
+        )),
+    }
+}
+
+/// `params { param "name" type="string" required=#true description="…" }` —
+/// the tool's declared parameters, which form its JSON input schema and feed
+/// the `{{param}}` templates in `cmd`.
+fn parse_tool_params(node: &KdlNode, input: &str) -> Result<Option<BTreeMap<String, ToolParam>>> {
+    reject_positionals(input, node)?;
+    let mut params = BTreeMap::new();
+    for child in child_nodes(node) {
+        if child.name().value() != "param" {
+            return Err(node_error(
+                input,
+                child,
+                format!(
+                    "unsupported `{}` (declare parameters with `param \"name\" …`)",
+                    child.name().value()
+                ),
+                None,
+            ));
+        }
+        let (name, param) = parse_tool_param(child, input)?;
+        if params.insert(name.clone(), param).is_some() {
+            return Err(duplicate(input, child, &name));
+        }
+    }
+    Ok((!params.is_empty()).then_some(params))
+}
+
+/// One `param "name" type=…` entry; only `type` is required.
+fn parse_tool_param(node: &KdlNode, input: &str) -> Result<(String, ToolParam)> {
+    let name = single_positional_string(input, node, "param")?;
+    if !valid_name(&name) {
+        return Err(node_error(
+            input,
+            node,
+            format!("param name `{name}` must contain only letters, digits, `_`, and `-`"),
+            None,
+        ));
+    }
+    let kind = match property_string(input, node, "type")?.as_deref() {
+        Some("string") => ToolParamKind::String,
+        Some("integer") => ToolParamKind::Integer,
+        Some("number") => ToolParamKind::Number,
+        Some("boolean") => ToolParamKind::Boolean,
+        Some(other) => {
+            return Err(node_error(
+                input,
+                node,
+                format!(
+                    "param `{name}` type must be `string`, `integer`, `number`, or `boolean`, found `{other}`"
+                ),
+                None,
+            ));
+        }
+        None => {
+            return Err(node_error(
+                input,
+                node,
+                format!(
+                    "param `{name}` requires a `type` property (\"string\", \"integer\", \"number\", or \"boolean\")"
+                ),
+                None,
+            ));
+        }
+    };
+    reject_unknown_props(input, node, &["type", "required", "description"])?;
+    let required = property_bool(input, node, "required")?.unwrap_or(false);
+    let description = property_string(input, node, "description")?;
+    Ok((
+        name,
+        ToolParam {
+            kind,
+            required,
+            description,
+        },
+    ))
+}
+
+/// `envs inherit=#true { env "NAME" "value" }` — the environment of a spawned
+/// process. Values may carry `$VAR` / `${VAR}` placeholders.
+fn parse_envs(node: &KdlNode, input: &str) -> Result<Option<EnvsConfig>> {
+    reject_positionals(input, node)?;
+    reject_unknown_props(input, node, &["inherit"])?;
+    let inherit = property_bool(input, node, "inherit")?;
+    let mut entries = BTreeMap::new();
+    for child in child_nodes(node) {
+        if child.name().value() != "env" {
+            return Err(node_error(
+                input,
+                child,
+                format!(
+                    "unsupported `{}` (declare variables with `env \"NAME\" \"value\"`)",
+                    child.name().value()
+                ),
+                None,
+            ));
+        }
+        let (name, value) = env_entry_pair(input, child)?;
+        if entries.insert(name.clone(), value).is_some() {
+            return Err(duplicate(input, child, &name));
+        }
+    }
+    if inherit.is_none() && entries.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(EnvsConfig {
+        inherit: inherit.unwrap_or(true),
+        entries,
+    }))
+}
+
+/// One `env "NAME" "value"` entry: exactly two string arguments.
+fn env_entry_pair(input: &str, node: &KdlNode) -> Result<(String, String)> {
+    let mut positionals = node.entries().iter().filter(|entry| entry.name().is_none());
+    let first = positionals.next();
+    let second = positionals.next();
+    if second.is_none() || positionals.next().is_some() {
+        return Err(node_error(
+            input,
+            node,
+            "`env` takes two string arguments (name and value)",
+            None,
+        ));
+    }
+    let (KdlValue::String(name), KdlValue::String(value)) =
+        (first.unwrap().value(), second.unwrap().value())
+    else {
+        return Err(node_error(
+            input,
+            node,
+            "`env` takes two string arguments (name and value)",
+            None,
+        ));
+    };
+    if !valid_env_name(name) {
+        return Err(node_error(
+            input,
+            node,
+            format!("`{name}` is not a valid environment variable name"),
+            None,
+        ));
+    }
+    Ok((name.clone(), value.clone()))
+}
+
+/// `mcp { stdio name="…" { … }; http name="…" { … } }` — MCP servers. Names
+/// are unique across both transports because generated tool names are
+/// `mcp__<server>__<tool>`.
+fn parse_mcp(node: &KdlNode, input: &str) -> Result<McpConfig> {
+    reject_positionals(input, node)?;
+    let mut stdio = BTreeMap::new();
+    let mut http = BTreeMap::new();
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "stdio" => {
+                let (name, config) = parse_mcp_stdio(child, input)?;
+                if stdio.contains_key(&name) || http.contains_key(&name) {
+                    return Err(duplicate(input, child, &name));
+                }
+                stdio.insert(name, config);
+            }
+            "http" => {
+                let (name, config) = parse_mcp_http(child, input)?;
+                if stdio.contains_key(&name) || http.contains_key(&name) {
+                    return Err(duplicate(input, child, &name));
+                }
+                http.insert(name, config);
+            }
+            _ => {}
+        }
+    }
+    Ok(McpConfig { stdio, http })
+}
+
+/// `stdio name="…" { command "…"; args …; envs … }` — an MCP server spawned
+/// as a child process.
+fn parse_mcp_stdio(node: &KdlNode, input: &str) -> Result<(String, McpStdioConfig)> {
+    reject_positionals(input, node)?;
+    reject_unknown_props(input, node, &["name"])?;
+    let name = name_prop(input, node, "mcp stdio server")?;
+    let mut command = None;
+    let mut args = None;
+    let mut envs = None;
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "command" => set_once(input, child, &mut command, scalar_string(input, child))?,
+            "args" => set_once(input, child, &mut args, scalar_string_vec(input, child))?,
+            "envs" => set_once(input, child, &mut envs, parse_envs(child, input))?,
+            _ => {}
+        }
+    }
+    let command = command.ok_or_else(|| {
+        node_error(
+            input,
+            node,
+            format!("mcp server `{name}` requires a `command`"),
+            None,
+        )
+    })?;
+    Ok((
+        name,
+        McpStdioConfig {
+            command,
+            args: args.unwrap_or_default(),
+            envs: envs.unwrap_or_default(),
+        },
+    ))
+}
+
+/// `http name="…" { url "…"; headers { … } }` — an MCP server reached over
+/// streamable HTTP.
+fn parse_mcp_http(node: &KdlNode, input: &str) -> Result<(String, McpHttpConfig)> {
+    reject_positionals(input, node)?;
+    reject_unknown_props(input, node, &["name"])?;
+    let name = name_prop(input, node, "mcp http server")?;
+    let mut url = None;
+    let mut headers = None;
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "url" => set_once(input, child, &mut url, scalar_string(input, child))?,
+            "headers" => set_once(
+                input,
+                child,
+                &mut headers,
+                parse_web_search_headers(child, input),
+            )?,
+            _ => {}
+        }
+    }
+    let url = url.ok_or_else(|| {
+        node_error(
+            input,
+            node,
+            format!("mcp server `{name}` requires a `url`"),
+            None,
+        )
+    })?;
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(node_error(
+            input,
+            node,
+            format!("mcp server `{name}` url must start with http:// or https://"),
+            None,
+        ));
+    }
+    Ok((
+        name,
+        McpHttpConfig {
+            url,
+            headers: headers.unwrap_or_default(),
+        },
+    ))
+}
+
+/// The single `name` property of a named entry node (`tool name="…"`):
+/// required, a string, and a valid identifier.
+fn name_prop(input: &str, node: &KdlNode, what: &str) -> Result<String> {
+    let Some(name) = property_string(input, node, "name")? else {
+        return Err(node_error(
+            input,
+            node,
+            format!("`{what}` requires a `name` property"),
+            None,
+        ));
+    };
+    if !valid_name(&name) {
+        return Err(node_error(
+            input,
+            node,
+            format!("`name` must contain only letters, digits, `_`, and `-`, found `{name}`"),
+            None,
+        ));
+    }
+    Ok(name)
+}
+
+/// The identifier charset shared by tool names, MCP server names, and param
+/// names: the composite `mcp__<server>__<tool>` form must stay provider-safe.
+fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// A `NAME` usable as an environment variable: `[A-Za-z_][A-Za-z0-9_]*`.
+fn valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Every `{{name}}` template reference inside one `cmd` argument. Text that
+/// does not form a valid `{{name}}` is left alone (it stays literal).
+fn cmd_placeholders(arg: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let bytes = arg.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'{'
+            && bytes[i + 1] == b'{'
+            && let Some(rel) = arg[i + 2..].find("}}")
+        {
+            let inner = arg[i + 2..i + 2 + rel].trim();
+            if valid_name(inner) {
+                found.push(inner.to_string());
+                i += 2 + rel + 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    found
+}
+
+/// Every `{{param}}` reference in `cmd` must name a declared param.
+fn validate_cmd_placeholders(
+    input: &str,
+    node: &KdlNode,
+    cmd: &[String],
+    params: &BTreeMap<String, ToolParam>,
+) -> Result<()> {
+    for arg in cmd {
+        for placeholder in cmd_placeholders(arg) {
+            if !params.contains_key(&placeholder) {
+                return Err(node_error(
+                    input,
+                    node,
+                    format!(
+                        "`cmd` references `{{{{{placeholder}}}}}` but no `param` named `{placeholder}` is declared"
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reject_positionals(input: &str, node: &KdlNode) -> Result<()> {
+    if node.entries().iter().any(|entry| entry.name().is_none()) {
+        return Err(node_error(
+            input,
+            node,
+            format!("`{}` takes no positional arguments", node.name().value()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn reject_unknown_props(input: &str, node: &KdlNode, allowed: &[&str]) -> Result<()> {
+    for entry in node.entries() {
+        let Some(name) = entry.name() else {
+            continue;
+        };
+        if !allowed.contains(&name.value()) {
+            return Err(entry_error(
+                input,
+                entry,
+                format!("unknown property `{}`", name.value()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn entry_error(input: &str, entry: &KdlEntry, message: impl Into<String>) -> ConfigError {
+    at(
+        input,
+        entry.span().offset(),
+        entry.span().len(),
+        message,
+        None,
+    )
+}
+
+/// The single required positional string argument of a node (`param "url"`).
+fn single_positional_string(input: &str, node: &KdlNode, what: &str) -> Result<String> {
+    let mut positionals = node.entries().iter().filter(|entry| entry.name().is_none());
+    let Some(first) = positionals.next() else {
+        return Err(node_error(
+            input,
+            node,
+            format!("`{what}` takes a single string argument"),
+            None,
+        ));
+    };
+    if positionals.next().is_some() {
+        return Err(node_error(
+            input,
+            node,
+            format!("`{what}` takes a single argument"),
+            None,
+        ));
+    }
+    match first.value() {
+        KdlValue::String(value) => Ok(value.clone()),
+        _ => Err(node_error(
+            input,
+            node,
+            format!("`{what}` must be a string"),
+            None,
+        )),
+    }
 }
 
 fn parse_web_search(node: &KdlNode, input: &str) -> Result<Option<WebSearchConfig>> {
@@ -948,6 +1454,23 @@ fn property_usize(input: &str, node: &KdlNode, name: &str) -> Result<Option<usiz
                     found = Some(usize::try_from(*value).map_err(|_| range_error(input, node))?);
                 }
                 _ => return Err(type_error(input, node, "an integer")),
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// The value of a single named boolean property entry, when present.
+fn property_bool(input: &str, node: &KdlNode, name: &str) -> Result<Option<bool>> {
+    let mut found = None;
+    for entry in node.entries() {
+        if entry.name().is_some_and(|n| n.value() == name) {
+            if found.is_some() {
+                return Err(duplicate(input, node, name));
+            }
+            match entry.value() {
+                KdlValue::Bool(value) => found = Some(*value),
+                _ => return Err(type_error(input, node, "a boolean")),
             }
         }
     }
@@ -2129,8 +2652,117 @@ fn shell_rule_group(rules: &[&ShellRule]) -> KdlNode {
 }
 
 fn tools_node(cfg: &ToolsConfig) -> Option<KdlNode> {
-    let web = cfg.web_search.as_ref()?;
-    section_node("tools", vec![web_search_node(web)])
+    let mut children = Vec::new();
+    if let Some(web) = &cfg.web_search {
+        children.push(web_search_node(web));
+    }
+    for (name, tool) in &cfg.tools {
+        children.push(tool_node(name, tool));
+    }
+    if let Some(mcp) = mcp_node(&cfg.mcp) {
+        children.push(mcp);
+    }
+    section_node("tools", children)
+}
+
+fn tool_node(name: &str, cfg: &StdioToolConfig) -> KdlNode {
+    let mut children = Vec::new();
+    if let Some(description) = &cfg.description {
+        children.push(prompt_node("description", description.as_str()));
+    }
+    children.push(string_vec_node("cmd", &cfg.cmd).expect("parse guarantees a non-empty `cmd`"));
+    if cfg.input == Some(ToolInputKind::Json) {
+        children.push(value_node("input", "json"));
+    }
+    if cfg.timeout_secs != TOOL_DEFAULT_TIMEOUT_SECS {
+        children.push(int_node("timeout", cfg.timeout_secs));
+    }
+    if !cfg.params.is_empty() {
+        let mut params = KdlNode::new("params");
+        let mut body = KdlDocument::new();
+        for (param_name, param) in &cfg.params {
+            body.nodes_mut().push(tool_param_node(param_name, param));
+        }
+        params.set_children(body);
+        children.push(params);
+    }
+    if let Some(envs) = envs_node(&cfg.envs) {
+        children.push(envs);
+    }
+    node_with_prop("tool", "name", name, children)
+}
+
+fn tool_param_node(name: &str, param: &ToolParam) -> KdlNode {
+    let mut node = KdlNode::new("param");
+    node.push(string_entry(name));
+    node.push(KdlEntry::new_prop("type", param.kind.as_str()));
+    if param.required {
+        node.push(KdlEntry::new_prop("required", true));
+    }
+    if let Some(description) = &param.description {
+        node.push(KdlEntry::new_prop("description", description.as_str()));
+    }
+    node
+}
+
+/// Builds `envs { … }`; `None` when the config holds defaults (inherit on,
+/// no variables).
+fn envs_node(cfg: &EnvsConfig) -> Option<KdlNode> {
+    if cfg.is_default() {
+        return None;
+    }
+    let mut node = KdlNode::new("envs");
+    if !cfg.inherit {
+        node.push(KdlEntry::new_prop("inherit", false));
+    }
+    let mut body = KdlDocument::new();
+    for (name, value) in &cfg.entries {
+        let mut env = KdlNode::new("env");
+        env.push(string_entry(name));
+        env.push(string_entry(value));
+        body.nodes_mut().push(env);
+    }
+    node.set_children(body);
+    Some(node)
+}
+
+fn mcp_node(cfg: &McpConfig) -> Option<KdlNode> {
+    if cfg.is_empty() {
+        return None;
+    }
+    let mut children = Vec::new();
+    for (name, server) in &cfg.stdio {
+        children.push(mcp_stdio_node(name, server));
+    }
+    for (name, server) in &cfg.http {
+        children.push(mcp_http_node(name, server));
+    }
+    section_node("mcp", children)
+}
+
+fn mcp_stdio_node(name: &str, cfg: &McpStdioConfig) -> KdlNode {
+    let mut children = vec![value_node("command", cfg.command.as_str())];
+    if let Some(args) = string_vec_node("args", &cfg.args) {
+        children.push(args);
+    }
+    if let Some(envs) = envs_node(&cfg.envs) {
+        children.push(envs);
+    }
+    node_with_prop("stdio", "name", name, children)
+}
+
+fn mcp_http_node(name: &str, cfg: &McpHttpConfig) -> KdlNode {
+    let mut children = vec![value_node("url", cfg.url.as_str())];
+    if !cfg.headers.is_empty() {
+        let mut headers = KdlNode::new("headers");
+        let mut body = KdlDocument::new();
+        for (header, value) in &cfg.headers {
+            body.nodes_mut().push(value_node(header, value.as_str()));
+        }
+        headers.set_children(body);
+        children.push(headers);
+    }
+    node_with_prop("http", "name", name, children)
 }
 
 fn web_search_node(cfg: &WebSearchConfig) -> KdlNode {
