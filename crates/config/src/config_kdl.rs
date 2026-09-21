@@ -688,22 +688,22 @@ fn parse_tools(node: &KdlNode, input: &str) -> Result<ToolsConfig> {
                 input,
                 child,
                 &mut web_search,
-                parse_web_search(child, input),
+                parse_web_search(child, input).map(Some),
             )?;
         }
     }
     Ok(ToolsConfig { web_search })
 }
 
-fn parse_web_search(node: &KdlNode, input: &str) -> Result<Option<WebSearchConfig>> {
-    let mut enabled = None;
+fn parse_web_search(node: &KdlNode, input: &str) -> Result<WebSearchConfig> {
+    let mut disabled = None;
     let mut url = None;
     let mut kind = None;
     let mut headers = None;
     let mut params = None;
     for child in child_nodes(node) {
         match child.name().value() {
-            "enabled" => set_once(input, child, &mut enabled, scalar_bool(input, child))?,
+            "disabled" => set_once(input, child, &mut disabled, switch_flag(input, child))?,
             "url" => set_once(input, child, &mut url, scalar_string(input, child))?,
             "type" => set_once(input, child, &mut kind, parse_web_search_kind(input, child))?,
             "headers" => {
@@ -723,30 +723,38 @@ fn parse_web_search(node: &KdlNode, input: &str) -> Result<Option<WebSearchConfi
             _ => {}
         }
     }
-    let Some(url) = url else {
-        return Err(node_error(
-            input,
-            node,
-            "`web-search` requires a `url`",
-            None,
-        ));
+    // `url` and `type` come as a pair; omitted together they fall back to the
+    // built-in DuckDuckGo Lite backend.
+    let (url, kind) = match (url, kind) {
+        (Some(url), Some(kind)) => {
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                return Err(node_error(
+                    input,
+                    node,
+                    "`web-search` url must start with http:// or https://",
+                    None,
+                ));
+            }
+            (url, kind)
+        }
+        (None, None) => (DUCKDUCKGO_LITE_URL.to_string(), WebSearchKind::ToMarkdown),
+        (Some(_), None) => {
+            return Err(node_error(
+                input,
+                node,
+                "`web-search` requires a `type` (\"ollama\" or \"to_markdown\")",
+                None,
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(node_error(
+                input,
+                node,
+                "`web-search` requires a `url`",
+                None,
+            ));
+        }
     };
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err(node_error(
-            input,
-            node,
-            "`web-search` url must start with http:// or https://",
-            None,
-        ));
-    }
-    let kind = kind.ok_or_else(|| {
-        node_error(
-            input,
-            node,
-            "`web-search` requires a `type` (\"ollama\" or \"to_markdown\")",
-            None,
-        )
-    })?;
     let params = match params {
         Some((param_kind, map)) => WebSearchParams {
             kind: param_kind.unwrap_or_else(|| WebSearchParamKind::default_for(kind)),
@@ -754,13 +762,13 @@ fn parse_web_search(node: &KdlNode, input: &str) -> Result<Option<WebSearchConfi
         },
         None => WebSearchParams::default_for(kind),
     };
-    Ok(Some(WebSearchConfig {
-        enabled: enabled.unwrap_or(false),
+    Ok(WebSearchConfig {
+        disabled: disabled.unwrap_or_default(),
         url,
         kind,
         headers: headers.unwrap_or_default(),
         params,
-    }))
+    })
 }
 
 fn parse_web_search_kind(input: &str, node: &KdlNode) -> Result<Option<WebSearchKind>> {
@@ -2135,8 +2143,8 @@ fn tools_node(cfg: &ToolsConfig) -> Option<KdlNode> {
 
 fn web_search_node(cfg: &WebSearchConfig) -> KdlNode {
     let mut children = Vec::new();
-    if cfg.enabled {
-        children.push(value_node("enabled", true));
+    if cfg.disabled {
+        children.push(KdlNode::new("disabled"));
     }
     children.push(value_node("url", cfg.url.as_str()));
     children.push(value_node("type", cfg.kind.as_str()));

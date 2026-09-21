@@ -585,21 +585,39 @@ pub struct ShellConfig {
     pub path: Option<String>,
 }
 
-/// Opt-in agent tools. Every entry is absent from the file by default, and
-/// absence means the tool is not offered to the model at all.
+/// Agent tools. `web-search` is on by default through the built-in DuckDuckGo
+/// Lite backend; a `web-search` block overrides that endpoint, and a bare
+/// `disabled` switch inside it turns the tool off.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ToolsConfig {
-    /// `tools { web-search { … } }` — the user-configured web search backend.
-    /// `None` (section absent) or `enabled #false` registers no tool.
+    /// `tools { web-search { … } }` — overrides the built-in web search
+    /// backend. `None` (section absent) keeps the built-in DuckDuckGo Lite
+    /// default; `Some` with `disabled` set registers no tool.
     pub web_search: Option<WebSearchConfig>,
 }
 
-/// A user-defined web search backend: one endpoint plus how to send the query
-/// (`params`) and how to read the response (`kind`).
+impl ToolsConfig {
+    /// The web search backend to register: the user-configured one unless it
+    /// is disabled, otherwise the built-in DuckDuckGo Lite default.
+    pub fn effective_web_search(&self) -> Option<WebSearchConfig> {
+        match &self.web_search {
+            Some(cfg) => (!cfg.disabled).then(|| cfg.clone()),
+            None => Some(WebSearchConfig::default()),
+        }
+    }
+}
+
+/// The endpoint of the built-in web search backend: DuckDuckGo Lite, a
+/// JavaScript-free results page read with the `to_markdown` response kind.
+pub const DUCKDUCKGO_LITE_URL: &str = "https://lite.duckduckgo.com/lite/";
+
+/// A web search backend: one endpoint plus how to send the query (`params`)
+/// and how to read the response (`kind`). Defaults to the built-in DuckDuckGo
+/// Lite backend.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WebSearchConfig {
-    /// Stored as `enabled #true`; omitted or `#false` registers no tool.
-    pub enabled: bool,
+    /// Stored as a bare `disabled` switch; omitted = enabled (the default).
+    pub disabled: bool,
 
     /// The search endpoint. Must start with `http://` or `https://`.
     pub url: String,
@@ -614,6 +632,18 @@ pub struct WebSearchConfig {
 
     /// How the query reaches the endpoint.
     pub params: WebSearchParams,
+}
+
+impl Default for WebSearchConfig {
+    fn default() -> Self {
+        Self {
+            disabled: false,
+            url: DUCKDUCKGO_LITE_URL.to_string(),
+            kind: WebSearchKind::ToMarkdown,
+            headers: BTreeMap::new(),
+            params: WebSearchParams::default_for(WebSearchKind::ToMarkdown),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2983,6 +3013,15 @@ mod tests {
     fn web_search_absent_by_default() {
         let parsed = config_kdl::from_kdl("").unwrap();
         assert_eq!(parsed.tools.web_search, None);
+        // Absent section means the built-in DuckDuckGo Lite backend.
+        let effective = parsed.tools.effective_web_search().unwrap();
+        assert_eq!(effective.url, DUCKDUCKGO_LITE_URL);
+        assert_eq!(effective.kind, WebSearchKind::ToMarkdown);
+        assert_eq!(
+            effective.params,
+            WebSearchParams::default_for(effective.kind)
+        );
+        assert!(!effective.disabled);
         let text = config_kdl::to_kdl(&Config::default()).unwrap();
         assert!(!text.contains("tools"), "body: {text}");
     }
@@ -2992,8 +3031,6 @@ mod tests {
         let text = r#"
             tools {
                 web-search {
-                    enabled #true
-
                     url "https://ollama.com/api/web_search"
                     type "ollama"
 
@@ -3007,7 +3044,7 @@ mod tests {
                 }
 
                 /-web-search {
-                    enabled #true
+                    disabled
 
                     url "https://duckduckgo.com"
                     type "to_markdown"
@@ -3023,7 +3060,7 @@ mod tests {
             .tools
             .web_search
             .expect("only one web-search survives");
-        assert!(web.enabled);
+        assert!(!web.disabled);
         assert_eq!(web.url, "https://ollama.com/api/web_search");
         assert_eq!(web.kind, WebSearchKind::Ollama);
         assert_eq!(
@@ -3042,8 +3079,6 @@ mod tests {
         let text = r#"
             tools {
                 web-search {
-                    enabled #true
-
                     url "https://html.duckduckgo.com/html/"
                     type "to_markdown"
 
@@ -3082,7 +3117,7 @@ mod tests {
             web.params,
             WebSearchParams::default_for(WebSearchKind::Ollama)
         );
-        assert!(!web.enabled, "omitted enabled means off");
+        assert!(!web.disabled, "on unless `disabled` is present");
         assert!(web.headers.is_empty());
 
         let parsed = config_kdl::from_kdl(
@@ -3104,7 +3139,31 @@ mod tests {
 
         let text = config_kdl::to_kdl(&parsed).unwrap();
         assert!(!text.contains("params"), "defaults omitted: {text}");
-        assert!(!text.contains("enabled"), "off flag omitted: {text}");
+        assert!(!text.contains("disabled"), "off flag omitted: {text}");
+    }
+
+    #[test]
+    fn web_search_disabled_switch_turns_tool_off() {
+        let parsed = config_kdl::from_kdl(
+            r#"
+            tools {
+                web-search {
+                    disabled
+                }
+            }
+        "#,
+        )
+        .unwrap();
+        let web = parsed.tools.web_search.as_ref().expect("web-search parsed");
+        assert!(web.disabled);
+        assert_eq!(web.url, DUCKDUCKGO_LITE_URL);
+        assert_eq!(web.kind, WebSearchKind::ToMarkdown);
+        assert_eq!(parsed.tools.effective_web_search(), None);
+
+        let text = config_kdl::to_kdl(&parsed).unwrap();
+        assert!(text.contains("disabled"), "off flag kept: {text}");
+        let reparsed = config_kdl::from_kdl(&text).unwrap();
+        assert_eq!(parsed, reparsed);
     }
 
     #[test]
@@ -3165,6 +3224,10 @@ mod tests {
                 "tools { web-search { url \"https://a\"; type \"ollama\"; headers { \"Bad Header\" \"v\" } } }",
                 "header",
             ),
+            (
+                "tools { web-search { disabled #true } }",
+                "takes no arguments",
+            ),
         ];
         for (text, needle) in cases {
             let err = config_kdl::from_kdl(text).unwrap_err();
@@ -3182,7 +3245,7 @@ mod tests {
     fn web_search_full_config_round_trips() {
         let mut config = Config::default();
         config.tools.web_search = Some(WebSearchConfig {
-            enabled: true,
+            disabled: false,
             url: "https://ollama.com/api/web_search".to_string(),
             kind: WebSearchKind::Ollama,
             headers: BTreeMap::from([(
@@ -3198,9 +3261,14 @@ mod tests {
         let parsed = config_kdl::from_kdl(&text).unwrap();
         assert_eq!(parsed, config);
 
-        config.tools.web_search.as_mut().unwrap().enabled = false;
+        // The built-in DuckDuckGo Lite backend also round trips.
+        config.tools.web_search = Some(WebSearchConfig::default());
         let text = config_kdl::to_kdl(&config).unwrap();
-        assert!(!text.contains("enabled"), "off flag omitted: {text}");
+        assert_eq!(config_kdl::from_kdl(&text).unwrap(), config);
+
+        config.tools.web_search.as_mut().unwrap().disabled = true;
+        let text = config_kdl::to_kdl(&config).unwrap();
+        assert!(text.contains("disabled"), "off flag kept: {text}");
         let parsed = config_kdl::from_kdl(&text).unwrap();
         assert_eq!(parsed, config);
     }
@@ -3215,7 +3283,6 @@ mod tests {
             r#"
             tools {
                 web-search {
-                    enabled #true
                     url "https://global.example"
                     type "ollama"
                 }
@@ -3239,7 +3306,37 @@ mod tests {
         let web = config.tools.web_search.expect("top layer wins");
         assert_eq!(web.url, "https://top.example");
         assert_eq!(web.kind, WebSearchKind::ToMarkdown);
-        assert!(!web.enabled);
+        assert!(!web.disabled, "on unless the top layer disables it");
+    }
+
+    #[test]
+    fn web_search_layer_can_disable() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global.kdl");
+        let top = dir.path().join("shuvarie.kdl");
+        std::fs::write(
+            &global,
+            r#"
+            tools {
+                web-search {
+                    url "https://global.example"
+                    type "ollama"
+                }
+            }
+        "#,
+        )
+        .unwrap();
+        std::fs::write(&top, "tools { web-search { disabled } }").unwrap();
+        let config = Config::load_chain(&[(global, false), (top, true)]).unwrap();
+        assert!(
+            config
+                .tools
+                .web_search
+                .as_ref()
+                .expect("top layer wins")
+                .disabled
+        );
+        assert_eq!(config.tools.effective_web_search(), None);
     }
 
     #[test]
