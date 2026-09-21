@@ -248,6 +248,18 @@ pub enum Event {
     LspError {
         error: String,
     },
+    /// The state of every configured MCP server: emitted at startup, after
+    /// each turn's MCP connect pass, and by [`Command::McpList`] /
+    /// [`Command::McpReconnect`]. The sidebar's MCP section renders it.
+    McpStatus {
+        servers: Vec<shuvarie_mcp::McpStatus>,
+    },
+    /// An MCP lifecycle action failed (unknown server name, or a connection
+    /// attempt that did not complete). The per-server failure detail is
+    /// carried by the following [`Event::McpStatus`].
+    McpError {
+        error: String,
+    },
     SkillsLoaded {
         skills: Vec<crate::Skill>,
         warnings: Vec<crate::SkillWarning>,

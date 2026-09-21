@@ -14,13 +14,15 @@ pub enum CommandAction {
     UndoLastTurn,
     Replay,
     Reload,
+    McpServers,
+    McpReconnect,
     ToggleSidebar,
     Search,
     Quit,
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 15] = [
+    pub const ALL: [CommandAction; 17] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::OpenSessionPicker,
@@ -33,6 +35,8 @@ impl CommandAction {
         CommandAction::UndoLastTurn,
         CommandAction::Replay,
         CommandAction::Reload,
+        CommandAction::McpServers,
+        CommandAction::McpReconnect,
         CommandAction::ToggleSidebar,
         CommandAction::Search,
         CommandAction::Quit,
@@ -52,6 +56,8 @@ impl CommandAction {
             CommandAction::UndoLastTurn => "undo",
             CommandAction::Replay => "replay",
             CommandAction::Reload => "reload",
+            CommandAction::McpServers => "mcp",
+            CommandAction::McpReconnect => "mcp-reconnect",
             CommandAction::ToggleSidebar => "sidebar",
             CommandAction::Search => "search",
             CommandAction::Quit => "quit",
@@ -65,6 +71,7 @@ impl CommandAction {
             self,
             CommandAction::EditTitle
                 | CommandAction::Export
+                | CommandAction::McpReconnect
                 | CommandAction::OpenScenePicker
                 | CommandAction::OpenVariantPicker
                 | CommandAction::Search
@@ -152,6 +159,18 @@ pub fn default_commands() -> Vec<CommandEntry> {
             name: "Reload skills",
             description: "Re-discover skills without a restart",
             action: CommandAction::Reload,
+            available: true,
+        },
+        CommandEntry {
+            name: "MCP servers",
+            description: "Show MCP server states",
+            action: CommandAction::McpServers,
+            available: true,
+        },
+        CommandEntry {
+            name: "Reconnect MCP",
+            description: "Reconnect an MCP server",
+            action: CommandAction::McpReconnect,
             available: true,
         },
         CommandEntry {
@@ -401,6 +420,39 @@ mod tests {
             Some(ParsedCommand {
                 action: CommandAction::OpenVariantPicker,
                 args: Some("HIGH".into())
+            })
+        );
+    }
+
+    #[test]
+    fn parse_mcp_commands() {
+        assert_eq!(
+            parse_command("/mcp"),
+            Some(ParsedCommand {
+                action: CommandAction::McpServers,
+                args: None
+            })
+        );
+        assert_eq!(
+            parse_command("/MCP"),
+            Some(ParsedCommand {
+                action: CommandAction::McpServers,
+                args: None
+            })
+        );
+        assert_eq!(parse_command("/mcp extra"), None, "/mcp takes no arguments");
+        assert_eq!(
+            parse_command("/mcp-reconnect github"),
+            Some(ParsedCommand {
+                action: CommandAction::McpReconnect,
+                args: Some("github".into())
+            })
+        );
+        assert_eq!(
+            parse_command("/mcp-reconnect"),
+            Some(ParsedCommand {
+                action: CommandAction::McpReconnect,
+                args: None
             })
         );
     }

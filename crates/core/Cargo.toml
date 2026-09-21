@@ -25,9 +25,10 @@ shuvarie-config.workspace = true
 shuvarie-db.workspace = true
 shuvarie-llm.workspace = true
 shuvarie-lsp.workspace = true
+shuvarie-mcp.workspace = true
 similar = { version = "3", features = ["inline", "unicode"] }
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "process", "time"] }
 uuid.workspace = true
 yaml_serde.workspace = true
 
@@ -38,5 +39,6 @@ libc = "0.2"
 http.workspace = true
 jiff.workspace = true
 shuvarie-lsp.workspace = true
+shuvarie-mcp = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 tokio.workspace = true

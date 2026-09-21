@@ -137,6 +137,16 @@ pub enum Command {
         all: bool,
         filter: Option<String>,
     },
+    /// Snapshot the configured MCP servers' states and report
+    /// [`crate::Event::McpStatus`] (`/mcp`).
+    McpList,
+    /// Force a fresh connection to an MCP server, dropping any existing one.
+    /// Reports [`crate::Event::McpStatus`] on success; on failure
+    /// [`crate::Event::McpError`] plus a status snapshot in which the server
+    /// carries its failure detail.
+    McpReconnect {
+        name: String,
+    },
     /// Fetch the hosted (Selune) provider registry on demand. Reports
     /// [`Event::RegistryLoaded`] or [`Event::RegistryError`].
     FetchRegistry,

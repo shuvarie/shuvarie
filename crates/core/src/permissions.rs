@@ -116,6 +116,9 @@ pub enum AskScope {
     Path(PathBuf),
     /// The exact command line, whitespace runs collapsed.
     Shell(String),
+    /// The agent-facing tool name (e.g. `fetch-json`, `mcp__server__tool`);
+    /// covers every later call of that tool.
+    Tool(String),
 }
 
 /// Session-scoped memory behind the "allow for this session" answer: the
@@ -361,6 +364,16 @@ impl Permissions {
         verb_decision(fallback, reason)
     }
 
+    /// The decision for an agent-facing tool call (`tool`-defined and MCP
+    /// tools). No dedicated tool-name rules exist yet — a rule scope for
+    /// tools can be added later — so the top-level default verb decides.
+    pub fn check_tool(&self, _tool: &str) -> Decision {
+        verb_decision(
+            self.default,
+            format!("permissions default: {}-all", self.default.as_str()),
+        )
+    }
+
     /// Runs a permission check and, for `ask` decisions, pauses on `gate`
     /// until the user answers. Every denial — a matched `deny` rule or a user
     /// rejection — triggers `cut` (the turn ends like a user cancel) and is
@@ -434,6 +447,41 @@ impl Permissions {
                 let description = format!("Allow running this command?\n{command}\n{reason}");
                 let scope = AskScope::Shell(collapse_whitespace(command));
                 match gate.request(description, Some(scope)).await {
+                    Ok(true) => Ok(()),
+                    Ok(false) => {
+                        cut.trigger();
+                        Err(format!("permission denied by the user: {reason}"))
+                    }
+                    Err(err) => Err(err),
+                }
+            }
+        }
+    }
+
+    /// The ask-aware authorization of a configured (`tool`) or MCP tool call:
+    /// `tool` is the agent-facing name, `detail` the human-facing summary of
+    /// this specific call (rendered command line or arguments).
+    pub async fn authorize_tool(
+        &self,
+        gate: &PermissionGate,
+        cut: &DenyCut,
+        tool: &str,
+        detail: &str,
+        scene_ask: Option<&str>,
+    ) -> Result<(), String> {
+        let decision = compose_scene_ask(scene_ask, self.check_tool(tool));
+        match decision {
+            Decision::Allow => Ok(()),
+            Decision::Deny { reason } => {
+                cut.trigger();
+                Err(format!("permission denied: {reason}"))
+            }
+            Decision::Ask { reason } => {
+                let description = format!("Allow tool `{tool}`?\n{detail}\n{reason}");
+                match gate
+                    .request(description, Some(AskScope::Tool(tool.to_string())))
+                    .await
+                {
                     Ok(true) => Ok(()),
                     Ok(false) => {
                         cut.trigger();
@@ -660,6 +708,21 @@ impl Access {
                 &self.gate,
                 &self.deny_cut,
                 command,
+                self.scene_ask.as_deref(),
+            )
+            .await
+    }
+
+    /// Authorizes a configured (`tool`) or MCP tool call by its agent-facing
+    /// name, with a human-readable summary of this call (see
+    /// [`Permissions::authorize_tool`]).
+    pub async fn authorize_tool(&self, tool: &str, detail: &str) -> Result<(), String> {
+        self.permissions
+            .authorize_tool(
+                &self.gate,
+                &self.deny_cut,
+                tool,
+                detail,
                 self.scene_ask.as_deref(),
             )
             .await
@@ -1369,6 +1432,62 @@ mod tests {
         ));
         request.respond.send(PermissionAnswer::Allow).ok();
         assert!(other.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn tool_ask_denies_and_session_grants_by_name() {
+        let (tx, mut rx) = mpsc::channel::<PermissionRequest>(8);
+        let gate = PermissionGate::new(tx);
+        let cut = DenyCut::default();
+        // The default verb drives tool authorization (there are no
+        // tool-specific rule sets yet).
+        let perms = std::sync::Arc::new(config_scoped(Some(Verb::Ask), None, vec![], None, vec![]));
+
+        // A user rejection denies the call and cuts the turn.
+        let denied = {
+            let perms = perms.clone();
+            let gate = gate.clone();
+            let cut = cut.clone();
+            tokio::spawn(async move {
+                perms
+                    .authorize_tool(&gate, &cut, "fetch-json", "Command: `curl …`", None)
+                    .await
+            })
+        };
+        let request = rx.recv().await.unwrap();
+        assert!(request.description.contains("Allow tool `fetch-json`?"));
+        assert!(request.description.contains("Command: `curl …`"));
+        assert!(matches!(
+            request.scope,
+            Some(AskScope::Tool(ref name)) if name == "fetch-json"
+        ));
+        request.respond.send(PermissionAnswer::Deny).ok();
+        let err = denied.await.unwrap().unwrap_err();
+        assert!(err.contains("permission denied by the user"), "{err}");
+        assert!(cut.is_set(), "a user rejection must flag the turn cut");
+
+        // An "allow for this session" answer grants the tool for the session.
+        let granted = {
+            let perms = perms.clone();
+            let gate = gate.clone();
+            let cut = cut.clone();
+            tokio::spawn(async move {
+                perms
+                    .authorize_tool(&gate, &cut, "fetch-json", "second call", None)
+                    .await
+            })
+        };
+        let request = rx.recv().await.unwrap();
+        request.respond.send(PermissionAnswer::AllowSession).ok();
+        granted.await.unwrap().unwrap();
+        perms
+            .authorize_tool(&gate, &cut, "fetch-json", "third call", None)
+            .await
+            .unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "a session grant must cover the tool name"
+        );
     }
 
     #[tokio::test]

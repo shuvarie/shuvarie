@@ -245,6 +245,9 @@ struct CoreCtx {
     clients: HashMap<String, ProviderClient>,
     embedding_setup: Option<EmbeddingSetup>,
     lsp: std::sync::Arc<tokio::sync::Mutex<shuvarie_lsp::LspManager>>,
+    /// The configured MCP servers; connected lazily on first use, tools
+    /// bridged into the roster per turn.
+    mcp: shuvarie_mcp::SharedMcpManager,
     active_stream: Option<AbortHandle>,
     turn_state: Option<Arc<Mutex<TurnState>>>,
     event_tx: Sender<Event>,
@@ -354,6 +357,7 @@ pub async fn run(
         lsp_config.enabled,
         lsp_config.resolve(),
     )));
+    let mcp = crate::mcp_manager::mcp_manager(&config.tools.mcp);
     let mut lsp_pump_tick = tokio::time::interval(std::time::Duration::from_millis(500));
     lsp_pump_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Don't fire immediately on the first tick.
@@ -405,6 +409,14 @@ pub async fn run(
         })
         .await;
 
+    // Seed the sidebar's MCP section: every configured server shows as
+    // `Configured` until its first connect (no I/O here — just the specs).
+    let _ = event_tx
+        .send(Event::McpStatus {
+            servers: mcp.lock().await.status_snapshot(),
+        })
+        .await;
+
     let manager_turns = config.agent.effective_max_turns();
     let worker_turns = config.agent.effective_worker_max_turns();
     let max_output_chars = config.context.tool_output_max_chars;
@@ -415,6 +427,7 @@ pub async fn run(
         clients,
         embedding_setup,
         lsp,
+        mcp,
         active_stream: None,
         turn_state: None,
         event_tx,
@@ -1264,6 +1277,22 @@ pub async fn run(
                         // not as a dedicated event; the tool returns it directly.
                         let _ = text;
                     }
+                    Command::McpList => {
+                        let mgr = ctx.mcp.lock().await;
+                        emit_mcp_status(&mgr, &ctx.event_tx).await;
+                    }
+                    Command::McpReconnect { name } => {
+                        let mut mgr = ctx.mcp.lock().await;
+                        match mgr.reconnect(&name).await {
+                            Ok(()) => emit_mcp_status(&mgr, &ctx.event_tx).await,
+                            Err(error) => {
+                                // The error notice plus a snapshot in which
+                                // the server carries its failure detail.
+                                let _ = ctx.event_tx.send(Event::McpError { error }).await;
+                                emit_mcp_status(&mgr, &ctx.event_tx).await;
+                            }
+                        }
+                    }
                 }
             }
             _ = lsp_pump_tick.tick(), if ctx.lsp.try_lock().map(|m| m.has_active_servers()).unwrap_or(false) => {
@@ -1410,6 +1439,7 @@ pub async fn run(
     release_active_lock(&mut ctx).await;
 
     ctx.lsp.lock().await.shutdown_all().await;
+    ctx.mcp.lock().await.shutdown_all();
 }
 
 fn now_ms() -> i64 {
@@ -1430,6 +1460,14 @@ const SEARCH_LIMIT: u64 = 50;
 async fn emit_lsp_status(mgr: &shuvarie_lsp::LspManager, event_tx: &Sender<Event>) {
     let _ = event_tx
         .send(Event::LspStatus {
+            servers: mgr.status_snapshot(),
+        })
+        .await;
+}
+
+async fn emit_mcp_status(mgr: &shuvarie_mcp::McpManager, event_tx: &Sender<Event>) {
+    let _ = event_tx
+        .send(Event::McpStatus {
             servers: mgr.status_snapshot(),
         })
         .await;
@@ -2007,6 +2045,30 @@ impl CoreCtx {
         let (shell_tx, shell_rx) = tokio::sync::mpsc::channel::<crate::tools::ShellChunk>(64);
         let file_locks = crate::tools::FileLocks::new();
         let tool_scene = scene.tools();
+        // Connect the configured MCP servers before the roster is built so
+        // their tools are offered this turn; a server that fails to connect
+        // is skipped (surfacing of the failures arrives with the MCP
+        // lifecycle events). Also snapshot the roster: the descriptor set is
+        // read sync-side in `all_tools`.
+        let (mcp_roster, _mcp_errors) = {
+            let mut manager = self.mcp.lock().await;
+            let mut errors = Vec::new();
+            for name in manager.specs().keys().cloned().collect::<Vec<_>>() {
+                if let Err(error) = manager.ensure_connected(&name).await {
+                    errors.push(format!("MCP server '{name}': {error}"));
+                }
+            }
+            // Surface the connect pass: connected servers (with their tool
+            // counts) show in the sidebar, failures show their per-server
+            // error line.
+            let _ = self
+                .event_tx
+                .send(Event::McpStatus {
+                    servers: manager.status_snapshot(),
+                })
+                .await;
+            (manager.roster(), errors)
+        };
         let tools = crate::tools::all_tools(
             self.lsp.clone(),
             file_locks.clone(),
@@ -2021,6 +2083,9 @@ impl CoreCtx {
             &tool_scene,
             web_search,
             &self.skills,
+            &self.config.tools.tools,
+            Some(&self.mcp),
+            &mcp_roster,
         );
         let catalog_provider = crate::catalog::providers();
         let catalog_provider = self

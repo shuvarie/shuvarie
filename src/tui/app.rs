@@ -144,6 +144,12 @@ pub enum AppMessage {
     LspError {
         error: String,
     },
+    McpStatus {
+        servers: Vec<shuvarie_core::McpStatus>,
+    },
+    McpError {
+        error: String,
+    },
     SkillsLoaded {
         skills: Vec<shuvarie_core::Skill>,
         warnings: Vec<shuvarie_core::SkillWarning>,
@@ -744,6 +750,8 @@ impl App {
                     Some(AppMessage::LspDiagnostics { path, diagnostics })
                 }
                 CoreEvent::LspError { error } => Some(AppMessage::LspError { error }),
+                CoreEvent::McpStatus { servers } => Some(AppMessage::McpStatus { servers }),
+                CoreEvent::McpError { error } => Some(AppMessage::McpError { error }),
                 CoreEvent::SkillsLoaded { skills, warnings } => {
                     Some(AppMessage::SkillsLoaded { skills, warnings })
                 }
@@ -1339,6 +1347,14 @@ impl App {
             AppMessage::LspError { error } => {
                 self.session.update(SessionMessage::ShowError { error });
             }
+            AppMessage::McpStatus { servers } => {
+                self.session
+                    .sidebar
+                    .update(SidebarMessage::UpdateMcp { servers });
+            }
+            AppMessage::McpError { error } => {
+                self.session.update(SessionMessage::ShowError { error });
+            }
             AppMessage::SkillsLoaded { skills, warnings } => {
                 self.session.sidebar.update(SidebarMessage::UpdateSkills {
                     skills: skills.clone(),
@@ -1651,6 +1667,22 @@ impl App {
             }
             CommandAction::Reload => {
                 self.ctx.send(shuvarie_core::Command::Reload);
+            }
+            CommandAction::McpServers => {
+                self.ctx.send(shuvarie_core::Command::McpList);
+            }
+            CommandAction::McpReconnect => {
+                match args.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+                    Some(name) => {
+                        self.ctx
+                            .send(shuvarie_core::Command::McpReconnect { name: name.into() });
+                    }
+                    None => {
+                        self.session.update(SessionMessage::ShowError {
+                            error: "usage: /mcp-reconnect <server>".into(),
+                        });
+                    }
+                }
             }
             CommandAction::ToggleSidebar => {
                 self.session.sidebar.update(SidebarMessage::Toggle);

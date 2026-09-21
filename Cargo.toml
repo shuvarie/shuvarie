@@ -82,6 +82,7 @@ jiff = "0.2"
 kdl = "6.7"
 regex = "1"
 reqwest = "0.13"
+rmcp = { version = "3.4", default-features = false }
 selune = { path = "vendor/selune", version = "0.1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -91,6 +92,7 @@ shuvarie-db = { path = "crates/db", version = "0.2" }
 shuvarie-highlight = { path = "crates/highlight", version = "0.2" }
 shuvarie-llm = { path = "crates/llm", version = "0.2" }
 shuvarie-lsp = { path = "crates/lsp", version = "0.2" }
+shuvarie-mcp = { path = "crates/mcp", version = "0.2" }
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

@@ -594,6 +594,170 @@ pub struct ToolsConfig {
     /// backend. `None` (section absent) keeps the built-in DuckDuckGo Lite
     /// default; `Some` with `disabled` set registers no tool.
     pub web_search: Option<WebSearchConfig>,
+
+    /// `tools { tool name="…" { … } }` — user-defined one-shot subprocess
+    /// tools: every call spawns a fresh process running the templated `cmd`.
+    /// Names must be unique, may not start with `mcp__` (reserved for MCP
+    /// tools), and may not shadow a built-in tool (enforced where tools are
+    /// registered).
+    pub tools: BTreeMap<String, StdioToolConfig>,
+
+    /// `tools { mcp { … } }` — MCP servers providing tools over the stdio or
+    /// streamable-HTTP transport. Empty registers none.
+    pub mcp: McpConfig,
+}
+
+/// The per-call timeout of a `tool` when `timeout` is omitted, in seconds.
+pub const TOOL_DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/// A user-defined tool: one templated command line, the declared params
+/// forming the tool's JSON input schema, and the child-process environment.
+/// Each call spawns a fresh process; nothing is kept alive between calls.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StdioToolConfig {
+    /// The model-facing description; `None` lets the tool supply a fallback.
+    pub description: Option<String>,
+
+    /// Full argv. Elements may reference declared params with `{{param}}`
+    /// templates; every reference must name a declared param (validated at
+    /// parse time). Text that is not a valid `{{name}}` stays literal.
+    pub cmd: Vec<String>,
+
+    /// `input "json"` — pipe the resolved args object to the child's stdin
+    /// as JSON in addition to the templated argv.
+    pub input: Option<ToolInputKind>,
+
+    /// Per-call timeout in seconds; `0` is rejected at parse time.
+    pub timeout_secs: u64,
+
+    /// Param name → schema. Drives the tool's JSON input schema and the
+    /// `{{param}}` templates in `cmd`.
+    pub params: BTreeMap<String, ToolParam>,
+
+    /// The child-process environment.
+    pub envs: EnvsConfig,
+}
+
+impl Default for StdioToolConfig {
+    fn default() -> Self {
+        Self {
+            description: None,
+            cmd: Vec::new(),
+            input: None,
+            timeout_secs: TOOL_DEFAULT_TIMEOUT_SECS,
+            params: BTreeMap::new(),
+            envs: EnvsConfig::default(),
+        }
+    }
+}
+
+/// How extra call input reaches a `tool`'s child process beyond the templated
+/// argv.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolInputKind {
+    /// Pipe the resolved args object to the child's stdin as JSON.
+    Json,
+}
+
+impl ToolInputKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Json => "json",
+        }
+    }
+}
+
+/// One declared `tool` parameter: its JSON-schema `type` plus optionality.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolParam {
+    pub kind: ToolParamKind,
+    /// Required params are listed in the schema's `required` array; others
+    /// may be omitted by the model.
+    pub required: bool,
+    pub description: Option<String>,
+}
+
+/// The JSON-schema type of a declared `tool` parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolParamKind {
+    String,
+    Integer,
+    Number,
+    Boolean,
+}
+
+impl ToolParamKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::Integer => "integer",
+            Self::Number => "number",
+            Self::Boolean => "boolean",
+        }
+    }
+}
+
+/// The environment a spawned process (`tool`, MCP stdio server) runs with:
+/// `inherit` selects whether the parent's environment is passed through, and
+/// `entries` adds overrides and additions on top. Values may carry `$VAR` /
+/// `${VAR}` placeholders resolved from the environment when the process is
+/// spawned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvsConfig {
+    pub inherit: bool,
+    pub entries: BTreeMap<String, String>,
+}
+
+impl Default for EnvsConfig {
+    fn default() -> Self {
+        Self {
+            inherit: true,
+            entries: BTreeMap::new(),
+        }
+    }
+}
+
+impl EnvsConfig {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// `tools { mcp { … } }`: MCP servers. Server names are unique across both
+/// transports because the generated tool names are `mcp__<server>__<tool>`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct McpConfig {
+    /// `stdio name="…" { command …; args …; envs … }` servers.
+    pub stdio: BTreeMap<String, McpStdioConfig>,
+
+    /// `http name="…" { url …; headers … }` servers (streamable HTTP).
+    pub http: BTreeMap<String, McpHttpConfig>,
+}
+
+impl McpConfig {
+    pub fn is_empty(&self) -> bool {
+        self.stdio.is_empty() && self.http.is_empty()
+    }
+}
+
+/// An MCP server spawned as a child process (the `stdio` transport).
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpStdioConfig {
+    /// The executable; not templated.
+    pub command: String,
+    /// Static argv elements passed after the command; not templated.
+    pub args: Vec<String>,
+    pub envs: EnvsConfig,
+}
+
+/// An MCP server reached over streamable HTTP.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpHttpConfig {
+    /// Must start with `http://` or `https://`.
+    pub url: String,
+    /// Sent with every request. Values may carry `$VAR` / `${VAR}` resolved
+    /// from the environment when the client is built.
+    pub headers: BTreeMap<String, String>,
 }
 
 impl ToolsConfig {
@@ -3340,6 +3504,294 @@ mod tests {
     }
 
     #[test]
+    fn tool_full_example() {
+        let text = r#"
+            tools {
+                tool name="fetch-json" {
+                    description "Fetch a URL and return the JSON body"
+
+                    cmd "curl" "-sS" "{{url}}"
+                    input "json"
+                    timeout 90
+
+                    params {
+                        param "url" type="string" required=#true description="The URL to fetch"
+                        param "limit" type="integer" description="Max entries"
+                    }
+
+                    envs inherit=#false {
+                        env "AUTH" "$AUTH_TOKEN"
+                    }
+                }
+
+                tool name="ping" {
+                    cmd "echo" "pong"
+                }
+            }
+        "#;
+        let parsed = config_kdl::from_kdl(text).unwrap();
+        assert_eq!(parsed.tools.tools.len(), 2);
+        let fetch = parsed.tools.tools.get("fetch-json").expect("fetch-json");
+        assert_eq!(
+            fetch.description.as_deref(),
+            Some("Fetch a URL and return the JSON body")
+        );
+        assert_eq!(fetch.cmd, ["curl", "-sS", "{{url}}"]);
+        assert_eq!(fetch.input, Some(ToolInputKind::Json));
+        assert_eq!(fetch.timeout_secs, 90);
+        let url_param = fetch.params.get("url").expect("url param");
+        assert_eq!(url_param.kind, ToolParamKind::String);
+        assert!(url_param.required);
+        assert_eq!(url_param.description.as_deref(), Some("The URL to fetch"));
+        let limit_param = fetch.params.get("limit").expect("limit param");
+        assert_eq!(limit_param.kind, ToolParamKind::Integer);
+        assert!(!limit_param.required);
+        assert_eq!(limit_param.description.as_deref(), Some("Max entries"));
+        assert!(!fetch.envs.inherit);
+        assert_eq!(
+            fetch.envs.entries.get("AUTH").map(String::as_str),
+            Some("$AUTH_TOKEN")
+        );
+        let ping = parsed.tools.tools.get("ping").expect("ping");
+        assert_eq!(ping.cmd, ["echo", "pong"]);
+        assert_eq!(ping.description, None);
+        assert_eq!(ping.input, None);
+        assert_eq!(ping.timeout_secs, TOOL_DEFAULT_TIMEOUT_SECS);
+        assert!(ping.params.is_empty());
+        assert!(ping.envs.inherit, "omitted envs inherit the parent env");
+        assert!(ping.envs.entries.is_empty());
+
+        let text = config_kdl::to_kdl(&parsed).unwrap();
+        let reparsed = config_kdl::from_kdl(&text).unwrap();
+        assert_eq!(parsed, reparsed);
+    }
+
+    #[test]
+    fn tool_to_kdl_omits_defaults() {
+        let mut config = Config::default();
+        config.tools.tools.insert(
+            "ping".to_string(),
+            StdioToolConfig {
+                cmd: vec!["echo".to_string(), "pong".to_string()],
+                ..StdioToolConfig::default()
+            },
+        );
+        let text = config_kdl::to_kdl(&config).unwrap();
+        assert!(text.contains("tool name=ping"), "body: {text}");
+        assert!(text.contains("cmd echo pong"), "body: {text}");
+        assert!(!text.contains("timeout"), "default timeout omitted: {text}");
+        assert!(!text.contains("envs"), "default envs omitted: {text}");
+        assert!(!text.contains("params"), "absent params omitted: {text}");
+        let parsed = config_kdl::from_kdl(&text).unwrap();
+        assert_eq!(parsed, config);
+    }
+
+    #[test]
+    fn mcp_stdio_and_http_example() {
+        let text = r#"
+            tools {
+                mcp {
+                    stdio name="github" {
+                        command "npx"
+                        args "-y" "@modelcontextprotocol/server-github"
+
+                        envs inherit=#false {
+                            env "GITHUB_TOKEN" "$GITHUB_TOKEN"
+                        }
+                    }
+
+                    http name="deepwiki" {
+                        url "https://mcp.deepwiki.com/mcp"
+
+                        headers {
+                            Authorization "Bearer $DEEPWIKI_TOKEN"
+                        }
+                    }
+                }
+            }
+        "#;
+        let parsed = config_kdl::from_kdl(text).unwrap();
+        let stdio = parsed.tools.mcp.stdio.get("github").expect("github");
+        assert_eq!(stdio.command, "npx");
+        assert_eq!(stdio.args, ["-y", "@modelcontextprotocol/server-github"]);
+        assert!(!stdio.envs.inherit);
+        assert_eq!(
+            stdio.envs.entries.get("GITHUB_TOKEN").map(String::as_str),
+            Some("$GITHUB_TOKEN")
+        );
+        let http = parsed.tools.mcp.http.get("deepwiki").expect("deepwiki");
+        assert_eq!(http.url, "https://mcp.deepwiki.com/mcp");
+        assert_eq!(
+            http.headers.get("Authorization").map(String::as_str),
+            Some("Bearer $DEEPWIKI_TOKEN")
+        );
+
+        let text = config_kdl::to_kdl(&parsed).unwrap();
+        let reparsed = config_kdl::from_kdl(&text).unwrap();
+        assert_eq!(parsed, reparsed);
+    }
+
+    #[test]
+    fn tool_and_mcp_parse_errors() {
+        let cases: &[(&str, &str)] = &[
+            // tool entries
+            (
+                "tools { tool { cmd \"echo\" } }",
+                "requires a `name` property",
+            ),
+            (
+                "tools { tool name=\"bad name\" { cmd \"echo\" } }",
+                "letters, digits",
+            ),
+            (
+                "tools { tool name=\"mcp__x\" { cmd \"echo\" } }",
+                "reserved for MCP tools",
+            ),
+            (
+                "tools { tool name=\"a\" { cmd \"echo\" }; tool name=\"a\" { cmd \"echo\" } }",
+                "duplicate",
+            ),
+            ("tools { tool name=\"a\" }", "requires a `cmd`"),
+            (
+                "tools { tool name=\"a\" { cmd \"echo\" \"{{url}}\" } }",
+                "no `param` named `url`",
+            ),
+            (
+                "tools { tool name=\"a\" { cmd \"echo\"; timeout 0 } }",
+                "at least one second",
+            ),
+            (
+                "tools { tool name=\"a\" { cmd \"echo\"; input \"text\" } }",
+                "`input` must be `json`",
+            ),
+            (
+                "tools { tool name=\"a\" { cmd \"echo\"; input } }",
+                "takes a single string value",
+            ),
+            (
+                "tools { tool name=\"a\" { cmd \"echo\"; params { param \"u\" } } }",
+                "requires a `type` property",
+            ),
+            (
+                "tools { tool name=\"a\" { cmd \"echo\"; params { param \"u\" type=\"list\" } } }",
+                "`string`, `integer`",
+            ),
+            (
+                "tools { tool name=\"a\" { cmd \"echo\"; params { param \"u\" type=\"string\"; param \"u\" type=\"string\" } } }",
+                "duplicate",
+            ),
+            (
+                "tools { tool name=\"a\" { cmd \"echo {{u}}\"; params { param \"bad name\" type=\"string\" } } }",
+                "must contain only letters",
+            ),
+            (
+                "tools { tool name=\"a\" { cmd \"echo\"; params { flag \"x\" } } }",
+                "declare parameters with",
+            ),
+            (
+                "tools { tool name=\"a\" { cmd \"echo\"; params { param \"u\" type=\"string\" extra=#true } } }",
+                "unknown property",
+            ),
+            (
+                "tools { tool name=\"a\" { cmd \"echo\"; envs { env \"BAD-NAME\" \"v\" } } }",
+                "not a valid environment variable name",
+            ),
+            (
+                "tools { tool name=\"a\" { cmd \"echo\"; envs { env \"A\" \"1\"; env \"A\" \"2\" } } }",
+                "duplicate",
+            ),
+            (
+                "tools { tool name=\"a\" { cmd \"echo\"; envs { env \"A\" \"1\" \"2\" } } }",
+                "two string arguments",
+            ),
+            (
+                "tools { tool name=\"a\" { cmd \"echo\"; envs nope=#true { env \"A\" \"1\" } } }",
+                "unknown property",
+            ),
+            // mcp entries
+            (
+                "tools { mcp { stdio name=\"s\" { } } }",
+                "requires a `command`",
+            ),
+            (
+                "tools { mcp { stdio name=\"s\" { command \"npx\" \"-y\" } } }",
+                "takes a single argument",
+            ),
+            (
+                "tools { mcp { stdio name=\"s\" { command \"npx\"; envs { env \"A B\" \"v\" } } } }",
+                "not a valid environment variable name",
+            ),
+            ("tools { mcp { http name=\"h\" { } } }", "requires a `url`"),
+            (
+                "tools { mcp { http name=\"h\" { url \"ftp://x\" } } }",
+                "must start with http",
+            ),
+            (
+                "tools { mcp { stdio name=\"s\" { command \"npx\" }; http name=\"s\" { url \"https://x\" } } }",
+                "duplicate",
+            ),
+            (
+                "tools { mcp { stdio name=\"s\" { command \"npx\" }; stdio name=\"s\" { command \"npx\" } } }",
+                "duplicate",
+            ),
+            (
+                "tools { mcp { stdio name=\"s\" { command \"npx\" }; stdio { command \"npx\" } } }",
+                "requires a `name` property",
+            ),
+            (
+                "tools { mcp { http name=\"h\" { url \"https://x\"; headers { Authorization \"a\"; Authorization \"b\" } } } }",
+                "duplicate",
+            ),
+            (
+                "tools { mcp { http name=\"h\" { url \"https://x\"; headers { \"Bad Header\" \"a\" } } } }",
+                "header",
+            ),
+        ];
+        for (text, needle) in cases {
+            let err = config_kdl::from_kdl(text).unwrap_err();
+            let ConfigError::Parse(parse_err) = err else {
+                panic!("expected config parse error for {text}");
+            };
+            assert!(
+                parse_err.message.contains(needle),
+                "{needle:?} not in {parse_err}"
+            );
+        }
+    }
+
+    #[test]
+    fn tools_layer_replaces_wholesale() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global.kdl");
+        let top = dir.path().join("shuvarie.kdl");
+        std::fs::write(
+            &global,
+            r#"
+            tools {
+                tool name="global-tool" { cmd "echo" "global" }
+                mcp {
+                    http name="global-mcp" { url "https://global.example" }
+                }
+            }
+        "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &top,
+            r#"
+            tools {
+                tool name="top-tool" { cmd "echo" "top" }
+            }
+        "#,
+        )
+        .unwrap();
+        let config = Config::load_chain(&[(global, false), (top, true)]).unwrap();
+        assert!(config.tools.tools.contains_key("top-tool"));
+        assert!(!config.tools.tools.contains_key("global-tool"));
+        assert!(config.tools.mcp.is_empty(), "top layer wins wholesale");
+    }
+
+    #[test]
     fn permissions_section_absent_is_builtin() {
         let parsed = config_kdl::from_kdl("").unwrap();
         assert_eq!(parsed.permissions, PermissionsConfig::builtin());
@@ -4848,7 +5300,7 @@ Now we're in Plan mode: plan first, no edits.
         let set = theme_set_from_levels(
             Some(global),
             vec![local],
-            &std::path::Path::new("missing"),
+            std::path::Path::new("missing"),
             &[],
         );
         let ayu = set.themes.theme("Ayu").unwrap();
@@ -4883,7 +5335,7 @@ Now we're in Plan mode: plan first, no edits.
         let set = theme_set_from_levels(
             Some(global),
             vec![first, second],
-            &std::path::Path::new("missing"),
+            std::path::Path::new("missing"),
             &[],
         );
         assert_eq!(
@@ -5147,7 +5599,7 @@ Now we're in Plan mode: plan first, no edits.
         let set = theme_set_from_levels(
             Some(global),
             vec![first, second],
-            &std::path::Path::new("missing"),
+            std::path::Path::new("missing"),
             &[],
         );
         assert_eq!(set.themes.defs("Ayu").len(), 1, "the base def survives");
@@ -5174,7 +5626,7 @@ Now we're in Plan mode: plan first, no edits.
         let set = theme_set_from_levels(
             Some(global),
             vec![local],
-            &std::path::Path::new("missing"),
+            std::path::Path::new("missing"),
             &[],
         );
         assert_eq!(set.themes.defs("Ayu").len(), 2);
