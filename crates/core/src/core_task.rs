@@ -146,11 +146,12 @@ fn is_busy(ctx: &CoreCtx, pending_retry: Option<&PendingRetry>) -> bool {
 
 /// Switches the active session's scene: refuses while a turn is busy, while
 /// the name does not resolve to a configured scene (`None` = the built-in
-/// Default), and — once the session has messages — for scenes without an
-/// interlude: the injected prompt is what tells the model the scene changed,
-/// so an interlude-less scene can only start a session. A switch before the
-/// first message picks the scene the session will start under (recording it
-/// even when no session exists yet). Persists the new value and reports
+/// Default, always switchable via its hard-coded interlude), and — once the
+/// session has messages — for configured scenes without an interlude: the
+/// injected prompt is what tells the model the scene changed, so an
+/// interlude-less scene can only start a session. A switch before the first
+/// message picks the scene the session will start under (recording it even
+/// when no session exists yet). Persists the new value and reports
 /// `SceneChanged`.
 async fn switch_scene(
     ctx: &mut CoreCtx,
@@ -165,7 +166,8 @@ async fn switch_scene(
             Some(config) => crate::scenes::is_switchable(config),
             None => return Some(format!("unknown scene `{name}`")),
         },
-        None => false,
+        // The built-in default scene carries the hard-coded default interlude.
+        None => true,
     };
     let Some(s) = &ctx.session else {
         // Before the first turn: only a concrete scene needs recording — an
@@ -189,15 +191,10 @@ async fn switch_scene(
         return None;
     }
     if has_messages && !switchable {
-        return Some(match name {
-            Some(name) => {
-                format!("scene `{name}` has no interlude; it cannot be entered mid-session")
-            }
-            None => format!(
-                "the built-in {} scene has no interlude; it cannot be entered mid-session",
-                crate::scenes::DEFAULT_SCENE_NAME
-            ),
-        });
+        let name = name.expect("an unswitchable scene is configured");
+        return Some(format!(
+            "scene `{name}` has no interlude; it cannot be entered mid-session"
+        ));
     }
     let session_id = s.lock().await.id;
     {
@@ -389,7 +386,7 @@ pub async fn run(
             id: None,
             name: crate::scenes::DEFAULT_SCENE_NAME.to_string(),
             description: Some(crate::scenes::DEFAULT_SCENE_DESCRIPTION.to_string()),
-            switchable: false,
+            switchable: true,
         }];
         for (name, scene) in &scene_set.scenes.scenes {
             entries.push(crate::scenes::SceneListEntry {

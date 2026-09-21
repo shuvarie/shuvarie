@@ -1525,29 +1525,36 @@ async fn switch_scene_persists_and_reports() {
         );
     }
 
-    // Mid-session, the interlude-less built-in scene is refused.
+    // Mid-session, the built-in Default switches back (its hard-coded
+    // default interlude keeps it switchable).
     cmd_tx
         .send(Command::SwitchScene { name: None })
         .await
         .unwrap();
     cmd_tx.send(Command::Ping).await.unwrap();
-    let mut saw_builtin_error = false;
+    let mut saw_builtin = false;
     for _ in 0..6 {
         match event_rx.recv().await {
-            Some(Event::SceneError { error }) => {
-                assert!(error.contains("no interlude"), "{error}");
-                assert!(error.contains("Default"), "{error}");
-                saw_builtin_error = true;
+            Some(Event::SceneChanged { name }) => {
+                assert_eq!(name, None, "the built-in scene switches by identity");
+                saw_builtin = true;
             }
             Some(Event::Pong) => break,
             Some(_) => {}
             None => panic!("core task stopped"),
         }
     }
-    assert!(
-        saw_builtin_error,
-        "the built-in scene is refused mid-session"
-    );
+    assert!(saw_builtin, "the built-in scene is switchable mid-session");
+    {
+        let stored = store
+            .load_session(session_id.expect("session created"))
+            .await
+            .unwrap();
+        assert_eq!(
+            stored.scene, None,
+            "switching to the built-in scene clears the stored name"
+        );
+    }
 
     // An interlude-bearing configured scene switches mid-session.
     cmd_tx

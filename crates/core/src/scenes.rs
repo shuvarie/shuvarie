@@ -4,8 +4,9 @@
 //! A scene is a named bundle from the `scenes` config section (plus the
 //! `scene.d` drop-ins): a system-prompt prelude/interlude, injected wrapper
 //! prompts, and tool availability. The built-in default scene is code, not
-//! config: it reproduces the unconfigured behavior and is the fallback when
-//! nothing else resolves.
+//! config: it reproduces the unconfigured behavior except for its hard-coded
+//! default interlude ([`DEFAULT_INTERLUDE`]), which makes it re-enterable in
+//! the middle of a session. It is the fallback when nothing else resolves.
 
 use std::collections::BTreeMap;
 
@@ -20,6 +21,17 @@ pub const DEFAULT_SCENE_NAME: &str = "Default";
 
 /// The built-in default scene's picker description.
 pub const DEFAULT_SCENE_DESCRIPTION: &str = "Built-in behavior, no scene configured";
+
+/// The built-in default scene's interlude, injected at the top of the outgoing
+/// history: it tells the model the earlier turns may have run under a scene
+/// with its own instructions or tool restrictions, and to keep going under the
+/// default behavior. Hedged because a session may also live its whole life
+/// under the built-in scene — the interlude rides every request either way,
+/// just like a configured scene's.
+pub const DEFAULT_INTERLUDE: &str = "The earlier turns of this session may have run under a different scene, \
+possibly with its own instructions or tool restrictions. Treat any scene-specific \
+constraints in the history as belonging to those earlier turns, and continue \
+under the default behavior.";
 
 /// One row of the scene switcher: the switch identity handed back to
 /// `Command::SwitchScene` (`None` = the built-in default scene) plus display
@@ -37,8 +49,9 @@ pub struct SceneListEntry {
 
 /// Whether the scene may be entered in the middle of a session: it has a
 /// non-empty interlude, the injected prompt that tells the model the scene
-/// changed. Scenes without one can only start a session (no prior context to
-/// explain), and the built-in default scene never carries an interlude.
+/// changed. Scenes without one can only start a session. Only configured
+/// scenes are asked — the built-in default scene carries the hard-coded
+/// [`DEFAULT_INTERLUDE`] and is always switchable.
 pub fn is_switchable(config: &SceneConfig) -> bool {
     config
         .system_prompts
@@ -93,11 +106,13 @@ impl Scene {
 
     /// The scene's interlude: injected at the top of the outgoing history on
     /// every request after a mid-session switch, so the model knows earlier
-    /// turns ran under a different scene.
+    /// turns ran under a different scene. The built-in default scene carries
+    /// the hard-coded [`DEFAULT_INTERLUDE`].
     pub fn interlude(&self) -> Option<&str> {
-        self.config
-            .as_ref()
-            .and_then(|c| c.system_prompts.interlude.as_deref())
+        match &self.config {
+            Some(c) => c.system_prompts.interlude.as_deref(),
+            None => Some(DEFAULT_INTERLUDE),
+        }
     }
 
     pub fn before_each(&self) -> Option<&Hooks> {
@@ -179,7 +194,8 @@ impl ToolScene {
 /// Wraps the outgoing history with the scene's injected prompts. The pending
 /// user prompt itself stays the plain `prompt` argument of the stream call,
 /// so its `before-each` hooks are appended as trailing system messages.
-/// Unconfigured scenes change nothing.
+/// The built-in default scene injects only its interlude; a configured scene
+/// without one changes nothing.
 ///
 /// Hooks fire around every prior user prompt / assistant reply. The turn
 /// markers wrap each turn: a turn starts with its user prompt (so
@@ -190,9 +206,6 @@ pub fn inject_history(
     prior: &[ChatMsg],
     pending_user: Option<&str>,
 ) -> Vec<ChatMsg> {
-    if scene.is_default() {
-        return prior.to_vec();
-    }
     let before = scene.before_each();
     let after = scene.after_each();
 
@@ -272,6 +285,7 @@ mod tests {
         assert_eq!(resolved.display_name(), DEFAULT_SCENE_NAME);
         assert_eq!(resolved.description(), None);
         assert_eq!(resolved.prelude(), None);
+        assert_eq!(resolved.interlude(), Some(DEFAULT_INTERLUDE));
         assert!(resolved.tools().allows("run_shell"));
         assert!(!resolved.tools().forces_ask("run_shell"));
     }
@@ -449,7 +463,17 @@ mod tests {
     fn injection_passes_default_history_through() {
         let prior = vec![ChatMsg::user("hi"), ChatMsg::assistant("hello")];
         let injected = inject_history(&Scene::default(), &prior, Some("next"));
-        assert_eq!(injected, prior);
+        assert_eq!(
+            injected,
+            vec![
+                ChatMsg::system(DEFAULT_INTERLUDE),
+                ChatMsg::user("hi"),
+                ChatMsg::assistant("hello"),
+            ],
+            "the built-in scene injects only its default interlude"
+        );
+        let empty = inject_history(&Scene::default(), &[], Some("next"));
+        assert_eq!(empty, vec![ChatMsg::system(DEFAULT_INTERLUDE)]);
     }
 
     #[test]

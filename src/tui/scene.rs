@@ -226,7 +226,7 @@ mod tests {
                 id: None,
                 name: shuvarie_core::scenes::DEFAULT_SCENE_NAME.to_string(),
                 description: Some("built-in".into()),
-                switchable: false,
+                switchable: true,
             },
             SceneListEntry {
                 id: Some("Plan".into()),
@@ -243,13 +243,30 @@ mod tests {
                 id: None,
                 name: shuvarie_core::scenes::DEFAULT_SCENE_NAME.to_string(),
                 description: Some("built-in".into()),
-                switchable: false,
+                switchable: true,
             },
             SceneListEntry {
                 id: Some("Default".into()),
                 name: "Default".into(),
                 description: Some("custom default".into()),
                 switchable: true,
+            },
+        ]
+    }
+
+    fn entries_with_start_only() -> Vec<SceneListEntry> {
+        vec![
+            SceneListEntry {
+                id: None,
+                name: shuvarie_core::scenes::DEFAULT_SCENE_NAME.to_string(),
+                description: Some("built-in".into()),
+                switchable: true,
+            },
+            SceneListEntry {
+                id: Some("Draft".into()),
+                name: "Draft".into(),
+                description: Some("no interlude".into()),
+                switchable: false,
             },
         ]
     }
@@ -318,14 +335,21 @@ mod tests {
     }
 
     #[test]
-    fn mid_session_opens_dim_interlude_less_rows() {
+    fn mid_session_keeps_the_builtin_switchable() {
         let mut picker = ScenePicker::new();
         picker.open(entries(), Some("Plan"), true);
         assert!(
-            !picker.entries[0].switchable,
-            "the built-in row is start-only"
+            picker.entries[0].switchable,
+            "the built-in row carries the default interlude"
         );
         assert!(picker.entries[1].switchable, "Plan carries an interlude");
+    }
+
+    #[test]
+    fn mid_session_dims_interlude_less_rows() {
+        let mut picker = ScenePicker::new();
+        picker.open(entries_with_start_only(), Some("Draft"), true);
+        assert!(!picker.entries[1].switchable, "Draft stays start-only");
     }
 
     #[test]
