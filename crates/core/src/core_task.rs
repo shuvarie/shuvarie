@@ -151,7 +151,9 @@ fn is_busy(ctx: &CoreCtx, pending_retry: Option<&PendingRetry>) -> bool {
 /// injected prompt is what tells the model the scene changed, so an
 /// interlude-less scene can only start a session. A switch before the first
 /// message picks the scene the session will start under (recording it even
-/// when no session exists yet). Persists the new value and reports
+/// when no session exists yet). Only the in-memory scene moves here: the DB
+/// persist is deferred to the first request under the new scene, which is
+/// also where the interlude is injected once (`self_replay_send`). Reports
 /// `SceneChanged`.
 async fn switch_scene(
     ctx: &mut CoreCtx,
@@ -196,15 +198,9 @@ async fn switch_scene(
             "scene `{name}` has no interlude; it cannot be entered mid-session"
         ));
     }
-    let session_id = s.lock().await.id;
     {
         let mut guard = s.lock().await;
         guard.scene = name.clone();
-    }
-    if let Some(session_id) = session_id
-        && let Err(e) = ctx.store.set_scene(session_id, name.as_deref()).await
-    {
-        return Some(format!("failed to persist the scene: {e}"));
     }
     let _ = ctx.event_tx.send(Event::SceneChanged { name }).await;
     None
@@ -1794,6 +1790,10 @@ impl CoreCtx {
                         guard.id = Some(id);
                         guard.title = Some(title.clone());
                         guard.scene = scene.clone();
+                        // The row starts under this scene, so it is already
+                        // announced: the first request injects no interlude
+                        // for it.
+                        guard.announced_scene = scene.clone();
                         match self.store.acquire_session_lock(id, now_ms()).await {
                             Ok(LockAcquire::Acquired | LockAcquire::Ours) => {
                                 self.locked_session = Some(id);
@@ -1990,15 +1990,44 @@ impl CoreCtx {
                 return;
             }
         };
-        let (prior, todo_records, stored_scene) = {
+        let (prior, todo_records, stored_scene, announced_scene, session_id) = {
             let guard = s.lock().await;
             (
                 guard.history_for_send(),
                 guard.tool_records.clone(),
                 guard.scene.clone(),
+                guard.announced_scene.clone(),
+                guard.id,
             )
         };
         let scene = crate::scenes::Scene::resolve(&self.scenes, stored_scene.as_deref());
+        // The scene announce: the current scene differs from the last
+        // announced one only inside the deferral window after a mid-session
+        // switch. The first request under the new scene injects the
+        // interlude (what tells the model) and makes the switch durable;
+        // updating the mirror keeps later requests interlude-free. A failed
+        // persist leaves the mirror stale — the interlude still rides this
+        // request, and the next one retries the write.
+        let announce = stored_scene != announced_scene;
+        if announce {
+            match session_id {
+                Some(id) => match self.store.set_scene(id, stored_scene.as_deref()).await {
+                    Ok(()) => s.lock().await.announced_scene = stored_scene.clone(),
+                    Err(e) => {
+                        let _ = self
+                            .event_tx
+                            .send(Event::SceneError {
+                                error: format!("failed to persist the scene: {e}"),
+                            })
+                            .await;
+                    }
+                },
+                // No row yet (a pre-picked scene before its first turn):
+                // the first turn's `create_session` records the scene, so
+                // the mirror simply follows.
+                None => s.lock().await.announced_scene = stored_scene.clone(),
+            }
+        }
         let todo_state = crate::tools::todos::TodoState::from_records(&todo_records);
         let agents_md = crate::context::load_agents_md(&self.workspace_root, &self.trust);
         let agents_budget = agents_md.remaining_budget();
@@ -2110,7 +2139,7 @@ impl CoreCtx {
             web_search,
             &self.skills,
         );
-        let prior = crate::scenes::inject_history(&scene, &prior, Some(&content));
+        let prior = crate::scenes::inject_history(&scene, &prior, Some(&content), announce);
         let stream = client
             .stream(
                 &model,

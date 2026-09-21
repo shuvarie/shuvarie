@@ -81,6 +81,13 @@ pub struct Session {
     pub leaf_id: Option<u64>,
     /// The session's active scene; `None` = the built-in default scene.
     pub scene: Option<String>,
+    /// The scene the model was last told about — what the DB `sessions.scene`
+    /// column holds. Differs from `scene` only inside the deferral window
+    /// after a mid-session switch: the switch moves `scene` at once, while
+    /// the announce (interlude injection + DB write) waits for the first
+    /// request under it. Seeded from storage on load and kept in step by the
+    /// announce.
+    pub announced_scene: Option<String>,
     /// Usage of the most recent main-stream request, restored from storage so
     /// a loaded session can re-seed the sidebar's context anchor and read/
     /// cache-hit metrics. Not maintained by the live turn loop (which reports
@@ -177,6 +184,7 @@ impl Session {
             id: Some(stored.id),
             title: Some(stored.title),
             leaf_id: path_ids.last().copied(),
+            announced_scene: stored.scene.clone(),
             scene: stored.scene,
             scroll: stored.scroll,
             ..Self::default()
@@ -244,6 +252,7 @@ impl Session {
         self.nodes.clear();
         self.leaf_id = None;
         self.scene = None;
+        self.announced_scene = None;
         self.last_usage = None;
         self.scroll = StoredScroll::default();
     }

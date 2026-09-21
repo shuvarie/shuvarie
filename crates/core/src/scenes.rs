@@ -23,11 +23,10 @@ pub const DEFAULT_SCENE_NAME: &str = "Default";
 pub const DEFAULT_SCENE_DESCRIPTION: &str = "Built-in behavior, no scene configured";
 
 /// The built-in default scene's interlude, injected at the top of the outgoing
-/// history: it tells the model the earlier turns may have run under a scene
-/// with its own instructions or tool restrictions, and to keep going under the
-/// default behavior. Hedged because a session may also live its whole life
-/// under the built-in scene — the interlude rides every request either way,
-/// just like a configured scene's.
+/// history of the first request after the built-in scene is entered
+/// mid-session: it tells the model the earlier turns may have run under a
+/// scene with its own instructions or tool restrictions, and to keep going
+/// under the default behavior.
 pub const DEFAULT_INTERLUDE: &str = "The earlier turns of this session may have run under a different scene, \
 possibly with its own instructions or tool restrictions. Treat any scene-specific \
 constraints in the history as belonging to those earlier turns, and continue \
@@ -104,10 +103,10 @@ impl Scene {
             .and_then(|c| c.system_prompts.prelude.as_deref())
     }
 
-    /// The scene's interlude: injected at the top of the outgoing history on
-    /// every request after a mid-session switch, so the model knows earlier
-    /// turns ran under a different scene. The built-in default scene carries
-    /// the hard-coded [`DEFAULT_INTERLUDE`].
+    /// The scene's interlude: injected at the top of the outgoing history of
+    /// the first request after a mid-session switch, so the model knows
+    /// earlier turns ran under a different scene. The built-in default scene
+    /// carries the hard-coded [`DEFAULT_INTERLUDE`].
     pub fn interlude(&self) -> Option<&str> {
         match &self.config {
             Some(c) => c.system_prompts.interlude.as_deref(),
@@ -194,8 +193,12 @@ impl ToolScene {
 /// Wraps the outgoing history with the scene's injected prompts. The pending
 /// user prompt itself stays the plain `prompt` argument of the stream call,
 /// so its `before-each` hooks are appended as trailing system messages.
-/// The built-in default scene injects only its interlude; a configured scene
-/// without one changes nothing.
+///
+/// The interlude is a one-shot transition marker: it is injected at the top
+/// only when `announce_scene` is set — the first request after a mid-session
+/// switch, the same request that persists the switch. On later requests (and
+/// for a session that started under the scene) the history is left unwrapped
+/// by it; the `before-each` / `after-each` hooks still wrap every message.
 ///
 /// Hooks fire around every prior user prompt / assistant reply. The turn
 /// markers wrap each turn: a turn starts with its user prompt (so
@@ -205,12 +208,13 @@ pub fn inject_history(
     scene: &Scene,
     prior: &[ChatMsg],
     pending_user: Option<&str>,
+    announce_scene: bool,
 ) -> Vec<ChatMsg> {
     let before = scene.before_each();
     let after = scene.after_each();
 
     let mut out = Vec::with_capacity(prior.len() * 2 + 4);
-    if let Some(interlude) = scene.interlude() {
+    if announce_scene && let Some(interlude) = scene.interlude() {
         out.push(ChatMsg::system(interlude));
     }
     for msg in prior {
@@ -462,17 +466,23 @@ mod tests {
     #[test]
     fn injection_passes_default_history_through() {
         let prior = vec![ChatMsg::user("hi"), ChatMsg::assistant("hello")];
-        let injected = inject_history(&Scene::default(), &prior, Some("next"));
+        let injected = inject_history(&Scene::default(), &prior, Some("next"), false);
         assert_eq!(
             injected,
+            vec![ChatMsg::user("hi"), ChatMsg::assistant("hello")],
+            "without the announce nothing is injected, not even the built-in interlude"
+        );
+        let announced = inject_history(&Scene::default(), &prior, Some("next"), true);
+        assert_eq!(
+            announced,
             vec![
                 ChatMsg::system(DEFAULT_INTERLUDE),
                 ChatMsg::user("hi"),
                 ChatMsg::assistant("hello"),
             ],
-            "the built-in scene injects only its default interlude"
+            "the built-in scene injects only its default interlude, on the announce"
         );
-        let empty = inject_history(&Scene::default(), &[], Some("next"));
+        let empty = inject_history(&Scene::default(), &[], Some("next"), true);
         assert_eq!(empty, vec![ChatMsg::system(DEFAULT_INTERLUDE)]);
     }
 
@@ -505,7 +515,7 @@ mod tests {
             ChatMsg::assistant("a1"),
             ChatMsg::user("u2"),
         ];
-        let injected = inject_history(&scene, &prior, Some("u3"));
+        let injected = inject_history(&scene, &prior, Some("u3"), true);
         let rendered: Vec<(char, &str)> = injected
             .iter()
             .map(|m| {
@@ -538,6 +548,19 @@ mod tests {
                 ('s', "BT"),
                 ('s', "BU"),
             ]
+        );
+
+        // The interlude is a one-shot announce; the hooks still wrap every
+        // request.
+        let later = inject_history(&scene, &prior, Some("u3"), false);
+        assert!(
+            later.iter().all(|m| m.content != "switched"),
+            "the interlude rides only the announce request"
+        );
+        assert_eq!(
+            later.first().map(|m| m.content.as_str()),
+            Some("BT"),
+            "hooks still wrap the first turn on later requests"
         );
     }
 }

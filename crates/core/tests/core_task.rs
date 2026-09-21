@@ -300,6 +300,16 @@ async fn mcp_reconnect_failure_shows_per_server_detail() {
 /// A minimal OpenAI-compatible chat-completions mock: any request gets one SSE
 /// response whose single text delta carries `reply`, then `data: [DONE]`.
 fn spawn_mock_openai(reply: &'static str) -> std::net::SocketAddr {
+    spawn_mock_openai_recording(reply, Default::default())
+}
+
+/// The same mock, also recording every request body it serves: the captured
+/// strings let a test assert what the outgoing request carried (e.g. an
+/// injected scene interlude).
+fn spawn_mock_openai_recording(
+    reply: &'static str,
+    bodies: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) -> std::net::SocketAddr {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
@@ -339,6 +349,10 @@ fn spawn_mock_openai(reply: &'static str) -> std::net::SocketAddr {
                         Err(_) => break,
                     }
                 }
+                bodies
+                    .lock()
+                    .expect("request sink poisoned")
+                    .push(String::from_utf8_lossy(&buf[end..]).into_owned());
             }
             let sse = format!(
                 "data: {{\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"sequence_number\":1,\"delta\":\"{reply}\"}}\n\n
@@ -1403,8 +1417,12 @@ async fn reload_after_resume_maps_tools_to_new_dense_indices() {
     assert_eq!(session.tool_records[0].message_seq, 1);
 }
 
+/// A mid-session switch only moves the in-memory scene: the DB persist is
+/// deferred to the first request under the new scene, which is also what
+/// injects the interlude once. Without a prompt (this test sends none after
+/// the switches) every persist stays deferred.
 #[tokio::test]
-async fn switch_scene_persists_and_reports() {
+async fn switch_scene_defers_the_persist_and_reports() {
     let mut store = Store::open_in_memory().await.unwrap();
     let mut scenes = shuvarie_config::ScenesConfig::default();
     let with_interlude = |interlude: &str| shuvarie_config::SceneConfig {
@@ -1551,8 +1569,10 @@ async fn switch_scene_persists_and_reports() {
             .await
             .unwrap();
         assert_eq!(
-            stored.scene, None,
-            "switching to the built-in scene clears the stored name"
+            stored.scene.as_deref(),
+            Some("Draft"),
+            "the switch only moved the in-memory scene: the persist waits for \
+             the first prompt under it"
         );
     }
 
@@ -1620,12 +1640,192 @@ async fn switch_scene_persists_and_reports() {
     }
     assert!(saw_custom_default, "the configured Default was switched to");
 
-    // The persisted session row carries the scene.
+    // No prompt was sent after the switches: every persist stayed deferred
+    // and the row still holds the scene the last prompt announced.
     let stored = store
         .load_session(session_id.expect("session created"))
         .await
         .unwrap();
-    assert_eq!(stored.scene.as_deref(), Some("Default"));
+    assert_eq!(stored.scene.as_deref(), Some("Draft"));
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+/// The scene announce: a mid-session switch defers the persist to the first
+/// request under the new scene, which is also the only one that carries the
+/// interlude.
+#[tokio::test]
+async fn the_interlude_announces_a_mid_session_switch_once() {
+    let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let addr = spawn_mock_openai_recording("done", bodies.clone());
+    let mut connections = empty_connections();
+    connections.providers.insert(
+        "mock".into(),
+        ProviderConfig::new(
+            "mock",
+            "openai-compat",
+            Some("sk-test".into()),
+            Some(format!("http://{addr}/v1")),
+        ),
+    );
+    connections.active = Some(Active {
+        provider: "mock".into(),
+        model: Some("test-model".into()),
+        variant: None,
+    });
+    let mut scenes = shuvarie_config::ScenesConfig::default();
+    scenes.scenes.insert(
+        "Plan".into(),
+        shuvarie_config::SceneConfig {
+            description: Some("plan first".into()),
+            system_prompts: shuvarie_config::SystemPromptsConfig {
+                interlude: Some("we are in Plan mode".into()),
+                ..Default::default()
+            },
+            ..shuvarie_config::SceneConfig::default()
+        },
+    );
+    let mut store = Store::open_in_memory().await.unwrap();
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let handle = tokio::spawn(run(
+        empty_config(),
+        connections,
+        store.clone(),
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        shuvarie_core::SceneSet {
+            scenes,
+            warnings: Vec::new(),
+        },
+        cmd_rx,
+        event_tx,
+    ));
+    recv_skills_loaded(&mut event_rx).await;
+
+    // The `Event::StreamDone` of a turn precedes the run loop's internal
+    // outcome handling by a beat; give it a moment so the next command is
+    // not refused as busy.
+    async fn drain_turn(event_rx: &mut tokio::sync::mpsc::Receiver<Event>) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let ev = tokio::time::timeout(deadline - tokio::time::Instant::now(), event_rx.recv())
+                .await
+                .expect("timed out waiting for the turn to finish")
+                .expect("core task ended");
+            if matches!(ev, Event::StreamDone { .. }) {
+                break;
+            }
+        }
+    }
+    async fn settle(event_rx: &mut tokio::sync::mpsc::Receiver<Event>) {
+        drain_turn(event_rx).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    fn chat_bodies(bodies: &[String]) -> Vec<&str> {
+        bodies
+            .iter()
+            .filter(|b| b.contains("\"instructions\""))
+            .map(|b| b.as_str())
+            .collect()
+    }
+
+    // Turn 1: the session starts under no scene — a session does not
+    // announce its own beginning, so no interlude rides the first request.
+    cmd_tx
+        .send(Command::SendMessage {
+            content: "one".into(),
+        })
+        .await
+        .unwrap();
+    settle(&mut event_rx).await;
+
+    // Mid-session switch to Plan: only the in-memory scene moves; the row
+    // still holds the scene of the previous prompt.
+    cmd_tx
+        .send(Command::SwitchScene {
+            name: Some("Plan".into()),
+        })
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let ev = tokio::time::timeout(deadline - tokio::time::Instant::now(), event_rx.recv())
+            .await
+            .expect("timed out waiting for SceneChanged")
+            .expect("core task ended");
+        match ev {
+            Event::SceneChanged { name } => {
+                assert_eq!(name.as_deref(), Some("Plan"));
+                break;
+            }
+            Event::SceneError { error } => panic!("switch refused: {error}"),
+            _ => {}
+        }
+    }
+    let sid = store
+        .most_recent_session()
+        .await
+        .unwrap()
+        .expect("session row");
+    assert_eq!(
+        sid.scene, None,
+        "the switch does not persist until the next prompt"
+    );
+
+    // Turn 2: the first request under Plan announces the switch — the
+    // interlude rides it and the row now carries the scene.
+    cmd_tx
+        .send(Command::SendMessage {
+            content: "two".into(),
+        })
+        .await
+        .unwrap();
+    settle(&mut event_rx).await;
+    {
+        let stored = store.load_session(sid.id).await.unwrap();
+        assert_eq!(
+            stored.scene.as_deref(),
+            Some("Plan"),
+            "the first prompt under the scene announces it"
+        );
+    }
+    {
+        let bodies = bodies.lock().unwrap();
+        // The mock also serves the embedding requests that index each
+        // message; only the chat-completions bodies (they carry the
+        // `instructions` preamble) assert the interlude.
+        let chat = chat_bodies(&bodies);
+        assert_eq!(chat.len(), 2, "one chat request per turn");
+        assert!(
+            !chat[0].contains("we are in Plan mode"),
+            "the session started under its scene: no interlude on request 1"
+        );
+        assert!(
+            chat[1].contains("we are in Plan mode"),
+            "the first request after the switch carries the interlude"
+        );
+    }
+
+    // Turn 3: later requests run interlude-free.
+    cmd_tx
+        .send(Command::SendMessage {
+            content: "three".into(),
+        })
+        .await
+        .unwrap();
+    settle(&mut event_rx).await;
+    let bodies = bodies.lock().unwrap();
+    let chat = chat_bodies(&bodies);
+    assert_eq!(chat.len(), 3);
+    assert!(
+        !chat[2].contains("we are in Plan mode"),
+        "the interlude is a one-shot announce, not a per-request wrap"
+    );
+
     drop(cmd_tx);
     let _ = handle.await;
 }
