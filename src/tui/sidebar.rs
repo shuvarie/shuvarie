@@ -356,10 +356,8 @@ impl Sidebar {
         }
         lines.push(Line::from(""));
 
-        lines.push(Line::from("MCP").fg(theme::accent()).bold());
-        if self.mcp_servers.is_empty() {
-            lines.push(Line::from("  none").fg(theme::text_muted()));
-        } else {
+        if !self.mcp_servers.is_empty() {
+            lines.push(Line::from("MCP").fg(theme::accent()).bold());
             for s in &self.mcp_servers {
                 let mut row = vec![
                     Span::raw("  ").fg(theme::text_muted()),
@@ -380,8 +378,8 @@ impl Sidebar {
                     );
                 }
             }
+            lines.push(Line::from(""));
         }
-        lines.push(Line::from(""));
 
         lines.push(Line::from("Skills").fg(theme::accent()).bold());
         if self.skills.is_empty() {
@@ -510,14 +508,13 @@ mod tests {
     }
 
     #[test]
-    fn mcp_section_renders_header_when_empty() {
+    fn mcp_section_hidden_when_empty() {
         let mut sidebar = Sidebar::new();
         // The lines cache is built on the first update; nudge it with a
         // no-op message so the empty-config rendering is checked.
         sidebar.update(SidebarMessage::SetWidth { cols: 100 });
         let rendered = text(sidebar.rendered_lines());
-        assert!(rendered.contains("MCP"), "body: {rendered}");
-        assert!(rendered.contains("none"), "body: {rendered}");
+        assert!(!rendered.contains("MCP"), "body: {rendered}");
     }
 
     #[test]
