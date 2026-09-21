@@ -24,6 +24,30 @@ pub const ENABLE_KITTY_KEYBOARD: Csi = Csi::Keyboard(Keyboard::PushFlags(
 
 pub const DISABLE_KITTY_KEYBOARD: Csi = Csi::Keyboard(Keyboard::PopFlags(1));
 
+// Query the current kitty keyboard flags (`CSI ? u`). Kitty-protocol terminals
+// (Ghostty, Kitty, iTerm2, WezTerm, ...) answer immediately; tmux does not
+// implement the kitty protocol toward panes and stays silent, which is what
+// the startup probe in `super` uses to detect it.
+pub const QUERY_KITTY_FLAGS: Csi = Csi::Keyboard(Keyboard::QueryFlags);
+
+// Fallback for terminals without the kitty keyboard protocol (notably tmux,
+// which ignores both the flag push and `CSI ? u`): request xterm
+// `modifyOtherKeys=1` (`CSI > 4;1m`). tmux then tracks the request and starts
+// forwarding modified keys toward the pane — as CSI-u (e.g. Shift+Enter as
+// `CSI 13;2u`) with its `extended-keys-format csi-u` option (the tmux 3.5+
+// default), which termina parses into modifier-carrying key events. Mode 1
+// only affects keys that have no legacy encoding, so Ctrl/Alt chords keep
+// their legacy sequences.
+//
+// Not the `xterm` format (`CSI 27;2;13~`): termina's input parser drops
+// those sequences, so Shift+Enter would still be inert. tmux < 3.5 has no
+// `extended-keys-format` option and defaults to the xterm encoding.
+pub const REQUEST_MODIFY_OTHER_KEYS: &str = "\x1b[>4;1m";
+
+// Reset modifyOtherKeys (`CSI > 4n`) after a fallback request, mirroring the
+// kitty flag pop on exit.
+pub const RESET_MODIFY_OTHER_KEYS: &str = "\x1b[>4n";
+
 // Enable button-event mouse tracking (mode 1002: press/release/drag) with SGR
 // extended coordinates (mode 1006). Termina parses the reports into
 // `Event::Mouse`; terminals that don't support the modes ignore the sequence

@@ -3,7 +3,11 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use ratatui::prelude::*;
-use termina::{EventStream, PlatformTerminal, Terminal};
+use termina::{
+    EventReader, EventStream, PlatformTerminal, Terminal,
+    escape::csi::{Csi, Keyboard},
+    event::Event as TerminalEvent,
+};
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use shuvarie_core::{Command, Config, Connections, Event as CoreEvent, ThemeSet};
@@ -62,7 +66,7 @@ pub async fn run_tui(
         config.ui.theme.as_deref(),
         self::theme::detect_variant(&mut term, &reader),
     );
-    let event_stream = EventStream::new(reader, |_| true);
+    let event_stream = EventStream::new(reader.clone(), |_| true);
 
     let initial_cols = term.get_dimensions()?.cols;
     let frame_budget = frame_budget(config.ui.frame_rate);
@@ -81,9 +85,14 @@ pub async fn run_tui(
 
     init_terminal(rat.backend_mut().terminal_mut())?;
 
+    // Decide how modified keys reach the TUI before the render loop starts
+    // consuming events: the probe shares the reader, so any keystrokes typed
+    // during the wait stay buffered and are delivered by the stream later.
+    let modify_other_keys = probe_keyboard_protocol(rat.backend_mut().terminal_mut(), &reader)?;
+
     let session_id = render_tui(app, &mut rat, event_rx, event_stream, frame_budget).await;
 
-    let deinit = deinit_terminal(rat.backend_mut().terminal_mut());
+    let deinit = deinit_terminal(rat.backend_mut().terminal_mut(), modify_other_keys);
     let session_id = session_id?;
     deinit?;
 
@@ -308,11 +317,19 @@ fn init_terminal(terminal: &mut PlatformTerminal) -> io::Result<()> {
     Ok(())
 }
 
-fn deinit_terminal(terminal: &mut PlatformTerminal) -> io::Result<()> {
+fn deinit_terminal(
+    terminal: &mut PlatformTerminal,
+    reset_modify_other_keys: bool,
+) -> io::Result<()> {
     write!(
         terminal,
-        "{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}",
         escape::DISABLE_KITTY_KEYBOARD,
+        if reset_modify_other_keys {
+            escape::RESET_MODIFY_OTHER_KEYS
+        } else {
+            ""
+        },
         escape::DISABLE_SGR_MOUSE,
         escape::DISABLE_MOUSE,
         escape::DISABLE_BRACKETED_PASTE,
@@ -321,6 +338,50 @@ fn deinit_terminal(terminal: &mut PlatformTerminal) -> io::Result<()> {
     )?;
     terminal.flush()?;
     Ok(())
+}
+
+/// Time to wait for a kitty keyboard protocol query answer before treating the
+/// terminal as not speaking the protocol.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Decide how modified keys reach the TUI.
+///
+/// `init_terminal` pushes kitty keyboard protocol flags, which real
+/// kitty-protocol terminals honor: they answer the `CSI ? u` query below and
+/// send modified keys as CSI-u sequences (e.g. Shift+Enter as `\x1b[13;2u`),
+/// which termina parses into modifier-carrying key events.
+///
+/// tmux does not implement the kitty protocol toward panes: it silently
+/// ignores both the flag push and the query, and without help it strips the
+/// modifiers from keys that have no legacy encoding — Shift+Enter arrives as
+/// plain `\r`, indistinguishable from Enter. A silent terminal therefore gets
+/// an xterm `modifyOtherKeys=1` request (`CSI > 4;1m`); tmux tracks it and
+/// starts forwarding modified keys as CSI-u (its `extended-keys` and
+/// `extended-keys-format csi-u` options, on by default since tmux 3.5).
+///
+/// Returns `true` when the kitty protocol is available and `false` when the
+/// modifyOtherKeys fallback was requested, so `deinit_terminal` can reset it.
+fn probe_keyboard_protocol(term: &mut PlatformTerminal, reader: &EventReader) -> io::Result<bool> {
+    write!(term, "{}", escape::QUERY_KITTY_FLAGS)?;
+    term.flush()?;
+    if let Ok(true) = reader.poll(Some(PROBE_TIMEOUT), kitty_flags_report) {
+        // Consume the report so it never surfaces as a stray CSI event;
+        // keystrokes typed during the wait stay buffered for the stream.
+        let _ = reader.read(kitty_flags_report)?;
+        return Ok(true);
+    }
+    write!(term, "{}", escape::REQUEST_MODIFY_OTHER_KEYS)?;
+    term.flush()?;
+    Ok(false)
+}
+
+/// Matches the kitty keyboard flags report (`CSI ? flags u`). Non-matching
+/// events are retained by the reader for later consumers.
+fn kitty_flags_report(event: &TerminalEvent) -> bool {
+    matches!(
+        event,
+        TerminalEvent::Csi(Csi::Keyboard(Keyboard::ReportFlags(_)))
+    )
 }
 
 #[cfg(test)]
@@ -343,5 +404,12 @@ mod tests {
         sync_window_title(&mut out, &mut last, "Shuvarie — fix the bug").unwrap();
         assert!(out.len() > unchanged);
         assert_eq!(last, "Shuvarie — fix the bug");
+    }
+
+    #[test]
+    fn keyboard_protocol_probe_sequences() {
+        assert_eq!(escape::QUERY_KITTY_FLAGS.to_string(), "\x1b[?u");
+        assert_eq!(escape::REQUEST_MODIFY_OTHER_KEYS, "\x1b[>4;1m");
+        assert_eq!(escape::RESET_MODIFY_OTHER_KEYS, "\x1b[>4n");
     }
 }
