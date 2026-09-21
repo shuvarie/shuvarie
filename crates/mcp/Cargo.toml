@@ -1,0 +1,25 @@
+[package]
+name = "shuvarie-mcp"
+description = "Blazingly fast AI coding TUI for chivalrous people (MCP module)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+http.workspace = true
+rmcp = { workspace = true, features = [
+    "client",
+    "transport-child-process",
+    "which-command",
+    "transport-streamable-http-client-reqwest",
+    "reqwest",
+] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "process", "time"] }
+
+[dev-dependencies]
+rmcp = { workspace = true, features = ["server", "transport-io"] }
