@@ -10,6 +10,7 @@ pub enum CommandAction {
     OpenVariantPicker,
     NewSession,
     EditTitle,
+    GenTitle,
     Export,
     UndoLastTurn,
     Replay,
@@ -22,7 +23,7 @@ pub enum CommandAction {
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 17] = [
+    pub const ALL: [CommandAction; 18] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::OpenSessionPicker,
@@ -31,6 +32,7 @@ impl CommandAction {
         CommandAction::OpenVariantPicker,
         CommandAction::NewSession,
         CommandAction::EditTitle,
+        CommandAction::GenTitle,
         CommandAction::Export,
         CommandAction::UndoLastTurn,
         CommandAction::Replay,
@@ -52,6 +54,7 @@ impl CommandAction {
             CommandAction::OpenVariantPicker => "variant",
             CommandAction::NewSession => "new",
             CommandAction::EditTitle => "title",
+            CommandAction::GenTitle => "gen-title",
             CommandAction::Export => "export",
             CommandAction::UndoLastTurn => "undo",
             CommandAction::Replay => "replay",
@@ -135,6 +138,12 @@ pub fn default_commands() -> Vec<CommandEntry> {
             name: "Edit title",
             description: "Rename the current session",
             action: CommandAction::EditTitle,
+            available: true,
+        },
+        CommandEntry {
+            name: "Generate title",
+            description: "Draft the session title with the LLM",
+            action: CommandAction::GenTitle,
             available: true,
         },
         CommandEntry {
@@ -509,6 +518,26 @@ mod tests {
                 args: Some("backups/out.json".into())
             })
         );
+    }
+
+    #[test]
+    fn parse_recognizes_gen_title_command() {
+        assert_eq!(
+            parse_command("/gen-title"),
+            Some(ParsedCommand {
+                action: CommandAction::GenTitle,
+                args: None
+            })
+        );
+        assert_eq!(
+            parse_command(":GEN-TITLE"),
+            Some(ParsedCommand {
+                action: CommandAction::GenTitle,
+                args: None
+            })
+        );
+        // The command takes no arguments, so it never parses with one.
+        assert_eq!(parse_command("/gen-title now"), None);
     }
 
     #[test]

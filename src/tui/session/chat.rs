@@ -463,6 +463,13 @@ impl Chat {
         !self.turns.borrow().is_empty()
     }
 
+    /// Whether the visible history contains at least one user prompt: title
+    /// generation (the `gen-title` command) needs an existing prompt to work
+    /// from.
+    pub fn has_user_turn(&self) -> bool {
+        self.turns.borrow().iter().any(|t| t.role == Role::User)
+    }
+
     /// Whether any tool block is still animating: live blocks in the
     /// in-flight turn or a straggler in the last committed turn. Only those
     /// turns can hold running blocks — committed turns are built from

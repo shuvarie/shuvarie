@@ -1,13 +1,14 @@
-//! Session title drafting. The policy comes from `ui.title` in the config:
-//! by default the title is (part of) the session's first user prompt, with no
-//! LLM involved; `by-llm { … }` opts into the LLM drafting described here —
-//! right after a session's first user prompt creates the session, the
-//! configured (or active) provider's default small model drafts a title for
-//! it in a fire-and-forget side call (no tools, one turn). The provisional
-//! heuristic title (`core_task::title_for`) stands until the generated title
-//! arrives; the compare-and-swap store write upgrades it without clobbering
-//! a manual rename that landed meanwhile. `disabled` skips automatic
-//! titling entirely.
+//! Session title drafting. By default (`ui.title` without `auto-gen`) the
+//! title is (part of) the session's first user prompt, with no LLM involved.
+//! `auto-gen` opts into the LLM drafting described here — right after a
+//! session's first user prompt creates the session, the configured (or
+//! active) provider's default small model drafts a title for it in a
+//! fire-and-forget side call (no tools, one turn). The same call is
+//! available on demand through the `gen-title` command. The provisional
+//! heuristic title (`core_task::title_for`) stands until the generated
+//! title arrives; the compare-and-swap store write upgrades it without
+//! clobbering a manual rename that landed meanwhile. `llm { … }` only
+//! carries the settings for the call.
 
 use std::sync::{Arc, Mutex};
 

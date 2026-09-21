@@ -298,6 +298,12 @@ impl SessionScreen {
         self.chat.has_messages()
     }
 
+    /// Whether the visible history contains at least one user prompt (drives
+    /// the `gen-title` availability).
+    pub fn has_user_turn(&self) -> bool {
+        self.chat.has_user_turn()
+    }
+
     /// The session to leave and its persisted chat scroll position; `None`
     /// when no session row is loaded yet, so there is nothing to save.
     pub fn scroll_save(&self) -> Option<(uuid::Uuid, StoredScroll)> {
@@ -485,6 +491,10 @@ impl SessionScreen {
             .set_availability(CommandAction::OpenScenePicker, !self.chat.is_streaming());
         self.slash
             .set_availability(CommandAction::EditTitle, self.session_id.is_some());
+        self.slash.set_availability(
+            CommandAction::GenTitle,
+            self.session_id.is_some() && self.chat.has_user_turn(),
+        );
         self.slash
             .set_availability(CommandAction::Export, self.session_id.is_some());
         let buffer = self.input.buffer.value.clone();
@@ -1464,6 +1474,37 @@ mod tests {
         screen.update(todo_finish("Todos (0/1 done)\n  #1 [~] write tests"));
         screen.update(SessionMessage::Reset);
         assert!(screen.working_todos.is_empty());
+    }
+
+    #[test]
+    fn gen_title_availability_tracks_session_and_first_prompt() {
+        fn available(screen: &SessionScreen, action: CommandAction) -> bool {
+            screen.slash.available(action)
+        }
+
+        let mut screen = SessionScreen::new();
+        // A fresh screen has neither a session nor a user prompt.
+        assert!(screen.session_id.is_none());
+        screen.update(SessionMessage::SpinnerUpdate);
+        assert!(!available(&screen, CommandAction::GenTitle));
+
+        // A loaded session with a user prompt enables the command.
+        let mut session = shuvarie_core::Session::new();
+        session.push_user("go");
+        session.push_assistant("ok");
+        screen.update(SessionMessage::Loaded {
+            id: uuid::Uuid::now_v7(),
+            title: "t".into(),
+            session,
+        });
+        // Availability resyncs on the next update.
+        screen.update(SessionMessage::SpinnerUpdate);
+        assert!(available(&screen, CommandAction::GenTitle));
+
+        // Resetting back to a fresh screen hides it again.
+        screen.update(SessionMessage::Reset);
+        screen.update(SessionMessage::SpinnerUpdate);
+        assert!(!available(&screen, CommandAction::GenTitle));
     }
 
     #[test]

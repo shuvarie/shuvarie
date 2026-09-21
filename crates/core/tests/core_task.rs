@@ -370,11 +370,11 @@ data: [DONE]\n\n"
     addr
 }
 
-/// The `ui.title` `by-llm` policy: the session is created with the
+/// The `ui.title` `auto-gen` switch: the session is created with the
 /// provisional first-prompt title, and the configured provider's model drafts
 /// the real title in a background call once the first prompt is in.
 #[tokio::test]
-async fn by_llm_drafts_the_session_title_after_the_first_user_prompt() {
+async fn auto_gen_drafts_the_session_title_after_the_first_user_prompt() {
     let addr = spawn_mock_openai("Mocked title");
     let mut connections = empty_connections();
     connections.providers.insert(
@@ -392,10 +392,10 @@ async fn by_llm_drafts_the_session_title_after_the_first_user_prompt() {
         variant: None,
     });
     let mut config = empty_config();
-    config.ui.title = TitleConfig::ByLlm {
-        provider: None,
+    config.ui.title = TitleConfig {
+        auto_gen: true,
         model: Some("test-model".into()),
-        system_prompt: None,
+        ..TitleConfig::default()
     };
 
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
@@ -448,7 +448,7 @@ async fn by_llm_drafts_the_session_title_after_the_first_user_prompt() {
     let _ = handle.await;
 }
 
-/// The default `first-user-prompt` policy never spawns a title generation:
+/// The default policy (no `auto-gen`) never spawns a title generation:
 /// the provisional title stands and no `SessionTitleChanged` is ever sent.
 #[tokio::test]
 async fn default_title_policy_never_triggers_generation() {
@@ -505,6 +505,176 @@ async fn default_title_policy_never_triggers_generation() {
 
     drop(cmd_tx);
     let _ = handle.await;
+}
+
+/// The `gen-title` command drafts the session title on demand from the
+/// active path's first user prompt — even with `auto-gen` off.
+#[tokio::test]
+async fn gen_title_command_drafts_the_title_from_the_first_prompt() {
+    let addr = spawn_mock_openai("Mocked title");
+    let mut connections = empty_connections();
+    connections.providers.insert(
+        "mock".into(),
+        ProviderConfig::new(
+            "mock",
+            "openai-compat",
+            Some("sk-test".into()),
+            Some(format!("http://{addr}/v1")),
+        ),
+    );
+    connections.active = Some(Active {
+        provider: "mock".into(),
+        model: Some("test-model".into()),
+        variant: None,
+    });
+    // Default config: `auto-gen` off, so only the manual command may draft.
+    let mut config = empty_config();
+    config.ui.title.model = Some("test-model".into());
+
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let handle = tokio::spawn(run(
+        config,
+        connections,
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        shuvarie_core::SceneSet {
+            scenes: Default::default(),
+            warnings: Vec::new(),
+        },
+        cmd_rx,
+        event_tx,
+    ));
+    recv_skills_loaded(&mut event_rx).await;
+
+    cmd_tx
+        .send(Command::SendMessage {
+            content: "hello world".into(),
+        })
+        .await
+        .unwrap();
+
+    let mut saw_created = false;
+    while !saw_created {
+        let ev = event_rx.recv().await.expect("core task ended");
+        if let Event::SessionCreated { title, .. } = ev {
+            assert_eq!(title, "hello world");
+            saw_created = true;
+        }
+    }
+
+    cmd_tx.send(Command::GenTitle).await.unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let changed = loop {
+        let ev = tokio::time::timeout(deadline - tokio::time::Instant::now(), event_rx.recv())
+            .await
+            .expect("timed out waiting for the generated title")
+            .expect("core task ended");
+        if let Event::SessionTitleChanged { title, .. } = ev {
+            break title;
+        }
+    };
+    assert_eq!(changed, "Mocked title");
+
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+/// The `gen-title` command's guards: without a session it reports
+/// `no active session`, with a session but no user prompt yet it reports
+/// `no user prompt yet`, and with a title provider that resolves no model
+/// it reports that no model is available.
+#[tokio::test]
+async fn gen_title_command_reports_guards_and_resolve_failures() {
+    let addr = spawn_mock_openai("Mocked title");
+    let mut connections = empty_connections();
+    connections.providers.insert(
+        "mock".into(),
+        ProviderConfig::new(
+            "mock",
+            "openai-compat",
+            Some("sk-test".into()),
+            Some(format!("http://{addr}/v1")),
+        ),
+    );
+    connections.active = Some(Active {
+        provider: "mock".into(),
+        model: Some("test-model".into()),
+        variant: None,
+    });
+    // A configured provider connection that does not exist:
+    // `resolve_model` never finds it.
+    let mut config = empty_config();
+    config.ui.title.provider = Some("ghost".into());
+
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let handle = tokio::spawn(run(
+        config,
+        connections,
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        shuvarie_core::SceneSet {
+            scenes: Default::default(),
+            warnings: Vec::new(),
+        },
+        cmd_rx,
+        event_tx,
+    ));
+    recv_skills_loaded(&mut event_rx).await;
+
+    // No session yet: the core reports the guard instead of drafting.
+    cmd_tx.send(Command::GenTitle).await.unwrap();
+    next_session_error(&mut event_rx, "no active session").await;
+
+    // A fresh session with no prompt on it: the command still refuses.
+    cmd_tx.send(Command::NewSession).await.unwrap();
+    cmd_tx.send(Command::GenTitle).await.unwrap();
+    next_session_error(&mut event_rx, "no user prompt yet").await;
+
+    // With a first prompt on the session, the resolve failure surfaces.
+    cmd_tx
+        .send(Command::SendMessage {
+            content: "hello world".into(),
+        })
+        .await
+        .unwrap();
+    let mut saw_created = false;
+    while !saw_created {
+        let ev = event_rx.recv().await.expect("core task ended");
+        saw_created = matches!(ev, Event::SessionCreated { .. });
+    }
+    cmd_tx.send(Command::GenTitle).await.unwrap();
+    next_session_error(&mut event_rx, "no model available for title generation").await;
+
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+/// Drain events until the next `SessionError`, which must carry `expected`.
+async fn next_session_error(event_rx: &mut tokio::sync::mpsc::Receiver<Event>, expected: &str) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let ev = tokio::time::timeout(deadline - tokio::time::Instant::now(), event_rx.recv())
+            .await
+            .expect("timed out waiting for the gen-title error")
+            .expect("core task ended");
+        match ev {
+            Event::SessionError { error } => {
+                assert_eq!(error, expected, "unexpected session error");
+                return;
+            }
+            _ => {}
+        }
+    }
 }
 
 #[tokio::test]

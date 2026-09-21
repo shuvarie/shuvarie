@@ -273,6 +273,15 @@ impl Session {
             .find(|n| n.on_path && n.role == Role::User)
     }
 
+    /// The active path's first user prompt (root → tip): the source for LLM
+    /// title drafting. Compaction summaries (assistant role) never match.
+    pub fn first_user_prompt(&self) -> Option<&str> {
+        self.messages
+            .iter()
+            .find(|m| m.role == Role::User)
+            .map(|m| m.content.as_str())
+    }
+
     pub fn last_assistant_interrupted(&self) -> bool {
         let Some(idx) = self
             .messages

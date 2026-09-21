@@ -74,6 +74,15 @@ impl SlashMenu {
         }
     }
 
+    /// Whether `action` is currently marked available.
+    #[cfg(test)]
+    pub fn available(&self, action: CommandAction) -> bool {
+        self.commands
+            .iter()
+            .find(|cmd| cmd.action == action)
+            .is_some_and(|cmd| cmd.available)
+    }
+
     /// Recompute open/filtered state from the current buffer text.
     pub fn sync(&mut self, buffer: &str) {
         match trigger_state(buffer) {

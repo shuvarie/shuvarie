@@ -875,6 +875,60 @@ pub async fn run(
                             }
                         }
                     }
+                    Command::GenTitle => {
+                        let Some(s) = &ctx.session else {
+                            let _ = ctx
+                                .event_tx
+                                .send(Event::SessionError {
+                                    error: "no active session".to_string(),
+                                })
+                                .await;
+                            continue;
+                        };
+                        let request = {
+                            let guard = s.lock().await;
+                            match (guard.id, guard.title.clone(), guard.first_user_prompt()) {
+                                (Some(id), Some(title), Some(prompt)) => {
+                                    Some((id, title, prompt.to_string()))
+                                }
+                                _ => None,
+                            }
+                        };
+                        let Some((id, current, prompt)) = request else {
+                            let _ = ctx
+                                .event_tx
+                                .send(Event::SessionError {
+                                    error: "no user prompt yet".to_string(),
+                                })
+                                .await;
+                            continue;
+                        };
+                        let title_cfg = ctx.config.ui.title.clone();
+                        if let Err(error) = spawn_title_draft(
+                            &mut ctx.clients,
+                            &mut ctx.connections,
+                            &ctx.event_tx,
+                            &mut ctx.store,
+                            s.clone(),
+                            id,
+                            &title_cfg,
+                            // Compare-and-swap from the current title: a
+                            // manual rename that lands while the call runs
+                            // wins, and a concurrently finishing automatic
+                            // draft (which swaps from the provisional
+                            // title) cannot clobber the result.
+                            current,
+                            prompt,
+                        ) {
+                            // The manual trigger surfaces resolve/connection
+                            // failures as errors instead of the automatic
+                            // draft's silent no-op.
+                            let _ = ctx
+                                .event_tx
+                                .send(Event::SessionError { error })
+                                .await;
+                        }
+                    }
                     Command::DeleteSession { id } => {
                         if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
@@ -1531,8 +1585,8 @@ struct PendingToolCall {
 }
 
 /// The provisional title for a new session: a trimmed prefix of the first
-/// user prompt, capped at `max_chars` (the `ui.title` `first-user-prompt`
-/// `max-chars`), or "Untitled session" for an empty prompt.
+/// user prompt, capped at `max_chars` (the `ui.title` `max-chars` property),
+/// or "Untitled session" for an empty prompt.
 fn title_for(content: &str, max_chars: usize) -> String {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -1540,6 +1594,64 @@ fn title_for(content: &str, max_chars: usize) -> String {
     } else {
         trimmed.chars().take(max_chars).collect()
     }
+}
+
+/// Spawn the fire-and-forget LLM title draft for session `id`: ask the
+/// model configured under `ui.title` `llm` (defaults: the active provider's
+/// catalog small model) to title the session from `prompt`, then
+/// compare-and-swap the store title from `expected` to the sanitized reply —
+/// the write lands only while the title still reads `expected`, so a manual
+/// rename that lands meanwhile wins and two racing drafts cannot clobber
+/// each other. The in-memory session and a `SessionTitleChanged` event are
+/// updated only when the swap took effect. `Err(reason)` when no model
+/// resolves or the provider client cannot be built — the automatic draft
+/// ignores it, the manual `gen-title` command reports it.
+#[allow(clippy::too_many_arguments)]
+fn spawn_title_draft(
+    clients: &mut HashMap<String, ProviderClient>,
+    connections: &mut Connections,
+    event_tx: &Sender<Event>,
+    store: &mut Store,
+    session: Arc<Mutex<Session>>,
+    id: uuid::Uuid,
+    cfg: &TitleConfig,
+    expected: String,
+    prompt: String,
+) -> Result<(), String> {
+    let Some((name, model)) =
+        crate::title::resolve_model(connections, cfg.provider.as_deref(), cfg.model.as_deref())
+    else {
+        return Err("no model available for title generation".to_string());
+    };
+    let client = client_for(clients, connections, event_tx, &name)
+        .cloned()
+        .map_err(|e| format!("title generation failed: {e}"))?;
+    let mut store = store.clone();
+    let event_tx = event_tx.clone();
+    let preamble = cfg.system_prompt.clone();
+    tokio::spawn(async move {
+        let Some(generated) =
+            crate::title::generate(&client, &model, preamble.as_deref(), &prompt).await
+        else {
+            return;
+        };
+        if let Ok(true) = store.set_title_if(id, &expected, &generated).await {
+            // Only when the in-memory title is still the expected one: a
+            // manual rename that landed after the swap wins instead.
+            let mut guard = session.lock().await;
+            if guard.title.as_deref() == Some(expected.as_str()) {
+                guard.title = Some(generated.clone());
+                drop(guard);
+                let _ = event_tx
+                    .send(Event::SessionTitleChanged {
+                        id,
+                        title: generated,
+                    })
+                    .await;
+            }
+        }
+    });
+    Ok(())
 }
 
 /// The active path's message ids, root → tip: the parent chain from the
@@ -1765,10 +1877,7 @@ impl CoreCtx {
             let mut guard = s.lock().await;
             if guard.id.is_none() {
                 let title_cfg = self.config.ui.title.clone();
-                let title = match &title_cfg {
-                    TitleConfig::Disabled => "Untitled session".to_string(),
-                    _ => title_for(&content, title_cfg.prompt_max_chars()),
-                };
+                let title = title_for(&content, title_cfg.max_chars);
                 let scene = guard.scene.take().or_else(|| self.scenes.default.clone());
                 match self
                     .store
@@ -1809,66 +1918,24 @@ impl CoreCtx {
                             })
                             .await;
                         // Draft the session title in the background when
-                        // `ui.title` selects the `by-llm` policy: the
-                        // provisional `title_for` heuristic stands until the
-                        // generated title arrives, and the compare-and-swap
-                        // write upgrades it only while no manual rename has
+                        // `ui.title` enables `auto-gen`: the provisional
+                        // `title_for` heuristic stands until the generated
+                        // title arrives, and the compare-and-swap write
+                        // upgrades it only while no manual rename has
                         // landed meanwhile. Fire-and-forget — a failed or
                         // empty generation keeps the provisional title.
-                        if let TitleConfig::ByLlm {
-                            provider: cfg_provider,
-                            model: cfg_model,
-                            system_prompt: cfg_system_prompt,
-                        } = &title_cfg
-                            && let Some((name, model)) = crate::title::resolve_model(
-                                &self.connections,
-                                cfg_provider.as_deref(),
-                                cfg_model.as_deref(),
-                            )
-                            && let Ok(client) = client_for(
+                        if title_cfg.auto_gen {
+                            let _ = spawn_title_draft(
                                 &mut self.clients,
                                 &mut self.connections,
                                 &self.event_tx,
-                                &name,
-                            )
-                            .cloned()
-                        {
-                            let mut store = self.store.clone();
-                            let event_tx = self.event_tx.clone();
-                            let session = s.clone();
-                            let provisional = title;
-                            let prompt = content.clone();
-                            let preamble = cfg_system_prompt.clone();
-                            tokio::spawn(async move {
-                                let Some(generated) = crate::title::generate(
-                                    &client,
-                                    &model,
-                                    preamble.as_deref(),
-                                    &prompt,
-                                )
-                                .await
-                                else {
-                                    return;
-                                };
-                                if let Ok(true) =
-                                    store.set_title_if(id, &provisional, &generated).await
-                                {
-                                    // Only when the in-memory title is still
-                                    // the provisional one: a manual rename
-                                    // that landed after the swap wins instead.
-                                    let mut guard = session.lock().await;
-                                    if guard.title.as_deref() == Some(provisional.as_str()) {
-                                        guard.title = Some(generated.clone());
-                                        drop(guard);
-                                        let _ = event_tx
-                                            .send(Event::SessionTitleChanged {
-                                                id,
-                                                title: generated,
-                                            })
-                                            .await;
-                                    }
-                                }
-                            });
+                                &mut self.store,
+                                s.clone(),
+                                id,
+                                &title_cfg,
+                                title,
+                                content.clone(),
+                            );
                         }
                     }
                     Err(e) => {

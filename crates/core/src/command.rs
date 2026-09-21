@@ -68,6 +68,14 @@ pub enum Command {
     SetTitle {
         title: String,
     },
+    /// Draft the active session's title with the LLM configured under
+    /// `ui.title` `llm` (defaults: the active provider's catalog small model
+    /// and the built-in title prompt), from the active path's first user
+    /// prompt. Reports [`crate::Event::SessionTitleChanged`] on success and
+    /// [`crate::Event::SessionError`] when there is no session, no user
+    /// prompt, or no resolvable model. A manual rename that lands while the
+    /// call runs wins over the generated title.
+    GenTitle,
     SearchHistory {
         query: String,
     },

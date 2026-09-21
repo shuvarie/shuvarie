@@ -1696,57 +1696,42 @@ pub enum SidebarPref {
 }
 
 /// Cap on the characters taken from the first user prompt for a new
-/// session's provisional title (`ui.title` `first-user-prompt`, and the
-/// stand-in title while an LLM-drafted one is pending).
+/// session's provisional title (`ui.title` `max-chars`).
 pub(crate) const DEFAULT_TITLE_PROMPT_CHARS: usize = 30;
 
-/// How a new session's title is drafted (`ui.title`). Defaults to
-/// [`TitleConfig::FirstUserPrompt`], and the three alternatives are mutually
-/// exclusive.
+/// How a new session's title is drafted (`ui.title`). By default the title
+/// is (part of) the session's first user prompt and no LLM is involved.
+/// `auto-gen` opts into LLM drafting — right after the first user prompt
+/// creates the session, and on demand through the `gen-title` command —
+/// while `llm { … }` only carries the settings for those calls: each field
+/// defaults, `provider` to the active provider connection, `model` to that
+/// provider's catalog default small model, and `system_prompt` to the
+/// built-in title prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TitleConfig {
-    /// The title stays part of the first user prompt: trimmed, capped at
-    /// `max_chars` (the `max-chars` property). No LLM call is made.
-    FirstUserPrompt {
-        /// Cap on the characters taken from the prompt.
-        max_chars: usize,
-    },
-    /// The title is drafted by an LLM right after the first user prompt
-    /// creates the session, replacing the provisional prompt prefix once it
-    /// arrives (`by-llm { … }`). Each field defaults: `provider` to the
-    /// active provider connection, `model` to that provider's catalog
-    /// default small model, and `system_prompt` to the built-in title
-    /// prompt.
-    ByLlm {
-        /// Provider connection name the title call runs on.
-        provider: Option<String>,
-        /// Model id the title call runs on.
-        model: Option<String>,
-        /// System prompt for the title call.
-        system_prompt: Option<String>,
-    },
-    /// No automatic titling: sessions start as `Untitled session` until
-    /// renamed by hand (the `disabled` switch).
-    Disabled,
+pub struct TitleConfig {
+    /// Cap on the characters taken from the first user prompt for the
+    /// provisional title (the `max-chars` property).
+    pub max_chars: usize,
+    /// Draft the title with an LLM once the first user prompt creates the
+    /// session (the `auto-gen` switch).
+    pub auto_gen: bool,
+    /// Provider connection name the title call runs on
+    /// (`llm { provider … }`).
+    pub provider: Option<String>,
+    /// Model id the title call runs on (`llm { model … }`).
+    pub model: Option<String>,
+    /// System prompt for the title call (`llm { system-prompt … }`).
+    pub system_prompt: Option<String>,
 }
 
 impl Default for TitleConfig {
     fn default() -> Self {
-        Self::FirstUserPrompt {
+        Self {
             max_chars: DEFAULT_TITLE_PROMPT_CHARS,
-        }
-    }
-}
-
-impl TitleConfig {
-    /// Cap on the characters taken from the first user prompt for the
-    /// provisional title: the `first-user-prompt` cap when that policy is
-    /// selected, the built-in default otherwise (the stand-in title while an
-    /// LLM-drafted one is pending).
-    pub fn prompt_max_chars(&self) -> usize {
-        match self {
-            Self::FirstUserPrompt { max_chars } => *max_chars,
-            Self::ByLlm { .. } | Self::Disabled => DEFAULT_TITLE_PROMPT_CHARS,
+            auto_gen: false,
+            provider: None,
+            model: None,
+            system_prompt: None,
         }
     }
 }
@@ -2584,43 +2569,34 @@ mod tests {
         for text in [
             "",
             "ui { title }",
-            "ui { title { first-user-prompt } }",
-            "ui { title { first-user-prompt max-chars=30 } }",
+            "ui { title { } }",
+            "ui { title { llm { } } }",
         ] {
             let parsed = config_kdl::from_kdl(text).unwrap();
             assert_eq!(parsed.ui.title, TitleConfig::default(), "text: {text:?}");
         }
-        assert_eq!(TitleConfig::default().prompt_max_chars(), 30);
+        assert_eq!(TitleConfig::default().max_chars, 30);
+        assert!(!TitleConfig::default().auto_gen);
     }
 
     #[test]
-    fn ui_title_first_user_prompt_max_chars() {
-        let parsed =
-            config_kdl::from_kdl("ui { title { first-user-prompt max-chars=12 } }").unwrap();
-        assert_eq!(parsed.ui.title.prompt_max_chars(), 12);
-    }
-
-    #[test]
-    fn ui_title_disabled_round_trips() {
-        let parsed = config_kdl::from_kdl("ui { title { disabled } }").unwrap();
-        assert_eq!(parsed.ui.title, TitleConfig::Disabled);
+    fn ui_title_max_chars_property() {
+        let parsed = config_kdl::from_kdl("ui { title max-chars=12 { } }").unwrap();
+        assert_eq!(parsed.ui.title.max_chars, 12);
+        assert!(!parsed.ui.title.auto_gen);
         let text = config_kdl::to_kdl(&parsed).unwrap();
-        assert!(text.contains("disabled"), "body: {text}");
+        assert!(text.contains("max-chars=12"), "body: {text}");
         let reparsed = config_kdl::from_kdl(&text).unwrap();
         assert_eq!(parsed, reparsed);
-        assert!(
-            !config_kdl::to_kdl(&Config::default())
-                .unwrap()
-                .contains("title")
-        );
     }
 
     #[test]
-    fn ui_title_by_llm_round_trips() {
+    fn ui_title_auto_gen_round_trips() {
         let text = r#"
             ui {
                 title {
-                    by-llm {
+                    auto-gen
+                    llm {
                         provider "Openai"
                         model "gpt-5.6-luna"
                         system-prompt """
@@ -2631,25 +2607,22 @@ mod tests {
             }
         "#;
         let parsed = config_kdl::from_kdl(text).unwrap();
-        let TitleConfig::ByLlm {
-            provider,
-            model,
-            system_prompt,
-        } = &parsed.ui.title
-        else {
-            panic!("expected the by-llm policy, got {:?}", parsed.ui.title);
-        };
-        assert_eq!(provider.as_deref(), Some("Openai"));
-        assert_eq!(model.as_deref(), Some("gpt-5.6-luna"));
+        assert!(parsed.ui.title.auto_gen);
+        assert_eq!(parsed.ui.title.provider.as_deref(), Some("Openai"));
+        assert_eq!(parsed.ui.title.model.as_deref(), Some("gpt-5.6-luna"));
         assert!(
-            system_prompt
+            parsed
+                .ui
+                .title
+                .system_prompt
                 .as_deref()
                 .unwrap()
                 .contains("You name sessions.")
         );
 
         let text = config_kdl::to_kdl(&parsed).unwrap();
-        assert!(text.contains("by-llm"), "body: {text}");
+        assert!(text.contains("auto-gen"), "body: {text}");
+        assert!(text.contains("llm"), "body: {text}");
         assert!(text.contains("system-prompt"), "body: {text}");
         assert!(text.contains("provider"), "body: {text}");
         let reparsed = config_kdl::from_kdl(&text).unwrap();
@@ -2657,18 +2630,38 @@ mod tests {
     }
 
     #[test]
-    fn ui_title_bare_by_llm_round_trips() {
-        let parsed = config_kdl::from_kdl("ui { title { by-llm } }").unwrap();
+    fn ui_title_llm_settings_without_auto_gen() {
+        // `llm` alone is only a settings block: LLM drafting stays off.
+        let parsed = config_kdl::from_kdl("ui { title { llm { model \"gpt-5-nano\" } } }").unwrap();
         assert_eq!(
             parsed.ui.title,
-            TitleConfig::ByLlm {
-                provider: None,
-                model: None,
-                system_prompt: None,
+            TitleConfig {
+                auto_gen: false,
+                model: Some("gpt-5-nano".to_string()),
+                ..TitleConfig::default()
             }
         );
         let text = config_kdl::to_kdl(&parsed).unwrap();
-        assert!(text.contains("by-llm"), "body: {text}");
+        assert!(text.contains("llm"), "body: {text}");
+        assert!(!text.contains("auto-gen"), "body: {text}");
+        let reparsed = config_kdl::from_kdl(&text).unwrap();
+        assert_eq!(parsed, reparsed);
+    }
+
+    #[test]
+    fn ui_title_max_chars_with_auto_gen_round_trips() {
+        let parsed = config_kdl::from_kdl("ui { title max-chars=40 { auto-gen } }").unwrap();
+        assert_eq!(
+            parsed.ui.title,
+            TitleConfig {
+                max_chars: 40,
+                auto_gen: true,
+                ..TitleConfig::default()
+            }
+        );
+        let text = config_kdl::to_kdl(&parsed).unwrap();
+        assert!(text.contains("max-chars=40"), "body: {text}");
+        assert!(text.contains("auto-gen"), "body: {text}");
         let reparsed = config_kdl::from_kdl(&text).unwrap();
         assert_eq!(parsed, reparsed);
     }
@@ -2676,46 +2669,28 @@ mod tests {
     #[test]
     fn ui_title_parse_errors() {
         let cases: &[(&str, &str)] = &[
-            (
-                "ui {\n    title {\n        first-user-prompt max-chars=30\n        by-llm\n    }\n}",
-                "at most one",
-            ),
-            (
-                "ui {\n    title {\n        disabled\n        first-user-prompt\n    }\n}",
-                "at most one",
-            ),
             ("ui { title { bogus } }", "unknown node `bogus` in `title`"),
             (
-                "ui { title { by-llm { bogus \"x\" } } }",
-                "unknown node `bogus` in `by-llm`",
+                "ui { title { llm { bogus \"x\" } } }",
+                "unknown node `bogus` in `llm`",
             ),
+            ("ui { title { auto-gen #false } }", "takes no arguments"),
+            ("ui { title { auto-gen { x } } }", "takes no children"),
             (
-                "ui { title { first-user-prompt wrong=\"x\" } }",
-                "unknown property `wrong`",
+                "ui { title { auto-gen\n    auto-gen\n} }",
+                "duplicate `auto-gen`",
             ),
+            ("ui { title { llm\n    llm\n} }", "duplicate `llm`"),
+            ("ui { title wrong=\"x\" { } }", "unknown property `wrong`"),
+            ("ui { title 42 { } }", "takes no positional arguments"),
+            ("ui { title max-chars=0 { } }", "greater than zero"),
+            ("ui { title max-chars=\"30\" { } }", "an integer"),
+            ("ui { title max-chars=-1 { } }", "out of range"),
+            ("ui { title { llm 42 } }", "takes no positional arguments"),
             (
-                "ui { title { first-user-prompt 42 } }",
-                "takes no positional arguments",
-            ),
-            (
-                "ui { title { first-user-prompt max-chars=0 } }",
-                "greater than zero",
-            ),
-            (
-                "ui { title { first-user-prompt max-chars=\"30\" } }",
-                "an integer",
-            ),
-            (
-                "ui { title { first-user-prompt max-chars=-1 } }",
-                "out of range",
-            ),
-            ("ui { title { disabled #true } }", "takes no arguments"),
-            ("ui { title { disabled #false } }", "takes no arguments"),
-            (
-                "ui { title { by-llm { system-prompt \"\" } } }",
+                "ui { title { llm { system-prompt \"\" } } }",
                 "must not be empty",
             ),
-            ("ui { title 42 }", "takes no positional arguments"),
         ];
         for (text, expected) in cases {
             let error = config_kdl::from_kdl(text).unwrap_err();

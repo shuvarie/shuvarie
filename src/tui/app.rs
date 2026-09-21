@@ -1575,6 +1575,10 @@ impl App {
             .set_availability(CommandAction::OpenTree, self.session.session_id.is_some());
         self.command_menu
             .set_availability(CommandAction::EditTitle, self.session.session_id.is_some());
+        self.command_menu.set_availability(
+            CommandAction::GenTitle,
+            self.session.session_id.is_some() && self.session.has_user_turn(),
+        );
         self.command_menu
             .set_availability(CommandAction::Export, self.session.session_id.is_some());
     }
@@ -1643,6 +1647,15 @@ impl App {
                 } else {
                     self.title_popup.open(self.session.session_title.as_deref());
                     self.overlay = Overlay::TitleEdit;
+                }
+            }
+            CommandAction::GenTitle => {
+                if self.session.session_id.is_none() {
+                    self.session.update(SessionMessage::ShowError {
+                        error: "no active session".into(),
+                    });
+                } else {
+                    self.ctx.send(shuvarie_core::Command::GenTitle);
                 }
             }
             CommandAction::Export => {
