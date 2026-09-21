@@ -5203,7 +5203,7 @@ Now we're in Plan mode: plan first, no edits.
         let set = theme_set_from_levels(
             Some(global),
             vec![local],
-            &std::path::Path::new("missing"),
+            std::path::Path::new("missing"),
             &[],
         );
         let ayu = set.themes.theme("Ayu").unwrap();
@@ -5238,7 +5238,7 @@ Now we're in Plan mode: plan first, no edits.
         let set = theme_set_from_levels(
             Some(global),
             vec![first, second],
-            &std::path::Path::new("missing"),
+            std::path::Path::new("missing"),
             &[],
         );
         assert_eq!(
@@ -5502,7 +5502,7 @@ Now we're in Plan mode: plan first, no edits.
         let set = theme_set_from_levels(
             Some(global),
             vec![first, second],
-            &std::path::Path::new("missing"),
+            std::path::Path::new("missing"),
             &[],
         );
         assert_eq!(set.themes.defs("Ayu").len(), 1, "the base def survives");
@@ -5529,7 +5529,7 @@ Now we're in Plan mode: plan first, no edits.
         let set = theme_set_from_levels(
             Some(global),
             vec![local],
-            &std::path::Path::new("missing"),
+            std::path::Path::new("missing"),
             &[],
         );
         assert_eq!(set.themes.defs("Ayu").len(), 2);

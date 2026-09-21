@@ -283,21 +283,26 @@ pub(crate) async fn run_shell_command(
 }
 
 #[cfg(unix)]
-fn kill_process_group(pid: u32) {
+pub(crate) fn kill_process_group(pid: u32) {
     unsafe {
         libc::killpg(pid as libc::pid_t, libc::SIGKILL);
     }
 }
 
 #[cfg(not(unix))]
-fn kill_process_group(_pid: u32) {}
+pub(crate) fn kill_process_group(_pid: u32) {}
 
-/// Kills the shell's process group if the tool future is cancelled mid-run
-/// (turn abort / stream cancel), so the child cannot outlive the request.
-struct KillGuard(Option<u32>);
+/// Kills the process's group if the tool future is cancelled mid-run (turn
+/// abort / stream cancel), so the child cannot outlive the request. Shared by
+/// `run_shell` and the configured stdio tools.
+pub(crate) struct KillGuard(Option<u32>);
 
 impl KillGuard {
-    fn disarm(&mut self) {
+    pub(crate) fn new(pid: Option<u32>) -> Self {
+        Self(pid)
+    }
+
+    pub(crate) fn disarm(&mut self) {
         self.0 = None;
     }
 }

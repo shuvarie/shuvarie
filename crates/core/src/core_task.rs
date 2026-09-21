@@ -245,6 +245,9 @@ struct CoreCtx {
     clients: HashMap<String, ProviderClient>,
     embedding_setup: Option<EmbeddingSetup>,
     lsp: std::sync::Arc<tokio::sync::Mutex<shuvarie_lsp::LspManager>>,
+    /// The configured MCP servers; connected lazily on first use, tools
+    /// bridged into the roster per turn.
+    mcp: shuvarie_mcp::SharedMcpManager,
     active_stream: Option<AbortHandle>,
     turn_state: Option<Arc<Mutex<TurnState>>>,
     event_tx: Sender<Event>,
@@ -354,6 +357,7 @@ pub async fn run(
         lsp_config.enabled,
         lsp_config.resolve(),
     )));
+    let mcp = crate::mcp_manager::mcp_manager(&config.tools.mcp);
     let mut lsp_pump_tick = tokio::time::interval(std::time::Duration::from_millis(500));
     lsp_pump_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Don't fire immediately on the first tick.
@@ -415,6 +419,7 @@ pub async fn run(
         clients,
         embedding_setup,
         lsp,
+        mcp,
         active_stream: None,
         turn_state: None,
         event_tx,
@@ -2011,6 +2016,21 @@ impl CoreCtx {
         let (shell_tx, shell_rx) = tokio::sync::mpsc::channel::<crate::tools::ShellChunk>(64);
         let file_locks = crate::tools::FileLocks::new();
         let tool_scene = scene.tools();
+        // Connect the configured MCP servers before the roster is built so
+        // their tools are offered this turn; a server that fails to connect
+        // is skipped (surfacing of the failures arrives with the MCP
+        // lifecycle events). Also snapshot the roster: the descriptor set is
+        // read sync-side in `all_tools`.
+        let (mcp_roster, _mcp_errors) = {
+            let mut manager = self.mcp.lock().await;
+            let mut errors = Vec::new();
+            for name in manager.specs().keys().cloned().collect::<Vec<_>>() {
+                if let Err(error) = manager.ensure_connected(&name).await {
+                    errors.push(format!("MCP server '{name}': {error}"));
+                }
+            }
+            (manager.roster(), errors)
+        };
         let tools = crate::tools::all_tools(
             self.lsp.clone(),
             file_locks.clone(),
@@ -2025,6 +2045,9 @@ impl CoreCtx {
             &tool_scene,
             web_search,
             &self.skills,
+            &self.config.tools.tools,
+            Some(&self.mcp),
+            &mcp_roster,
         );
         let catalog_provider = crate::catalog::providers();
         let catalog_provider = self

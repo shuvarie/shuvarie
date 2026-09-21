@@ -1,111 +1,20 @@
 //! In-process end-to-end tests over a `tokio::io::duplex` pair: a real rmcp
-//! server (hand-written handler) on one half, the real client connection on
-//! the other — the full JSON-RPC codec, `tools/list`, and `tools/call` path
+//! server (the testkit double) on one half, the real client connection on the
+//! other — the full JSON-RPC codec, `tools/list`, and `tools/call` path
 //! without spawning processes.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
-use rmcp::model::{
-    CallToolResponse, ContentBlock, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
-};
-use rmcp::service::RequestContext;
-use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, ServiceExt};
-use serde_json::{Value, json};
+use serde_json::json;
 
-use crate::config::McpServerSpec;
 use crate::connection::McpConnection;
 use crate::manager::McpManager;
+use crate::testkit::{McpServerSpec, duplex_connection};
 use crate::types::{McpStatusState, composite_tool_name};
 
-/// The test server: `echo` (text round-trip) and `fail` (tool-level error).
-/// The same handler backs the example server used by `tests/stdio.rs`.
-pub(crate) struct TestServer;
-
-impl ServerHandler for TestServer {
-    fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("shuvarie-mcp test server")
-    }
-
-    async fn list_tools(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<rmcp::model::ListToolsResult, McpError> {
-        let mut echo = tool("echo", "Echo a message");
-        echo.input_schema = Arc::new(
-            json!({
-                "type": "object",
-                "properties": {"message": {"type": "string"}},
-                "required": ["message"]
-            })
-            .as_object()
-            .expect("object")
-            .clone(),
-        );
-        Ok(rmcp::model::ListToolsResult {
-            tools: vec![echo, tool("fail", "Always fails")],
-            ..Default::default()
-        })
-    }
-
-    async fn call_tool(
-        &self,
-        request: rmcp::model::CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResponse, McpError> {
-        match request.name.as_ref() {
-            "echo" => {
-                let message = request
-                    .arguments
-                    .as_ref()
-                    .and_then(|args| args.get("message"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                Ok(CallToolResponse::Complete(
-                    rmcp::model::CallToolResult::success(vec![ContentBlock::text(format!(
-                        "echo: {message}"
-                    ))]),
-                ))
-            }
-            "fail" => Ok(CallToolResponse::Complete(
-                rmcp::model::CallToolResult::error(vec![ContentBlock::text("boom")]),
-            )),
-            other => Err(McpError::invalid_params(
-                format!("unknown tool '{other}'"),
-                None,
-            )),
-        }
-    }
-}
-
-fn tool(name: &str, description: &str) -> Tool {
-    let mut t = Tool::default();
-    t.name = name.to_owned().into();
-    t.description = Some(description.to_owned().into());
-    t
-}
-
-/// A connected client over one duplex pair with a fresh [`TestServer`] task.
+/// A connected client over one duplex pair with a fresh test-server task.
 async fn connect_duplex(server_name: &str) -> (McpConnection, tokio::task::JoinHandle<()>) {
-    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-    let server = tokio::spawn(async move {
-        // The returned `RunningService` must be kept alive: dropping it
-        // cancels the service loop (which is why the handshake's successor
-        // messages hit a broken pipe).
-        match TestServer.serve(server_io).await {
-            Ok(service) => {
-                let _ = service.waiting().await;
-            }
-            Err(e) => panic!("test server failed to serve: {e}"),
-        }
-    });
-    let conn = McpConnection::serve(server_name, client_io, None)
-        .await
-        .expect("connect over duplex");
-    (conn, server)
+    duplex_connection(server_name).await
 }
 
 #[tokio::test]

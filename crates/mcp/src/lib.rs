@@ -25,6 +25,8 @@
 pub mod config;
 mod connection;
 mod manager;
+#[cfg(any(test, feature = "test-util"))]
+pub mod testkit;
 #[cfg(test)]
 mod tests;
 pub mod types;

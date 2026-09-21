@@ -4,10 +4,12 @@ mod glob;
 mod grep;
 mod list_dir;
 mod lsp;
+mod mcp_tool;
 mod question;
 mod read_file;
 mod run_shell;
 mod skill;
+mod stdio;
 pub mod todos;
 mod web_search;
 mod webfetch;
@@ -33,10 +35,12 @@ use glob::Glob;
 use grep::Grep;
 use list_dir::ListDir;
 use lsp::Lsp;
+use mcp_tool::McpTool;
 use question::Question;
 use read_file::ReadFile;
 use run_shell::RunShell;
 use skill::SkillTool;
+use stdio::StdioTool;
 use web_search::WebSearch;
 use webfetch::WebFetch;
 use write_file::WriteFile;
@@ -56,7 +60,7 @@ type ReadKey = (String, Option<u64>, Option<u64>);
 /// same overlay through `Access::for_tool` instead). `gated` marks tools
 /// whose calls authorize via `Access`.
 fn scene_tool<T>(
-    name: &'static str,
+    name: &str,
     scene: &ToolScene,
     access: &Access,
     gated: bool,
@@ -237,6 +241,9 @@ pub fn all_tools(
     scene: &ToolScene,
     web_search: Option<&WebSearchConfig>,
     skills: &Skills,
+    stdio_tools: &std::collections::BTreeMap<String, shuvarie_config::StdioToolConfig>,
+    mcp_manager: Option<&shuvarie_mcp::SharedMcpManager>,
+    mcp_roster: &std::collections::BTreeMap<String, shuvarie_mcp::McpToolMap>,
 ) -> Vec<DynamicTool> {
     let mut tools = Vec::new();
     tools.extend(scene_tool("read_file", scene, &access, true, |access| {
@@ -304,6 +311,32 @@ pub fn all_tools(
             false,
             |_access| WebSearch::new(config, max_output_chars),
         ));
+    }
+    // Configured one-shot subprocess tools: each config entry is its own
+    // tool, named as in config. Gated: calls authorize through the
+    // permission engine (ask by default, session-grantable by name).
+    for (name, config) in stdio_tools {
+        tools.extend(scene_tool(name, scene, &access, true, |access| {
+            StdioTool::new(name.clone(), config, max_output_chars, access)
+        }));
+    }
+    // MCP server tools: the roster snapshot (composite name → descriptor per
+    // server) was taken from the manager before the turn; calls route through
+    // the shared manager. Gated like the stdio tools.
+    if let Some(manager) = mcp_manager {
+        for (server, roster) in mcp_roster {
+            for (composite, info) in roster {
+                tools.extend(scene_tool(composite, scene, &access, true, |access| {
+                    McpTool::new(
+                        manager.clone(),
+                        server.clone(),
+                        info.clone(),
+                        max_output_chars,
+                        access,
+                    )
+                }));
+            }
+        }
     }
     tools
 }
@@ -444,6 +477,9 @@ mod tests {
             scene,
             None,
             skills,
+            &Default::default(),
+            None,
+            &Default::default(),
         )
         .into_iter()
         .map(|tool| tool.name().to_string())

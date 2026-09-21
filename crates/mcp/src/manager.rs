@@ -151,6 +151,16 @@ impl McpManager {
             .collect()
     }
 
+    /// The tool rosters of every connected server, keyed by server name —
+    /// the snapshot the agent tool roster is built from each turn.
+    pub fn roster(&self) -> BTreeMap<String, McpToolMap> {
+        self.connections
+            .iter()
+            .filter(|(_, conn)| !conn.closed())
+            .map(|(server, _)| (server.clone(), self.tool_map(server)))
+            .collect()
+    }
+
     /// Re-fetch the tool list of a connected server.
     pub async fn refresh_tools(&mut self, server: &str) -> Result<Vec<McpToolInfo>, String> {
         self.ensure_connected(server).await?;
@@ -208,10 +218,10 @@ impl McpManager {
 /// The shared handle core keeps around, mirroring the LSP manager.
 pub type SharedMcpManager = Arc<Mutex<McpManager>>;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 impl McpManager {
     /// Insert a pre-built connection (test support only).
-    pub(crate) fn inject_connection(&mut self, name: &str, connection: McpConnection) {
+    pub fn inject_connection(&mut self, name: &str, connection: McpConnection) {
         self.connections.insert(name.to_string(), connection);
     }
 }

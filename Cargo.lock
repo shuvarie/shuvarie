@@ -5790,6 +5790,7 @@ dependencies = [
  "shuvarie-db",
  "shuvarie-llm",
  "shuvarie-lsp",
+ "shuvarie-mcp",
  "similar",
  "tempfile",
  "thiserror 2.0.20",

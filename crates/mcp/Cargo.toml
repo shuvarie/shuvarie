@@ -21,5 +21,10 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "process", "time"] }
 
+[features]
+# In-memory server + connection/manager test doubles for dependent crates'
+# tests (drags the rmcp server features the doubles are built on).
+test-util = ["rmcp/server", "rmcp/transport-io"]
+
 [dev-dependencies]
 rmcp = { workspace = true, features = ["server", "transport-io"] }
