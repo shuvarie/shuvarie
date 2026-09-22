@@ -7,6 +7,8 @@ use sha2::{Digest, Sha256};
 use std::env::consts::{ARCH, OS};
 use std::io::{Read, Write};
 use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
 
 const RELEASES_API: &str = "https://api.github.com/repos/shuvarie/shuvarie/releases/latest";
 
@@ -277,7 +279,6 @@ fn install(dir: &Path, archive: &Archive, data: &[u8]) -> color_eyre::Result<()>
 
 #[cfg(windows)]
 fn backup_path(exe: &Path) -> PathBuf {
-    use std::path::PathBuf;
     exe.with_extension("exe.old")
 }
 
