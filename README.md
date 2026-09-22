@@ -31,6 +31,8 @@ In the plain tongue of innkeepers — the one that runs without dice — Shuvari
 - **Scry the chronicles (search)** — `Ctrl+R` first reads the plain ink (full-text search), then listens for omens (semantic embeddings), and fuses both into one vision.
 - **Speak to the local spirits** — a prompt that begins with `!` never reaches the patron; it runs as your own shell command, inside the keep.
 - **Honor the law of leave** — entering an untraveled workspace, the knight asks which scrolls it may read (context files, skills, configs) and remembers your answer.
+- **Cast your own spells** — defining and using your own commands.
+- **Summon your stdio and MCP** — letting your knights use stdio commands and MCP servers like a druid.
 
 *In order to introduce the knights into our barracks, we should:*
 
