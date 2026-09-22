@@ -1,4 +1,0 @@
-[submodule "vendor/selune"]
-	path = vendor/selune
-	url = git@github.com:shuvarie/selune.git
-	branch = chatgpt-copilot
