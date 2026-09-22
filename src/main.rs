@@ -6,7 +6,7 @@ mod trust;
 mod tui;
 mod update;
 
-use crate::cli::show_resume_hint;
+use crate::cli::{init_default_store, show_resume_hint};
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
@@ -18,23 +18,23 @@ async fn main() -> color_eyre::Result<()> {
         })?;
     }
 
-    let mut store = shuvarie_db::Store::open(&shuvarie_db::Store::default_path()).await?;
-
     if let Some(cmd) = args.command {
         use cli::CliSubcommand::*;
 
         match cmd {
             Import { file } => {
-                return cli::import_session(&mut store, &file).await;
+                return cli::import_session(&file).await;
             }
             Export { dest } => {
-                return cli::export_session(&mut store, &dest, args.session).await;
+                return cli::export_session(&dest, args.session).await;
             }
             Update => {
                 return update::run().await;
             }
         }
     }
+
+    let store = init_default_store().await?;
 
     let Some(trust::Resolved {
         config,

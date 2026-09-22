@@ -59,10 +59,15 @@ pub fn show_resume_hint(session_id: Uuid) {
     println!("  shuvarie -s {session_id}");
 }
 
+pub async fn init_default_store() -> shuvarie_db::Result<shuvarie_db::Store> {
+    shuvarie_db::Store::open(&shuvarie_db::Store::default_path()).await
+}
+
 pub async fn import_session(
-    store: &mut shuvarie_db::Store,
     path: &std::path::Path,
 ) -> color_eyre::Result<()> {
+    let mut store = init_default_store().await?;
+
     let json = std::fs::read_to_string(path)
         .map_err(|e| color_eyre::eyre::eyre!("read {}: {e}", path.display()))?;
     let file = shuvarie_db::SessionFile::from_json(&json)?;
@@ -73,10 +78,11 @@ pub async fn import_session(
 }
 
 pub async fn export_session(
-    store: &mut shuvarie_db::Store,
     dest: &str,
     session: Option<Uuid>,
 ) -> color_eyre::Result<()> {
+    let mut store = init_default_store().await?;
+
     let stored = match session {
         Some(id) => Some(store.load_session(id).await?),
         None => store.most_recent_session().await?,
