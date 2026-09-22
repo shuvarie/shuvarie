@@ -26,6 +26,8 @@ pub struct SlashMenu {
     commands: Vec<CommandEntry>,
     open: bool,
     trigger: char,
+    /// The query the current `filtered`/`selected` state was built from.
+    query: String,
     filtered: Vec<usize>,
     selected: usize,
     offset: usize,
@@ -38,6 +40,7 @@ impl SlashMenu {
             commands: default_commands(),
             open: false,
             trigger: '/',
+            query: String::new(),
             filtered: Vec::new(),
             selected: 0,
             offset: 0,
@@ -70,10 +73,15 @@ impl SlashMenu {
 
     pub fn set_availability(&mut self, action: CommandAction, available: bool) {
         let action = CommandRef::Builtin(action);
+        let mut changed = false;
         for cmd in &mut self.commands {
             if cmd.action == action {
+                changed |= cmd.available != available;
                 cmd.available = available;
             }
+        }
+        if changed && self.open {
+            self.refilter();
         }
     }
 
@@ -86,7 +94,7 @@ impl SlashMenu {
         self.commands
             .extend(commands.iter().map(CommandEntry::custom));
         if self.open {
-            self.refilter("");
+            self.refilter();
         }
     }
 
@@ -99,7 +107,9 @@ impl SlashMenu {
             .is_some_and(|cmd| cmd.available)
     }
 
-    /// Recompute open/filtered state from the current buffer text.
+    /// Recompute open/filtered state from the current buffer text. Called on
+    /// every `Session::update`, so re-syncing with an unchanged trigger and
+    /// query must not disturb the selection (see `refilter`).
     pub fn sync(&mut self, buffer: &str) {
         match trigger_state(buffer) {
             Some((c, query)) => {
@@ -109,12 +119,14 @@ impl SlashMenu {
                     self.open = true;
                     self.trigger = c;
                     self.dismissed = None;
-                    self.refilter(query);
+                    self.query = query.to_string();
+                    self.refilter();
                 }
             }
             None => {
                 self.open = false;
                 self.dismissed = None;
+                self.query.clear();
             }
         }
     }
@@ -125,15 +137,24 @@ impl SlashMenu {
         }
     }
 
-    fn refilter(&mut self, query: &str) {
-        self.filtered = search::filter_indices(query, self.commands.len(), |i| {
+    /// Rebuild `filtered` from the current query. Resetting the selection on
+    /// every call would make navigation impossible (`Session::update` re-syncs
+    /// the menu before each message), so the selection is only reset when the
+    /// filtered list actually changes — i.e. when the query or the command
+    /// set/availability moved under it.
+    fn refilter(&mut self) {
+        let query = self.query.clone();
+        let new_filtered = search::filter_indices(&query, self.commands.len(), |i| {
             self.commands[i].action.slash_alias()
         })
         .into_iter()
         .filter(|&i| self.commands[i].available)
         .collect();
-        self.selected = 0;
-        self.offset = 0;
+        if new_filtered != self.filtered {
+            self.selected = 0;
+            self.offset = 0;
+        }
+        self.filtered = new_filtered;
         self.recompute_offset();
     }
 
@@ -359,6 +380,61 @@ mod tests {
             menu.next();
         }
         assert_eq!(menu.selected, menu.filtered.len() - 1);
+    }
+
+    #[test]
+    fn re_sync_with_unchanged_buffer_keeps_selection() {
+        let mut menu = SlashMenu::new();
+        menu.sync("/");
+        menu.next();
+        // `Session::update` re-syncs the menu before handling every message;
+        // the selection must survive that (otherwise navigation could never
+        // move past the second row).
+        menu.sync("/");
+        assert_eq!(menu.selected, 1);
+        menu.next();
+        menu.sync("/");
+        assert_eq!(menu.selected, 2);
+        for _ in 0..(menu.filtered.len() + 5) {
+            menu.sync("/");
+            menu.next();
+        }
+        assert_eq!(menu.selected, menu.filtered.len() - 1);
+        menu.sync("/");
+        menu.prev();
+        assert_eq!(menu.selected, menu.filtered.len() - 2);
+    }
+
+    #[test]
+    fn query_change_resets_selection() {
+        let mut menu = SlashMenu::new();
+        menu.sync("/");
+        menu.next();
+        menu.next();
+        menu.sync("/mo");
+        assert_eq!(menu.selected, 0, "a changed query resets the selection");
+    }
+
+    #[test]
+    fn availability_flip_refreshes_open_menu() {
+        let mut menu = SlashMenu::new();
+        menu.sync("/");
+        let len = menu.filtered.len();
+        menu.set_availability(CommandAction::Quit, false);
+        assert_eq!(menu.filtered.len(), len - 1);
+        assert!(menu.selected_action().is_some());
+        menu.set_availability(CommandAction::Quit, true);
+        assert_eq!(menu.filtered.len(), len);
+    }
+
+    #[test]
+    fn custom_commands_refilter_with_open_query() {
+        let mut menu = SlashMenu::new();
+        menu.sync("/com");
+        assert!(menu.filtered.is_empty(), "no builtin matches 'com'");
+        menu.set_custom_commands(&[custom_command("commit", "Commit code", None)]);
+        assert_eq!(custom_names(&menu), vec!["commit"]);
+        assert_eq!(menu.selected, 0);
     }
 
     #[test]
