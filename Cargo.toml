@@ -17,6 +17,16 @@ frameplay = "0.2"
 futures-util.workspace = true
 gix = { version = "0.87", default-features = false, features = ["sha1"] }
 nucleo = "0.5"
+ratatui = { version = "0.30.2", default-features = false, features = [
+    "all-widgets",
+    "layout-cache",
+    "macros",
+    "std",
+    "termina",
+    "underline-color",
+    "unstable-backend-writer",
+    "unstable-rendered-line-info",
+] }
 reqwest.workspace = true
 selune.workspace = true
 semver = "1"
@@ -32,21 +42,6 @@ termina = { version = "0.3", features = ["event-stream"] }
 tokio.workspace = true
 unicode-width.workspace = true
 uuid.workspace = true
-
-# Ratatui
-[dependencies.ratatui]
-version = "0.30.2"
-default-features = false
-features = [
-    "all-widgets",
-    "layout-cache",
-    "macros",
-    "std",
-    "termina",
-    "underline-color",
-    "unstable-backend-writer",
-    "unstable-rendered-line-info",
-]
 
 [profile.release]
 codegen-units = 1
