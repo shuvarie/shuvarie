@@ -5,7 +5,7 @@ use termina::event::{KeyCode, KeyEvent};
 
 use crate::tui::utils::ctrl;
 
-use super::commands::{CommandAction, CommandEntry, default_commands};
+use super::commands::{CommandAction, CommandEntry, CommandRef, default_commands};
 use super::list::{render_list_item_line, scroll_offset_for};
 use super::search::{Search, SearchMessage};
 use super::theme;
@@ -69,11 +69,24 @@ impl CommandMenu {
     }
 
     pub fn set_availability(&mut self, action: CommandAction, available: bool) {
+        let action = CommandRef::Builtin(action);
         for cmd in &mut self.commands {
             if cmd.action == action {
                 cmd.available = available;
             }
         }
+        if self.open {
+            self.refilter();
+        }
+    }
+
+    /// Replace the custom-command suffix of the command list (builtins keep
+    /// their availability state; custom commands are always available).
+    pub fn set_custom_commands(&mut self, commands: &[shuvarie_core::CustomCommand]) {
+        let builtins = default_commands().len();
+        self.commands.truncate(builtins);
+        self.commands
+            .extend(commands.iter().map(CommandEntry::custom));
         if self.open {
             self.refilter();
         }
@@ -99,10 +112,10 @@ impl CommandMenu {
         self.offset = scroll_offset_for(self.selected, self.offset, vh, len);
     }
 
-    fn selected_action(&self) -> Option<CommandAction> {
+    fn selected_action(&self) -> Option<CommandRef> {
         let idx = self.selected;
         let cmd_idx = self.filtered.get(idx)?;
-        Some(self.commands[*cmd_idx].action)
+        Some(self.commands[*cmd_idx].action.clone())
     }
 
     pub fn map_event(&self, key: &KeyEvent) -> Option<CommandMenuMessage> {
@@ -124,7 +137,7 @@ impl CommandMenu {
         }
     }
 
-    pub fn update(&mut self, msg: CommandMenuMessage) -> Option<CommandAction> {
+    pub fn update(&mut self, msg: CommandMenuMessage) -> Option<CommandRef> {
         if !self.open && !matches!(msg, CommandMenuMessage::Close) {
             return None;
         }

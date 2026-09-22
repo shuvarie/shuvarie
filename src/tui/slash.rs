@@ -4,7 +4,9 @@ use termina::event::{KeyCode, KeyEvent};
 
 use crate::tui::utils::ctrl;
 
-use super::commands::{CommandAction, CommandEntry, TRIGGER_CHARS, default_commands, is_escaped};
+use super::commands::{
+    CommandAction, CommandEntry, CommandRef, TRIGGER_CHARS, default_commands, is_escaped,
+};
 use super::list::{render_list_item_line, scroll_offset_for};
 use super::search;
 use super::theme;
@@ -67,10 +69,24 @@ impl SlashMenu {
     }
 
     pub fn set_availability(&mut self, action: CommandAction, available: bool) {
+        let action = CommandRef::Builtin(action);
         for cmd in &mut self.commands {
             if cmd.action == action {
                 cmd.available = available;
             }
+        }
+    }
+
+    /// Replace the custom-command suffix of the command list. Builtins keep
+    /// their availability state; custom commands are always available and
+    /// sort after the builtins in name order.
+    pub fn set_custom_commands(&mut self, commands: &[shuvarie_core::CustomCommand]) {
+        let builtins = default_commands().len();
+        self.commands.truncate(builtins);
+        self.commands
+            .extend(commands.iter().map(CommandEntry::custom));
+        if self.open {
+            self.refilter("");
         }
     }
 
@@ -79,7 +95,7 @@ impl SlashMenu {
     pub fn available(&self, action: CommandAction) -> bool {
         self.commands
             .iter()
-            .find(|cmd| cmd.action == action)
+            .find(|cmd| cmd.action == CommandRef::Builtin(action))
             .is_some_and(|cmd| cmd.available)
     }
 
@@ -111,7 +127,7 @@ impl SlashMenu {
 
     fn refilter(&mut self, query: &str) {
         self.filtered = search::filter_indices(query, self.commands.len(), |i| {
-            self.commands[i].action.slash_name().to_string()
+            self.commands[i].action.slash_alias()
         })
         .into_iter()
         .filter(|&i| self.commands[i].available)
@@ -145,9 +161,9 @@ impl SlashMenu {
         self.offset = scroll_offset_for(self.selected, self.offset, vh, len);
     }
 
-    pub fn selected_action(&self) -> Option<CommandAction> {
+    pub fn selected_action(&self) -> Option<CommandRef> {
         let cmd_idx = self.filtered.get(self.selected)?;
-        Some(self.commands[*cmd_idx].action)
+        Some(self.commands[*cmd_idx].action.clone())
     }
 
     pub fn map_event(&self, key: &KeyEvent) -> Option<SlashMessage> {
@@ -196,7 +212,7 @@ impl SlashMenu {
                 let line = Line::from(vec![
                     Span::raw(format!(
                         "{:<10}",
-                        format!("{}{}", self.trigger, cmd.action.slash_name())
+                        format!("{}{}", self.trigger, cmd.action.slash_alias())
                     ))
                     .fg(theme::accent())
                     .bold(),
@@ -236,7 +252,20 @@ mod tests {
     fn actions(menu: &SlashMenu) -> Vec<CommandAction> {
         menu.filtered
             .iter()
-            .map(|&i| menu.commands[i].action)
+            .filter_map(|&i| match &menu.commands[i].action {
+                CommandRef::Builtin(action) => Some(*action),
+                CommandRef::Custom { .. } => None,
+            })
+            .collect()
+    }
+
+    fn custom_names(menu: &SlashMenu) -> Vec<String> {
+        menu.filtered
+            .iter()
+            .filter_map(|&i| match &menu.commands[i].action {
+                CommandRef::Custom { name, .. } => Some(name.clone()),
+                CommandRef::Builtin(_) => None,
+            })
             .collect()
     }
 
@@ -338,7 +367,52 @@ mod tests {
         menu.sync(":se");
         assert_eq!(
             menu.selected_action(),
-            Some(CommandAction::OpenSessionPicker)
+            Some(CommandRef::Builtin(CommandAction::OpenSessionPicker))
         );
+    }
+
+    #[test]
+    fn custom_commands_append_after_builtins() {
+        let mut menu = SlashMenu::new();
+        menu.set_custom_commands(&[
+            custom_command("commit", "Commit code", None),
+            custom_command("model", "Fallback model", None),
+        ]);
+        menu.sync("/");
+        // Builtins first (all still present), then the custom commands in
+        // name order.
+        assert_eq!(actions(&menu).len(), CommandAction::ALL.len());
+        assert_eq!(custom_names(&menu), vec!["commit", "model"]);
+        // Re-setting replaces (never duplicates) the custom suffix.
+        menu.set_custom_commands(&[custom_command("review", "Review", None)]);
+        menu.sync("/");
+        assert_eq!(custom_names(&menu), vec!["review"]);
+        assert_eq!(actions(&menu).len(), CommandAction::ALL.len());
+    }
+
+    #[test]
+    fn custom_commands_survive_availability_updates() {
+        let mut menu = SlashMenu::new();
+        menu.set_custom_commands(&[custom_command("commit", "Commit code", None)]);
+        menu.set_availability(CommandAction::Quit, false);
+        menu.sync("/");
+        assert_eq!(custom_names(&menu), vec!["commit"]);
+        assert!(
+            !actions(&menu).contains(&CommandAction::Quit),
+            "builtin availability still applies"
+        );
+    }
+
+    fn custom_command(
+        name: &str,
+        title: &str,
+        model: Option<&str>,
+    ) -> shuvarie_core::CustomCommand {
+        shuvarie_core::CustomCommand {
+            name: name.to_string(),
+            title: title.to_string(),
+            model: model.map(ToOwned::to_owned),
+            path: std::path::PathBuf::from("/tmp"),
+        }
     }
 }

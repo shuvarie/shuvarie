@@ -41,8 +41,15 @@ pub enum Command {
     },
     SaveConfig,
     NewSession,
+    /// Start a user turn. `model` optionally overrides the streaming target
+    /// for this turn only: a `<provider_type>/<model>` spec resolved to a
+    /// provider connection through the `default-providers` config (see
+    /// `resolve_model_override`); `None` streams on the active provider.
+    /// An unresolvable spec reports [`crate::Event::StreamError`]. A prompt
+    /// queued behind a busy agent (steered) keeps its override.
     SendMessage {
         content: String,
+        model: Option<String>,
     },
     /// Run a bash-mode (`!`-prefixed) command through the resolved shell.
     /// Display-only: the output never persists or reaches the model.

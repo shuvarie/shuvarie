@@ -25,6 +25,9 @@ pub(crate) fn from_kdl_with_sections(contents: &str) -> Result<(Config, Vec<Stri
             "agent" => config.agent = parse_agent(node, contents)?,
             "lsp" => config.lsp = parse_lsp(node, contents)?,
             "skills" => config.skills = parse_skills(node, contents)?,
+            "default-providers" => {
+                config.default_providers = parse_default_providers(node, contents)?
+            }
             "context" => config.context = parse_context(node, contents)?,
             "shell" => config.shell = parse_shell(node, contents)?,
             "registries" => config.registries = parse_registries(node, contents)?,
@@ -515,6 +518,46 @@ fn parse_skills(node: &KdlNode, input: &str) -> Result<SkillsConfig> {
         config.dirs = value;
     }
     Ok(config)
+}
+
+/// `default-providers { use id="<provider id>" … }` — the provider connection
+/// preferred per connection type when a prompt names a model as
+/// `<provider_type>/<model>`. Each `use` entry carries an `id` property; the
+/// connection type is read from the connection's own `kind` at use time.
+fn parse_default_providers(node: &KdlNode, input: &str) -> Result<DefaultProvidersConfig> {
+    let mut use_ids = Vec::new();
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "use" => {
+                if child.entries().iter().any(|entry| entry.name().is_none()) {
+                    return Err(node_error(
+                        input,
+                        child,
+                        "`use` takes only an `id` property",
+                        None,
+                    ));
+                }
+                let Some(id) = property_string(input, child, "id")? else {
+                    return Err(node_error(
+                        input,
+                        child,
+                        "`use` requires an `id` property",
+                        None,
+                    ));
+                };
+                use_ids.push(id);
+            }
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!("unknown node `{other}` in `default-providers` (expected `use`)"),
+                    None,
+                ));
+            }
+        }
+    }
+    Ok(DefaultProvidersConfig { use_ids })
 }
 
 fn parse_context(node: &KdlNode, input: &str) -> Result<ContextConfig> {
@@ -2285,6 +2328,7 @@ pub(crate) fn to_kdl(config: &Config) -> Result<String> {
         agent_node(&config.agent),
         lsp_node(&config.lsp),
         skills_node(&config.skills),
+        default_providers_node(&config.default_providers),
         context_node(&config.context),
         shell_node(&config.shell),
         permissions_node(&config.permissions),
@@ -2469,6 +2513,19 @@ fn skills_node(cfg: &SkillsConfig) -> Option<KdlNode> {
     }
     children.extend(string_vec_node("dirs", &cfg.dirs));
     section_node("skills", children)
+}
+
+fn default_providers_node(cfg: &DefaultProvidersConfig) -> Option<KdlNode> {
+    if cfg.use_ids.is_empty() {
+        return None;
+    }
+    let mut children = Vec::new();
+    for id in &cfg.use_ids {
+        let mut node = KdlNode::new("use");
+        node.push(KdlEntry::new_prop("id", KdlValue::String(id.clone())));
+        children.push(node);
+    }
+    section_node("default-providers", children)
 }
 
 fn context_node(cfg: &ContextConfig) -> Option<KdlNode> {

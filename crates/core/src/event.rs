@@ -264,6 +264,14 @@ pub enum Event {
         skills: Vec<crate::Skill>,
         warnings: Vec<crate::SkillWarning>,
     },
+    /// The custom-command roster (`.shuvarie/commands` + the global config
+    /// dir's `commands`), sent at startup and refreshed by
+    /// [`Command::Reload`]. The TUI turns them into slash-menu entries and
+    /// expands their templates on invocation.
+    CustomCommandsLoaded {
+        commands: Vec<crate::custom_commands::CustomCommand>,
+        warnings: Vec<crate::custom_commands::CustomCommandWarning>,
+    },
     /// A startup warning surfaced as a dismissible popup — currently: the
     /// `shell.path` configured in config.kdl was not found, so `run_shell`
     /// falls back to the platform default shell.

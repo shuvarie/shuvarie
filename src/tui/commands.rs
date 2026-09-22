@@ -84,122 +84,156 @@ impl CommandAction {
 
 #[derive(Clone)]
 pub struct CommandEntry {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub action: CommandAction,
+    pub name: String,
+    pub description: String,
+    pub action: CommandRef,
     pub available: bool,
+}
+
+/// What running an entry dispatches to: a built-in UI action or a custom
+/// command (a prompt template loaded from `.shuvarie/commands`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommandRef {
+    Builtin(CommandAction),
+    Custom {
+        /// The command directory name (its slash alias).
+        name: String,
+        /// The command's `model` frontmatter override
+        /// (`<provider_type>/<model>`), passed through to the core for the
+        /// turn.
+        model: Option<String>,
+    },
+}
+
+impl CommandRef {
+    /// The slash alias this entry answers to: a builtin's slash name, or a
+    /// custom command's name — rendered `custom:<name>` when it collides with
+    /// a builtin's name (the builtin keeps the plain alias).
+    pub fn slash_alias(&self) -> String {
+        match self {
+            CommandRef::Builtin(action) => action.slash_name().to_string(),
+            CommandRef::Custom { name, .. } => {
+                if CommandAction::ALL.iter().any(|a| a.slash_name() == name) {
+                    format!("custom:{name}")
+                } else {
+                    name.clone()
+                }
+            }
+        }
+    }
+}
+
+impl CommandEntry {
+    pub fn builtin(name: &'static str, description: &'static str, action: CommandAction) -> Self {
+        Self {
+            name: name.to_string(),
+            description: description.to_string(),
+            action: CommandRef::Builtin(action),
+            available: true,
+        }
+    }
+
+    pub fn custom(command: &shuvarie_core::CustomCommand) -> Self {
+        Self {
+            name: command.title.clone(),
+            description: "Custom command".to_string(),
+            action: CommandRef::Custom {
+                name: command.name.clone(),
+                model: command.model.clone(),
+            },
+            available: true,
+        }
+    }
 }
 
 pub fn default_commands() -> Vec<CommandEntry> {
     vec![
-        CommandEntry {
-            name: "Select model",
-            description: "Pick the active model",
-            action: CommandAction::OpenModelSelect,
-            available: true,
-        },
-        CommandEntry {
-            name: "Add provider",
-            description: "Add a new LLM provider",
-            action: CommandAction::AddProvider,
-            available: true,
-        },
-        CommandEntry {
-            name: "Switch session",
-            description: "Resume or delete past sessions",
-            action: CommandAction::OpenSessionPicker,
-            available: true,
-        },
-        CommandEntry {
-            name: "New session",
-            description: "Start a fresh conversation",
-            action: CommandAction::NewSession,
-            available: true,
-        },
-        CommandEntry {
-            name: "Session tree",
-            description: "Walk the tree, fork from a node",
-            action: CommandAction::OpenTree,
-            available: true,
-        },
-        CommandEntry {
-            name: "Switch scene",
-            description: "Pick the scene the agent runs under",
-            action: CommandAction::OpenScenePicker,
-            available: true,
-        },
-        CommandEntry {
-            name: "Select variant",
-            description: "Pick the model's reasoning effort",
-            action: CommandAction::OpenVariantPicker,
-            available: true,
-        },
-        CommandEntry {
-            name: "Edit title",
-            description: "Rename the current session",
-            action: CommandAction::EditTitle,
-            available: true,
-        },
-        CommandEntry {
-            name: "Generate title",
-            description: "Draft the session title with the LLM",
-            action: CommandAction::GenTitle,
-            available: true,
-        },
-        CommandEntry {
-            name: "Export session",
-            description: "Write the session to a JSON file",
-            action: CommandAction::Export,
-            available: true,
-        },
-        CommandEntry {
-            name: "Undo last turn",
-            description: "Fork before the last prompt",
-            action: CommandAction::UndoLastTurn,
-            available: true,
-        },
-        CommandEntry {
-            name: "Replay last turn",
-            description: "Fork + re-run the last turn",
-            action: CommandAction::Replay,
-            available: true,
-        },
-        CommandEntry {
-            name: "Reload skills",
-            description: "Re-discover skills without a restart",
-            action: CommandAction::Reload,
-            available: true,
-        },
-        CommandEntry {
-            name: "MCP servers",
-            description: "Show MCP server states",
-            action: CommandAction::McpServers,
-            available: true,
-        },
-        CommandEntry {
-            name: "Reconnect MCP",
-            description: "Reconnect an MCP server",
-            action: CommandAction::McpReconnect,
-            available: true,
-        },
-        CommandEntry {
-            name: "Toggle sidebar",
-            description: "Collapse or expand the sidebar",
-            action: CommandAction::ToggleSidebar,
-            available: true,
-        },
-        CommandEntry {
-            name: "Search chat",
-            description: "Highlight text in the chat live",
-            action: CommandAction::Search,
-            available: true,
-        },
-        CommandEntry {
-            name: "Quit",
-            description: "Exit the program",
-            action: CommandAction::Quit,
-            available: true,
-        },
+        CommandEntry::builtin(
+            "Select model",
+            "Pick the active model",
+            CommandAction::OpenModelSelect,
+        ),
+        CommandEntry::builtin(
+            "Add provider",
+            "Add a new LLM provider",
+            CommandAction::AddProvider,
+        ),
+        CommandEntry::builtin(
+            "Switch session",
+            "Resume or delete past sessions",
+            CommandAction::OpenSessionPicker,
+        ),
+        CommandEntry::builtin(
+            "New session",
+            "Start a fresh conversation",
+            CommandAction::NewSession,
+        ),
+        CommandEntry::builtin(
+            "Session tree",
+            "Walk the tree, fork from a node",
+            CommandAction::OpenTree,
+        ),
+        CommandEntry::builtin(
+            "Switch scene",
+            "Pick the scene the agent runs under",
+            CommandAction::OpenScenePicker,
+        ),
+        CommandEntry::builtin(
+            "Select variant",
+            "Pick the model's reasoning effort",
+            CommandAction::OpenVariantPicker,
+        ),
+        CommandEntry::builtin(
+            "Edit title",
+            "Rename the current session",
+            CommandAction::EditTitle,
+        ),
+        CommandEntry::builtin(
+            "Generate title",
+            "Draft the session title with the LLM",
+            CommandAction::GenTitle,
+        ),
+        CommandEntry::builtin(
+            "Export session",
+            "Write the session to a JSON file",
+            CommandAction::Export,
+        ),
+        CommandEntry::builtin(
+            "Undo last turn",
+            "Fork before the last prompt",
+            CommandAction::UndoLastTurn,
+        ),
+        CommandEntry::builtin(
+            "Replay last turn",
+            "Fork + re-run the last turn",
+            CommandAction::Replay,
+        ),
+        CommandEntry::builtin(
+            "Reload skills",
+            "Re-discover skills and commands without a restart",
+            CommandAction::Reload,
+        ),
+        CommandEntry::builtin(
+            "MCP servers",
+            "Show MCP server states",
+            CommandAction::McpServers,
+        ),
+        CommandEntry::builtin(
+            "Reconnect MCP",
+            "Reconnect an MCP server",
+            CommandAction::McpReconnect,
+        ),
+        CommandEntry::builtin(
+            "Toggle sidebar",
+            "Collapse or expand the sidebar",
+            CommandAction::ToggleSidebar,
+        ),
+        CommandEntry::builtin(
+            "Search chat",
+            "Highlight text in the chat live",
+            CommandAction::Search,
+        ),
+        CommandEntry::builtin("Quit", "Exit the program", CommandAction::Quit),
     ]
 }
 
@@ -290,6 +324,55 @@ pub fn parse_skill_invocation(text: &str) -> Option<SkillInvocation> {
         return None;
     }
     Some(SkillInvocation {
+        name: name.to_string(),
+        args: (!args.is_empty()).then(|| args.to_string()),
+    })
+}
+
+/// A parsed `<trigger><name> [args]` custom-command submission (also accepted
+/// in the `custom:`-prefixed form `<trigger>custom:<name> [args]`, which is
+/// how a command sharing a builtin's name is invoked).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CustomInvocation {
+    pub name: String,
+    pub args: Option<String>,
+}
+
+/// Whether `name` could be a custom-command name (the loader-validated
+/// set: lowercase a-z, 0-9, and hyphens).
+fn is_command_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// Parse submitted text as a custom-command invocation. Escaped prefixes
+/// (`//`, `::`) never parse. A builtin's slash name without the `custom:`
+/// prefix is never claimed here — it belongs to the builtin (which
+/// [`parse_command`] handled or rejected for its args).
+pub fn parse_custom_invocation(text: &str) -> Option<CustomInvocation> {
+    let text = text.trim();
+    let first = text.chars().next()?;
+    if !TRIGGER_CHARS.contains(&first) || is_escaped(text) {
+        return None;
+    }
+    let rest = &text[first.len_utf8()..];
+    let (prefixed, rest) = match rest.strip_prefix("custom:") {
+        Some(custom) => (true, custom),
+        None => (false, rest),
+    };
+    let (name, args) = match rest.find(char::is_whitespace) {
+        Some(i) => (&rest[..i], rest[i..].trim()),
+        None => (rest, ""),
+    };
+    if name.is_empty() || !is_command_name(name) {
+        return None;
+    }
+    if !prefixed && CommandAction::ALL.iter().any(|a| a.slash_name() == name) {
+        return None;
+    }
+    Some(CustomInvocation {
         name: name.to_string(),
         args: (!args.is_empty()).then(|| args.to_string()),
     })
@@ -582,5 +665,73 @@ mod tests {
         assert_eq!(parse_skill_invocation("skill:tokio"), None);
         assert_eq!(parse_skill_invocation("/undo"), None);
         assert_eq!(parse_skill_invocation("hello"), None);
+    }
+
+    #[test]
+    fn parse_custom_invocations() {
+        assert_eq!(
+            parse_custom_invocation("/commit"),
+            Some(CustomInvocation {
+                name: "commit".into(),
+                args: None
+            })
+        );
+        assert_eq!(
+            parse_custom_invocation(":commit fix the tests"),
+            Some(CustomInvocation {
+                name: "commit".into(),
+                args: Some("fix the tests".into())
+            })
+        );
+        assert_eq!(
+            parse_custom_invocation("/commit fix the tests"),
+            Some(CustomInvocation {
+                name: "commit".into(),
+                args: Some("fix the tests".into())
+            })
+        );
+        assert_eq!(
+            parse_custom_invocation("  /custom:model  "),
+            Some(CustomInvocation {
+                name: "model".into(),
+                args: None
+            })
+        );
+    }
+
+    #[test]
+    fn parse_custom_invocation_rejects() {
+        assert_eq!(parse_custom_invocation("//commit"), None);
+        assert_eq!(parse_custom_invocation("::commit"), None);
+        assert_eq!(parse_custom_invocation("/custom:"), None);
+        // Invalid name charset: falls through to a literal send.
+        assert_eq!(parse_custom_invocation("/usr/bin/ls"), None);
+        assert_eq!(parse_custom_invocation("/Commit"), None);
+        assert_eq!(parse_custom_invocation("/skill:x"), None);
+        assert_eq!(parse_custom_invocation("hello"), None);
+    }
+
+    #[test]
+    fn slash_alias_collisions_render_as_custom() {
+        assert_eq!(
+            CommandRef::Custom {
+                name: "commit".into(),
+                model: None
+            }
+            .slash_alias(),
+            "commit"
+        );
+        assert_eq!(
+            CommandRef::Custom {
+                name: "model".into(),
+                model: None
+            }
+            .slash_alias(),
+            "custom:model"
+        );
+        assert_eq!(
+            CommandRef::Builtin(CommandAction::OpenModelSelect).slash_alias(),
+            "model"
+        );
     }
 }

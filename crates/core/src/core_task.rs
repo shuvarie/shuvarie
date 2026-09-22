@@ -297,8 +297,9 @@ pub async fn run(
     // completed action boundary of the active stream (after a tool batch
     // settles or after a thinking/text segment — the stream task then cuts
     // the turn), when the turn finishes, or when it is cancelled. The back is
-    // what Alt+Up recalls.
-    let mut steered: Vec<String> = Vec::new();
+    // what Alt+Up recalls (its model override is dropped there — the recalled
+    // text is re-submitted by the user).
+    let mut steered: Vec<(String, Option<String>)> = Vec::new();
     let steer = SteerSignal::default();
 
     let (question_tx, mut question_rx) = tokio::sync::mpsc::channel::<QuestionRequest>(8);
@@ -366,6 +367,14 @@ pub async fn run(
         .send(Event::SkillsLoaded {
             skills: skills.skills.clone(),
             warnings: skills.warnings.clone(),
+        })
+        .await;
+
+    let custom_commands = crate::custom_commands::CustomCommands::load(&workspace_root);
+    let _ = event_tx
+        .send(Event::CustomCommandsLoaded {
+            commands: custom_commands.commands.clone(),
+            warnings: custom_commands.warnings.clone(),
         })
         .await;
 
@@ -680,9 +689,9 @@ pub async fn run(
                         ctx.session = Some(Arc::new(Mutex::new(Session::new())));
                         let _ = ctx.event_tx.send(Event::SessionStarted).await;
                     }
-                    Command::SendMessage { content } => {
+                    Command::SendMessage { content, model } => {
                         if is_busy(&ctx, pending_retry.as_ref()) {
-                            steered.push(content.clone());
+                            steered.push((content.clone(), model));
                             ctx.steer.arm();
                             let _ = ctx.event_tx.send(Event::PromptSteered { content }).await;
                             continue;
@@ -691,7 +700,7 @@ pub async fn run(
                         pending_retry = None;
                         conn_retries = 0;
                         ctx.active_stream = None;
-                        ctx.start_user_turn(content, false).await;
+                        ctx.start_user_turn(content, false, model).await;
                     }
                     Command::RunBash { command } => {
                         let id = next_bash_id;
@@ -775,9 +784,9 @@ pub async fn run(
                         if aborted {
                             ctx.steer.reset();
                             if !steered.is_empty() {
-                                let content = steered.remove(0);
+                                let (content, model) = steered.remove(0);
                                 ctx.active_stream = None;
-                                ctx.start_user_turn(content, true).await;
+                                ctx.start_user_turn(content, true, model).await;
                             }
                         }
                     }
@@ -1233,7 +1242,7 @@ pub async fn run(
                                     continue;
                                 }
                                 if let Some(content) = last_user_content {
-                                    ctx.self_replay_send(content, true).await;
+                                    ctx.self_replay_send(content, true, None).await;
                                 }
                             }
                             Err(e) => {
@@ -1259,9 +1268,18 @@ pub async fn run(
                                 warnings: ctx.skills.warnings.clone(),
                             })
                             .await;
+                        let custom_commands =
+                            crate::custom_commands::CustomCommands::load(&ctx.workspace_root);
+                        let _ = ctx
+                            .event_tx
+                            .send(Event::CustomCommandsLoaded {
+                                commands: custom_commands.commands.clone(),
+                                warnings: custom_commands.warnings.clone(),
+                            })
+                            .await;
                     }
                     Command::RecallSteered { stacked } => {
-                        let content = steered.pop();
+                        let content = steered.pop().map(|(content, _)| content);
                         if steered.is_empty() {
                             ctx.steer.disarm();
                         }
@@ -1413,8 +1431,8 @@ pub async fn run(
                         // the next queued prompt cuts in at its next action
                         // boundary instead of waiting for the whole turn.
                         if !steered.is_empty() {
-                            let content = steered.remove(0);
-                            ctx.start_user_turn(content, true).await;
+                            let (content, model) = steered.remove(0);
+                            ctx.start_user_turn(content, true, model).await;
                             if !steered.is_empty() {
                                 ctx.steer.arm();
                             }
@@ -1860,8 +1878,9 @@ impl CoreCtx {
     /// Persist and start streaming a new user turn: an accepted `SendMessage`
     /// or a dispatched steered prompt. Emits [`Event::TurnStarted`] (with the
     /// `steered` flag) before the first stream event so the TUI renders the
-    /// user prompt in order.
-    async fn start_user_turn(&mut self, content: String, steered: bool) {
+    /// user prompt in order. `model` is the per-turn streaming override (see
+    /// [`Command::SendMessage`]); `None` streams on the active provider.
+    async fn start_user_turn(&mut self, content: String, steered: bool, model: Option<String>) {
         // A new turn always starts with the preemption signal off: dispatched
         // steered prompts only preempt the stream they were queued during,
         // and a fresh turn must not inherit a stale armed signal.
@@ -1995,14 +2014,21 @@ impl CoreCtx {
                 steered,
             })
             .await;
-        self.self_replay_send(content, false).await;
+        self.self_replay_send(content, false, model).await;
     }
 
     /// Build a stream for the given user content and spawn the event-forwarding
     /// task. When `push_user` is set, the content is first appended as a user
     /// message (used by `SendMessage`); otherwise it is re-sent as-is (used by
-    /// replay/resume).
-    async fn self_replay_send(&mut self, content: String, push_user: bool) {
+    /// replay/resume). `model_override` is a per-turn `<provider_type>/<model>`
+    /// spec (a custom command's `model` frontmatter); `None` streams on the
+    /// active provider.
+    async fn self_replay_send(
+        &mut self,
+        content: String,
+        push_user: bool,
+        model_override: Option<String>,
+    ) {
         let Some(s) = &self.session else {
             return;
         };
@@ -2026,24 +2052,40 @@ impl CoreCtx {
                 }
             }
         }
-        let Some(active) = self.connections.active.clone() else {
-            let _ = self
-                .event_tx
-                .send(Event::StreamError {
-                    error: "no active provider".into(),
-                })
-                .await;
-            return;
-        };
-        let provider_name = active.provider;
-        let Some(model) = active.model else {
-            let _ = self
-                .event_tx
-                .send(Event::StreamError {
-                    error: "no active model".into(),
-                })
-                .await;
-            return;
+        let (provider_name, model) = match model_override.as_deref() {
+            Some(spec) => match resolve_model_override(
+                &self.connections,
+                &self.config.default_providers,
+                spec,
+            ) {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    let _ = self.event_tx.send(Event::StreamError { error }).await;
+                    return;
+                }
+            },
+            None => {
+                let Some(active) = self.connections.active.clone() else {
+                    let _ = self
+                        .event_tx
+                        .send(Event::StreamError {
+                            error: "no active provider".into(),
+                        })
+                        .await;
+                    return;
+                };
+                let provider_name = active.provider;
+                let Some(model) = active.model else {
+                    let _ = self
+                        .event_tx
+                        .send(Event::StreamError {
+                            error: "no active model".into(),
+                        })
+                        .await;
+                    return;
+                };
+                (provider_name, model)
+            }
         };
         let client = match client_for(
             &mut self.clients,
@@ -2297,9 +2339,49 @@ impl CoreCtx {
             })
             .await;
         if let Some(content) = content {
-            self.self_replay_send(content, false).await;
+            self.self_replay_send(content, false, None).await;
         }
     }
+}
+
+/// Resolve a custom command's `model` spec (`<provider_type>/<model>`) to the
+/// provider connection id + model id to stream on. The provider entry comes
+/// from the `default-providers` config: the last `use` entry whose connection
+/// still exists and whose `kind` resolves to the requested type wins; with no
+/// matching entry, the first configured provider of that type (lowest id) is
+/// used. A failed resolution reports the reason as an error.
+fn resolve_model_override(
+    connections: &Connections,
+    default_providers: &shuvarie_config::DefaultProvidersConfig,
+    spec: &str,
+) -> Result<(String, String), String> {
+    let Some((type_name, model)) = crate::custom_commands::parse_model_spec(spec) else {
+        return Err(format!(
+            "invalid model `{spec}` (expected `<provider>/<model>`)"
+        ));
+    };
+    let Some(target) = crate::catalog::parse_provider_type(type_name) else {
+        return Err(format!(
+            "unknown provider type `{type_name}` in model `{spec}`"
+        ));
+    };
+    for id in default_providers.use_ids.iter().rev() {
+        if connections
+            .providers
+            .get(id)
+            .is_some_and(|provider| crate::catalog::provider_type(&provider.kind) == target)
+        {
+            return Ok((id.clone(), model.to_string()));
+        }
+    }
+    for (id, provider) in &connections.providers {
+        if crate::catalog::provider_type(&provider.kind) == target {
+            return Ok((id.clone(), model.to_string()));
+        }
+    }
+    Err(format!(
+        "no provider connection of type `{type_name}` is configured (for model `{model}`)"
+    ))
 }
 
 async fn load_startup_session(
@@ -2408,7 +2490,11 @@ async fn cut_running_stream(
 
 /// Wipe the steered queue (session-level transition) and tell the TUI to drop
 /// its queued-prompt display.
-async fn clear_steered(steered: &mut Vec<String>, steer: &SteerSignal, event_tx: &Sender<Event>) {
+async fn clear_steered(
+    steered: &mut Vec<(String, Option<String>)>,
+    steer: &SteerSignal,
+    event_tx: &Sender<Event>,
+) {
     steer.disarm();
     if steered.is_empty() {
         return;
@@ -3616,6 +3702,95 @@ mod tests {
     use selune::ProviderType;
     use shuvarie_llm::StreamItem;
     use shuvarie_llm::TokenUsage;
+
+    fn provider(id: &str, kind: &str) -> ProviderConfig {
+        ProviderConfig::new(id, kind, Some("tok".into()), None)
+    }
+
+    fn connections_with(providers: &[(&str, &str)]) -> Connections {
+        let mut connections = Connections::default();
+        for (id, kind) in providers {
+            connections
+                .providers
+                .insert(id.to_string(), provider(id, kind));
+        }
+        connections
+    }
+
+    #[test]
+    fn model_override_resolves_the_matching_default_provider() {
+        let connections = connections_with(&[
+            ("openai-a", "openai"),
+            ("openai-b", "openai"),
+            ("anthropic-c", "anthropic"),
+        ]);
+        let defaults = shuvarie_config::DefaultProvidersConfig {
+            use_ids: vec!["openai-b".to_string()],
+        };
+        assert_eq!(
+            resolve_model_override(&connections, &defaults, "openai/gpt-6").unwrap(),
+            ("openai-b".to_string(), "gpt-6".to_string())
+        );
+        // No default entry for anthropic: the first configured provider of
+        // the type (lowest id) is used.
+        assert_eq!(
+            resolve_model_override(&connections, &defaults, "anthropic/claude-x").unwrap(),
+            ("anthropic-c".to_string(), "claude-x".to_string())
+        );
+    }
+
+    #[test]
+    fn model_override_last_matching_use_entry_wins() {
+        let connections = connections_with(&[("a", "openai"), ("b", "openai"), ("c", "openai")]);
+        let defaults = shuvarie_config::DefaultProvidersConfig {
+            use_ids: vec!["a".to_string(), "b".to_string()],
+        };
+        assert_eq!(
+            resolve_model_override(&connections, &defaults, "openai/m").unwrap(),
+            ("b".to_string(), "m".to_string())
+        );
+    }
+
+    #[test]
+    fn model_override_skips_entries_whose_type_no_longer_matches() {
+        // `c` points at an anthropic connection; it must not serve an openai
+        // model — the first openai connection wins instead.
+        let connections = connections_with(&[("a", "openai"), ("c", "anthropic")]);
+        let defaults = shuvarie_config::DefaultProvidersConfig {
+            use_ids: vec!["c".to_string()],
+        };
+        assert_eq!(
+            resolve_model_override(&connections, &defaults, "openai/m").unwrap(),
+            ("a".to_string(), "m".to_string())
+        );
+    }
+
+    #[test]
+    fn model_override_skips_entries_whose_connection_vanished() {
+        let connections = connections_with(&[("a", "openai")]);
+        let defaults = shuvarie_config::DefaultProvidersConfig {
+            use_ids: vec!["ghost".to_string()],
+        };
+        assert_eq!(
+            resolve_model_override(&connections, &defaults, "openai/m").unwrap(),
+            ("a".to_string(), "m".to_string())
+        );
+    }
+
+    #[test]
+    fn model_override_errors() {
+        let connections = connections_with(&[("a", "openai")]);
+        let defaults = shuvarie_config::DefaultProvidersConfig::default();
+        let error = resolve_model_override(&connections, &defaults, "anthropic/m").unwrap_err();
+        assert!(
+            error.contains("no provider connection of type `anthropic`"),
+            "{error}"
+        );
+        let error = resolve_model_override(&connections, &defaults, "nosuchtype/m").unwrap_err();
+        assert!(error.contains("unknown provider type"), "{error}");
+        let error = resolve_model_override(&connections, &defaults, "nomodel").unwrap_err();
+        assert!(error.contains("expected `<provider>/<model>`"), "{error}");
+    }
 
     #[test]
     fn device_code_handler_forwards_prompts_for_oauth_backed_kinds_only() {

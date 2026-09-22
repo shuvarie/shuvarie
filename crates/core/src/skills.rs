@@ -293,7 +293,7 @@ impl Skill {
     }
 }
 
-fn validate_name(name: &str) -> Vec<String> {
+pub(crate) fn validate_name(name: &str) -> Vec<String> {
     let mut errors = Vec::new();
     if name.chars().count() > MAX_NAME_LENGTH {
         errors.push(format!(

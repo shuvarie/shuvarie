@@ -11,7 +11,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::tui::utils::{alt, alt_shift, ctrl};
 
-use super::commands::{self, CommandAction};
+use super::commands::{self, CommandAction, CommandRef};
 use super::components::{TextArea, TextAreaEffect, TextAreaMessage};
 use super::permission::{PermissionEffect, PermissionMessage, PermissionUI};
 use super::question::{QuestionEffect, QuestionMessage, QuestionUI};
@@ -82,6 +82,15 @@ pub enum SessionMessage {
     /// Replaces the session's skill list (mirrors what the sidebar shows).
     SetSkills {
         skills: Vec<Skill>,
+    },
+    /// Replaces the session's custom-command list; the slash menu mirrors it.
+    SetCustomCommands {
+        commands: Vec<shuvarie_core::CustomCommand>,
+    },
+    /// Run a custom command picked from the Ctrl+M menu: expand its template
+    /// (menu launches carry no arguments) and send it.
+    RunCustomCommand {
+        name: String,
     },
     /// Per-request usage added to the sidebar's running totals;
     /// `context_tokens` is the request's context footprint when it came from
@@ -240,6 +249,7 @@ pub struct SessionScreen {
     last_escape: Option<Instant>,
     working_todos: Vec<shuvarie_core::tools::todos::TodoItem>,
     skills: Vec<Skill>,
+    custom_commands: Vec<shuvarie_core::CustomCommand>,
     /// Last painted layout rects, for mouse zone routing between frames.
     input_area: Cell<Rect>,
     history_area: Cell<Rect>,
@@ -270,6 +280,7 @@ impl SessionScreen {
             last_escape: None,
             working_todos: Vec::new(),
             skills: Vec::new(),
+            custom_commands: Vec::new(),
             input_area: Cell::new(Rect::default()),
             history_area: Cell::new(Rect::default()),
             copy_on_select: false,
@@ -332,6 +343,60 @@ impl SessionScreen {
             .invocation_content(invocation.args.as_deref())
             .map(Some)
             .map_err(|e| format!("failed to read skill {}: {e}", invocation.name))
+    }
+
+    /// Expand a `/<name> [args]` submit into the custom command's prompt
+    /// content plus its `model` override. `Ok(None)` when the text is not a
+    /// custom invocation (no custom command claims the name, so the submit
+    /// falls through to skill parsing and a literal send); `Err(reason)` for
+    /// an unreadable `command.md`.
+    fn expand_custom(&self, content: &str) -> Result<Option<(String, Option<String>)>, String> {
+        let Some(invocation) = commands::parse_custom_invocation(content) else {
+            return Ok(None);
+        };
+        let Some(command) = self
+            .custom_commands
+            .iter()
+            .find(|c| c.name == invocation.name)
+        else {
+            return Ok(None);
+        };
+        command
+            .invocation_content(invocation.args.as_deref())
+            .map(|content| Some((content, command.model.clone())))
+            .map_err(|e| format!("failed to read command {}: {e}", invocation.name))
+    }
+
+    /// Run a slash-menu / command-menu selection: builtins dispatch through
+    /// [`SessionEffect::RunCommand`]; custom commands expand immediately
+    /// (menu launches carry no args).
+    fn run_command_ref(&mut self, action: CommandRef) -> Option<SessionEffect> {
+        match action {
+            CommandRef::Builtin(action) => Some(SessionEffect::RunCommand {
+                action: CommandRef::Builtin(action),
+                args: None,
+            }),
+            CommandRef::Custom { name, model: _ } => self.run_custom(&name, None),
+        }
+    }
+
+    /// Expand and send a custom command by name; `args` feed the
+    /// `{{arguments}}` placeholder (or trail the template).
+    fn run_custom(&mut self, name: &str, args: Option<String>) -> Option<SessionEffect> {
+        let Some(command) = self.custom_commands.iter().find(|c| c.name == name) else {
+            self.error = Some(format!("unknown command: {name}"));
+            return None;
+        };
+        match command.invocation_content(args.as_deref()) {
+            Ok(content) => Some(SessionEffect::SendMessage {
+                content,
+                model: command.model.clone(),
+            }),
+            Err(error) => {
+                self.error = Some(format!("failed to read command {name}: {error}"));
+                None
+            }
+        }
     }
 
     /// Enter chat search mode: open the floating tooltip seeded with
@@ -519,9 +584,30 @@ impl SessionScreen {
                             if let Some(cmd) = commands::parse_command(&content) {
                                 self.sync_slash();
                                 return Some(SessionEffect::RunCommand {
-                                    action: cmd.action,
+                                    action: CommandRef::Builtin(cmd.action),
                                     args: cmd.args,
                                 });
+                            }
+                            // A custom command: expand its template (the
+                            // `{{arguments}}` placeholder / trailing args)
+                            // and send it, carrying the command's `model`
+                            // override for this turn. An unknown name falls
+                            // through to skill parsing and then to a literal
+                            // send.
+                            match self.expand_custom(&content) {
+                                Ok(Some((expanded, model))) => {
+                                    self.input.remember_sent(&content);
+                                    self.sync_slash();
+                                    return Some(SessionEffect::SendMessage {
+                                        content: expanded,
+                                        model,
+                                    });
+                                }
+                                Ok(None) => {}
+                                Err(error) => {
+                                    self.error = Some(error);
+                                    return None;
+                                }
                             }
                             let expanded = match self.expand_skill(&content) {
                                 Ok(Some(expanded)) => expanded,
@@ -536,7 +622,10 @@ impl SessionScreen {
                             // turn or gets steered behind a busy agent.
                             self.input.remember_sent(&content);
                             self.sync_slash();
-                            return Some(SessionEffect::SendMessage { content: expanded });
+                            return Some(SessionEffect::SendMessage {
+                                content: expanded,
+                                model: None,
+                            });
                         }
                     }
                 }
@@ -616,7 +705,8 @@ impl SessionScreen {
                 }
                 SlashMessage::Complete => {
                     if let Some(action) = self.slash.selected_action() {
-                        let text = format!("{}{} ", self.slash.trigger_char(), action.slash_name());
+                        let text =
+                            format!("{}{} ", self.slash.trigger_char(), action.slash_alias());
                         self.input.buffer.set(&text);
                     }
                     self.sync_slash();
@@ -626,7 +716,7 @@ impl SessionScreen {
                     if let Some(action) = self.slash.selected_action() {
                         self.input.buffer.clear();
                         self.sync_slash();
-                        return Some(SessionEffect::RunCommand { action, args: None });
+                        return self.run_command_ref(action);
                     }
                     None
                 }
@@ -664,6 +754,12 @@ impl SessionScreen {
                 self.skills = skills;
                 None
             }
+            SessionMessage::SetCustomCommands { commands } => {
+                self.custom_commands = commands.clone();
+                self.slash.set_custom_commands(&commands);
+                None
+            }
+            SessionMessage::RunCustomCommand { name } => self.run_custom(&name, None),
             SessionMessage::UsageUpdate {
                 usage,
                 cost,
@@ -1216,9 +1312,14 @@ impl SessionScreen {
     }
 }
 
+#[derive(Debug)]
 pub enum SessionEffect {
+    /// Send a prompt. `model` is the per-turn streaming override
+    /// (`<provider_type>/<model>` from a custom command's frontmatter);
+    /// `None` streams on the active provider.
     SendMessage {
         content: String,
+        model: Option<String>,
     },
     /// Run a bash-mode (`!`-prefixed) command locally through the resolved
     /// shell. Never persisted, never sent to the model.
@@ -1236,7 +1337,7 @@ pub enum SessionEffect {
         decision: shuvarie_core::PermissionAnswer,
     },
     RunCommand {
-        action: CommandAction,
+        action: CommandRef,
         /// Free-form arguments after the command name (e.g. `/title My
         /// title`); `None` for menu launches (Ctrl+M or the slash menu).
         args: Option<String>,
@@ -2192,9 +2293,133 @@ mod tests {
         assert!(!screen.is_bash_mode());
         assert!(matches!(
             screen.update(SessionMessage::Text(TextAreaMessage::Submit)),
-            Some(SessionEffect::SendMessage { content })
+            Some(SessionEffect::SendMessage { content, .. })
                 if content == "hello agent"
         ));
+    }
+
+    fn custom_command_fixture(
+        name: &str,
+        contents: &str,
+    ) -> (tempfile::TempDir, shuvarie_core::CustomCommand) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(name);
+        std::fs::create_dir_all(&path).expect("mkdir");
+        std::fs::write(path.join("command.md"), contents).expect("write");
+        let command = shuvarie_core::CustomCommand {
+            name: name.to_string(),
+            title: name.to_string(),
+            model: Some("openai/gpt-test".to_string()),
+            path: path.clone(),
+        };
+        (dir, command)
+    }
+
+    #[test]
+    fn custom_command_submit_expands_template_and_model() {
+        let (_dir, command) = custom_command_fixture(
+            "commit",
+            "---\ntitle: Commit\nmodel: anthropic/claude-x\n---\n\nCommit with {{arguments}} please\n",
+        );
+        let mut screen = SessionScreen::new();
+        let effect = screen.update(SessionMessage::SetCustomCommands {
+            commands: vec![command],
+        });
+        assert!(effect.is_none());
+        screen.input.buffer.set("/commit tidy the tests");
+        match screen.update(SessionMessage::Text(TextAreaMessage::Submit)) {
+            Some(SessionEffect::SendMessage { content, model }) => {
+                assert_eq!(content, "Commit with tidy the tests please");
+                assert_eq!(model.as_deref(), Some("openai/gpt-test"));
+            }
+            other => panic!("expected a custom command send, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn custom_command_submit_without_args_clears_placeholder() {
+        let (_dir, command) = custom_command_fixture(
+            "commit",
+            "---\nmodel: openai/gpt-test\n---\n\nCommit with {{arguments}} please\n",
+        );
+        let mut screen = SessionScreen::new();
+        let effect = screen.update(SessionMessage::SetCustomCommands {
+            commands: vec![command],
+        });
+        assert!(effect.is_none());
+        screen.input.buffer.set("/commit");
+        match screen.update(SessionMessage::Text(TextAreaMessage::Submit)) {
+            Some(SessionEffect::SendMessage { content, model }) => {
+                assert_eq!(content, "Commit with  please");
+                assert_eq!(model.as_deref(), Some("openai/gpt-test"));
+            }
+            other => panic!("expected a custom command send, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn custom_command_submit_appends_args_without_placeholder() {
+        let (_dir, command) = custom_command_fixture("review", "Review it\n");
+        let mut screen = SessionScreen::new();
+        let effect = screen.update(SessionMessage::SetCustomCommands {
+            commands: vec![command],
+        });
+        assert!(effect.is_none());
+        screen.input.buffer.set("/review focus on the TUI");
+        match screen.update(SessionMessage::Text(TextAreaMessage::Submit)) {
+            Some(SessionEffect::SendMessage { content, .. }) => {
+                assert_eq!(content, "Review it\n\nfocus on the TUI");
+            }
+            other => panic!("expected a custom command send, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_slash_name_falls_through_to_literal_send() {
+        let mut screen = SessionScreen::new();
+        screen.input.buffer.set("/nonexistent-command");
+        assert!(matches!(
+            screen.update(SessionMessage::Text(TextAreaMessage::Submit)),
+            Some(SessionEffect::SendMessage { content, .. })
+                if content == "/nonexistent-command"
+        ));
+    }
+
+    #[test]
+    fn custom_command_with_builtin_name_needs_custom_prefix() {
+        let (_dir, command) = custom_command_fixture("model", "Override the model\n");
+        let mut screen = SessionScreen::new();
+        let effect = screen.update(SessionMessage::SetCustomCommands {
+            commands: vec![command],
+        });
+        assert!(effect.is_none());
+        // `/model` stays the builtin (the model picker); the custom command
+        // answers to `/custom:model`.
+        screen.input.buffer.set("/model");
+        assert!(matches!(
+            screen.update(SessionMessage::Text(TextAreaMessage::Submit)),
+            Some(SessionEffect::RunCommand { .. })
+        ));
+        screen.input.buffer.set("/custom:model");
+        match screen.update(SessionMessage::Text(TextAreaMessage::Submit)) {
+            Some(SessionEffect::SendMessage { content, .. }) => {
+                assert_eq!(content, "Override the model");
+            }
+            other => panic!("expected a custom command send, got {other:?}"),
+        }
+    }
+    #[test]
+    fn slash_menu_runs_custom_command() {
+        let (_dir, command) = custom_command_fixture("commit", "Commit {{arguments}}\n");
+        let mut screen = SessionScreen::new();
+        let effect = screen.update(SessionMessage::SetCustomCommands {
+            commands: vec![command],
+        });
+        assert!(effect.is_none());
+        let effect = screen.update(SessionMessage::RunCustomCommand {
+            name: "commit".into(),
+        });
+        assert!(matches!(effect, Some(SessionEffect::SendMessage { .. })));
     }
 
     #[test]
@@ -2563,7 +2788,7 @@ mod tests {
         assert!(matches!(
             screen.update(SessionMessage::Text(TextAreaMessage::Submit)),
             Some(SessionEffect::RunCommand {
-                action: CommandAction::Search,
+                action: CommandRef::Builtin(CommandAction::Search),
                 args: Some(args)
             }) if args == "foo bar"
         ));
@@ -2571,7 +2796,7 @@ mod tests {
         assert!(matches!(
             screen.update(SessionMessage::Text(TextAreaMessage::Submit)),
             Some(SessionEffect::RunCommand {
-                action: CommandAction::Search,
+                action: CommandRef::Builtin(CommandAction::Search),
                 args: None
             })
         ));

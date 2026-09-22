@@ -14,7 +14,7 @@ use super::add_provider::{
 };
 use super::auth::{AuthMessage, AuthPopup};
 use super::command_menu::{CommandMenu, CommandMenuMessage};
-use super::commands::CommandAction;
+use super::commands::{CommandAction, CommandRef};
 use super::components::TextAreaMessage;
 use super::confirm_quit::{ConfirmQuit, ConfirmQuitEffect, ConfirmQuitMessage};
 use super::context::UpdateCtx;
@@ -153,6 +153,10 @@ pub enum AppMessage {
     SkillsLoaded {
         skills: Vec<shuvarie_core::Skill>,
         warnings: Vec<shuvarie_core::SkillWarning>,
+    },
+    CustomCommandsLoaded {
+        commands: Vec<shuvarie_core::CustomCommand>,
+        warnings: Vec<shuvarie_core::CustomCommandWarning>,
     },
     ShellWarning {
         message: String,
@@ -755,6 +759,9 @@ impl App {
                 CoreEvent::SkillsLoaded { skills, warnings } => {
                     Some(AppMessage::SkillsLoaded { skills, warnings })
                 }
+                CoreEvent::CustomCommandsLoaded { commands, warnings } => {
+                    Some(AppMessage::CustomCommandsLoaded { commands, warnings })
+                }
                 CoreEvent::ScenesLoaded {
                     scenes,
                     default,
@@ -860,9 +867,9 @@ impl App {
                 }
                 if let Some(effect) = effect {
                     match effect {
-                        SessionEffect::SendMessage { content } => {
+                        SessionEffect::SendMessage { content, model } => {
                             self.ctx
-                                .send(shuvarie_core::Command::SendMessage { content });
+                                .send(shuvarie_core::Command::SendMessage { content, model });
                         }
                         SessionEffect::RunBash { command } => {
                             self.ctx.send(shuvarie_core::Command::RunBash { command });
@@ -883,7 +890,11 @@ impl App {
                                 .send(shuvarie_core::Command::PermissionDecide { id, decision });
                         }
                         SessionEffect::RunCommand { action, args } => {
-                            if let Some(effect) = self.run_command(action, args) {
+                            // Custom refs never reach the app (the session
+                            // expands them); a defensive no-op otherwise.
+                            if let CommandRef::Builtin(action) = action
+                                && let Some(effect) = self.run_command(action, args)
+                            {
                                 return Some(effect);
                             }
                         }
@@ -1067,10 +1078,20 @@ impl App {
                 }
             }
             AppMessage::CommandMenu(m) => {
-                if let Some(action) = self.command_menu.update(m)
-                    && let Some(effect) = self.run_command(action, None)
-                {
-                    return Some(effect);
+                if let Some(action) = self.command_menu.update(m) {
+                    match action {
+                        CommandRef::Builtin(action) => {
+                            if let Some(effect) = self.run_command(action, None) {
+                                return Some(effect);
+                            }
+                        }
+                        CommandRef::Custom { name, .. } => {
+                            // The session owns the command roster and the
+                            // expansion.
+                            self.session
+                                .update(SessionMessage::RunCustomCommand { name });
+                        }
+                    }
                 }
                 if !self.command_menu.open && self.overlay == Overlay::CommandMenu {
                     self.overlay = Overlay::None;
@@ -1362,6 +1383,19 @@ impl App {
                 });
                 self.session.update(SessionMessage::SetSkills { skills });
             }
+            AppMessage::CustomCommandsLoaded { commands, warnings } => {
+                self.session.update(SessionMessage::SetCustomCommands {
+                    commands: commands.clone(),
+                });
+                self.command_menu.set_custom_commands(&commands);
+                if !warnings.is_empty() {
+                    let messages: Vec<String> = warnings
+                        .into_iter()
+                        .map(|warning| format!("{}: {}", warning.path.display(), warning.message))
+                        .collect();
+                    self.warning.open(messages.join("\n"));
+                }
+            }
             AppMessage::ScenesLoaded {
                 scenes,
                 default,
@@ -1583,9 +1617,9 @@ impl App {
             .set_availability(CommandAction::Export, self.session.session_id.is_some());
     }
 
-    /// Runs a command action (from the Ctrl+M menu or the inline slash menu).
-    /// Run a command action. Returns `Some(AppEffect)` when the action needs
-    /// to escalate to the parent (quit).
+    /// Runs a built-in command action (from the Ctrl+M menu or the inline
+    /// slash menu). Returns `Some(AppEffect)` when the action needs to
+    /// escalate to the parent (quit).
     fn run_command(&mut self, action: CommandAction, args: Option<String>) -> Option<AppEffect> {
         match action {
             CommandAction::OpenModelSelect => {

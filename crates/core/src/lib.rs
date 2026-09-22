@@ -5,6 +5,7 @@ pub mod command;
 pub mod compaction;
 pub mod context;
 pub mod core_task;
+pub mod custom_commands;
 pub mod embeddings;
 pub mod event;
 pub mod lsp_manager;
@@ -24,6 +25,7 @@ pub mod truncate;
 
 pub use command::Command;
 pub use core_task::{StartupSession, run};
+pub use custom_commands::{CustomCommand, CustomCommandWarning, CustomCommands};
 pub use event::Event;
 pub use permissions::{
     Access, AskScope, Decision, PathKind, PermissionAnswer, PermissionGate, PermissionRequest,

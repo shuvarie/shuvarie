@@ -89,6 +89,9 @@ fn merge_layer(config: &mut Config, layer: &ConfigLayer) {
             "embedding" => config.embedding = layer.config.embedding.clone(),
             "agent" => config.agent = layer.config.agent.clone(),
             "skills" => config.skills = layer.config.skills.clone(),
+            "default-providers" => {
+                config.default_providers = layer.config.default_providers.clone();
+            }
             "context" => config.context = layer.config.context.clone(),
             "shell" => config.shell = layer.config.shell.clone(),
             "registries" => {
@@ -344,6 +347,10 @@ pub struct Config {
     pub lsp: LspConfigRepr,
 
     pub skills: SkillsConfig,
+
+    /// `default-providers { … }` — per-connection-type provider preference
+    /// for `<provider_type>/<model>` overrides (see [`DefaultProvidersConfig`]).
+    pub default_providers: DefaultProvidersConfig,
 
     pub context: ContextConfig,
 
@@ -1678,6 +1685,20 @@ pub struct SkillsConfig {
     pub dirs: Vec<String>,
 }
 
+/// `default-providers { use id="<provider id>" … }` — the provider connection
+/// preferred per connection type when a prompt names a model as
+/// `<provider_type>/<model>` (a custom command's `model` frontmatter). The
+/// targeted connection type is read from the connection's own `kind` in
+/// `connections.kdl`, so an entry keeps pointing at the right type as the
+/// connection is edited. When unset (or no entry matches the type), the first
+/// configured provider of that type is used.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DefaultProvidersConfig {
+    /// Provider ids in declaration order; the last entry matching a
+    /// connection type wins.
+    pub use_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EmbeddingConfig {
     pub disabled: bool,
@@ -2284,6 +2305,63 @@ mod tests {
         let text = config_kdl::to_kdl(&config).unwrap();
         let parsed = config_kdl::from_kdl(&text).unwrap();
         assert_eq!(config, parsed);
+    }
+
+    #[test]
+    fn default_providers_section_round_trips() {
+        let text = r#"
+            default-providers {
+                use id="openai-1"
+                use id="anthropic-2"
+            }
+        "#;
+        let parsed = config_kdl::from_kdl(text).unwrap();
+        assert_eq!(
+            parsed.default_providers.use_ids,
+            vec!["openai-1".to_string(), "anthropic-2".to_string()]
+        );
+
+        let text = config_kdl::to_kdl(&parsed).unwrap();
+        assert!(text.contains("default-providers"), "must serialize: {text}");
+        let reparsed = config_kdl::from_kdl(&text).unwrap();
+        assert_eq!(parsed, reparsed);
+    }
+
+    #[test]
+    fn default_providers_absent_is_default() {
+        let parsed = config_kdl::from_kdl("ui { frame-rate 30 }").unwrap();
+        assert!(parsed.default_providers.use_ids.is_empty());
+    }
+
+    #[test]
+    fn default_providers_requires_id_property() {
+        let err = config_kdl::from_kdl("default-providers { use \"x\" }").unwrap_err();
+        assert!(err.to_string().contains("`id`"), "{err}");
+        let err = config_kdl::from_kdl("default-providers { use }").unwrap_err();
+        assert!(err.to_string().contains("`id`"), "{err}");
+        let err = config_kdl::from_kdl("default-providers { other }").unwrap_err();
+        assert!(err.to_string().contains("unknown node"), "{err}");
+    }
+
+    #[test]
+    fn default_providers_section_overrides_wholesale() {
+        let global = r#"
+            default-providers {
+                use id="global-1"
+            }
+        "#;
+        let local = r#"
+            default-providers {
+                use id="local-1"
+            }
+        "#;
+        let mut config = config_kdl::from_kdl(global).unwrap();
+        let layer = parse_layer(local).unwrap();
+        merge_layer(&mut config, &layer);
+        assert_eq!(
+            config.default_providers.use_ids,
+            vec!["local-1".to_string()]
+        );
     }
 
     #[test]

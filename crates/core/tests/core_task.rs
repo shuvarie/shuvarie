@@ -57,13 +57,18 @@ async fn recv_skills_loaded(
     );
     let ev = event_rx.recv().await.expect("event");
     assert!(
+        matches!(ev, Event::CustomCommandsLoaded { .. }),
+        "expected CustomCommandsLoaded as the second startup event, got {ev:?}"
+    );
+    let ev = event_rx.recv().await.expect("event");
+    assert!(
         matches!(ev, Event::ScenesLoaded { .. }),
-        "expected ScenesLoaded as the second startup event, got {ev:?}"
+        "expected ScenesLoaded as the third startup event, got {ev:?}"
     );
     let ev = event_rx.recv().await.expect("event");
     match ev {
         Event::McpStatus { servers } => servers,
-        other => panic!("expected McpStatus as the third startup event, got {other:?}"),
+        other => panic!("expected McpStatus as the fourth startup event, got {other:?}"),
     }
 }
 
@@ -98,6 +103,11 @@ async fn scenes_loaded_carries_conflict_warnings() {
     assert!(
         matches!(first, Event::SkillsLoaded { .. }),
         "expected SkillsLoaded first, got {first:?}"
+    );
+    let ev = event_rx.recv().await.expect("event");
+    assert!(
+        matches!(ev, Event::CustomCommandsLoaded { .. }),
+        "expected CustomCommandsLoaded second, got {ev:?}"
     );
     let ev = event_rx.recv().await.expect("event");
     match ev {
@@ -421,6 +431,7 @@ async fn auto_gen_drafts_the_session_title_after_the_first_user_prompt() {
     cmd_tx
         .send(Command::SendMessage {
             content: "hello world".into(),
+            model: None,
         })
         .await
         .unwrap();
@@ -475,6 +486,7 @@ async fn default_title_policy_never_triggers_generation() {
     cmd_tx
         .send(Command::SendMessage {
             content: "hello world".into(),
+            model: None,
         })
         .await
         .unwrap();
@@ -554,6 +566,7 @@ async fn gen_title_command_drafts_the_title_from_the_first_prompt() {
     cmd_tx
         .send(Command::SendMessage {
             content: "hello world".into(),
+            model: None,
         })
         .await
         .unwrap();
@@ -644,6 +657,7 @@ async fn gen_title_command_reports_guards_and_resolve_failures() {
     cmd_tx
         .send(Command::SendMessage {
             content: "hello world".into(),
+            model: None,
         })
         .await
         .unwrap();
@@ -842,6 +856,7 @@ async fn send_message_without_active_provider_emits_error() {
     cmd_tx
         .send(Command::SendMessage {
             content: "hello".into(),
+            model: None,
         })
         .await
         .unwrap();
@@ -929,12 +944,14 @@ async fn send_while_streaming_is_steered() {
     cmd_tx
         .send(Command::SendMessage {
             content: "first".into(),
+            model: None,
         })
         .await
         .unwrap();
     cmd_tx
         .send(Command::SendMessage {
             content: "second".into(),
+            model: None,
         })
         .await
         .unwrap();
@@ -985,12 +1002,14 @@ async fn steered_recall_round_trip() {
     cmd_tx
         .send(Command::SendMessage {
             content: "first".into(),
+            model: None,
         })
         .await
         .unwrap();
     cmd_tx
         .send(Command::SendMessage {
             content: "second".into(),
+            model: None,
         })
         .await
         .unwrap();
@@ -1077,12 +1096,14 @@ async fn cancel_dispatches_first_steered_prompt() {
     cmd_tx
         .send(Command::SendMessage {
             content: "first".into(),
+            model: None,
         })
         .await
         .unwrap();
     cmd_tx
         .send(Command::SendMessage {
             content: "second".into(),
+            model: None,
         })
         .await
         .unwrap();
@@ -1165,20 +1186,22 @@ async fn new_session_clears_steered_queue() {
     cmd_tx
         .send(Command::SendMessage {
             content: "first".into(),
+            model: None,
         })
         .await
         .unwrap();
     cmd_tx
         .send(Command::SendMessage {
             content: "second".into(),
+            model: None,
         })
         .await
         .unwrap();
 
-    // Wait until the failed stream scheduled its retry: the stream task is
-    // gone by then, so the busy gate no longer rejects `NewSession`.
     let mut retrying = false;
-    for _ in 0..10 {
+    // The startup events (skills, custom commands, scenes, MCP) ride the same
+    // channel; leave room for them.
+    for _ in 0..12 {
         match event_rx.recv().await {
             Some(Event::RetryScheduled { .. }) => {
                 retrying = true;
@@ -1253,6 +1276,7 @@ async fn send_message_persists_session_and_messages() {
     cmd_tx
         .send(Command::SendMessage {
             content: "hello world".into(),
+            model: None,
         })
         .await
         .unwrap();
@@ -1679,6 +1703,7 @@ async fn switch_scene_defers_the_persist_and_reports() {
     cmd_tx
         .send(Command::SendMessage {
             content: "hello".into(),
+            model: None,
         })
         .await
         .unwrap();
@@ -1908,6 +1933,7 @@ async fn the_interlude_announces_a_mid_session_switch_once() {
     cmd_tx
         .send(Command::SendMessage {
             content: "one".into(),
+            model: None,
         })
         .await
         .unwrap();
@@ -1951,6 +1977,7 @@ async fn the_interlude_announces_a_mid_session_switch_once() {
     cmd_tx
         .send(Command::SendMessage {
             content: "two".into(),
+            model: None,
         })
         .await
         .unwrap();
@@ -1984,6 +2011,7 @@ async fn the_interlude_announces_a_mid_session_switch_once() {
     cmd_tx
         .send(Command::SendMessage {
             content: "three".into(),
+            model: None,
         })
         .await
         .unwrap();
@@ -2122,6 +2150,7 @@ async fn switch_scene_requires_interlude_mid_session() {
     cmd_tx
         .send(Command::SendMessage {
             content: "hello".into(),
+            model: None,
         })
         .await
         .unwrap();
