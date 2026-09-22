@@ -14,7 +14,7 @@
 ; Compile-time configuration (overridable with /D switches)
 ; ---------------------------------------------------------------------------
 
-!define /IfNDef VERSION "0.2.0"
+!define /IfNDef VERSION "0.2.1"
 !define /IfNDef APP_NAME "shuvarie"
 !define /IfNDef EXE_FILE_NAME "shuvarie.exe"
 !define /IfNDef PUBLISHER "Charles Dong"

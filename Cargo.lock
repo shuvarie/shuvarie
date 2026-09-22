@@ -5729,7 +5729,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "color-eyre",
@@ -5761,7 +5761,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-config"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "dirs",
  "kdl",
@@ -5771,7 +5771,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "dirs",
  "futures-util",
@@ -5804,7 +5804,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-db"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "jiff",
@@ -5824,7 +5824,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-highlight"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "pulldown-cmark",
  "ratatui",
@@ -5834,7 +5834,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-llm"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "futures-core",
  "futures-util",
@@ -5851,7 +5851,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-lsp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-lsp",
  "serde",
@@ -5865,7 +5865,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-mcp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "http",
  "rmcp",
