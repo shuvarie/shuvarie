@@ -100,15 +100,21 @@ pub enum Command {
         decision: crate::permissions::PermissionAnswer,
     },
     /// Fork the session: with `node: None`, walk to the active path's last
-    /// user prompt (`/undo`); with a node id, walk to that node. Every turn
-    /// node forks *before* itself — its parent becomes the tip and its
+    /// user prompt (`/undo`); otherwise the fork targets `node`. Turn nodes
+    /// fork *before* themselves — their parent becomes the tip and their
     /// content is recalled into the input — while summary/system nodes walk
-    /// to themselves. When `summarize`, an LLM summary of the prefix before
-    /// the fork point is created first and the forked-away node is
-    /// reparented under it.
+    /// to themselves. With `after`, the targeted turn node is walked to
+    /// instead: it becomes the tip and nothing is recalled (the tree's tool
+    /// rows walk to their reply and reply rows walk to themselves this
+    /// way). When `summarize`, an LLM summary of the prefix before the fork
+    /// point is created first and the forked-away node is reparented under
+    /// it.
     ForkSession {
         node: Option<u64>,
         summarize: bool,
+        /// Fork *after* the node's turn instead of before it: the node
+        /// itself becomes the tip and nothing is recalled into the input.
+        after: bool,
     },
     /// Delete a branch of the session tree: the node and all of its
     /// descendants (must not contain the active leaf).

@@ -1720,7 +1720,7 @@ async fn fork_session_undo_forks_before_the_last_user_prompt() {
     let (mut store, sid, ids) = chain_session().await;
     let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
-    let prompt = fork_session(&mut store, sid, None, false, None, &event_tx)
+    let prompt = fork_session(&mut store, sid, None, false, false, None, &event_tx)
         .await
         .unwrap();
     assert_eq!(prompt.as_deref(), Some("two"), "the prompt is recalled");
@@ -1739,7 +1739,7 @@ async fn fork_session_at_an_assistant_node_forks_before_it() {
     let (mut store, sid, ids) = chain_session().await;
     let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
-    let prompt = fork_session(&mut store, sid, Some(ids[1]), false, None, &event_tx)
+    let prompt = fork_session(&mut store, sid, Some(ids[1]), false, false, None, &event_tx)
         .await
         .unwrap();
     assert_eq!(prompt.as_deref(), Some("r1"), "the reply is recalled");
@@ -1756,7 +1756,7 @@ async fn fork_session_at_a_user_node_forks_before_it() {
     let (mut store, sid, ids) = chain_session().await;
     let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
-    let prompt = fork_session(&mut store, sid, Some(ids[2]), false, None, &event_tx)
+    let prompt = fork_session(&mut store, sid, Some(ids[2]), false, false, None, &event_tx)
         .await
         .unwrap();
     assert_eq!(prompt.as_deref(), Some("two"), "the prompt is recalled");
@@ -1773,7 +1773,7 @@ async fn fork_session_at_the_root_prompt_starts_over() {
     let (mut store, sid, ids) = chain_session().await;
     let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
-    let prompt = fork_session(&mut store, sid, Some(ids[0]), false, None, &event_tx)
+    let prompt = fork_session(&mut store, sid, Some(ids[0]), false, false, None, &event_tx)
         .await
         .unwrap();
     assert_eq!(prompt.as_deref(), Some("one"));
@@ -1802,12 +1802,68 @@ async fn fork_session_at_a_summary_node_walks_to_it() {
         .await
         .unwrap();
 
-    let prompt = fork_session(&mut store, sid, Some(summary.id), false, None, &event_tx)
-        .await
-        .unwrap();
+    let prompt = fork_session(
+        &mut store,
+        sid,
+        Some(summary.id),
+        false,
+        false,
+        None,
+        &event_tx,
+    )
+    .await
+    .unwrap();
     assert_eq!(prompt, None, "summary markers carry no recall");
     let stored = store.load_session(sid).await.unwrap();
     assert_eq!(stored.leaf_id, Some(summary.id));
+}
+
+#[tokio::test]
+async fn fork_session_after_a_turn_walks_to_the_reply() {
+    let (mut store, sid, ids) = chain_session().await;
+    store
+        .append_tool_call(
+            sid,
+            ids[1],
+            0,
+            "read_file",
+            "{}",
+            "out",
+            "",
+            true,
+            false,
+            None,
+            "",
+            None,
+            None,
+            0,
+        )
+        .await
+        .unwrap();
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+
+    let prompt = fork_session(&mut store, sid, Some(ids[1]), false, true, None, &event_tx)
+        .await
+        .unwrap();
+    assert_eq!(prompt, None, "walk-to forks recall nothing");
+    let stored = store.load_session(sid).await.unwrap();
+    assert_eq!(
+        stored.leaf_id,
+        Some(ids[1]),
+        "the tip walks to the reply itself"
+    );
+
+    let loaded = Session::from_stored(store.load_session(sid).await.unwrap());
+    assert_eq!(
+        loaded.messages.len(),
+        2,
+        "the path keeps the prompt and the reply"
+    );
+    assert_eq!(
+        loaded.tool_records.len(),
+        1,
+        "the reply's tool calls stay on the path"
+    );
 }
 
 #[tokio::test]
@@ -1815,7 +1871,7 @@ async fn fork_session_without_summarizer_errors_on_summarize() {
     let (mut store, sid, ids) = chain_session().await;
     let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
-    let err = fork_session(&mut store, sid, Some(ids[2]), true, None, &event_tx)
+    let err = fork_session(&mut store, sid, Some(ids[2]), true, false, None, &event_tx)
         .await
         .unwrap_err();
     assert!(
@@ -1837,7 +1893,7 @@ async fn fork_session_undo_on_a_root_only_session_starts_over() {
         .unwrap();
     let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
-    let prompt = fork_session(&mut store, sid, None, false, None, &event_tx)
+    let prompt = fork_session(&mut store, sid, None, false, false, None, &event_tx)
         .await
         .unwrap();
     assert_eq!(prompt.as_deref(), Some("only"));

@@ -22,12 +22,16 @@ pub enum TreeMessage {
 }
 
 pub enum TreeEffect {
-    /// Fork at the selected row: turn rows (prompts, replies, and the tool
-    /// rows that resolve to their reply) fork before themselves, recalling
-    /// the node's content into the input; summary rows walk to themselves.
+    /// Fork at the selected row: prompt rows fork before themselves,
+    /// recalling the node's content into the input; reply rows walk *after*
+    /// themselves and tool rows walk *after* their reply's turn — the reply
+    /// becomes the tip, so the prompt, the reply, and its tool calls stay
+    /// on the active path with nothing recalled; marker rows walk to
+    /// themselves.
     Fork {
         node: u64,
         summarize: bool,
+        after: bool,
     },
     DeleteBranch {
         node: u64,
@@ -38,9 +42,14 @@ pub enum TreeEffect {
 impl std::fmt::Debug for TreeEffect {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TreeEffect::Fork { node, summarize } => {
-                write!(f, "Fork {{ node: {node}, summarize: {summarize} }}")
-            }
+            TreeEffect::Fork {
+                node,
+                summarize,
+                after,
+            } => write!(
+                f,
+                "Fork {{ node: {node}, summarize: {summarize}, after: {after} }}"
+            ),
             TreeEffect::DeleteBranch { node } => write!(f, "DeleteBranch {{ node: {node} }}"),
             TreeEffect::Close => write!(f, "Close"),
         }
@@ -49,10 +58,15 @@ impl std::fmt::Debug for TreeEffect {
 
 /// One flattened display row of the depth-first tree walk: a message node or
 /// (under assistant nodes) one of their tool calls. `fork_node` is the node a
-/// fork at this row targets (tool rows fork at the reply they hang from).
+/// fork at this row targets (tool rows walk to the reply they hang from).
 struct TreeRow {
     node_id: u64,
     fork_node: u64,
+    /// Rows that walk *after* their target instead of forking before it:
+    /// reply rows walk to themselves and tool rows to their reply, keeping
+    /// the reply on the active path with nothing recalled; prompt rows fork
+    /// before themselves, recalling their content into the input.
+    walks_after: bool,
     guide: String,
     glyph: &'static str,
     text: String,
@@ -195,6 +209,7 @@ impl TreePopup {
                 Some(TreeEffect::Fork {
                     node: row.fork_node,
                     summarize: self.summarize,
+                    after: row.walks_after,
                 })
             }
             TreeMessage::ToggleSummarize => {
@@ -376,6 +391,7 @@ fn build_rows(session: &shuvarie_core::Session) -> Vec<TreeRow> {
         rows.push(TreeRow {
             node_id: node.id,
             fork_node,
+            walks_after: node.role != Role::User,
             guide,
             glyph,
             text,
@@ -389,6 +405,7 @@ fn build_rows(session: &shuvarie_core::Session) -> Vec<TreeRow> {
             rows.push(TreeRow {
                 node_id: node.id,
                 fork_node: node.id,
+                walks_after: true,
                 guide: cont.clone(),
                 glyph: "⚙",
                 text: tool_line(tool),
@@ -521,7 +538,19 @@ mod tests {
         assert_eq!(popup.rows[4].guide, "   └─ ");
         assert!(!popup.rows[0].deletable, "on-path rows are not deletable");
         assert!(popup.rows[4].deletable);
-        assert_eq!(popup.rows[3].fork_node, 3, "tool rows fork at their reply");
+        assert!(
+            !popup.rows[0].walks_after,
+            "prompt rows fork before themselves"
+        );
+        assert!(
+            popup.rows[1].walks_after,
+            "reply rows walk after themselves"
+        );
+        assert!(
+            popup.rows[3].walks_after,
+            "tool rows walk after their reply"
+        );
+        assert_eq!(popup.rows[3].fork_node, 3, "tool rows target their reply");
     }
 
     #[test]
@@ -551,9 +580,17 @@ mod tests {
         popup.selected = 1;
         popup.summarize = true;
         match popup.update(TreeMessage::Fork) {
-            Some(TreeEffect::Fork { node, summarize }) => {
+            Some(TreeEffect::Fork {
+                node,
+                summarize,
+                after,
+            }) => {
                 assert_eq!(node, 2);
                 assert!(summarize);
+                assert!(
+                    after,
+                    "reply rows walk after themselves, keeping the reply in chat"
+                );
             }
             other => panic!("expected fork effect, got {other:?}"),
         }
@@ -663,9 +700,57 @@ mod tests {
             popup.update(TreeMessage::Fork),
             Some(TreeEffect::Fork {
                 node: 2,
-                summarize: false
+                summarize: false,
+                after: true
             })
         ));
+    }
+
+    #[test]
+    fn tool_rows_walk_to_their_reply_after_the_turn() {
+        let mut replied = node(2, Some(1), Role::Assistant, 1, "reply", true);
+        replied.tools.push(TreeNodeTool {
+            name: "read_file".into(),
+            ok: true,
+            killed: false,
+            worker: None,
+        });
+        let session = session_with(vec![node(1, None, Role::User, 0, "ask", true), replied], 2);
+        let mut popup = popup_for(&session);
+        popup.selected = 2; // the tool row under the reply
+        popup.summarize = true;
+        match popup.update(TreeMessage::Fork) {
+            Some(TreeEffect::Fork {
+                node,
+                summarize,
+                after,
+            }) => {
+                assert_eq!(node, 2, "tool rows target their reply");
+                assert!(summarize);
+                assert!(after, "tool rows walk after the turn, not before it");
+            }
+            other => panic!("expected fork effect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prompt_rows_fork_before_themselves_recalling_their_content() {
+        let session = session_with(
+            vec![
+                node(1, None, Role::User, 0, "ask", true),
+                node(2, Some(1), Role::Assistant, 1, "reply", true),
+            ],
+            2,
+        );
+        let mut popup = popup_for(&session);
+        popup.selected = 0;
+        match popup.update(TreeMessage::Fork) {
+            Some(TreeEffect::Fork { node, after, .. }) => {
+                assert_eq!(node, 1);
+                assert!(!after, "prompt rows fork before themselves");
+            }
+            other => panic!("expected fork effect, got {other:?}"),
+        }
     }
 
     #[test]

@@ -984,7 +984,7 @@ pub async fn run(
                             let _ = respond.send(decision);
                         }
                     }
-                    Command::ForkSession { node, summarize } => {
+                    Command::ForkSession { node, summarize, after } => {
                         // A fork rewinds the active path, so a running turn is
                         // cut first (persisted interrupted) and the queued
                         // steered prompts belong to a discarded context: wipe
@@ -1045,6 +1045,7 @@ pub async fn run(
                             sid,
                             node,
                             summarize,
+                            after,
                             summarizer.as_ref(),
                             &ctx.event_tx,
                         )
@@ -1177,7 +1178,15 @@ pub async fn run(
                         let Some(sid) = session_id else { continue; };
                         let last_user_content = s.lock().await.last_user_node()
                             .map(|n| n.content.clone());
-                        match fork_session(&mut ctx.store, sid, None, false, None, &ctx.event_tx)
+                        match fork_session(
+                            &mut ctx.store,
+                            sid,
+                            None,
+                            false,
+                            false,
+                            None,
+                            &ctx.event_tx,
+                        )
                             .await
                         {
                             Ok(_) => {
@@ -1681,7 +1690,10 @@ fn subtree_contains(
 /// Fork the session at a node: the active path is re-rooted *before* the
 /// node — its parent becomes the fork tip and the node's own content is
 /// returned for recall into the input — optionally creating an LLM summary
-/// of the prefix before the fork point first. Summary and system nodes are
+/// of the prefix before the fork point first. With `after`, the node is
+/// walked to instead of being forked away: it becomes the fork tip itself
+/// and nothing is recalled (the tree's tool rows walk to their reply and
+/// reply rows walk to themselves this way). Summary and system nodes are
 /// compaction markers rather than turns, so they walk to themselves without
 /// a recall. `node: None` walks to the active path's last user prompt
 /// (`/undo`). Returns the recalled content, `None` when there was nothing
@@ -1691,6 +1703,7 @@ async fn fork_session(
     session_id: uuid::Uuid,
     node_id: Option<u64>,
     summarize: bool,
+    after: bool,
     summarizer: Option<&(ProviderClient, String)>,
     event_tx: &Sender<Event>,
 ) -> Result<Option<String>, String> {
@@ -1717,7 +1730,10 @@ async fn fork_session(
     };
     let node = by_id.get(&target).ok_or("unknown node")?;
     let (fork_tip, prompt): (Option<u64>, Option<String>) =
-        if node.summary || node.role == shuvarie_db::MsgRole::System {
+        if after || node.summary || node.role == shuvarie_db::MsgRole::System {
+            // Walk-to forks: markers walk to themselves, and `after` forks to
+            // the targeted turn node (the tree's tool rows walk to their
+            // reply, reply rows to themselves). Nothing is recalled.
             (Some(node.id), None)
         } else {
             let recalled = (!node.content.trim().is_empty()).then(|| node.content.clone());
@@ -1768,18 +1784,14 @@ async fn fork_session(
         let summary = crate::compaction::summarize(client, model, &head_text).await;
         let _ = event_tx.send(Event::CompactionFinished).await;
         let summary = summary.map_err(|e| format!("summarization failed: {e}"))?;
-        // Turn forks: the summary hangs from the fork tip — where the
-        // selected node hung — and the forked-away node is reparented under
-        // it. Marker forks walk to the marker itself: the new summary takes
-        // its place in the chain.
-        let marker = node.summary || node.role == shuvarie_db::MsgRole::System;
-        let (parent, reparent) = if marker {
-            (node.parent_id, None)
-        } else {
-            (Some(tip), Some(target))
-        };
+        // The summary takes the fork point's place in the chain: it hangs
+        // from the fork node's parent. Turn nodes — forked away before
+        // themselves or walked to (`after`) — are reparented under it so
+        // the branch keeps its shape; markers are left where they hang.
+        let marker = !after && (node.summary || node.role == shuvarie_db::MsgRole::System);
+        let reparent = (!marker).then_some(target);
         let summary_msg = store
-            .append_summary(session_id, parent, &summary)
+            .append_summary(session_id, node.parent_id, &summary)
             .await
             .map_err(|e| e.to_string())?;
         if let Some(id) = reparent {

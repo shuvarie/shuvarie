@@ -154,13 +154,15 @@ pub enum SessionMessage {
         session: shuvarie_core::Session,
     },
     /// The session forked: the active path ends at a different node now
-    /// (an `/undo` fork or a `/tree` fork); the chat pane rebuilds from the
-    /// reloaded session and the forked-away prompt may be recalled into the
-    /// input.
+    /// (an `/undo` fork, a `/tree` fork, or a `/tree` walk to a reply —
+    /// from a tool row or the reply row itself); the chat pane rebuilds
+    /// from the reloaded session and the forked-away prompt may be
+    /// recalled into the input.
     Forked {
         session: shuvarie_core::Session,
         /// The forked-away user prompt, recalled into the input area; `None`
-        /// when the fork re-sends automatically (replay / retry resume).
+        /// when the fork re-sends automatically (replay / retry resume) or
+        /// recalls nothing (marker, tool-row, and reply-row walks).
         prompt: Option<String>,
     },
     /// A user turn started streaming in the core: either an accepted submit

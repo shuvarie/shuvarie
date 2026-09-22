@@ -962,11 +962,16 @@ impl App {
             AppMessage::Tree(m) => {
                 if let Some(effect) = self.tree_popup.update(m) {
                     match effect {
-                        TreeEffect::Fork { node, summarize } => {
+                        TreeEffect::Fork {
+                            node,
+                            summarize,
+                            after,
+                        } => {
                             self.close_overlay();
                             self.ctx.send(shuvarie_core::Command::ForkSession {
                                 node: Some(node),
                                 summarize,
+                                after,
                             });
                         }
                         TreeEffect::DeleteBranch { node } => {
@@ -1707,6 +1712,7 @@ impl App {
                 self.ctx.send(shuvarie_core::Command::ForkSession {
                     node: None,
                     summarize: false,
+                    after: false,
                 });
             }
             CommandAction::Replay => {
