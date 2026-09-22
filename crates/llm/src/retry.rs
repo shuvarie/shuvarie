@@ -8,12 +8,13 @@ pub struct ConnectionFailure {
     pub reason: String,
 }
 
-/// Classify a rig streaming error as a retryable connection failure.
+/// Label a rig streaming error for the turn-retry status row.
 ///
-/// Retryable: reqwest transport errors (timeout, connect failure, reset,
-/// broken pipe, ...), and HTTP statuses 408/429/5xx. Everything else —
-/// provider API errors (auth, bad request, unknown model), JSON/URL/request
-/// build errors — is a hard error the user must see.
+/// Transport failures (reqwest timeouts, connect failures, resets, broken
+/// pipes, HTTP 408/429/5xx) get a specific label (`Connection reset`, ...).
+/// Everything else — provider API errors (auth, bad request, unknown
+/// model), JSON/URL/request build errors — still retries the turn, but with
+/// the generic fallback label.
 ///
 /// Mid-stream SSE transport failures lose their typed error (rig flattens
 /// them to `ProviderError`), so they are recognized by the

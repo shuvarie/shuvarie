@@ -143,9 +143,11 @@ pub enum Event {
     /// The compaction summarizer call finished (success or failure); the
     /// core task replays the interrupted turn afterwards.
     CompactionFinished,
-    /// A retryable connection failure occurred; the core task will re-send the
-    /// turn after `delay_ms`. `attempt` is the upcoming retry number (1-based)
-    /// out of `max_attempts` (from `[retry].max-retries`).
+    /// The turn failed with a retryable error; the core task will re-send
+    /// the turn after `delay_ms`. `reason` is a short status-row label (the
+    /// connection-failure kind, or the generic `Turn error`). `attempt` is
+    /// the upcoming retry number (1-based) out of `max_attempts` (from
+    /// `[retry].max-retries`).
     RetryScheduled {
         reason: String,
         message: String,

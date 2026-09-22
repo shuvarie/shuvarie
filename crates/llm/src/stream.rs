@@ -70,14 +70,14 @@ pub enum StreamItem {
     /// The run was stopped because the context budget was exceeded. The
     /// caller should compact the session history before continuing.
     Overflow,
-    /// A transport-level connection failure (timeout, reset, refused, HTTP
-    /// 408/429/5xx). The caller may retry the turn after a backoff.
-    ConnectionError {
-        message: String,
-        reason: String,
-    },
+    /// A failure from the turn: a connection loss (timeout, reset, refused,
+    /// HTTP 408/429/5xx), a provider API error, a malformed tool call, a
+    /// worker failure, ... Every turn error leads to the timeout-retry flow
+    /// in core (the turn is resumed after a backoff); `reason` is a short
+    /// label for the retry status row.
     Error {
         message: String,
+        reason: String,
     },
 }
 

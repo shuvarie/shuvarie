@@ -29,7 +29,7 @@ mod tests;
 /// whether to auto-continue after a context overflow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum StreamOutcome {
-    /// The turn completed normally (or was cancelled/errored).
+    /// The turn completed normally (or was cancelled).
     Finished,
     /// The turn was cut at an action boundary so a queued steered prompt
     /// could take over. The partial output is persisted as interrupted.
@@ -38,13 +38,15 @@ enum StreamOutcome {
     /// is true when the session history was successfully summarized so the
     /// next turn can continue with `[summary, tail]`.
     Overflowed { compacted: bool },
-    /// The turn failed with a retryable connection failure (timeout, reset,
-    /// refused, HTTP 408/429/5xx). The run loop schedules an auto-retry
-    /// (resuming the turn) after a backoff, up to `[retry].max-retries`.
-    ConnectionLost { reason: String, message: String },
+    /// The turn failed with an error that schedules the timeout retry (a
+    /// connection failure, provider API error, malformed tool call, worker
+    /// failure, ...). The run loop resumes the turn after a backoff, up to
+    /// `[retry].max-retries`; on exhaustion the error surfaces as
+    /// `StreamError`.
+    RetryableFailure { reason: String, message: String },
 }
 
-/// A scheduled connection retry: when it fires plus the original error
+/// A scheduled turn retry: when it fires plus the original error
 /// message (re-emitted as `StreamError` if the user cancels the wait).
 struct PendingRetry {
     deadline: tokio::time::Instant,
@@ -86,7 +88,7 @@ enum ActionPhase {
 }
 
 /// Whether the agent loop is occupied: a live stream or a scheduled
-/// connection retry. Steered prompts queue while this is true.
+/// turn retry. Steered prompts queue while this is true.
 fn is_busy(ctx: &CoreCtx, pending_retry: Option<&PendingRetry>) -> bool {
     ctx.active_stream.as_ref().is_some_and(|h| !h.is_finished()) || pending_retry.is_some()
 }
@@ -153,10 +155,10 @@ async fn switch_scene(
     None
 }
 
-/// Decide the next connection-retry step: `None` when retrying is disabled
+/// Decide the next turn-retry step: `None` when retrying is disabled
 /// (`max_retries == 0`) or the cap is reached (give up), otherwise the
 /// 1-based attempt number and its delay.
-fn next_connection_retry(attempts_so_far: usize, max_retries: usize) -> Option<(usize, u64)> {
+fn next_turn_retry(attempts_so_far: usize, max_retries: usize) -> Option<(usize, u64)> {
     let attempt = attempts_so_far.checked_add(1)?;
     if attempt > max_retries {
         return None;
@@ -234,9 +236,9 @@ pub async fn run(
     let mut overflow_retries: usize = 0;
     const MAX_OVERFLOW_RETRIES: usize = 3;
 
-    // Connection-failure auto-retry state: consecutive failures within one
+    // Turn-failure auto-retry state: consecutive turn errors within one
     // retry chain, plus the currently scheduled wait (if any).
-    let mut conn_retries: usize = 0;
+    let mut turn_retries: usize = 0;
     let mut pending_retry: Option<PendingRetry> = None;
 
     // Steered prompts: submissions made while the agent loop is busy. Queued
@@ -627,7 +629,7 @@ pub async fn run(
                         }
                         overflow_retries = 0;
                         pending_retry = None;
-                        conn_retries = 0;
+                        turn_retries = 0;
                         ctx.context_announced = false;
                         release_active_lock(&mut ctx).await;
                         clear_steered(&mut steered, &ctx.steer, &ctx.event_tx).await;
@@ -645,7 +647,7 @@ pub async fn run(
                         }
                         overflow_retries = 0;
                         pending_retry = None;
-                        conn_retries = 0;
+                        turn_retries = 0;
                         ctx.active_stream = None;
                         ctx.start_user_turn(content, false, model).await;
                     }
@@ -722,7 +724,7 @@ pub async fn run(
                         if !aborted
                             && let Some(pending) = pending_retry.take()
                         {
-                            conn_retries = 0;
+                            turn_retries = 0;
                             let _ = ctx.event_tx.send(Event::StreamError { error: pending.message }).await;
                             aborted = true;
                         }
@@ -754,7 +756,7 @@ pub async fn run(
                             continue;
                         }
                         pending_retry = None;
-                        conn_retries = 0;
+                        turn_retries = 0;
                         match ctx.store.acquire_session_lock(id, now_ms()).await {
                             Ok(LockAcquire::Held) => {
                                 let _ = ctx.event_tx.send(Event::SessionLocked { id }).await;
@@ -894,7 +896,7 @@ pub async fn run(
                             continue;
                         }
                         pending_retry = None;
-                        conn_retries = 0;
+                        turn_retries = 0;
                         clear_steered(&mut steered, &ctx.steer, &ctx.event_tx).await;
                         match ctx.store.delete_session(id).await {
                             Ok(()) => {
@@ -998,7 +1000,7 @@ pub async fn run(
                         }
                         clear_steered(&mut steered, &ctx.steer, &ctx.event_tx).await;
                         pending_retry = None;
-                        conn_retries = 0;
+                        turn_retries = 0;
                         let Some(s) = &ctx.session else { continue; };
                         let Some(sid) = s.lock().await.id else { continue; };
                         let summarizer = if summarize {
@@ -1071,7 +1073,7 @@ pub async fn run(
                             continue;
                         }
                         pending_retry = None;
-                        conn_retries = 0;
+                        turn_retries = 0;
                         let Some(s) = &ctx.session else { continue; };
                         let Some(sid) = s.lock().await.id else { continue; };
                         match ctx.store.load_session(sid).await {
@@ -1168,7 +1170,7 @@ pub async fn run(
                             continue;
                         }
                         pending_retry = None;
-                        conn_retries = 0;
+                        turn_retries = 0;
                         ctx.steer.reset();
                         let Some(s) = &ctx.session else { continue; };
                         let session_id = s.lock().await.id;
@@ -1365,7 +1367,7 @@ pub async fn run(
                 match outcome {
                     StreamOutcome::Finished | StreamOutcome::Preempted => {
                         overflow_retries = 0;
-                        conn_retries = 0;
+                        turn_retries = 0;
                         ctx.active_stream = None;
                         // A permission denial cut may leave sibling ask
                         // responders behind; drop them so late decisions are
@@ -1403,10 +1405,10 @@ pub async fn run(
                                 .await;
                         }
                     }
-                    StreamOutcome::ConnectionLost { reason, message } => {
-                        match next_connection_retry(conn_retries, ctx.config.retry.max_retries) {
+                    StreamOutcome::RetryableFailure { reason, message } => {
+                        match next_turn_retry(turn_retries, ctx.config.retry.max_retries) {
                             Some((attempt, delay_secs)) => {
-                                conn_retries = attempt;
+                                turn_retries = attempt;
                                 let _ = ctx
                                     .event_tx
                                     .send(Event::RetryScheduled {
@@ -1424,7 +1426,7 @@ pub async fn run(
                                 });
                             }
                             None => {
-                                conn_retries = 0;
+                                turn_retries = 0;
                                 ctx.steer.reset();
                                 let _ = ctx
                                     .event_tx
@@ -2254,7 +2256,7 @@ impl CoreCtx {
     /// Delete the interrupted assistant tip (message + tool calls), walk the
     /// leaf back to its parent (the user prompt), and re-stream from there.
     /// Used by the auto-continue path after a context overflow and the
-    /// connection-retry resume. No undo-log entry — the retry rewrites the
+    /// turn-retry resume. No undo-log entry — the retry rewrites the
     /// same branch position.
     async fn resume_last_turn(&mut self) {
         let Some(s) = &self.session else {
@@ -2951,7 +2953,7 @@ async fn stream_stream_to_events(
                 // stream and drains the worker receivers before returning
                 // `None`.
             }
-            shuvarie_llm::StreamItem::ConnectionError { message, reason } => {
+            shuvarie_llm::StreamItem::Error { message, reason } => {
                 persist_stream_error(
                     assistant_message_id,
                     &text_segments,
@@ -2961,20 +2963,7 @@ async fn stream_stream_to_events(
                 )
                 .await;
                 done = None;
-                outcome = StreamOutcome::ConnectionLost { reason, message };
-                break;
-            }
-            shuvarie_llm::StreamItem::Error { message } => {
-                persist_stream_error(
-                    assistant_message_id,
-                    &text_segments,
-                    &pending_reasoning,
-                    &session,
-                    &mut store,
-                )
-                .await;
-                let _ = event_tx.send(Event::StreamError { error: message }).await;
-                done = None;
+                outcome = StreamOutcome::RetryableFailure { reason, message };
                 break;
             }
             shuvarie_llm::StreamItem::Overflow => {

@@ -195,7 +195,7 @@ enum BusyKind {
     Waiting,
 }
 
-/// A scheduled connection retry, rendered as a red countdown in the status
+/// A scheduled turn retry, rendered as a red countdown in the status
 /// row (`<reason>. Retry in <seconds>s [<attempt>/<cap>]`).
 #[derive(Debug, Clone)]
 pub(crate) struct RetryWait {

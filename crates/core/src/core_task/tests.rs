@@ -193,16 +193,16 @@ fn retry_schedule_escalates_and_caps() {
 
 #[test]
 fn next_connection_retry_caps_at_max() {
-    assert_eq!(next_connection_retry(0, 10), Some((1, 3)));
-    assert_eq!(next_connection_retry(1, 10), Some((2, 5)));
-    assert_eq!(next_connection_retry(4, 10), Some((5, 30)));
-    assert_eq!(next_connection_retry(5, 10), Some((6, 60)));
-    assert_eq!(next_connection_retry(9, 10), Some((10, 60)));
-    assert_eq!(next_connection_retry(10, 10), None);
-    assert_eq!(next_connection_retry(11, 10), None);
-    assert_eq!(next_connection_retry(0, 0), None, "0 = no retry");
-    assert_eq!(next_connection_retry(0, 1), Some((1, 3)));
-    assert_eq!(next_connection_retry(1, 1), None);
+    assert_eq!(next_turn_retry(0, 10), Some((1, 3)));
+    assert_eq!(next_turn_retry(1, 10), Some((2, 5)));
+    assert_eq!(next_turn_retry(4, 10), Some((5, 30)));
+    assert_eq!(next_turn_retry(5, 10), Some((6, 60)));
+    assert_eq!(next_turn_retry(9, 10), Some((10, 60)));
+    assert_eq!(next_turn_retry(10, 10), None);
+    assert_eq!(next_turn_retry(11, 10), None);
+    assert_eq!(next_turn_retry(0, 0), None, "0 = no retry");
+    assert_eq!(next_turn_retry(0, 1), Some((1, 3)));
+    assert_eq!(next_turn_retry(1, 1), None);
 }
 
 #[tokio::test]
@@ -304,7 +304,7 @@ async fn stream_events_forward_and_accumulate_usage() {
 }
 
 #[tokio::test]
-async fn stream_error_forwards_and_leaves_session_clean() {
+async fn stream_error_schedules_turn_retry_and_leaves_session_clean() {
     let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
     let session = Arc::new(Mutex::new(Session::new()));
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(16);
@@ -315,6 +315,7 @@ async fn stream_error_forwards_and_leaves_session_clean() {
         },
         StreamItem::Error {
             message: "boom".into(),
+            reason: "Turn error".into(),
         },
     ]));
 
@@ -322,7 +323,7 @@ async fn stream_error_forwards_and_leaves_session_clean() {
     let store = Store::open_in_memory().await.unwrap();
     let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
     let turn_state = Arc::new(Mutex::new(TurnState::default()));
-    let (stream_done_tx, _stream_done_rx) = tokio::sync::mpsc::channel(1);
+    let (stream_done_tx, mut stream_done_rx) = tokio::sync::mpsc::channel(1);
     tokio::spawn(async move {
         stream_stream_to_events(
             stream,
@@ -343,18 +344,24 @@ async fn stream_error_forwards_and_leaves_session_clean() {
         .await;
     });
 
-    let mut saw_error = false;
-    for _ in 0..4 {
-        match event_rx.recv().await {
-            Some(Event::StreamError { error }) if error == "boom" => {
-                saw_error = true;
-                break;
-            }
-            Some(_) => {}
-            None => break,
-        }
+    // A turn error no longer surfaces as `StreamError`: it schedules the
+    // timeout retry, so the run loop resumes the turn after a backoff.
+    let outcome = stream_done_rx.recv().await.expect("outcome reported");
+    assert_eq!(
+        outcome,
+        StreamOutcome::RetryableFailure {
+            reason: "Turn error".into(),
+            message: "boom".into(),
+        },
+    );
+    // No `StreamError` either: only the run loop emits one, after
+    // `[retry].max-retries` is exhausted.
+    while let Some(event) = event_rx.recv().await {
+        assert!(
+            !matches!(event, Event::StreamError { .. }),
+            "a turn error must not surface as StreamError: {event:?}"
+        );
     }
-    assert!(saw_error, "expected StreamError");
     let guard = session.lock().await;
     assert!(guard.messages.is_empty(), "no assistant message on error");
 }

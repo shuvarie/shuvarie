@@ -1034,6 +1034,7 @@ impl ProviderClient {
             }
             ListImpl::Voyageai(_) => Box::pin(futures_util::stream::iter([StreamItem::Error {
                 message: "voyageai supports embeddings only, not completions".into(),
+                reason: "Turn error".into(),
             }])),
         }
     }
@@ -1272,6 +1273,7 @@ async fn run_worker_agent(
                 let _ = activity_tx
                     .send(StreamItem::Error {
                         message: message.clone(),
+                        reason: "Worker failed".to_string(),
                     })
                     .await;
                 return Err(message);
@@ -1434,13 +1436,14 @@ fn map_agent_stream(
             let message = e.to_string();
             if message.contains(crate::context_hook::OVERFLOW_REASON) {
                 StreamItem::Overflow
-            } else if let Some(failure) = crate::retry::classify_connection_error(&e) {
-                StreamItem::ConnectionError {
-                    message,
-                    reason: failure.reason,
-                }
             } else {
-                StreamItem::Error { message }
+                // Every error from the turn retries: connection failures
+                // keep their specific label, everything else falls back to
+                // the generic one.
+                let reason = crate::retry::classify_connection_error(&e)
+                    .map(|failure| failure.reason)
+                    .unwrap_or_else(|| "Turn error".to_string());
+                StreamItem::Error { message, reason }
             }
         }
     });
