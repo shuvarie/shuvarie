@@ -87,3 +87,6 @@ win-installer: build-win
 # Regenerate CHANGELOG.md with git-cliff
 changelog:
     git cliff v0.1.1..HEAD -o ./CHANGELOG.md
+
+changelog-branch:
+    git cliff --use-branch-tags v0.1.1..HEAD -o ./CHANGELOG.md
