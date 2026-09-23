@@ -431,7 +431,11 @@ mod tests {
     fn custom_commands_refilter_with_open_query() {
         let mut menu = SlashMenu::new();
         menu.sync("/com");
-        assert!(menu.filtered.is_empty(), "no builtin matches 'com'");
+        assert_eq!(
+            custom_names(&menu),
+            Vec::<String>::new(),
+            "only builtins (compact) match 'com' before custom commands load"
+        );
         menu.set_custom_commands(&[custom_command("commit", "Commit code", None)]);
         assert_eq!(custom_names(&menu), vec!["commit"]);
         assert_eq!(menu.selected, 0);

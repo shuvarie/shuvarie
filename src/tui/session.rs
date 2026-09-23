@@ -34,6 +34,13 @@ pub use bash::BashMessage;
 pub use chat::ChatMessage;
 pub use search::{SearchMessage, SearchPrompt};
 
+/// Status shown while a compaction summarizer call runs (auto overflow and
+/// manual `/compact` alike).
+const COMPACTING_STATUS: &str = "Compacting context...";
+/// Status shown between a compaction finishing and the replayed turn starting
+/// (auto overflow) or the compacted session reloading (manual `/compact`).
+const COMPACT_RESUME_STATUS: &str = "Resuming after compaction...";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseKind {
     Down,
@@ -164,6 +171,13 @@ pub enum SessionMessage {
         /// when the fork re-sends automatically (replay / retry resume) or
         /// recalls nothing (marker, tool-row, and reply-row walks).
         prompt: Option<String>,
+    },
+    /// A manual compaction (`/compact`) finished: the summary sits in the
+    /// active path with the kept tail under it. The chat pane rebuilds from
+    /// the reloaded session; unlike [`SessionMessage::Forked`], no turn
+    /// resumes and the busy state ends here.
+    SessionCompacted {
+        session: shuvarie_core::Session,
     },
     /// A user turn started streaming in the core: either an accepted submit
     /// or a dispatched steered prompt. Renders the user prompt and arms the
@@ -552,6 +566,10 @@ impl SessionScreen {
             .set_availability(CommandAction::UndoLastTurn, has_messages);
         self.slash
             .set_availability(CommandAction::Replay, has_messages);
+        self.slash.set_availability(
+            CommandAction::Compact,
+            has_messages && !self.chat.is_streaming(),
+        );
         self.slash
             .set_availability(CommandAction::OpenTree, self.session_id.is_some());
         self.slash
@@ -741,6 +759,19 @@ impl SessionScreen {
                 None
             }
             SessionMessage::ShowError { error } => {
+                // End a manual-compaction wait: the command's busy window
+                // ("Compacting context..."/"Resuming after compaction...")
+                // has no stream behind it, so an error is the only exit
+                // besides the compacted reload. Live turns never report
+                // through ShowError — they use StreamError, which owns its
+                // own busy transition.
+                if matches!(
+                    self.status.as_deref(),
+                    Some(COMPACTING_STATUS) | Some(COMPACT_RESUME_STATUS)
+                ) {
+                    self.busy_kind = BusyKind::Idle;
+                    self.status = None;
+                }
                 self.error = Some(error);
                 None
             }
@@ -853,7 +884,7 @@ impl SessionScreen {
             }
             SessionMessage::CompactionStarted => {
                 self.busy_kind = BusyKind::Waiting;
-                self.status = Some("Compacting context...".to_string());
+                self.status = Some(COMPACTING_STATUS.to_string());
                 self.retry = None;
                 // The post-compaction context is unknown until the replay's
                 // next response; the stale pre-compaction footprint would
@@ -864,8 +895,25 @@ impl SessionScreen {
             }
             SessionMessage::CompactionFinished => {
                 self.busy_kind = BusyKind::Generating;
-                self.status = Some("Resuming after compaction...".to_string());
+                self.status = Some(COMPACT_RESUME_STATUS.to_string());
                 self.retry = None;
+                None
+            }
+            SessionMessage::SessionCompacted { session } => {
+                let usage = session.usage();
+                let cost = session.cost;
+                self.retry = None;
+                self.last_escape = None;
+                self.reset_search();
+                self.busy_kind = BusyKind::Idle;
+                self.status = Some("Context compacted".to_string());
+                self.sidebar
+                    .update(SidebarMessage::SetUsage { usage, cost });
+                self.sidebar.update(SidebarMessage::SetContextRequest {
+                    usage: session.last_usage,
+                });
+                self.sync_todos(shuvarie_core::tools::todos::replay(&session.tool_records));
+                self.chat.update(ChatMessage::Forked { session });
                 None
             }
             SessionMessage::Reset => {

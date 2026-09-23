@@ -2203,3 +2203,227 @@ async fn switch_scene_requires_interlude_mid_session() {
     drop(cmd_tx);
     let _ = handle.await;
 }
+
+/// Drain events until the turn's `StreamDone`.
+async fn drain_until_stream_done(event_rx: &mut tokio::sync::mpsc::Receiver<Event>) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let ev = tokio::time::timeout(deadline - tokio::time::Instant::now(), event_rx.recv())
+            .await
+            .expect("timed out waiting for StreamDone")
+            .expect("core task ended");
+        if matches!(ev, Event::StreamDone { .. }) {
+            return;
+        }
+    }
+}
+
+/// The active path root → tip of a stored session, walked from its leaf.
+fn active_path_of(stored: &shuvarie_db::StoredSession) -> Vec<shuvarie_db::StoredMessage> {
+    let by_id: std::collections::HashMap<u64, &shuvarie_db::StoredMessage> =
+        stored.messages.iter().map(|m| (m.id, m)).collect();
+    let mut ids = Vec::new();
+    let mut cur = stored.leaf_id;
+    while let Some(id) = cur {
+        let msg = by_id.get(&id).expect("leaf resolves to a message");
+        ids.push((*msg).clone());
+        cur = msg.parent_id;
+    }
+    ids.reverse();
+    ids
+}
+
+/// A manual `/compact` (with a focus instruction) runs the standard
+/// compaction flow: the summary is spliced into the active path at the cut
+/// point, the kept tail hangs under it, the leaf returns to the
+/// pre-compaction tip so the compacted history stays on the active path, and
+/// the summarizer request carries the instruction plus the summary format.
+#[tokio::test]
+async fn manual_compact_splices_the_summary_and_forwards_the_focus() {
+    let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let addr = spawn_mock_openai_recording("Compacted summary.", bodies.clone());
+    let mut connections = empty_connections();
+    connections.providers.insert(
+        "mock".into(),
+        ProviderConfig::new(
+            "mock",
+            "openai-compat",
+            Some("sk-test".into()),
+            Some(format!("http://{addr}/v1")),
+        ),
+    );
+    connections.active = Some(Active {
+        provider: "mock".into(),
+        model: Some("test-model".into()),
+        variant: None,
+    });
+    let store = Store::open_in_memory().await.unwrap();
+    let mut store_handle = store.clone();
+
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let handle = tokio::spawn(run(
+        empty_config(),
+        connections,
+        store,
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        shuvarie_core::SceneSet {
+            scenes: Default::default(),
+            warnings: Vec::new(),
+        },
+        cmd_rx,
+        event_tx,
+    ));
+    recv_skills_loaded(&mut event_rx).await;
+
+    // Three short turns: six messages, so the plan keeps the last four and
+    // summarizes the first two.
+    for prompt in ["first", "second", "third"] {
+        cmd_tx
+            .send(Command::SendMessage {
+                content: prompt.into(),
+                model: None,
+            })
+            .await
+            .unwrap();
+        drain_until_stream_done(&mut event_rx).await;
+    }
+
+    cmd_tx
+        .send(Command::CompactSession {
+            instruction: Some("Focus on the migration plan.".into()),
+        })
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let (mut started, mut finished, mut compacted) = (false, false, None);
+    while compacted.is_none() {
+        let ev = tokio::time::timeout(deadline - tokio::time::Instant::now(), event_rx.recv())
+            .await
+            .expect("timed out waiting for SessionCompacted")
+            .expect("core task ended");
+        match ev {
+            Event::CompactionStarted => started = true,
+            Event::CompactionFinished => finished = true,
+            Event::SessionCompacted { session } => compacted = Some(session),
+            Event::SessionError { error } => panic!("compaction errored: {error}"),
+            _ => {}
+        }
+    }
+    assert!(started, "CompactionStarted brackets the summarizer");
+    assert!(finished, "CompactionFinished closes the bracket");
+    let session = compacted.expect("SessionCompacted carries the reloaded session");
+    let sid = session.id.expect("compacted session has an id");
+
+    let stored = store_handle.load_session(sid).await.unwrap();
+    let summaries: Vec<_> = stored.messages.iter().filter(|m| m.summary).collect();
+    assert_eq!(summaries.len(), 1, "exactly one summary was appended");
+    assert_eq!(summaries[0].content, "Compacted summary.");
+    let path = active_path_of(&stored);
+    let summary_pos = path
+        .iter()
+        .position(|m| m.id == summaries[0].id)
+        .expect("summary sits on the active path");
+    // Head [u1, a1], summary, kept tail [u2, a2, u3, a3]: the tail's first
+    // message hangs under the summary and the leaf is the old tip.
+    assert_eq!(summary_pos, 2);
+    assert_eq!(path.len(), 7, "summary + 6 original messages");
+    assert_eq!(path[0].content, "first");
+    assert_eq!(summaries[0].parent_id, Some(path[1].id));
+    assert_eq!(path[3].content, "second");
+    assert_eq!(path[3].parent_id, Some(summaries[0].id));
+    assert_eq!(stored.leaf_id, Some(path[6].id), "leaf back at the old tip");
+    assert_eq!(path[6].role, shuvarie_db::MsgRole::Assistant);
+
+    // The summarizer request carried the focus instruction and the summary
+    // format over a transcript of the summarized head.
+    {
+        let recorded = bodies.lock().expect("request sink poisoned");
+        let last = recorded.last().expect("the compaction call was recorded");
+        assert!(last.contains("Focus on the migration plan."), "{last}");
+        assert!(last.contains("## Objective"), "{last}");
+        assert!(last.contains("### User"), "{last}");
+        assert!(!last.contains("third"), "the kept tail is not re-sent");
+    }
+
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+/// With no summarizable span (at most the minimum tail), a manual compaction
+/// reports `nothing to compact` instead of calling the summarizer.
+#[tokio::test]
+async fn manual_compact_without_enough_history_reports_nothing_to_compact() {
+    let addr = spawn_mock_openai("reply");
+    let mut connections = empty_connections();
+    connections.providers.insert(
+        "mock".into(),
+        ProviderConfig::new(
+            "mock",
+            "openai-compat",
+            Some("sk-test".into()),
+            Some(format!("http://{addr}/v1")),
+        ),
+    );
+    connections.active = Some(Active {
+        provider: "mock".into(),
+        model: Some("test-model".into()),
+        variant: None,
+    });
+
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let handle = tokio::spawn(run(
+        empty_config(),
+        connections,
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        shuvarie_core::SceneSet {
+            scenes: Default::default(),
+            warnings: Vec::new(),
+        },
+        cmd_rx,
+        event_tx,
+    ));
+    recv_skills_loaded(&mut event_rx).await;
+
+    cmd_tx
+        .send(Command::SendMessage {
+            content: "hello".into(),
+            model: None,
+        })
+        .await
+        .unwrap();
+    drain_until_stream_done(&mut event_rx).await;
+
+    cmd_tx
+        .send(Command::CompactSession { instruction: None })
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let ev = tokio::time::timeout(deadline - tokio::time::Instant::now(), event_rx.recv())
+            .await
+            .expect("timed out waiting for the refusal")
+            .expect("core task ended");
+        match ev {
+            Event::SessionError { error } => {
+                assert!(error.contains("nothing to compact"), "{error}");
+                break;
+            }
+            Event::CompactionStarted | Event::CompactionFinished => {}
+            _ => {}
+        }
+    }
+
+    drop(cmd_tx);
+    let _ = handle.await;
+}

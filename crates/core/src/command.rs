@@ -121,6 +121,17 @@ pub enum Command {
     DeleteBranch {
         node: u64,
     },
+    /// Manually compact the active session (`/compact [instruction]`): run
+    /// the standard compaction flow over the active path (keep the recent
+    /// tail within `keep_recent_tokens`, summarize the head, splice the
+    /// summary in at the cut point, reparent the tail under it) and reload
+    /// the session, reporting [`crate::Event::SessionCompacted`].
+    /// `instruction` optionally focuses the summary. Refused with
+    /// [`crate::Event::SessionError`] while a turn is in flight, without an
+    /// active session/provider/model, or when there is no summarizable span.
+    CompactSession {
+        instruction: Option<String>,
+    },
     /// Load the active session's tree for the `/tree` popup; reports
     /// [`crate::Event::SessionTree`].
     OpenTree,

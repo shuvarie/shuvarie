@@ -1,5 +1,7 @@
-use std::sync::{Arc, atomic::{AtomicU8, Ordering}};
-
+use std::sync::{
+    Arc,
+    atomic::{AtomicU8, Ordering},
+};
 
 /// Shared steering-preemption state between the run loop and the active
 /// stream task. The run loop sets `ARMED` when a prompt is steered while this

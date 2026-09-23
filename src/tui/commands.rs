@@ -14,6 +14,7 @@ pub enum CommandAction {
     Export,
     UndoLastTurn,
     Replay,
+    Compact,
     Reload,
     McpServers,
     McpReconnect,
@@ -23,7 +24,7 @@ pub enum CommandAction {
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 18] = [
+    pub const ALL: [CommandAction; 19] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::OpenSessionPicker,
@@ -36,6 +37,7 @@ impl CommandAction {
         CommandAction::Export,
         CommandAction::UndoLastTurn,
         CommandAction::Replay,
+        CommandAction::Compact,
         CommandAction::Reload,
         CommandAction::McpServers,
         CommandAction::McpReconnect,
@@ -58,6 +60,7 @@ impl CommandAction {
             CommandAction::Export => "export",
             CommandAction::UndoLastTurn => "undo",
             CommandAction::Replay => "replay",
+            CommandAction::Compact => "compact",
             CommandAction::Reload => "reload",
             CommandAction::McpServers => "mcp",
             CommandAction::McpReconnect => "mcp-reconnect",
@@ -68,11 +71,12 @@ impl CommandAction {
     }
 
     /// Whether the command accepts free-form arguments after its name
-    /// (e.g. `/title My title`).
+    /// (e.g. `/title My title`, `/compact focus on the parser work`).
     pub fn takes_args(self) -> bool {
         matches!(
             self,
-            CommandAction::EditTitle
+            CommandAction::Compact
+                | CommandAction::EditTitle
                 | CommandAction::Export
                 | CommandAction::McpReconnect
                 | CommandAction::OpenScenePicker
@@ -207,6 +211,11 @@ pub fn default_commands() -> Vec<CommandEntry> {
             "Replay last turn",
             "Fork + re-run the last turn",
             CommandAction::Replay,
+        ),
+        CommandEntry::builtin(
+            "Compact context",
+            "Summarize older history; optional focus instruction",
+            CommandAction::Compact,
         ),
         CommandEntry::builtin(
             "Reload skills",
@@ -459,6 +468,13 @@ mod tests {
                 args: None
             })
         );
+        assert_eq!(
+            parse_command("/compact"),
+            Some(ParsedCommand {
+                action: CommandAction::Compact,
+                args: None
+            })
+        );
     }
 
     #[test]
@@ -491,6 +507,13 @@ mod tests {
                 args: None
             }),
             "whitespace-only remainder is no args"
+        );
+        assert_eq!(
+            parse_command("/compact focus on the parser work"),
+            Some(ParsedCommand {
+                action: CommandAction::Compact,
+                args: Some("focus on the parser work".into())
+            })
         );
         assert_eq!(
             parse_command("/variant"),
