@@ -86,4 +86,4 @@ win-installer: build-win
 
 # Regenerate CHANGELOG.md with git-cliff
 changelog:
-    git cliff v0.2.0..HEAD -o ./CHANGELOG.md
+    git cliff v0.1.1..HEAD -o ./CHANGELOG.md
