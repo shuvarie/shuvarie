@@ -1,10 +1,23 @@
 # Changelog
 
-## [unreleased]
+## [0.2.2] - 2026-09-23
+
+### 🐛 Bug Fixes
+
+- *(tui)* No word wrap for question block
 
 ### ⚙️ Miscellaneous Tasks
 
 - *(cliff)* Use branch tags
+
+### ◀️ Revert
+
+- "chore(cliff): use branch tags"
+
+### 💼 Other
+
+- Update changelog
+- Add branch changelog
 ## [0.2.1] - 2026-09-22
 
 ### 🚀 Features
