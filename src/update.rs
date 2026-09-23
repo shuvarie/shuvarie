@@ -5,12 +5,22 @@ use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::env::consts::{ARCH, OS};
+use std::future::Future;
 use std::io::{Read, Write};
 use std::path::Path;
 #[cfg(windows)]
 use std::path::PathBuf;
+use std::time::Duration;
 
 const RELEASES_API: &str = "https://api.github.com/repos/shuvarie/shuvarie/releases/latest";
+
+/// Total attempts per HTTP request. GitHub connections are frequently cut
+/// mid-TLS-handshake by proxies and firewalls (`tls handshake eof`), and a
+/// retry on a fresh connection usually gets through.
+const MAX_ATTEMPTS: u32 = 3;
+const RETRY_DELAY: Duration = Duration::from_millis(500);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Deserialize)]
 struct Release {
@@ -30,6 +40,8 @@ struct Asset {
 pub async fn run() -> color_eyre::Result<()> {
     let client = reqwest::Client::builder()
         .user_agent(concat!("shuvarie/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(READ_TIMEOUT)
         .build()?;
 
     let release = fetch_latest_release(&client).await?;
@@ -81,21 +93,73 @@ pub async fn run() -> color_eyre::Result<()> {
 /// The GitHub `latest` endpoint only resolves published, non-draft,
 /// non-prerelease releases.
 async fn fetch_latest_release(client: &reqwest::Client) -> color_eyre::Result<Option<Release>> {
-    let response = client
-        .get(RELEASES_API)
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-        .wrap_err("failed to reach GitHub releases")?;
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(None);
+    with_retries("fetching the latest release", || async {
+        let response = client
+            .get(RELEASES_API)
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await
+            .wrap_err("failed to reach GitHub releases")?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let release: Release = response
+            .error_for_status()?
+            .json()
+            .await
+            .wrap_err("failed to decode the release metadata")?;
+        Ok(Some(release))
+    })
+    .await
+}
+
+/// Runs `attempt`, retrying transient network failures with an exponential
+/// backoff. Every attempt rebuilds the request, reconnecting from scratch —
+/// which is what works around proxies and firewalls that intermittently cut
+/// connections mid-TLS-handshake (`tls handshake eof`) or reset GitHub
+/// connections. Only unestablishable connections (DNS, TCP, TLS), timeouts,
+/// truncated bodies, and transient statuses (408, 5xx) are retried; the
+/// requests here are GETs, so re-attempting never duplicates side effects.
+async fn with_retries<T, F>(label: &str, mut attempt: impl FnMut() -> F) -> color_eyre::Result<T>
+where
+    F: Future<Output = color_eyre::Result<T>>,
+{
+    let mut last = None;
+    for number in 1..=MAX_ATTEMPTS {
+        match attempt().await {
+            Ok(value) => return Ok(value),
+            Err(err) if !is_retryable(&err) => return Err(err),
+            Err(err) => last = Some(err),
+        }
+        if number < MAX_ATTEMPTS {
+            tokio::time::sleep(retry_delay(number)).await;
+        }
     }
-    let response = response.error_for_status()?;
-    let release: Release = response
-        .json()
-        .await
-        .wrap_err("failed to decode the release metadata")?;
-    Ok(Some(release))
+    Err(last.expect("the loop only ends on a retryable failure")).wrap_err_with(|| {
+        format!("{label} failed after {MAX_ATTEMPTS} attempts; a proxy or firewall may be interrupting the connection")
+    })
+}
+
+/// Backoff before the retry following attempt `number` (1-based).
+fn retry_delay(number: u32) -> Duration {
+    RETRY_DELAY * (1 << (number - 1))
+}
+
+/// Whether `err` is a transient failure worth re-attempting. A cut TLS
+/// handshake surfaces as a connect error (`tls handshake eof`), and a
+/// connection reset mid-transfer as a body error.
+fn is_retryable(err: &color_eyre::Report) -> bool {
+    let Some(err) = err.downcast_ref::<reqwest::Error>() else {
+        return false;
+    };
+    err.is_connect()
+        || err.is_timeout()
+        || err.is_body()
+        || matches!(err.status(), Some(status) if is_retryable_status(status))
+}
+
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::REQUEST_TIMEOUT || status.is_server_error()
 }
 
 /// Parses a release tag (`v1.2.3`) into a version.
@@ -154,17 +218,20 @@ async fn download_asset(
         .ok_or_eyre(format!("release asset {name:?} is missing"))?
         .browser_download_url
         .clone();
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .with_context(|| format!("failed to download {name}"))?
-        .error_for_status()?;
-    response
-        .bytes()
-        .await
-        .with_context(|| format!("failed to read {name}"))
-        .map(|bytes| bytes.to_vec())
+    with_retries(&format!("downloading {name}"), || async {
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("failed to download {name}"))?;
+        response
+            .error_for_status()?
+            .bytes()
+            .await
+            .with_context(|| format!("failed to read {name}"))
+            .map(|bytes| bytes.to_vec())
+    })
+    .await
 }
 
 /// Verifies `data` against its entry in a `sha256sum`-formatted checksum file.
@@ -285,6 +352,7 @@ fn backup_path(exe: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[test]
     fn parses_tagged_versions() {
@@ -322,5 +390,79 @@ mod tests {
                 _ => unreachable!(),
             }
         );
+    }
+
+    #[test]
+    fn retry_delay_doubles() {
+        assert_eq!(retry_delay(1), Duration::from_millis(500));
+        assert_eq!(retry_delay(2), Duration::from_millis(1000));
+        assert_eq!(retry_delay(3), Duration::from_millis(2000));
+    }
+
+    /// A closed loopback port yields a real, retryable reqwest connect error.
+    fn failing_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(1))
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn exhausts_retries_on_connect_errors() {
+        let client = failing_client();
+        let attempts = Cell::new(0u32);
+        let err = with_retries("reaching the endpoint", || async {
+            attempts.set(attempts.get() + 1);
+            client
+                .get("http://127.0.0.1:9/")
+                .send()
+                .await
+                .wrap_err("connect failed")
+                .map(drop)
+        })
+        .await
+        .expect_err("connect errors exhaust the retries");
+        assert_eq!(attempts.get(), MAX_ATTEMPTS);
+        let text = format!("{err:#}");
+        assert!(text.contains("after 3 attempts"), "missing hint: {text}");
+        assert!(text.contains("connect failed"), "missing cause: {text}");
+    }
+
+    #[tokio::test]
+    async fn succeeds_after_a_retry() {
+        let client = failing_client();
+        let attempts = Cell::new(0u32);
+        let value = with_retries("reaching the endpoint", || async {
+            let previous = attempts.replace(attempts.get() + 1);
+            if previous == 0 {
+                return client
+                    .get("http://127.0.0.1:9/")
+                    .send()
+                    .await
+                    .wrap_err("connect failed")
+                    .map(|_| 7u8);
+            }
+            Ok(7)
+        })
+        .await
+        .unwrap();
+        assert_eq!(value, 7);
+        assert_eq!(attempts.get(), 2);
+    }
+
+    #[tokio::test]
+    async fn non_retryable_errors_bubble_up_immediately() {
+        let attempts = Cell::new(0u32);
+        let err = with_retries("reaching the endpoint", || async {
+            attempts.set(attempts.get() + 1);
+            Err::<(), _>(eyre!("release tag is not a valid semver version"))
+        })
+        .await
+        .expect_err("synthetic errors are not retried");
+        assert_eq!(attempts.get(), 1);
+        let text = err.to_string();
+        assert!(text.contains("not a valid semver"), "missing: {text}");
+        assert!(!text.contains("after 3 attempts"), "unwanted hint: {text}");
     }
 }
