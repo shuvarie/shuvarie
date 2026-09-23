@@ -1,6 +1,6 @@
 use ratatui::layout::Alignment;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Padding, Paragraph};
+use ratatui::widgets::{Block, Padding, Paragraph, Wrap};
 use shuvarie_core::QuestionPrompt;
 use termina::event::{KeyCode, KeyEvent, Modifiers};
 
@@ -373,7 +373,7 @@ impl QuestionUI {
     /// the inner width the symmetric(2, 1) padded block paints at.
     pub fn desired_height(&self, width: usize) -> u16 {
         let inner = (width.max(10) as u16).saturating_sub(4);
-        let lines = self.build_lines(inner, usize::MAX).len();
+        let lines = self.paragraph(inner).line_count(inner);
         (lines.min(MAX_VIEW_ROWS) as u16) + 2
     }
 
@@ -390,11 +390,16 @@ impl QuestionUI {
             return;
         }
 
-        let lines = self.build_lines(inner.width, inner.height as usize);
-        frame.render_widget(Paragraph::new(lines).alignment(Alignment::Left), inner);
+        frame.render_widget(self.paragraph(inner.width), inner);
     }
 
-    fn build_lines(&self, width: u16, max_rows: usize) -> Vec<Line<'static>> {
+    fn paragraph(&self, width: u16) -> Paragraph<'static> {
+        Paragraph::new(self.build_lines(width))
+            .alignment(Alignment::Left)
+            .wrap(Wrap { trim: false })
+    }
+
+    fn build_lines(&self, width: u16) -> Vec<Line<'static>> {
         let width = width.max(10);
         if self.at_confirm {
             return self.confirm_lines();
@@ -407,16 +412,16 @@ impl QuestionUI {
         } else {
             String::new()
         };
-        let mut lines = vec![
-            Line::from(vec![
-                Span::raw("▸ ").fg(theme::accent()),
-                Span::raw(format!("{progress}{}", q.header))
-                    .fg(theme::accent())
-                    .bold(),
-            ]),
-            truncate_line(&q.question, width).style(Style::new().fg(theme::text()).italic()),
-            Line::from(""),
-        ];
+        let mut lines = vec![Line::from(vec![
+            Span::raw("▸ ").fg(theme::accent()),
+            Span::raw(format!("{progress}{}", q.header))
+                .fg(theme::accent())
+                .bold(),
+        ])];
+        lines.push(Line::from(
+            Span::raw(q.question.clone()).fg(theme::text()).italic(),
+        ));
+        lines.push(Line::from(""));
         if self.typing_custom {
             lines.push(
                 self.typing_buffer
@@ -430,9 +435,6 @@ impl QuestionUI {
             return lines;
         }
         for (i, option) in q.options.iter().enumerate() {
-            if lines.len() + 2 > max_rows {
-                break;
-            }
             let picked = self.picked[self.current].contains(&i);
             let marker = if q.multiple {
                 if picked { "[x] " } else { "[ ] " }
@@ -459,9 +461,6 @@ impl QuestionUI {
             if !option.description.is_empty() {
                 let desc_width = (width as usize).saturating_sub(DESC_INDENT);
                 for row in wrap_text(&option.description, desc_width) {
-                    if lines.len() >= max_rows {
-                        break;
-                    }
                     lines.push(Line::from(
                         Span::raw(format!("{}{row}", " ".repeat(DESC_INDENT)))
                             .fg(theme::text_muted()),
@@ -469,7 +468,7 @@ impl QuestionUI {
                 }
             }
         }
-        if q.custom && lines.len() < max_rows {
+        if q.custom {
             let saved = self.custom_answers[self.current].clone();
             let selected = self.cursor == q.options.len();
             let mut spans = Vec::new();
@@ -498,26 +497,24 @@ impl QuestionUI {
             }
             lines.push(Line::from(spans));
         }
-        if lines.len() < max_rows {
-            let hints: &[(&str, &str)] = if self.questions.len() > 1 {
-                &[
-                    ("↑/↓", "choose"),
-                    ("←/→", "question"),
-                    ("Enter", "pick/toggle"),
-                    ("Esc", "dismiss"),
-                ]
-            } else if q.multiple {
-                &[
-                    ("↑/↓", "choose"),
-                    ("Enter", "toggle"),
-                    ("→", "done"),
-                    ("Esc", "dismiss"),
-                ]
-            } else {
-                &[("↑/↓", "choose"), ("Enter", "pick"), ("Esc", "dismiss")]
-            };
-            lines.push(theme::help_line(hints));
-        }
+        let hints: &[(&str, &str)] = if self.questions.len() > 1 {
+            &[
+                ("↑/↓", "choose"),
+                ("←/→", "question"),
+                ("Enter", "pick/toggle"),
+                ("Esc", "dismiss"),
+            ]
+        } else if q.multiple {
+            &[
+                ("↑/↓", "choose"),
+                ("Enter", "toggle"),
+                ("→", "done"),
+                ("Esc", "dismiss"),
+            ]
+        } else {
+            &[("↑/↓", "choose"), ("Enter", "pick"), ("Esc", "dismiss")]
+        };
+        lines.push(theme::help_line(hints));
         lines
     }
 
@@ -571,10 +568,6 @@ impl QuestionUI {
 
 fn ctrl_mod(key: &KeyEvent) -> bool {
     key.modifiers.contains(Modifiers::CONTROL)
-}
-
-fn truncate_line(text: &str, width: u16) -> Line<'static> {
-    Line::from(truncate_span(text, width.saturating_sub(1), theme::text()))
 }
 
 fn truncate_span(text: &str, width: u16, color: Color) -> Span<'static> {
@@ -648,10 +641,21 @@ mod tests {
             .collect()
     }
 
+    fn rendered(paragraph: Paragraph<'static>, width: u16, height: u16) -> Buffer {
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        paragraph.render(area, &mut buf);
+        buf
+    }
+
+    fn row_text(buf: &Buffer, y: u16) -> String {
+        (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
     #[test]
     fn long_description_wraps_under_the_option() {
         let ui = ui(&["first row here second row here"]);
-        let lines = ui.build_lines(30, usize::MAX);
+        let lines = ui.build_lines(30);
         let texts = texts(&lines);
         assert_eq!(texts[4], "     first row here second row");
         assert_eq!(texts[5], "     here");
@@ -661,28 +665,18 @@ mod tests {
     #[test]
     fn short_description_stays_one_row() {
         let ui = ui(&["a short note"]);
-        let lines = ui.build_lines(40, usize::MAX);
+        let lines = ui.build_lines(40);
         let texts = texts(&lines);
         assert_eq!(texts[4], "     a short note");
         assert_eq!(lines.len(), 6);
     }
 
     #[test]
-    fn wrapped_rows_respect_max_rows() {
-        let ui = ui(&["aaaa bbbb cccc dddd eeee ffff gggg hhhh"]);
-        let lines = ui.build_lines(30, 6);
-        let texts = texts(&lines);
-        assert_eq!(lines.len(), 6);
-        assert_eq!(texts[4], "     aaaa bbbb cccc dddd eeee");
-        assert_eq!(texts[5], "     ffff gggg hhhh");
-    }
-
-    #[test]
     fn desired_height_measures_at_the_painted_inner_width() {
         let desc = format!("{} zzzz", "w".repeat(20));
         let ui = ui(&[&desc]);
-        let inner_lines = ui.build_lines(26, usize::MAX).len();
-        assert_eq!(inner_lines, 7);
+        let inner_lines = ui.paragraph(26).line_count(26);
+        assert_eq!(inner_lines, 8);
         assert_eq!(
             ui.desired_height(30),
             (inner_lines.min(MAX_VIEW_ROWS) + 2) as u16
@@ -692,7 +686,7 @@ mod tests {
     #[test]
     fn newline_in_description_starts_a_new_row() {
         let ui = ui(&["one\ntwo"]);
-        let texts = texts(&ui.build_lines(40, usize::MAX));
+        let texts = texts(&ui.build_lines(40));
         assert_eq!(texts[4], "     one");
         assert_eq!(texts[5], "     two");
     }
@@ -709,13 +703,38 @@ mod tests {
     }
 
     #[test]
+    fn long_question_wraps_across_rows() {
+        let mut ui = ui(&[""]);
+        ui.questions[0].question = "first row here second row here".into();
+        let buf = rendered(ui.paragraph(25), 25, 5);
+        assert_eq!(row_text(&buf, 1), "first row here second row");
+        assert_eq!(row_text(&buf, 2).trim_end(), "here");
+        for y in [1, 2] {
+            let style = buf[(0, y)].style();
+            assert_eq!(style.fg, Some(theme::text()));
+            assert!(style.add_modifier.contains(Modifier::ITALIC));
+        }
+        // The option list still follows the blank row after the question.
+        assert_eq!(row_text(&buf, 4).trim_end(), "▶   1 label");
+    }
+
+    #[test]
+    fn wrapped_question_grows_desired_height() {
+        let mut ui = ui(&[""]);
+        ui.questions[0].question = "first row here second row here".into();
+        // header + 2 wrapped question rows + blank + option + 2 wrapped help rows
+        assert_eq!(ui.paragraph(25).line_count(25), 7);
+        assert_eq!(ui.desired_height(29), 9);
+    }
+
+    #[test]
     fn saved_custom_answer_takes_the_picked_marker() {
         let mut ui = custom_ui(true, 1);
         ui.update(QuestionMessage::Toggle); // pick option 0
         type_custom(&mut ui, "hi");
         assert!(ui.picked[0].is_empty());
         assert_eq!(ui.custom_answers[0].as_deref(), Some("hi"));
-        let texts = texts(&ui.build_lines(40, usize::MAX));
+        let texts = texts(&ui.build_lines(40));
         assert_eq!(texts[3], "  [ ] 1 label");
         assert_eq!(texts[4], "▶ ✎ [x] hi");
     }
@@ -724,7 +743,7 @@ mod tests {
     fn saved_custom_answer_shows_the_green_dot() {
         let mut ui = custom_ui(false, 2);
         type_custom(&mut ui, "hi");
-        let texts = texts(&ui.build_lines(40, usize::MAX));
+        let texts = texts(&ui.build_lines(40));
         assert_eq!(texts[3], "    1 label");
         assert_eq!(texts[4], "▶ ✎ ● hi");
     }
@@ -751,7 +770,7 @@ mod tests {
         assert!(ui.custom_answers[0].is_none());
         assert!(ui.picked[0].contains(&0));
         assert_eq!(ui.build_answers()[0], vec!["label".to_string()]);
-        let texts = texts(&ui.build_lines(40, usize::MAX));
+        let texts = texts(&ui.build_lines(40));
         assert_eq!(texts[3], "▶ ● 1 label");
         assert_eq!(texts[4], "  ✎ Type your own answer");
     }
