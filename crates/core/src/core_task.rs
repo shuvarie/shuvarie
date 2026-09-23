@@ -2060,7 +2060,7 @@ impl CoreCtx {
                 return;
             }
         };
-        let (prior, todo_records, stored_scene, announced_scene, session_id) = {
+        let (prior, todo_records, stored_scene, announced_scene, session_id, seed_usage) = {
             let guard = s.lock().await;
             (
                 guard.history_for_send(),
@@ -2068,6 +2068,10 @@ impl CoreCtx {
                 guard.scene.clone(),
                 guard.announced_scene.clone(),
                 guard.id,
+                // Seed the measured compaction trigger with the last main
+                // request's real usage so the first call of the turn is
+                // anchored on measurement instead of a chars/4 estimate.
+                guard.last_usage,
             )
         };
         let scene = crate::scenes::Scene::resolve(&self.scenes, stored_scene.as_deref());
@@ -2220,6 +2224,7 @@ impl CoreCtx {
                 &mut worker_set.workers,
                 self.manager_turns,
                 budget,
+                seed_usage,
             )
             .await;
         // Live `run_shell` output flows through the same merged turn stream as
@@ -2942,6 +2947,13 @@ async fn stream_stream_to_events(
                     .unwrap_or(0.0);
                 let context_tokens = if worker.is_none() {
                     let footprint = shuvarie_llm::context_footprint(&usage);
+                    // Keep the session's live anchor in step with the last
+                    // completed main request: the next turn seeds its
+                    // measured compaction trigger and the sidebar's restored
+                    // context anchor from it.
+                    if footprint > 0 {
+                        session.lock().await.last_usage = Some(usage);
+                    }
                     (footprint > 0).then_some(footprint)
                 } else {
                     None

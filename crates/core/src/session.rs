@@ -88,10 +88,13 @@ pub struct Session {
     /// request under it. Seeded from storage on load and kept in step by the
     /// announce.
     pub announced_scene: Option<String>,
-    /// Usage of the most recent main-stream request, restored from storage so
-    /// a loaded session can re-seed the sidebar's context anchor and read/
-    /// cache-hit metrics. Not maintained by the live turn loop (which reports
-    /// per-request usage through events).
+    /// Usage of the most recent main-stream request against the current
+    /// post-compaction conversation. Maintained live by the turn loop (every
+    /// main-stream usage report) and seeded from storage on load — only from
+    /// requests made after the newest compaction summary, since earlier usage
+    /// describes the conversation the summary replaced. The next turn seeds
+    /// the LLM's measured compaction trigger and the sidebar's context anchor
+    /// from it.
     pub last_usage: Option<TokenUsage>,
     /// Chat pane scroll position persisted at the last leave of the session;
     /// the TUI seeds its scroll engine from it when the session loads.
@@ -189,6 +192,18 @@ impl Session {
             scroll: stored.scroll,
             ..Self::default()
         };
+        // Usage anchoring: requests made after the newest compaction summary
+        // describe the current conversation's size. Everything before it was
+        // replaced by that summary, so its stored usage would over-state the
+        // context — and re-arm the measured compaction trigger against a
+        // history that just shrank. With no summary on the path, every
+        // request qualifies.
+        let newest_summary: Option<u64> = path_ids
+            .iter()
+            .enumerate()
+            .filter(|(_, id)| stored.messages[by_id[id]].summary)
+            .map(|(idx, _)| idx as u64)
+            .next_back();
         for (idx, id) in path_ids.iter().enumerate() {
             let m = &stored.messages[by_id[id]];
             s.input_tokens = s.input_tokens.saturating_add(m.input_tokens);
@@ -213,8 +228,7 @@ impl Session {
             }
             if m.summary {
                 s.summaries.insert(idx);
-            }
-            if !m.summary
+            } else if newest_summary.is_none_or(|pos| idx > pos)
                 && let Some(usage) = request_usage_of(m)
             {
                 s.last_usage = Some(usage);
@@ -416,10 +430,10 @@ mod tests {
     }
 
     #[test]
-    fn from_stored_skips_zero_and_summary_rows_for_last_usage() {
+    fn from_stored_skips_summary_rows_and_pre_summary_usage_for_last_usage() {
         let mut stored = stored_session(vec![
             stored_message(0, MsgRole::Assistant, "ok"),
-            stored_message(1, MsgRole::Assistant, "ok"),
+            stored_message(1, MsgRole::User, "summary"),
             stored_message(2, MsgRole::User, "again"),
         ]);
         chain(&mut stored.messages);
@@ -437,8 +451,34 @@ mod tests {
         };
 
         let session = Session::from_stored(stored);
-        let last = session.last_usage.expect("main request restored");
-        assert_eq!(last.total_tokens, 30, "summary rows are not main requests");
+        // Both usable rows predate the newest summary: the head they measured
+        // was replaced by that summary, so nothing on the path describes the
+        // current conversation and the anchor stays unset.
+        assert!(session.last_usage.is_none());
+    }
+
+    #[test]
+    fn from_stored_seeds_last_usage_from_post_summary_requests() {
+        let mut stored = stored_session(vec![
+            stored_message(0, MsgRole::Assistant, "ok"),
+            stored_message(1, MsgRole::User, "summary"),
+            stored_message(2, MsgRole::Assistant, "fresh"),
+        ]);
+        chain(&mut stored.messages);
+        stored.leaf_id = Some(stored.messages[2].id);
+        stored.messages[0].request = TokenUsage {
+            total_tokens: 99_000,
+            ..TokenUsage::default()
+        };
+        stored.messages[1].summary = true;
+        stored.messages[2].request = TokenUsage {
+            total_tokens: 3_000,
+            ..TokenUsage::default()
+        };
+
+        let session = Session::from_stored(stored);
+        let last = session.last_usage.expect("post-summary request restored");
+        assert_eq!(last.total_tokens, 3_000, "pre-summary usage is ignored");
     }
 
     #[test]

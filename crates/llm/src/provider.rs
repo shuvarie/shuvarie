@@ -557,8 +557,17 @@ impl ProviderClient {
         workers: &mut [crate::agent::WorkerAgent],
         max_turns: usize,
         context_budget: Option<crate::context_hook::ContextBudget>,
+        seed_usage: Option<crate::TokenUsage>,
     ) -> StreamStream {
         let tracker = crate::context_hook::UsageTracker::new();
+        // Seed the measured compaction trigger with the previous turn's last
+        // main request, so the first call of this run is anchored on real
+        // usage instead of a chars/4 estimate. A fresh session has no seed
+        // and stays estimate-only until its first call reports usage; a
+        // zero-usage seed is ignored by `record`.
+        if let Some(seed) = seed_usage {
+            tracker.record(seed);
+        }
         let tracker_for_hook = tracker.clone();
         let user_msg = rig_core::message::Message::user(prompt.to_string());
         let rig_history: Vec<rig_core::message::Message> = history
@@ -1434,7 +1443,13 @@ fn map_agent_stream(
         },
         Err(e) => {
             let message = e.to_string();
-            if message.contains(crate::context_hook::OVERFLOW_REASON) {
+            if message.contains(crate::context_hook::OVERFLOW_REASON)
+                || crate::retry::is_context_length_error(&message)
+            {
+                // Either the hook stopped the run pre-call (the measured
+                // trigger) or the provider itself rejected the request as
+                // too long (a genuine overflow that slipped past the
+                // trigger): both compact the session and auto-continue.
                 StreamItem::Overflow
             } else {
                 // Every error from the turn retries: connection failures

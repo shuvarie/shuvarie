@@ -120,11 +120,67 @@ fn classify_source_chain(err: &(dyn std::error::Error + 'static)) -> Option<Conn
     None
 }
 
+/// Provider error phrases that identify a context-length rejection. Matched
+/// case-insensitively against the error's Display text: provider API errors
+/// reach the stream as flattened strings, so the markers cover the common
+/// phrasings (OpenAI's "maximum context length", Anthropic's "prompt is too
+/// long", Gemini's "input token count … exceeds the maximum number of
+/// tokens", Ollama's "exceed context limit", passthrough bodies from
+/// OpenRouter-compatible providers).
+const CONTEXT_LENGTH_MARKERS: [&str; 7] = [
+    "context length",
+    "context_length",
+    "context window",
+    "prompt is too long",
+    "input token count",
+    "exceeds the maximum number of tokens",
+    "exceed context limit",
+];
+
+/// Whether a provider rejection says the request exceeded the model's context
+/// length. Such a rejection ends the run as an overflow (prompt compaction +
+/// auto-continue) instead of the futile retry loop a plain turn error gets.
+pub fn is_context_length_error(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    CONTEXT_LENGTH_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::error::Error as StdError;
     use std::fmt;
+
+    #[test]
+    fn context_length_rejections_are_recognized() {
+        assert!(is_context_length_error(
+            "400: This model's maximum context length is 128000 tokens. However, you \
+             requested 130000 tokens"
+        ));
+        assert!(is_context_length_error(
+            "invalid_request_error: prompt is too long: 250000 tokens > 200000 maximum"
+        ));
+        assert!(is_context_length_error(
+            "The input token count (123456) exceeds the maximum number of tokens allowed \
+             (100000)."
+        ));
+        assert!(is_context_length_error(
+            "input length and `max_tokens` exceed context limit"
+        ));
+        assert!(is_context_length_error(
+            "{\"error\":{\"code\":\"context_length_exceeded\"}}"
+        ));
+    }
+
+    #[test]
+    fn unrelated_rejections_are_not_context_length_errors() {
+        assert!(!is_context_length_error("401 unauthorized"));
+        assert!(!is_context_length_error("rate limit exceeded, retry later"));
+        assert!(!is_context_length_error("model `x` not found"));
+        assert!(!is_context_length_error("connection reset by peer"));
+    }
 
     fn completion_err(err: CompletionError) -> StreamingError {
         StreamingError::Completion(err)
