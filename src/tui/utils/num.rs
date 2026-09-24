@@ -1,8 +1,47 @@
-const UNITS: [&str; 4] = ["k", "M", "B", "T"];
+use std::fmt::Display;
 
-/// Display string for a token count: exact below 1,000, then abbreviated with
+/// Number wrapper with cached scaled number display
+pub struct CachedScaledNumber {
+    num: u64,
+    display: String,
+}
+
+impl CachedScaledNumber {
+    pub fn num(&self) -> u64 {
+        self.num
+    }
+
+    pub fn saturating_add(&self, rhs: u64) -> Self {
+        self.num.saturating_add(rhs).into()
+    }
+}
+
+impl Default for CachedScaledNumber {
+    fn default() -> Self {
+        0.into()
+    }
+}
+
+impl From<u64> for CachedScaledNumber {
+    fn from(value: u64) -> Self {
+        Self {
+            num: value,
+            display: fmt_scaled_number(value),
+        }
+    }
+}
+
+impl Display for CachedScaledNumber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.display)
+    }
+}
+
+/// Display string for a number: exact below 1,000, then abbreviated with
 /// one decimal (`1.1k`, `12.3k`) and none past three digits (`128k`, `1.2M`).
-pub fn fmt_tokens(n: u64) -> String {
+pub fn fmt_scaled_number(n: u64) -> String {
+    const UNITS: [&str; 4] = ["k", "M", "B", "T"];
+
     if n < 1_000 {
         return n.to_string();
     }
@@ -35,26 +74,26 @@ mod tests {
 
     #[test]
     fn tokens_exact_below_one_thousand() {
-        assert_eq!(fmt_tokens(0), "0");
-        assert_eq!(fmt_tokens(999), "999");
+        assert_eq!(fmt_scaled_number(0), "0");
+        assert_eq!(fmt_scaled_number(999), "999");
     }
 
     #[test]
     fn tokens_abbreviated_k() {
-        assert_eq!(fmt_tokens(1_000), "1k");
-        assert_eq!(fmt_tokens(1_100), "1.1k");
-        assert_eq!(fmt_tokens(9_999), "10k");
-        assert_eq!(fmt_tokens(12_340), "12.3k");
-        assert_eq!(fmt_tokens(128_000), "128k");
-        assert_eq!(fmt_tokens(200_000), "200k");
+        assert_eq!(fmt_scaled_number(1_000), "1k");
+        assert_eq!(fmt_scaled_number(1_100), "1.1k");
+        assert_eq!(fmt_scaled_number(9_999), "10k");
+        assert_eq!(fmt_scaled_number(12_340), "12.3k");
+        assert_eq!(fmt_scaled_number(128_000), "128k");
+        assert_eq!(fmt_scaled_number(200_000), "200k");
     }
 
     #[test]
     fn tokens_abbreviated_m_and_b() {
-        assert_eq!(fmt_tokens(999_999), "1M");
-        assert_eq!(fmt_tokens(1_234_567), "1.2M");
-        assert_eq!(fmt_tokens(200_000_000), "200M");
-        assert_eq!(fmt_tokens(1_000_000_000), "1B");
+        assert_eq!(fmt_scaled_number(999_999), "1M");
+        assert_eq!(fmt_scaled_number(1_234_567), "1.2M");
+        assert_eq!(fmt_scaled_number(200_000_000), "200M");
+        assert_eq!(fmt_scaled_number(1_000_000_000), "1B");
     }
 
     #[test]
