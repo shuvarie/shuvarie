@@ -8,7 +8,7 @@ use selune::Provider;
 use termina::event::{KeyCode, KeyEvent};
 
 use crate::tui::utils::ctrl;
-use crate::tui::utils::num::fmt_tokens;
+use crate::tui::utils::num::fmt_scaled_number;
 
 use super::add_provider::centered_rect;
 use super::list::{render_list_item_line, scroll_offset_for};
@@ -496,7 +496,7 @@ impl ModelPicker {
                     let mut line = vec![Span::raw(id.clone()).fg(theme::text())];
                     if let Some(ctx) = context {
                         line.push(
-                            Span::raw(format!(" · {} ctx", fmt_tokens(u64::from(*ctx))))
+                            Span::raw(format!(" · {} ctx", fmt_scaled_number(u64::from(*ctx))))
                                 .fg(theme::text_muted()),
                         );
                     }
