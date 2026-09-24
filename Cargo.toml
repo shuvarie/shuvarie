@@ -78,7 +78,7 @@ kdl = "6.7"
 regex = "1"
 reqwest = "0.13"
 rmcp = { version = "3.4", default-features = false }
-selune = "0.2"
+selune = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 shuvarie-config = { path = "crates/config", version = "0.2" }
