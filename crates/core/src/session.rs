@@ -481,6 +481,35 @@ mod tests {
         assert_eq!(last.total_tokens, 3_000, "pre-summary usage is ignored");
     }
 
+    /// Post-`/compact` layout: the summary is spliced mid-path and the kept
+    /// tail hangs under it, but the tail's requests chronologically predate
+    /// the summary (they measured the pre-compaction context).
+    #[test]
+    fn from_stored_seeds_last_usage_from_the_kept_compaction_tail() {
+        let mut stored = stored_session(vec![
+            stored_message(0, MsgRole::User, "one"),
+            stored_message(1, MsgRole::Assistant, "r1"),
+            stored_message(2, MsgRole::User, "summary"),
+            stored_message(3, MsgRole::User, "two"),
+            stored_message(4, MsgRole::Assistant, "r2"),
+        ]);
+        chain(&mut stored.messages);
+        stored.leaf_id = Some(stored.messages[4].id);
+        stored.messages[1].request = TokenUsage {
+            total_tokens: 30_000,
+            ..TokenUsage::default()
+        };
+        stored.messages[2].summary = true;
+        stored.messages[4].request = TokenUsage {
+            total_tokens: 32_000,
+            ..TokenUsage::default()
+        };
+
+        let session = Session::from_stored(stored);
+        let last = session.last_usage.expect("kept-tail request restored");
+        assert_eq!(last.total_tokens, 32_000);
+    }
+
     #[test]
     fn from_stored_without_reported_usage_leaves_last_usage_none() {
         let stored = stored_session(vec![stored_message(0, MsgRole::User, "hi")]);

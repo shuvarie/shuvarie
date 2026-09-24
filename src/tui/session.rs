@@ -886,11 +886,14 @@ impl SessionScreen {
                 self.busy_kind = BusyKind::Waiting;
                 self.status = Some(COMPACTING_STATUS.to_string());
                 self.retry = None;
-                // The post-compaction context is unknown until the replay's
-                // next response; the stale pre-compaction footprint would
-                // overstate occupancy.
-                self.sidebar
-                    .update(SidebarMessage::SetContextRequest { usage: None });
+                // The sidebar's latest-request metrics stay put. A successful
+                // compact reseeds them from the reloaded session
+                // (`SessionCompacted`) — which restores the kept tail's last
+                // request, the same measurement the anchor already held — and
+                // a failed or no-op compaction leaves the conversation
+                // unchanged, so blanking here would only lose the metrics
+                // until the next completed response. They can overstate the
+                // post-compaction occupancy until the next request reports.
                 None
             }
             SessionMessage::CompactionFinished => {
@@ -1599,6 +1602,76 @@ mod tests {
             !rendered.contains("R20k") && !rendered.contains("CH97%"),
             "reset drops the restored metrics: {rendered}"
         );
+    }
+
+    /// A refused or failed `/compact` exits through `ShowError` with no
+    /// compacted reload; the conversation did not change, so the sidebar's
+    /// latest-request metrics (occupancy, read tokens, cache hit) must
+    /// survive the attempt instead of staying blanked until the next turn.
+    #[test]
+    fn failed_compaction_keeps_sidebar_request_metrics() {
+        let mut screen = SessionScreen::new();
+        screen.sidebar.update(SidebarMessage::UpdateConfig {
+            context_length: Some(200_000),
+        });
+        screen.update(SessionMessage::UsageUpdate {
+            usage: TokenUsage {
+                total_tokens: 84_000,
+                ..Default::default()
+            },
+            cost: 0.0,
+            context_tokens: Some(84_000),
+        });
+
+        screen.update(SessionMessage::CompactionStarted);
+        screen.update(SessionMessage::ShowError {
+            error: "nothing to compact — the session history is too short".into(),
+        });
+
+        let rendered = text(screen.sidebar.rendered_lines());
+        assert!(
+            rendered.contains("84k/200k (42%)"),
+            "a failed compact keeps the occupancy anchor: {rendered}"
+        );
+        assert!(rendered.contains("R84k"), "body: {rendered}");
+    }
+
+    /// A successful `/compact` reloads the session; the kept tail's last
+    /// request is the newest measured one, so the reseed restores the
+    /// request metrics (which can still overstate until the next turn).
+    #[test]
+    fn compacted_reload_reseeds_sidebar_request_metrics() {
+        let mut screen = SessionScreen::new();
+        screen.sidebar.update(SidebarMessage::UpdateConfig {
+            context_length: Some(200_000),
+        });
+        screen.update(SessionMessage::UsageUpdate {
+            usage: TokenUsage {
+                total_tokens: 84_000,
+                ..Default::default()
+            },
+            cost: 0.0,
+            context_tokens: Some(84_000),
+        });
+
+        screen.update(SessionMessage::CompactionStarted);
+        let mut session = shuvarie_core::Session::new();
+        session.last_usage = Some(TokenUsage {
+            input_tokens: 500,
+            output_tokens: 200,
+            total_tokens: 20_200,
+            cached_input_tokens: 19_400,
+            ..Default::default()
+        });
+        screen.update(SessionMessage::SessionCompacted { session });
+
+        let rendered = text(screen.sidebar.rendered_lines());
+        assert!(
+            rendered.contains("20.2k/200k (10%)"),
+            "compacted reload reseeds the anchor: {rendered}"
+        );
+        assert!(rendered.contains("R20k"), "body: {rendered}");
+        assert!(rendered.contains("CH97%"), "body: {rendered}");
     }
 
     #[test]
