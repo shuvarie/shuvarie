@@ -63,9 +63,7 @@ pub async fn init_default_store() -> shuvarie_db::Result<shuvarie_db::Store> {
     shuvarie_db::Store::open(&shuvarie_db::Store::default_path()).await
 }
 
-pub async fn import_session(
-    path: &std::path::Path,
-) -> color_eyre::Result<()> {
+pub async fn import_session(path: &std::path::Path) -> color_eyre::Result<()> {
     let mut store = init_default_store().await?;
 
     let json = std::fs::read_to_string(path)
@@ -77,10 +75,7 @@ pub async fn import_session(
     Ok(())
 }
 
-pub async fn export_session(
-    dest: &str,
-    session: Option<Uuid>,
-) -> color_eyre::Result<()> {
+pub async fn export_session(dest: &str, session: Option<Uuid>) -> color_eyre::Result<()> {
     let mut store = init_default_store().await?;
 
     let stored = match session {
