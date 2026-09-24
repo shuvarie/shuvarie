@@ -18,6 +18,7 @@ use self::app::{App, AppEffect, AppMessage};
 
 pub mod add_provider;
 mod app;
+mod assisted_by;
 mod auth;
 mod command_menu;
 mod commands;

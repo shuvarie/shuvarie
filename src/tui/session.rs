@@ -179,6 +179,14 @@ pub enum SessionMessage {
     SessionCompacted {
         session: shuvarie_core::Session,
     },
+    /// The session's per-model usage changed (a turn committed or a partial
+    /// turn was persisted): the full deduped list, first-use ordered, for the
+    /// `/assisted-by` popup. `session_id` lets a stale event from a
+    /// just-left session be dropped.
+    ModelsUsed {
+        session_id: uuid::Uuid,
+        models: Vec<shuvarie_core::ModelUsage>,
+    },
     /// A user turn started streaming in the core: either an accepted submit
     /// or a dispatched steered prompt. Renders the user prompt and arms the
     /// busy indicator; when `steered`, the first queued entry also leaves the
@@ -271,6 +279,9 @@ pub struct SessionScreen {
     history_area: Cell<Rect>,
     /// Copy the chat selection on mouse-up (`[ui] copy-on-select`).
     copy_on_select: bool,
+    /// The session's deduped per-model usage (first-use ordered), rebuilt on
+    /// load and extended live; the `/assisted-by` popup reads it at open.
+    pub models_used: Vec<shuvarie_core::ModelUsage>,
 }
 
 impl SessionScreen {
@@ -300,6 +311,7 @@ impl SessionScreen {
             input_area: Cell::new(Rect::default()),
             history_area: Cell::new(Rect::default()),
             copy_on_select: false,
+            models_used: Vec::new(),
         }
     }
 
@@ -910,6 +922,7 @@ impl SessionScreen {
                 self.reset_search();
                 self.busy_kind = BusyKind::Idle;
                 self.status = Some("Context compacted".to_string());
+                self.models_used = session.models_used.clone();
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
                 self.sidebar.update(SidebarMessage::SetContextRequest {
@@ -917,6 +930,12 @@ impl SessionScreen {
                 });
                 self.sync_todos(shuvarie_core::tools::todos::replay(&session.tool_records));
                 self.chat.update(ChatMessage::Forked { session });
+                None
+            }
+            SessionMessage::ModelsUsed { session_id, models } => {
+                if self.session_id == Some(session_id) {
+                    self.models_used = models;
+                }
                 None
             }
             SessionMessage::Reset => {
@@ -928,6 +947,7 @@ impl SessionScreen {
                 self.last_escape = None;
                 self.session_id = None;
                 self.session_title = None;
+                self.models_used.clear();
                 self.permission.close();
                 self.sidebar.update(SidebarMessage::SetUsage {
                     usage: TokenUsage::default(),
@@ -947,6 +967,7 @@ impl SessionScreen {
                 self.retry = None;
                 self.last_escape = None;
                 self.reset_search();
+                self.models_used = session.models_used.clone();
                 self.permission.close();
                 self.sidebar
                     .update(SidebarMessage::SetUsage { usage, cost });
@@ -963,6 +984,7 @@ impl SessionScreen {
                 self.retry = None;
                 self.last_escape = None;
                 self.reset_search();
+                self.models_used = session.models_used.clone();
                 if prompt.is_some() {
                     self.busy_kind = BusyKind::Idle;
                     self.status = None;

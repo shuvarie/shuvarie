@@ -539,12 +539,20 @@ mod tests {
         }
     }
 
+    fn model_code(id: &str) -> selune::ModelCode {
+        let (body, variant) = id.split_once(':').unwrap_or((id, ""));
+        let (org, model) = body.split_once('/').unwrap_or(("test-org", body));
+        let variant = (!variant.is_empty()).then_some(variant);
+        selune::ModelCode::new(org, model, variant).unwrap()
+    }
+
     fn test_provider(id: &str, models: impl IntoIterator<Item = (&'static str, i64)>) -> Provider {
         Provider {
             models: models
                 .into_iter()
                 .map(|(model, context)| selune::Model {
                     id: model.to_string(),
+                    model_code: model_code(model),
                     name: model.to_string(),
                     reasoning: false,
                     reasoning_options: Vec::new(),
@@ -677,6 +685,7 @@ mod tests {
     fn plain_model(id: &str) -> selune::Model {
         selune::Model {
             id: id.to_string(),
+            model_code: model_code(id),
             name: id.to_string(),
             reasoning: false,
             reasoning_options: Vec::new(),

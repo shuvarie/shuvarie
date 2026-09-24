@@ -264,6 +264,13 @@ pub struct Message {
     /// the combined per-row totals so a loaded session can restore the
     /// main-request context footprint and cache metrics.
     pub request_json: String,
+    /// Model code (`org/model`) of the model that produced this assistant
+    /// message; `None` for user rows, compaction summaries, imported
+    /// sessions, and rows written before attribution existed.
+    pub model_code: Option<String>,
+    /// Scene name under which the model produced this assistant message;
+    /// `None` for the built-in Default scene (and for user rows).
+    pub scene: Option<String>,
     #[has_many]
     pub embeddings: toasty::Deferred<Vec<MessageEmbedding>>,
     #[has_many]

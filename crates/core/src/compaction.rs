@@ -307,6 +307,8 @@ mod tests {
             cost: 0.0,
             summary: false,
             request: TokenUsage::default(),
+            model_code: None,
+            scene: None,
         }
     }
 

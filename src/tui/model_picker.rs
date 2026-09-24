@@ -547,6 +547,13 @@ mod tests {
     use super::*;
     use selune::{InferenceProvider, Model as SeluneModel, ModelLimit};
 
+    fn model_code(id: &str) -> selune::ModelCode {
+        let (body, variant) = id.split_once(':').unwrap_or((id, ""));
+        let (org, model) = body.split_once('/').unwrap_or(("test-org", body));
+        let variant = (!variant.is_empty()).then_some(variant);
+        selune::ModelCode::new(org, model, variant).unwrap()
+    }
+
     fn registry_provider(id: &str, name: &str, models: &[&str]) -> Provider {
         Provider {
             name: name.to_string(),
@@ -562,6 +569,7 @@ mod tests {
                 .iter()
                 .map(|m| SeluneModel {
                     id: (*m).to_string(),
+                    model_code: model_code(m),
                     name: (*m).to_string(),
                     reasoning: false,
                     reasoning_options: Vec::new(),

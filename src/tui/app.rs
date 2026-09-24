@@ -12,6 +12,7 @@ use crate::tui::utils::ctrl;
 use super::add_provider::{
     AddProviderForm, AddProviderMessage, AddProviderOutcome, AddProviderStage,
 };
+use super::assisted_by::{AssistedByEffect, AssistedByMessage, AssistedByPopup};
 use super::auth::{AuthMessage, AuthPopup};
 use super::command_menu::{CommandMenu, CommandMenuMessage};
 use super::commands::{CommandAction, CommandRef};
@@ -50,6 +51,7 @@ pub enum Overlay {
     Tree,
     Scene,
     Variant,
+    AssistedBy,
 }
 
 pub enum AppMessage {
@@ -72,6 +74,7 @@ pub enum AppMessage {
     Tree(TreeMessage),
     Scene(scene::SceneMessage),
     Variant(variant::VariantMessage),
+    AssistedBy(AssistedByMessage),
     /// The configured scene set (startup), for the switcher; `warnings`
     /// carries one message per same-level scene conflict.
     ScenesLoaded {
@@ -191,6 +194,7 @@ pub struct App {
     pub variant_picker: variant::VariantPicker,
     pub history_search: HistorySearch,
     pub title_popup: TitlePopup,
+    pub assisted_by: AssistedByPopup,
     pub warning: WarningPopup,
     pub auth: AuthPopup,
     pub models: HashMap<String, Vec<Model>>,
@@ -301,6 +305,7 @@ impl App {
             variant_picker: variant::VariantPicker::new(),
             history_search: HistorySearch::new(),
             title_popup: TitlePopup::new(),
+            assisted_by: AssistedByPopup::new(),
             warning,
             auth: AuthPopup::new(),
             models: HashMap::new(),
@@ -461,6 +466,9 @@ impl App {
                         }
                         Overlay::TitleEdit => {
                             return self.title_popup.map_event(&key).map(AppMessage::TitlePopup);
+                        }
+                        Overlay::AssistedBy => {
+                            return self.assisted_by.map_event(&key).map(AppMessage::AssistedBy);
                         }
                         Overlay::None => {}
                     }
@@ -723,6 +731,12 @@ impl App {
                         session,
                     }))
                 }
+                CoreEvent::ModelUsed { session_id, models } => {
+                    Some(AppMessage::Session(SessionMessage::ModelsUsed {
+                        session_id,
+                        models,
+                    }))
+                }
                 CoreEvent::SessionTree { session } => Some(AppMessage::SessionTree { session }),
                 CoreEvent::SessionExported { path } => {
                     Some(AppMessage::Session(SessionMessage::ShowStatus {
@@ -821,7 +835,8 @@ impl App {
             | Overlay::SessionPicker
             | Overlay::Tree
             | Overlay::Scene
-            | Overlay::Variant => None,
+            | Overlay::Variant
+            | Overlay::AssistedBy => None,
             Overlay::ModelPicker => {
                 let flat = super::components::flatten_newlines(text);
                 let mut msg = None;
@@ -994,6 +1009,16 @@ impl App {
                             self.ctx.send(shuvarie_core::Command::SetTitle { title });
                         }
                         TitleEffect::Close => self.close_overlay(),
+                    }
+                }
+            }
+            AppMessage::AssistedBy(m) => {
+                if let Some(effect) = self.assisted_by.update(m) {
+                    match effect {
+                        AssistedByEffect::Copy { content } => {
+                            return Some(AppEffect::CopyToClipboard(content));
+                        }
+                        AssistedByEffect::Close => self.close_overlay(),
                     }
                 }
             }
@@ -1185,7 +1210,8 @@ impl App {
                     | Overlay::TitleEdit
                     | Overlay::Tree
                     | Overlay::Scene
-                    | Overlay::Variant => {}
+                    | Overlay::Variant
+                    | Overlay::AssistedBy => {}
                 }
             }
             AppMessage::ConfigSaved => {
@@ -1759,6 +1785,10 @@ impl App {
             CommandAction::Search => {
                 self.session.open_search(args.as_deref());
             }
+            CommandAction::AssistedBy => {
+                self.assisted_by.open(self.session.models_used.clone());
+                self.overlay = Overlay::AssistedBy;
+            }
             CommandAction::Quit => {
                 if self.session.is_streaming() {
                     self.ctx.send(shuvarie_core::Command::CancelStream);
@@ -1780,6 +1810,7 @@ impl App {
         self.history_search.close();
         self.confirm_quit.close();
         self.title_popup.close();
+        self.assisted_by.close();
         self.variant_picker.close();
         if self.welcome.open {
             self.welcome.close();
@@ -1854,6 +1885,7 @@ impl App {
         self.history_search.view(frame, area);
         self.command_menu.view(frame, area);
         self.title_popup.view(frame, area);
+        self.assisted_by.view(frame, area);
         self.confirm_quit.view(frame, area);
         self.auth.view(frame, area);
         self.warning.view(frame, area);
