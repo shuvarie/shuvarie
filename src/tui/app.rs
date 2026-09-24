@@ -718,6 +718,11 @@ impl App {
                         prompt,
                     }))
                 }
+                CoreEvent::SessionCompacted { session } => {
+                    Some(AppMessage::Session(SessionMessage::SessionCompacted {
+                        session,
+                    }))
+                }
                 CoreEvent::SessionTree { session } => Some(AppMessage::SessionTree { session }),
                 CoreEvent::SessionExported { path } => {
                     Some(AppMessage::Session(SessionMessage::ShowStatus {
@@ -1717,6 +1722,17 @@ impl App {
             }
             CommandAction::Replay => {
                 self.ctx.send(shuvarie_core::Command::Replay);
+            }
+            CommandAction::Compact => {
+                if self.session.session_id.is_none() {
+                    self.session.update(SessionMessage::ShowError {
+                        error: "no active session".into(),
+                    });
+                } else {
+                    let instruction = args.map(|a| a.trim().to_string()).filter(|a| !a.is_empty());
+                    self.ctx
+                        .send(shuvarie_core::Command::CompactSession { instruction });
+                }
             }
             CommandAction::Reload => {
                 self.ctx.send(shuvarie_core::Command::Reload);

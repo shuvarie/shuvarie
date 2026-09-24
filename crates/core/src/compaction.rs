@@ -42,6 +42,21 @@ the Relevant Files section in those lists.\n\n\
 Keep the summary concise and information-dense. Do not include full file \
 contents or tool outputs — reference them by path and line where relevant.";
 
+/// The summarizer's system preamble: the built-in summary format, plus the
+/// user's focus instruction when one was given (`/compact <instruction>`).
+fn summary_preamble(instruction: Option<&str>) -> String {
+    let mut preamble = SUMMARY_PREAMBLE.to_string();
+    if let Some(instruction) = instruction {
+        preamble.push_str(
+            "\n\nThe user asked for this compaction to focus on the following. \
+             Weight it in every section, and keep the detail it asks for even \
+             at the cost of brevity:\n\n",
+        );
+        preamble.push_str(instruction);
+    }
+    preamble
+}
+
 /// A compaction plan: the message span `[start, cut)` to summarize, with the
 /// verbatim tail `[cut, len)` kept for the next request.
 pub struct CompactionPlan {
@@ -231,11 +246,13 @@ fn truncate(s: &str, max: usize) -> &str {
 }
 
 /// Run the compaction summarizer via a single-shot worker call (no tools).
-/// Returns the summary text, or an error string.
+/// Returns the summary text, or an error string. `instruction` optionally
+/// focuses the summary (a manual `/compact <instruction>` run).
 pub async fn summarize(
     client: &ProviderClient,
     model: &str,
     head_text: &str,
+    instruction: Option<&str>,
 ) -> Result<String, String> {
     let task = format!(
         "Summarize the following conversation transcript. Keep it concise and \
@@ -244,19 +261,24 @@ pub async fn summarize(
     );
     let (activity_tx, mut activity_rx) = tokio::sync::mpsc::channel::<shuvarie_llm::StreamItem>(16);
     let usage = std::sync::Arc::new(std::sync::Mutex::new(shuvarie_llm::TokenUsage::default()));
-    let req = shuvarie_llm::WorkerRequest {
-        client: client.clone(),
-        name: "compaction".to_string(),
-        model: model.to_string(),
-        preamble: SUMMARY_PREAMBLE.to_string(),
-        task,
-        tools: Vec::new(),
-        activity_tx,
-        usage,
-        max_turns: 2,
-        context_budget: None,
+    let result = {
+        let req = shuvarie_llm::WorkerRequest {
+            client: client.clone(),
+            name: "compaction".to_string(),
+            model: model.to_string(),
+            preamble: summary_preamble(instruction),
+            task,
+            tools: Vec::new(),
+            activity_tx,
+            usage,
+            max_turns: 2,
+            context_budget: None,
+        };
+        client.run_worker(&req).await
+        // `req` still holds an `activity_tx` clone: dropping it here (before
+        // the drain below) lets the activity channel close once the agent's
+        // internal clones do, instead of blocking `recv` forever.
     };
-    let result = client.run_worker(&req).await;
     // Drain activity to avoid backpressure.
     while activity_rx.recv().await.is_some() {}
     result
@@ -310,6 +332,15 @@ mod tests {
             new_content: None,
             duration_ms: 0,
         }
+    }
+
+    #[test]
+    fn summary_preamble_appends_the_focus_instruction() {
+        let base = summary_preamble(None);
+        assert!(!base.contains("focus on the migration"));
+        let focused = summary_preamble(Some("focus on the migration plan"));
+        assert!(focused.starts_with(&base));
+        assert!(focused.contains("focus on the migration plan"));
     }
 
     #[test]

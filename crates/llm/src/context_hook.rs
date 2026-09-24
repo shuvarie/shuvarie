@@ -1,24 +1,34 @@
 //! Per-call context budget hook (rig `AgentHook`).
 //!
-//! Forecast, trim, stop: before every model call in the multi-turn agent
-//! loop, forecast the request's input tokens. The forecast is anchored on the
-//! **real** request-side token cost reported by the most recent model call
-//! (`total_tokens - output_tokens`, which works across providers regardless
-//! of whether cached tokens are reported inside or alongside `input_tokens`),
-//! plus a chars/4 estimate of only what was appended since that call. With no
-//! usage anchor yet (first call of the run, or a provider that reports no
-//! usage), the forecast falls back to chars/4 over the whole request plus the
-//! preamble's estimated tokens (the preamble itself is not visible to hooks).
+//! Two signals drive it. The **measured** one is the last completed call's
+//! real request-side token cost (`total_tokens - output_tokens`, which works
+//! across providers regardless of whether cached tokens are reported inside or
+//! alongside `input_tokens`), recorded by the stream side (`provider.rs`
+//! forwards `MultiTurnStreamItem::CompletionCall` items) and seeded at turn
+//! start from the previous turn's last main request (`Session.last_usage`).
+//! The **forecast** one anchors on that measurement plus a chars/4 estimate of
+//! only what was appended since; with no anchor yet (first call of a fresh
+//! session, or a provider that reports no usage) it falls back to chars/4 over
+//! the whole request plus the preamble's estimated tokens (the preamble itself
+//! is not visible to hooks).
 //!
-//! When the forecast exceeds the usable budget (`context_length - reserved`),
-//! the hook applies a mechanical trim: keep the most recent messages verbatim
-//! within the `keep_recent_tokens` tail budget and replace older tool-result
-//! content with recovery-hint stubs so the model knows a tool ran and how to
-//! re-read it. If even the trimmed request would not fit, the hook stops the
-//! run *before* the provider call so the caller can compact the session
-//! (LLM-summzed summary) and auto-continue — the model never sees a failed
-//! request. Only what is *sent* changes: rig's run state and persistence are
-//! untouched (`RequestPatch.history` replaces the history for this turn only).
+//! Prompt compaction triggers **only on measured usage**: when the last
+//! completed call's request-side cost crosses the usable budget
+//! (`context_length - reserved`), the hook stops the run *before* the next
+//! model call so the caller can compact the session (LLM-summarized summary)
+//! and auto-continue — the model never sees a failed request. Estimates never
+//! stop the run; a genuine overflow that slips past the trigger is caught
+//! reactively when the provider rejects the request (`provider.rs` maps
+//! context-length rejections to `StreamItem::Overflow` as well).
+//!
+//! When the forecast exceeds the usable budget, the hook applies a mechanical
+//! trim: keep the most recent messages verbatim within the `keep_recent_tokens`
+//! tail budget and replace older tool-result content with recovery-hint stubs
+//! so the model knows a tool ran and how to re-read it. The trimmed request is
+//! sent even when it still forecasts over budget. Only what is *sent* changes:
+//! rig's run state and persistence are untouched (`RequestPatch.history`
+//! replaces the history for this call only — patches are non-sticky, so the
+//! next call re-expands to the full history and the hook re-trims).
 
 use rig_agent::agent::hook::{CompletionCall, ToolResultEvent};
 use rig_agent::agent::{
@@ -163,8 +173,10 @@ impl ContextBudget {
 
 /// Shared, hook-visible record of the real request-side token cost of the
 /// most recent model call in a run. Updated from the stream side
-/// (`provider.rs` forwards `MultiTurnStreamItem::CompletionCall` items); read
-/// by the hook to anchor the next call's forecast.
+/// (`provider.rs` forwards `MultiTurnStreamItem::CompletionCall` items) and
+/// seeded at turn start from the previous turn's last main request
+/// (`Session.last_usage`); read by the hook both to anchor the next call's
+/// forecast and as the measured prompt-compaction trigger.
 ///
 /// This is the *last* call's request size, not a cumulative sum: each model
 /// call re-sends the accumulated conversation, so per-request input is the
@@ -194,18 +206,20 @@ impl UsageTracker {
 /// Decision of the context-budget analysis for one model call.
 #[derive(Debug)]
 enum ContextDecision {
-    /// Forecast is inside the budget; send the request as-is.
+    /// Inside the budget; send the request as-is.
     Continue,
-    /// Forecast exceeded the budget; send a trimmed history instead.
+    /// The forecast exceeded the budget; send a trimmed history instead.
     Trim(Vec<Message>),
-    /// Even the trimmed request would not fit; stop before the model call so
-    /// the caller can compact the session and retry.
+    /// The measured request-side cost of the last completed call crossed the
+    /// usable budget; stop before the model call so the caller can compact
+    /// the session and retry.
     Stop,
 }
 
-/// rig `AgentHook` that forecasts per-call input tokens, mechanically trims
-/// old tool results when the forecast exceeds the budget, and stops the run
-/// before a call that cannot fit even trimmed.
+/// rig `AgentHook` that mechanically trims old tool results when the request
+/// forecast exceeds the budget, and stops the run before a call once the
+/// measured request-side usage of the last completed call crosses the budget
+/// (which triggers prompt compaction).
 pub struct ContextHook {
     budget: ContextBudget,
     tracker: Arc<UsageTracker>,
@@ -250,17 +264,29 @@ impl ContextHook {
         if self.budget.disabled {
             return ContextDecision::Continue;
         }
+        // Prompt compaction triggers only on measured usage: the last
+        // completed call's real request-side token cost crossing the usable
+        // budget (`context_length - reserved`). Estimates never stop the run
+        // — the chars/4 forecast is too coarse — and a genuine overflow the
+        // trim cannot avoid is caught reactively when the provider rejects
+        // the request.
+        if self.tracker.input() > self.budget.usable() {
+            return ContextDecision::Stop;
+        }
         let chars = self.request_chars(prompt, history);
         if self.forecast(chars) < self.budget.usable() {
             *self.last_request_chars.lock().unwrap() = Some(chars);
             return ContextDecision::Continue;
         }
         let trimmed = self.trim_history(history);
+        // The forecast only drives the mechanical trim. The baseline recorded
+        // for the next call's delta is the trimmed request: patches are
+        // non-sticky, so the next call re-expands to the full history and
+        // this diff re-measures exactly that regrowth. The trimmed request is
+        // sent even when it still forecasts over budget — only measured
+        // usage stops the run.
         let trimmed_chars =
             message_text_len(prompt) + trimmed.iter().map(message_text_len).sum::<usize>();
-        if self.forecast(trimmed_chars) >= self.budget.usable() {
-            return ContextDecision::Stop;
-        }
         *self.last_request_chars.lock().unwrap() = Some(trimmed_chars);
         ContextDecision::Trim(trimmed)
     }
@@ -268,8 +294,8 @@ impl ContextHook {
     /// Build a trimmed history that keeps the most recent messages verbatim
     /// within the `keep_recent_tokens` tail budget and replaces older
     /// tool-result content with recovery-hint stubs. Text messages are never
-    /// dropped or truncated — if the result still does not fit, the caller
-    /// stops the run instead.
+    /// dropped or truncated — when the result still forecasts over budget it
+    /// is sent anyway; a genuine overflow surfaces reactively.
     fn trim_history(&self, history: &[Message]) -> Vec<Message> {
         let preserve = self.budget.keep_recent_chars();
         let _ = preserve;
@@ -538,13 +564,78 @@ mod tests {
     }
 
     #[test]
-    fn stop_when_even_trimmed_request_would_overflow() {
-        // Usable budget 19 000 tokens; a single user message of 100 000 chars
-        // (25 000 tokens) plus a 2 000-token keep-recent floor cannot fit.
+    fn estimate_only_forecast_never_stops() {
+        // ~25 000 estimated tokens against a 19 000 usable budget with no
+        // usage anchor: the estimate alone must trim (mechanically), never
+        // stop the run.
         let budget = ContextBudget::new(20_000, 1_000).with_keep_recent_tokens(2_000);
         let hook = ContextHook::new(budget, UsageTracker::new());
-        let decision = hook.decide(&user_msg(&"y".repeat(100_000)), &[]);
+        let history = vec![
+            tool_result_msg("read_file", &"y".repeat(100_000)),
+            user_msg("recent user"),
+        ];
+        let decision = hook.decide(&user_msg("x"), &history);
+        let ContextDecision::Trim(trimmed) = decision else {
+            panic!("expected trim, got {decision:?}");
+        };
+        assert_eq!(trimmed.len(), 2);
+        assert!(
+            message_text_len(&trimmed[0]) < message_text_len(&history[0]),
+            "the old tool result is stubbed"
+        );
+    }
+
+    #[test]
+    fn measured_usage_above_budget_stops_before_the_call() {
+        // The last completed call measured 49 500 request tokens against a
+        // 10 000 usable budget: stop even though this call's chars/4
+        // estimate is tiny.
+        let budget = ContextBudget::new(11_000, 1_000);
+        let tracker = UsageTracker::new();
+        tracker.record(usage_of(50_000, 500));
+        let hook = ContextHook::new(budget, Arc::clone(&tracker));
+        let decision = hook.decide(&user_msg("x"), &[user_msg("recent")]);
         assert!(matches!(decision, ContextDecision::Stop), "{decision:?}");
+    }
+
+    #[test]
+    fn measured_usage_at_the_budget_boundary_does_not_stop() {
+        // Input exactly at usable (10 000 = 11 000 - 1 000) must not stop:
+        // the trigger is strictly greater-than. The forecast branch may still
+        // apply the mechanical trim at the boundary — that is not a stop.
+        let budget = ContextBudget::new(11_000, 1_000);
+        let tracker = UsageTracker::new();
+        tracker.record(usage_of(10_500, 500));
+        let hook = ContextHook::new(budget, Arc::clone(&tracker));
+        let decision = hook.decide(&user_msg("x"), &[user_msg("recent")]);
+        assert!(!matches!(decision, ContextDecision::Stop), "{decision:?}");
+    }
+
+    #[test]
+    fn trim_records_the_trimmed_request_baseline() {
+        let budget = ContextBudget::new(12_000, 2_000).with_keep_recent_tokens(1_000);
+        let tracker = UsageTracker::new();
+        let hook = ContextHook::new(budget, Arc::clone(&tracker));
+        // Establish the char baseline and the anchor (9 000 request tokens,
+        // under the 10 000 usable budget).
+        let base = vec![tool_result_msg("read_file", &"y".repeat(4_000))];
+        hook.decide(&user_msg("x"), &base);
+        tracker.record(usage_of(9_500, 500));
+        // Append a huge tool result: forecast ≈ 9 000 + 25 000 → trim.
+        let grown = vec![
+            tool_result_msg("read_file", &"y".repeat(4_000)),
+            tool_result_msg("run_shell", &"z".repeat(100_000)),
+        ];
+        let decision = hook.decide(&user_msg("x"), &grown);
+        assert!(matches!(decision, ContextDecision::Trim(_)), "{decision:?}");
+        // Patches are non-sticky (rig): the next call re-expands to the full
+        // history. The baseline recorded after the trim is the trimmed
+        // request, so the identical follow-up's forecast re-measures exactly
+        // that regrowth and re-applies the trim — instead of continuing with
+        // the full request (which recording the full baseline would do: its
+        // forecast would collapse back to the 9 000 anchor).
+        let decision = hook.decide(&user_msg("x"), &grown);
+        assert!(matches!(decision, ContextDecision::Trim(_)), "{decision:?}");
     }
 
     #[test]

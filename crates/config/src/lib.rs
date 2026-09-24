@@ -534,17 +534,20 @@ fn default_max_turns() -> usize {
     0
 }
 
-/// Context-window management: bounds the input tokens sent to the LLM. One
-/// forecast (anchored on the last call's real request size) drives three
-/// layers — the per-call mechanical trim, the stop-before-call overflow
-/// guard, and the pre-send LLM compaction — all sharing this budget.
+/// Context-window management: bounds the input tokens sent to the LLM. The
+/// budget drives two layers — a per-call mechanical trim (forecast-driven,
+/// cheap and recoverable) and the LLM prompt compaction, which triggers only
+/// on measured usage: the last completed request's real input cost crossing
+/// `context_length - reserved`. A genuine overflow that slips past the
+/// trigger is still caught reactively when the provider rejects the request.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContextConfig {
     /// Stored inverted in the file as `disabled`; defaults to enabled.
     pub disabled: bool,
 
     /// Tokens reserved for the model's reply and a safety buffer. The input
-    /// budget is `context_length - reserved`.
+    /// budget is `context_length - reserved`; prompt compaction triggers once
+    /// the measured input cost crosses it.
     pub reserved: u64,
 
     /// Tokens kept verbatim as the "tail" when trimming older messages (both

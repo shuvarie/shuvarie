@@ -416,8 +416,7 @@ async fn stream_done_waits_for_queued_worker_items_to_drain() {
             |mut rx| async move { rx.recv().await.map(|item| (item, rx)) },
         )),
     ];
-    let stream: shuvarie_llm::StreamStream =
-        Box::pin(futures_util::stream::select_all(streams));
+    let stream: shuvarie_llm::StreamStream = Box::pin(futures_util::stream::select_all(streams));
 
     let session_shared = session.clone();
     let store = Store::open_in_memory().await.unwrap();

@@ -136,13 +136,25 @@ pub enum Event {
     },
     StreamCancelled,
     /// The context budget overflowed and an LLM compaction summarizer call
-    /// is now running. No stream events arrive until the matching
+    /// is now running (also brackets fork-with-summary and a manual
+    /// `/compact`). No stream events arrive until the matching
     /// [`Event::CompactionFinished`], so the TUI must keep its busy indicator
     /// armed for the whole window.
     CompactionStarted,
     /// The compaction summarizer call finished (success or failure); the
-    /// core task replays the interrupted turn afterwards.
+    /// core task replays the interrupted turn (auto compaction), reloads the
+    /// forked session (fork with summary), or reports
+    /// [`Event::SessionCompacted`] (manual `/compact`) afterwards.
     CompactionFinished,
+    /// A manual compaction (`/compact`) finished and the session was
+    /// reloaded: the summary message sits in the active path with the kept
+    /// tail hanging under it, and the leaf points at the tail's tip so the
+    /// compacted history stays fully on the active path. `session` is the
+    /// reloaded in-memory state for the chat display and sidebar. Unlike
+    /// [`Event::Forked`], no turn resumes afterwards.
+    SessionCompacted {
+        session: crate::Session,
+    },
     /// The turn failed with a retryable error; the core task will re-send
     /// the turn after `delay_ms`. `reason` is a short status-row label (the
     /// connection-failure kind, or the generic `Turn error`). `attempt` is

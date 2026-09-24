@@ -10,8 +10,8 @@ use crate::tui::utils::num::{fmt_cost, fmt_tokens};
 /// token totals) shows the context occupancy — the latest main-request
 /// footprint (from `Event::UsageUpdate`, workers excluded; also restored from
 /// a loaded session's persisted request usage) against the window — and falls
-/// back to the bare window size while no footprint is known (fresh session,
-/// during compaction). Directly below it,
+/// back to the bare window size while no footprint is known (fresh session, or
+/// a provider that has not reported usage yet). Directly below it,
 /// the latest main-request read tokens (`R…`, `shuvarie_llm::read_tokens`)
 /// and cache-hit percentage (`CH…%`, `cached_input_tokens` over the read
 /// tokens) show how the last exchange was served; each half is hidden while

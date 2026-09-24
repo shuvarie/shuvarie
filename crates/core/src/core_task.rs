@@ -1004,38 +1004,9 @@ pub async fn run(
                         let Some(s) = &ctx.session else { continue; };
                         let Some(sid) = s.lock().await.id else { continue; };
                         let summarizer = if summarize {
-                            let Some(active) = ctx.connections.active.clone() else {
-                                let _ = ctx
-                                    .event_tx
-                                    .send(Event::SessionError {
-                                        error: "no active provider to summarize".into(),
-                                    })
-                                    .await;
-                                continue;
-                            };
-                            let Some(model) = active.model.clone() else {
-                                let _ = ctx
-                                    .event_tx
-                                    .send(Event::SessionError {
-                                        error: "no active model to summarize".into(),
-                                    })
-                                    .await;
-                                continue;
-                            };
-                            match client_for(
-                                &mut ctx.clients,
-                                &mut ctx.connections,
-                                &ctx.event_tx,
-                                &active.provider,
-                            ) {
-                                Ok(c) => Some((c.clone(), model)),
-                                Err(e) => {
-                                    let _ = ctx
-                                        .event_tx
-                                        .send(Event::SessionError { error: e })
-                                        .await;
-                                    continue;
-                                }
+                            match summarizer_for(&mut ctx).await {
+                                Some(pair) => Some(pair),
+                                None => continue,
                             }
                         } else {
                             None
@@ -1164,6 +1135,70 @@ pub async fn run(
                             .await
                         {
                             let _ = ctx.event_tx.send(Event::SceneError { error }).await;
+                        }
+                    }
+                    Command::CompactSession { instruction } => {
+                        // Compaction mutates the active path while the stream
+                        // consumer reads it; refuse rather than race a turn.
+                        if is_busy(&ctx, pending_retry.as_ref()) {
+                            let _ = ctx
+                                .event_tx
+                                .send(Event::SessionError {
+                                    error: "a turn is in flight; wait for it to finish before \
+                                           compacting"
+                                        .into(),
+                                })
+                                .await;
+                            continue;
+                        }
+                        let Some(s) = &ctx.session else { continue };
+                        let Some(sid) = s.lock().await.id else { continue };
+                        let Some((client, model)) = summarizer_for(&mut ctx).await else {
+                            continue;
+                        };
+                        let _ = ctx.event_tx.send(Event::CompactionStarted).await;
+                        let compacted = compact_active_path(
+                            &mut ctx.store,
+                            sid,
+                            &client,
+                            &model,
+                            ctx.config.context.keep_recent_tokens,
+                            instruction.as_deref(),
+                            None,
+                        )
+                        .await;
+                        let _ = ctx.event_tx.send(Event::CompactionFinished).await;
+                        match compacted {
+                            Ok(true) => match reload_session(&mut ctx, sid).await {
+                                Ok(session) => {
+                                    let _ = ctx
+                                        .event_tx
+                                        .send(Event::SessionCompacted { session })
+                                        .await;
+                                }
+                                Err(e) => {
+                                    let _ =
+                                        ctx.event_tx.send(Event::SessionError { error: e }).await;
+                                }
+                            },
+                            Ok(false) => {
+                                let _ = ctx
+                                    .event_tx
+                                    .send(Event::SessionError {
+                                        error:
+                                            "nothing to compact — the session history is too short"
+                                                .into(),
+                                    })
+                                    .await;
+                            }
+                            Err(e) => {
+                                let _ = ctx
+                                    .event_tx
+                                    .send(Event::SessionError {
+                                        error: format!("compaction failed: {e}"),
+                                    })
+                                    .await;
+                            }
                         }
                     }
                     Command::Replay => {
@@ -1781,7 +1816,7 @@ async fn fork_session(
             return Err("summarization requested without an active provider".into());
         };
         let _ = event_tx.send(Event::CompactionStarted).await;
-        let summary = crate::compaction::summarize(client, model, &head_text).await;
+        let summary = crate::compaction::summarize(client, model, &head_text, None).await;
         let _ = event_tx.send(Event::CompactionFinished).await;
         let summary = summary.map_err(|e| format!("summarization failed: {e}"))?;
         // The summary takes the fork point's place in the chain: it hangs
@@ -1809,13 +1844,108 @@ async fn fork_session(
     Ok(prompt)
 }
 
-/// Reload a session after a fork and emit [`Event::Forked`], swapping the
-/// in-memory session for the reloaded path.
-async fn reload_and_emit(
-    ctx: &mut CoreCtx,
+/// Resolve the active provider's client and model for summarizer-style calls
+/// (fork-with-summary, `/compact`), reporting a `SessionError` when either is
+/// missing. `None` means the caller must skip the command.
+async fn summarizer_for(ctx: &mut CoreCtx) -> Option<(ProviderClient, String)> {
+    let Some(active) = ctx.connections.active.clone() else {
+        let _ = ctx
+            .event_tx
+            .send(Event::SessionError {
+                error: "no active provider to summarize".into(),
+            })
+            .await;
+        return None;
+    };
+    let Some(model) = active.model.clone() else {
+        let _ = ctx
+            .event_tx
+            .send(Event::SessionError {
+                error: "no active model to summarize".into(),
+            })
+            .await;
+        return None;
+    };
+    match client_for(
+        &mut ctx.clients,
+        &mut ctx.connections,
+        &ctx.event_tx,
+        &active.provider,
+    ) {
+        Ok(c) => Some((c.clone(), model)),
+        Err(e) => {
+            let _ = ctx.event_tx.send(Event::SessionError { error: e }).await;
+            None
+        }
+    }
+}
+
+/// Run one compaction pass over the active path: select the split (keep the
+/// recent tail within `keep_recent_tokens`), serialize the head, summarize it
+/// (with the optional focus `instruction`), splice the summary into the chain
+/// at the cut point, reparent the first tail message under it, and point the
+/// active leaf back at the pre-compaction tip so the compacted history —
+/// summary plus kept tail — stays on the active path (and, for the
+/// auto-resume flow, the interrupted turn's partial reply stays deletable by
+/// `resume_last_turn`). `events` brackets the summarizer call with
+/// `CompactionStarted`/`CompactionFinished` when given. `Ok(false)` when
+/// there is no summarizable span.
+async fn compact_active_path(
+    store: &mut Store,
     session_id: uuid::Uuid,
-    prompt: Option<String>,
-) -> Result<(), String> {
+    client: &ProviderClient,
+    model: &str,
+    keep_recent_tokens: u64,
+    instruction: Option<&str>,
+    events: Option<&Sender<Event>>,
+) -> Result<bool, String> {
+    let stored = store
+        .load_session(session_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let chain = chain_of(&stored);
+    let by_id: HashMap<u64, &shuvarie_db::StoredMessage> =
+        stored.messages.iter().map(|m| (m.id, m)).collect();
+    let path: Vec<shuvarie_db::StoredMessage> = chain
+        .iter()
+        .filter_map(|id| by_id.get(id).map(|m| (*m).clone()))
+        .collect();
+    let Some(plan) = crate::compaction::select_plan(&path, keep_recent_tokens) else {
+        return Ok(false);
+    };
+    let head = &path[plan.start..plan.cut];
+    let chain_index: HashMap<u64, usize> =
+        chain.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+    let records = span_tool_records(&stored, &chain_index, plan.start..plan.cut);
+    let head_text = crate::compaction::serialize_head(head, &records, plan.start);
+    if let Some(event_tx) = events {
+        let _ = event_tx.send(Event::CompactionStarted).await;
+    }
+    let summary = crate::compaction::summarize(client, model, &head_text, instruction).await?;
+    if let Some(event_tx) = events {
+        let _ = event_tx.send(Event::CompactionFinished).await;
+    }
+    let parent = path[plan.cut - 1].id;
+    let msg = store
+        .append_summary(session_id, Some(parent), &summary)
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Some(first_tail) = path.get(plan.cut) {
+        let _ = store.set_message_parent(first_tail.id, Some(msg.id)).await;
+    }
+    // `append_summary` points the leaf at the summary (the fork flow wants
+    // that); compaction keeps summarizing forward, so the leaf must return
+    // to the pre-compaction tip — the kept tail's last message — or the
+    // tail would fall off the active path.
+    if let Some(tip) = path.last() {
+        let _ = store.set_active_leaf(session_id, Some(tip.id)).await;
+    }
+    Ok(true)
+}
+
+/// Reload a session row into memory, swapping the in-memory session for the
+/// reloaded path. Returns the loaded snapshot for the caller's event.
+async fn reload_session(ctx: &mut CoreCtx, session_id: uuid::Uuid) -> Result<Session, String> {
     let stored = ctx
         .store
         .load_session(session_id)
@@ -1825,6 +1955,17 @@ async fn reload_and_emit(
     if let Some(s) = &ctx.session {
         *s.lock().await = loaded.clone();
     }
+    Ok(loaded)
+}
+
+/// Reload a session after a fork and emit [`Event::Forked`], swapping the
+/// in-memory session for the reloaded path.
+async fn reload_and_emit(
+    ctx: &mut CoreCtx,
+    session_id: uuid::Uuid,
+    prompt: Option<String>,
+) -> Result<(), String> {
+    let loaded = reload_session(ctx, session_id).await?;
     let _ = ctx
         .event_tx
         .send(Event::Forked {
@@ -2060,7 +2201,7 @@ impl CoreCtx {
                 return;
             }
         };
-        let (prior, todo_records, stored_scene, announced_scene, session_id) = {
+        let (prior, todo_records, stored_scene, announced_scene, session_id, seed_usage) = {
             let guard = s.lock().await;
             (
                 guard.history_for_send(),
@@ -2068,6 +2209,10 @@ impl CoreCtx {
                 guard.scene.clone(),
                 guard.announced_scene.clone(),
                 guard.id,
+                // Seed the measured compaction trigger with the last main
+                // request's real usage so the first call of the turn is
+                // anchored on measurement instead of a chars/4 estimate.
+                guard.last_usage,
             )
         };
         let scene = crate::scenes::Scene::resolve(&self.scenes, stored_scene.as_deref());
@@ -2220,6 +2365,7 @@ impl CoreCtx {
                 &mut worker_set.workers,
                 self.manager_turns,
                 budget,
+                seed_usage,
             )
             .await;
         // Live `run_shell` output flows through the same merged turn stream as
@@ -2281,6 +2427,7 @@ impl CoreCtx {
             && let Some(leaf_id) = stored.leaf_id
             && let Some(leaf) = stored.messages.iter().find(|m| m.id == leaf_id)
             && leaf.role == shuvarie_db::MsgRole::Assistant
+            && !leaf.summary
         {
             let _ = self.store.delete_tool_calls_for_message(leaf.id).await;
             let _ = self.store.delete_message(leaf.id).await;
@@ -2942,6 +3089,13 @@ async fn stream_stream_to_events(
                     .unwrap_or(0.0);
                 let context_tokens = if worker.is_none() {
                     let footprint = shuvarie_llm::context_footprint(&usage);
+                    // Keep the session's live anchor in step with the last
+                    // completed main request: the next turn seeds its
+                    // measured compaction trigger and the sidebar's restored
+                    // context anchor from it.
+                    if footprint > 0 {
+                        session.lock().await.last_usage = Some(usage);
+                    }
                     (footprint > 0).then_some(footprint)
                 } else {
                     None
@@ -2997,51 +3151,29 @@ async fn stream_stream_to_events(
                 // Run compaction: summarize the head of the active path so
                 // the next turn sends [summary, tail] instead of the full
                 // history. The summary is inserted into the chain at the cut
-                // point and the first tail message reparented under it.
+                // point, the first tail message reparented under it, and the
+                // leaf returned to the pre-compaction tip so the interrupted
+                // turn's partial reply stays deletable by the resume below.
                 let mut compacted = false;
-                if let Some(sid) = session.lock().await.id
-                    && let Ok(stored) = store.load_session(sid).await
-                {
-                    let chain = chain_of(&stored);
-                    let by_id: HashMap<u64, &shuvarie_db::StoredMessage> =
-                        stored.messages.iter().map(|m| (m.id, m)).collect();
-                    let path: Vec<shuvarie_db::StoredMessage> = chain
-                        .iter()
-                        .filter_map(|id| by_id.get(id).map(|m| (*m).clone()))
-                        .collect();
-                    if let Some(plan) = crate::compaction::select_plan(&path, keep_recent_tokens) {
-                        let head = &path[plan.start..plan.cut];
-                        let chain_index: std::collections::HashMap<u64, usize> =
-                            chain.iter().enumerate().map(|(i, id)| (*id, i)).collect();
-                        let records =
-                            span_tool_records(&stored, &chain_index, plan.start..plan.cut);
-                        let head_text =
-                            crate::compaction::serialize_head(head, &records, plan.start);
-                        let _ = event_tx.send(Event::CompactionStarted).await;
-                        let summary =
-                            crate::compaction::summarize(&client, &model, &head_text).await;
-                        let _ = event_tx.send(Event::CompactionFinished).await;
-                        match summary {
-                            Ok(summary) => {
-                                let parent = path[plan.cut - 1].id;
-                                if let Ok(msg) =
-                                    store.append_summary(sid, Some(parent), &summary).await
-                                {
-                                    if let Some(first_tail) = path.get(plan.cut) {
-                                        let _ = store
-                                            .set_message_parent(first_tail.id, Some(msg.id))
-                                            .await;
-                                    }
-                                    compacted = true;
-                                }
-                            }
-                            Err(e) => {
-                                let _ = event_tx
-                                    .send(Event::StreamError {
-                                        error: format!("compaction failed: {e}"),
-                                    })
-                                    .await;
-                            }
+                if let Some(sid) = session.lock().await.id {
+                    match compact_active_path(
+                        &mut store,
+                        sid,
+                        &client,
+                        &model,
+                        keep_recent_tokens,
+                        None,
+                        Some(&event_tx),
+                    )
+                    .await
+                    {
+                        Ok(spliced) => compacted = spliced,
+                        Err(e) => {
+                            let _ = event_tx
+                                .send(Event::StreamError {
+                                    error: format!("compaction failed: {e}"),
+                                })
+                                .await;
                         }
                     }
                 }
