@@ -917,6 +917,7 @@ mod tests {
             default_small_model_id: None,
             models: vec![SeluneModel {
                 id: "test-model".into(),
+                model_code: selune::ModelCode::new("test-org", "test-model", None).unwrap(),
                 name: "Test Model".into(),
                 reasoning: false,
                 reasoning_options: Vec::new(),

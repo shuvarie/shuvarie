@@ -55,6 +55,7 @@ async fn build_source_session(store: &mut Store) -> shuvarie_db::StoredSession {
                 cached_input_tokens: 11_000,
                 ..TokenUsage::default()
             },
+            &shuvarie_db::Attribution::default(),
         )
         .await
         .unwrap();

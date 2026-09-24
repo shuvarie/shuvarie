@@ -251,6 +251,7 @@ async fn stream_events_forward_and_accumulate_usage() {
             None,
             store,
             "ollama-model".into(),
+            shuvarie_db::Attribution::default(),
             20_000,
             worker_usage,
             None,
@@ -304,6 +305,80 @@ async fn stream_events_forward_and_accumulate_usage() {
 }
 
 #[tokio::test]
+async fn committed_turn_records_model_use_and_broadcasts() {
+    let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
+    let session = Arc::new(Mutex::new(Session::new()));
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(16);
+
+    let stream: shuvarie_llm::StreamStream =
+        Box::pin(futures_util::stream::iter(vec![StreamItem::Done {
+            text: "hi".into(),
+            usage: TokenUsage::default(),
+        }]));
+
+    let session_shared = session.clone();
+    let mut store = Store::open_in_memory().await.unwrap();
+    let store_shared = store.clone();
+    let id = store.create_session("t", None, None, None).await.unwrap();
+    session.lock().await.id = Some(id);
+    let attribution = shuvarie_db::Attribution {
+        model_code: Some("test-org/test-model".into()),
+        scene: Some("Plan".into()),
+    };
+    let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
+    let turn_state = Arc::new(Mutex::new(TurnState {
+        attribution: attribution.clone(),
+        ..TurnState::default()
+    }));
+    let (stream_done_tx, _stream_done_rx) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(async move {
+        stream_stream_to_events(
+            stream,
+            session_shared,
+            client,
+            None,
+            store_shared,
+            "ollama-model".into(),
+            attribution,
+            20_000,
+            worker_usage,
+            None,
+            event_tx,
+            turn_state,
+            stream_done_tx,
+            SteerSignal::default(),
+            DenyCut::default(),
+        )
+        .await;
+    });
+
+    let mut saw_used = None;
+    while let Some(event) = event_rx.recv().await {
+        if let Event::ModelUsed { models, .. } = event {
+            saw_used = Some(models);
+        }
+    }
+    assert_eq!(
+        saw_used,
+        Some(vec![crate::session::ModelUsage {
+            code: "test-org/test-model".into(),
+            scene: Some("Plan".into()),
+        }])
+    );
+    assert_eq!(
+        session.lock().await.models_used,
+        saw_used.expect("ModelUsed broadcast"),
+        "the session records the same list"
+    );
+    let stored: shuvarie_db::StoredSession = store.load_session(id).await.unwrap();
+    assert_eq!(
+        stored.messages[0].model_code.as_deref(),
+        Some("test-org/test-model")
+    );
+    assert_eq!(stored.messages[0].scene.as_deref(), Some("Plan"));
+}
+
+#[tokio::test]
 async fn stream_error_schedules_turn_retry_and_leaves_session_clean() {
     let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
     let session = Arc::new(Mutex::new(Session::new()));
@@ -332,6 +407,7 @@ async fn stream_error_schedules_turn_retry_and_leaves_session_clean() {
             None,
             store,
             "ollama-model".into(),
+            shuvarie_db::Attribution::default(),
             20_000,
             worker_usage,
             None,
@@ -436,6 +512,7 @@ async fn stream_done_waits_for_queued_worker_items_to_drain() {
             None,
             store,
             "ollama-model".into(),
+            shuvarie_db::Attribution::default(),
             20_000,
             worker_usage,
             None,
@@ -554,6 +631,7 @@ async fn worker_events_forward_and_usage_accumulates() {
             None,
             store,
             "ollama-model".into(),
+            shuvarie_db::Attribution::default(),
             20_000,
             worker_usage,
             None,
@@ -648,6 +726,7 @@ async fn overflow_without_plan_reports_error_without_compaction_events() {
             None,
             store,
             "ollama-model".into(),
+            shuvarie_db::Attribution::default(),
             20_000,
             worker_usage,
             None,
@@ -732,6 +811,7 @@ async fn spawn_stream_core(
             None,
             store,
             "ollama-model".into(),
+            shuvarie_db::Attribution::default(),
             20_000,
             worker_usage,
             None,
@@ -1414,6 +1494,7 @@ async fn steered_prompt_cuts_mid_stream_when_armed_between_actions() {
             None,
             store,
             "ollama-model".into(),
+            shuvarie_db::Attribution::default(),
             20_000,
             worker_usage,
             None,
@@ -1453,7 +1534,15 @@ async fn steered_prompt_cuts_mid_stream_when_armed_between_actions() {
             text: "should never stream".into(),
         })
         .await;
-    match event_rx.recv().await {
+    // The interrupted-turn persist broadcasts the model use before the
+    // cancellation surfaces; skip it.
+    let cancellation = loop {
+        match event_rx.recv().await {
+            Some(Event::ModelUsed { .. }) => continue,
+            other => break other,
+        }
+    };
+    match cancellation {
         Some(Event::StreamCancelled) => {}
         other => panic!("expected cancellation at the boundary, got {other:?}"),
     }
@@ -1579,6 +1668,7 @@ async fn tool_result_clears_the_pending_call() {
             None,
             store,
             "ollama-model".into(),
+            shuvarie_db::Attribution::default(),
             20_000,
             worker_usage,
             None,
@@ -1648,6 +1738,7 @@ async fn text_runs_seal_at_tool_gaps() {
             None,
             store_shared,
             "ollama-model".into(),
+            shuvarie_db::Attribution::default(),
             20_000,
             worker_usage,
             None,

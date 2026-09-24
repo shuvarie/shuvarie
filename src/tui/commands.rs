@@ -20,11 +20,12 @@ pub enum CommandAction {
     McpReconnect,
     ToggleSidebar,
     Search,
+    AssistedBy,
     Quit,
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 19] = [
+    pub const ALL: [CommandAction; 20] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::OpenSessionPicker,
@@ -43,6 +44,7 @@ impl CommandAction {
         CommandAction::McpReconnect,
         CommandAction::ToggleSidebar,
         CommandAction::Search,
+        CommandAction::AssistedBy,
         CommandAction::Quit,
     ];
 
@@ -66,6 +68,7 @@ impl CommandAction {
             CommandAction::McpReconnect => "mcp-reconnect",
             CommandAction::ToggleSidebar => "sidebar",
             CommandAction::Search => "search",
+            CommandAction::AssistedBy => "assisted-by",
             CommandAction::Quit => "quit",
         }
     }
@@ -241,6 +244,11 @@ pub fn default_commands() -> Vec<CommandEntry> {
             "Search chat",
             "Highlight text in the chat live",
             CommandAction::Search,
+        ),
+        CommandEntry::builtin(
+            "Assisted by",
+            "Show the Assisted-By trailer; Enter copies it",
+            CommandAction::AssistedBy,
         ),
         CommandEntry::builtin("Quit", "Exit the program", CommandAction::Quit),
     ]

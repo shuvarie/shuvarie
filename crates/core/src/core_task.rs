@@ -1565,6 +1565,9 @@ the list current.";
 struct TurnState {
     assistant_message_id: Option<u64>,
     assistant_seq: u64,
+    /// Which model (and scene) this turn streams under; persisted with the
+    /// assistant row and recorded in the session's per-model usage list.
+    attribution: shuvarie_db::Attribution,
     text_segments: Vec<shuvarie_db::TextSegment>,
     pending_reasoning: Vec<shuvarie_db::ReasoningSegment>,
     tool_records: Vec<crate::tool_record::ToolRecord>,
@@ -2336,6 +2339,17 @@ impl CoreCtx {
             .and_then(|pc| pc.catalog_id())
             .and_then(|id| crate::catalog::find_provider(&catalog_provider, id))
             .cloned();
+        // The turn's attribution: the catalog's model code for the resolved
+        // model (absent for providers outside the catalog) plus the scene the
+        // request runs under. Persisted with the assistant row and recorded
+        // in the session's per-model usage list when the turn commits.
+        let attribution = shuvarie_db::Attribution {
+            model_code: catalog_provider
+                .as_ref()
+                .and_then(|p| crate::catalog::find_model(p, &model))
+                .map(|m| m.model_code.to_string()),
+            scene: stored_scene.clone(),
+        };
         let budget = context_budget(&self.config, catalog_provider.as_ref(), &model)
             .map(|b| b.with_preamble_tokens(shuvarie_llm::estimate_text_tokens(&preamble)));
         let mut worker_set = crate::agents::build_workers(
@@ -2381,7 +2395,10 @@ impl CoreCtx {
         let worker_usage = worker_set.usage;
         let keep_recent_tokens = self.config.context.keep_recent_tokens;
         let embedding_shared = self.embedding_setup.clone();
-        let turn_state_shared = Arc::new(Mutex::new(TurnState::default()));
+        let turn_state_shared = Arc::new(Mutex::new(TurnState {
+            attribution: attribution.clone(),
+            ..TurnState::default()
+        }));
         let stream_done = self.stream_done_tx.clone();
         let steer_shared = self.steer.clone();
         let deny_cut_shared = self.access.turn_cut().clone();
@@ -2396,6 +2413,7 @@ impl CoreCtx {
                     catalog_provider,
                     store_shared,
                     model_shared,
+                    attribution,
                     keep_recent_tokens,
                     worker_usage,
                     embedding_shared,
@@ -2754,6 +2772,7 @@ async fn stream_stream_to_events(
     catalog_provider: Option<selune::Provider>,
     mut store: Store,
     model: String,
+    attribution: shuvarie_db::Attribution,
     keep_recent_tokens: u64,
     worker_usage: Arc<std::sync::Mutex<shuvarie_llm::TokenUsage>>,
     embedding_setup: Option<EmbeddingSetup>,
@@ -2888,6 +2907,7 @@ async fn stream_stream_to_events(
                     &session,
                     &mut store,
                     &pending_reasoning,
+                    &attribution,
                     &event_tx,
                 )
                 .await;
@@ -3126,6 +3146,8 @@ async fn stream_stream_to_events(
                     &pending_reasoning,
                     &session,
                     &mut store,
+                    &attribution,
+                    &event_tx,
                 )
                 .await;
                 done = None;
@@ -3139,6 +3161,8 @@ async fn stream_stream_to_events(
                     &pending_reasoning,
                     &session,
                     &mut store,
+                    &attribution,
+                    &event_tx,
                 )
                 .await;
                 let _ = event_tx
@@ -3224,6 +3248,11 @@ async fn stream_stream_to_events(
             .map(|p| crate::catalog::estimate_cost(p, &model, &combined))
             .unwrap_or(0.0);
         guard.add_usage(combined, cost);
+        guard.record_model_use(
+            attribution.model_code.as_deref(),
+            attribution.scene.as_deref(),
+        );
+        let models_used = guard.models_used.clone();
         let usage_snapshot = guard.usage();
         let cost_snapshot = guard.cost;
         let id = guard.id;
@@ -3239,6 +3268,14 @@ async fn stream_stream_to_events(
         let parent = guard.leaf_id;
         drop(guard);
         if let Some(id) = id {
+            let _ = event_tx
+                .send(Event::ModelUsed {
+                    session_id: id,
+                    models: models_used,
+                })
+                .await;
+        }
+        if let Some(id) = id {
             if let Some(msg_id) = assistant_message_id {
                 let _ = store
                     .update_message(
@@ -3250,6 +3287,7 @@ async fn stream_stream_to_events(
                         combined,
                         cost,
                         &usage,
+                        &attribution,
                     )
                     .await;
                 if let Some(setup) = &embedding_setup {
@@ -3280,6 +3318,7 @@ async fn stream_stream_to_events(
                         combined,
                         cost,
                         &usage,
+                        &attribution,
                     )
                     .await
                 {
@@ -3355,6 +3394,7 @@ async fn ensure_assistant_row(
     session: &Arc<Mutex<Session>>,
     store: &mut Store,
     reasoning: &[shuvarie_db::ReasoningSegment],
+    attribution: &shuvarie_db::Attribution,
     _event_tx: &Sender<Event>,
 ) {
     if assistant_message_id.is_some() {
@@ -3378,6 +3418,7 @@ async fn ensure_assistant_row(
             shuvarie_llm::TokenUsage::default(),
             0.0,
             &shuvarie_llm::TokenUsage::default(),
+            attribution,
         )
         .await
     {
@@ -3449,9 +3490,9 @@ async fn persist_interrupted_turn(
     turn_state: Option<Arc<Mutex<TurnState>>>,
     store: &mut Store,
     session: &Option<Arc<Mutex<Session>>>,
-    _event_tx: &Sender<Event>,
+    event_tx: &Sender<Event>,
 ) {
-    let (text_segments, reasoning, msg_id, tool_records, pending_tools, assistant_seq) =
+    let (text_segments, reasoning, msg_id, tool_records, pending_tools, assistant_seq, attribution) =
         match turn_state {
             Some(ts_arc) => {
                 let ts = ts_arc.lock().await;
@@ -3462,11 +3503,16 @@ async fn persist_interrupted_turn(
                     ts.tool_records.clone(),
                     ts.pending_tools.clone(),
                     ts.assistant_seq,
+                    ts.attribution.clone(),
                 )
             }
             None => return,
         };
     let text = shuvarie_db::join_text_segments(&text_segments);
+    // Whether this turn actually used the model: a pre-created row or
+    // partial content means something streamed before the cut; an immediate
+    // cancel (nothing persisted) records nothing.
+    let produced = msg_id.is_some() || !text.is_empty() || !reasoning.is_empty();
 
     let Some(s) = session else {
         return;
@@ -3488,6 +3534,7 @@ async fn persist_interrupted_turn(
                 shuvarie_llm::TokenUsage::default(),
                 0.0,
                 &shuvarie_llm::TokenUsage::default(),
+                &attribution,
             )
             .await;
         let killed = killed_records(&pending_tools, msg_id, assistant_seq);
@@ -3536,6 +3583,7 @@ async fn persist_interrupted_turn(
                 shuvarie_llm::TokenUsage::default(),
                 0.0,
                 &shuvarie_llm::TokenUsage::default(),
+                &attribution,
             )
             .await
         {
@@ -3551,6 +3599,32 @@ async fn persist_interrupted_turn(
             }
             g.interrupted.insert(seq as u64, true);
         }
+    }
+    // Only a turn that produced something (a pre-created row or partial
+    // content) actually used the model; an immediate cancel records nothing.
+    if produced {
+        record_and_broadcast_model_use(s, &attribution, event_tx).await;
+    }
+}
+
+/// Record a turn's model attribution against the session and broadcast the
+/// updated deduped list so the `/assisted-by` popup stays current. A no-op
+/// for models outside the catalog (no code to record).
+async fn record_and_broadcast_model_use(
+    session: &Arc<Mutex<Session>>,
+    attribution: &shuvarie_db::Attribution,
+    event_tx: &Sender<Event>,
+) {
+    let (session_id, models) = {
+        let mut guard = session.lock().await;
+        guard.record_model_use(
+            attribution.model_code.as_deref(),
+            attribution.scene.as_deref(),
+        );
+        (guard.id, guard.models_used.clone())
+    };
+    if let Some(session_id) = session_id {
+        let _ = event_tx.send(Event::ModelUsed { session_id, models }).await;
     }
 }
 
@@ -3669,6 +3743,8 @@ async fn persist_stream_error(
     pending_reasoning: &[shuvarie_db::ReasoningSegment],
     session: &Arc<Mutex<Session>>,
     store: &mut Store,
+    attribution: &shuvarie_db::Attribution,
+    event_tx: &Sender<Event>,
 ) {
     let text = shuvarie_db::join_text_segments(text_segments);
     if text.is_empty() && pending_reasoning.is_empty() {
@@ -3691,6 +3767,7 @@ async fn persist_stream_error(
                 shuvarie_llm::TokenUsage::default(),
                 0.0,
                 &shuvarie_llm::TokenUsage::default(),
+                attribution,
             )
             .await;
     } else if !text.is_empty() {
@@ -3706,6 +3783,7 @@ async fn persist_stream_error(
                 shuvarie_llm::TokenUsage::default(),
                 0.0,
                 &shuvarie_llm::TokenUsage::default(),
+                attribution,
             )
             .await
         {
@@ -3722,6 +3800,8 @@ async fn persist_stream_error(
         g.text_segments.insert(seq as u64, text_segments.to_vec());
     }
     g.interrupted.insert(seq as u64, true);
+    drop(g);
+    record_and_broadcast_model_use(session, attribution, event_tx).await;
 }
 
 async fn persist(

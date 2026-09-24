@@ -4,3 +4,8 @@ version = 1
 id = 6974953454364957766
 name = "0000_init.sql"
 snapshot_name = "0000_snapshot.toml"
+
+[[migrations]]
+id = 7931380858330968442
+name = "20260924_071435_message_attribution.sql"
+snapshot_name = "20260924_071435_snapshot.toml"

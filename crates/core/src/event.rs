@@ -338,4 +338,12 @@ pub enum Event {
     SceneError {
         error: String,
     },
+    /// The session's per-model usage changed: an assistant message carrying
+    /// attribution was persisted (a committed turn, or a partial one cut by a
+    /// cancel/error). `models` is the full deduped list, first-use ordered;
+    /// `session_id` lets a stale event from a just-left session be dropped.
+    ModelUsed {
+        session_id: uuid::Uuid,
+        models: Vec<crate::session::ModelUsage>,
+    },
 }

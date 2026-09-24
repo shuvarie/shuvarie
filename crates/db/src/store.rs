@@ -103,6 +103,22 @@ pub struct StoredMessage {
     /// Usage of the turn's last main-stream request, parsed from
     /// `request_json`; all-zero when the row has none.
     pub request: TokenUsage,
+    /// Model code (`org/model`) that produced this assistant message;
+    /// `None` for user rows, summaries, and pre-attribution data.
+    pub model_code: Option<String>,
+    /// Scene name under which the model produced this assistant message;
+    /// `None` for the built-in Default scene (and for user rows).
+    pub scene: Option<String>,
+}
+
+/// Which model — and under which scene — produced an assistant message.
+/// Persisted alongside the row so the `/assisted-by` popup survives restarts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Attribution {
+    /// Model code (`org/model`); `None` when the model is not in the catalog.
+    pub model_code: Option<String>,
+    /// Scene name; `None` = the built-in Default scene.
+    pub scene: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -170,6 +186,8 @@ impl From<Message> for StoredMessage {
             cost: m.cost,
             summary: m.summary,
             request: serde_json::from_str(&m.request_json).unwrap_or_default(),
+            model_code: m.model_code,
+            scene: m.scene,
         }
     }
 }
@@ -414,6 +432,8 @@ impl Store {
             cost: 0.0,
             summary: false,
             request_json: String::new(),
+            model_code: None,
+            scene: None,
         })
         .exec(&mut self.db)
         .await
@@ -435,6 +455,7 @@ impl Store {
         usage: TokenUsage,
         cost: f64,
         request: &TokenUsage,
+        attribution: &Attribution,
     ) -> Result<StoredMessage> {
         let seq = self.next_seq(session_id).await?;
         let msg = toasty::create!(Message {
@@ -454,6 +475,8 @@ impl Store {
             cost,
             summary: false,
             request_json: serde_json::to_string(request).unwrap_or_default(),
+            model_code: attribution.model_code.clone(),
+            scene: attribution.scene.clone(),
         })
         .exec(&mut self.db)
         .await
@@ -474,6 +497,7 @@ impl Store {
         usage: TokenUsage,
         cost: f64,
         request: &TokenUsage,
+        attribution: &Attribution,
     ) -> Result<()> {
         Message::update_by_id(message_id)
             .content(content.to_string())
@@ -487,6 +511,8 @@ impl Store {
             .reasoning_tokens(usage.reasoning_tokens)
             .cost(cost)
             .request_json(serde_json::to_string(request).unwrap_or_default())
+            .model_code(attribution.model_code.clone())
+            .scene(attribution.scene.clone())
             .exec(&mut self.db)
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
@@ -517,6 +543,8 @@ impl Store {
             cost: 0.0,
             summary: true,
             request_json: String::new(),
+            model_code: None,
+            scene: None,
         })
         .exec(&mut self.db)
         .await
@@ -608,6 +636,8 @@ impl Store {
                 cost: m.cost,
                 summary: m.summary,
                 request_json: serde_json::to_string(&m.request).unwrap_or_default(),
+                model_code: None,
+                scene: None,
             })
             .exec(&mut self.db)
             .await

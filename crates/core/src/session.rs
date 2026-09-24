@@ -6,6 +6,16 @@ use shuvarie_llm::{Role, TokenUsage};
 
 use crate::tool_record::ToolRecord;
 
+/// One entry of the session's per-model usage: the model code (`org/model`)
+/// plus the non-Default scene that first used it (`None` when the model has
+/// only served the Default scene). Deduped by code, ordered by first use;
+/// drives the `/assisted-by` popup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelUsage {
+    pub code: String,
+    pub scene: Option<String>,
+}
+
 /// A stored message's main-request usage: the persisted `request` payload when
 /// the turn carried one, else the row's usage columns (older sessions and
 /// redone turns persisted only the combined per-row totals). Rows without any
@@ -96,6 +106,10 @@ pub struct Session {
     /// the LLM's measured compaction trigger and the sidebar's context anchor
     /// from it.
     pub last_usage: Option<TokenUsage>,
+    /// Per-model usage on the active path, deduped by model code and ordered
+    /// by first use; `scene` carries the first non-Default scene the model
+    /// served. Rebuilt from the stored rows on load; live turns extend it.
+    pub models_used: Vec<ModelUsage>,
     /// Chat pane scroll position persisted at the last leave of the session;
     /// the TUI seeds its scroll engine from it when the session loads.
     pub scroll: StoredScroll,
@@ -233,6 +247,9 @@ impl Session {
             {
                 s.last_usage = Some(usage);
             }
+            if !m.summary {
+                s.record_model_use(m.model_code.as_deref(), m.scene.as_deref());
+            }
         }
         s.tool_records = stored
             .tool_calls
@@ -268,6 +285,7 @@ impl Session {
         self.scene = None;
         self.announced_scene = None;
         self.last_usage = None;
+        self.models_used.clear();
         self.scroll = StoredScroll::default();
     }
 
@@ -277,6 +295,27 @@ impl Session {
 
     pub fn push_assistant(&mut self, content: impl Into<String>) {
         self.messages.push(ChatMsg::assistant(content));
+    }
+
+    /// Record one model use against the session: deduped by model code,
+    /// ordered by first use, with the first non-Default scene kept as the
+    /// annotation. A `None` code (the model is not in the catalog) is a no-op.
+    pub fn record_model_use(&mut self, model_code: Option<&str>, scene: Option<&str>) {
+        let Some(code) = model_code else {
+            return;
+        };
+        let scene = scene.filter(|scene| !scene.is_empty()).map(str::to_string);
+        match self.models_used.iter_mut().find(|u| u.code == code) {
+            Some(entry) => {
+                if entry.scene.is_none() {
+                    entry.scene = scene;
+                }
+            }
+            None => self.models_used.push(ModelUsage {
+                code: code.to_string(),
+                scene,
+            }),
+        }
     }
 
     /// The active path's last user prompt node, if any.
@@ -374,6 +413,8 @@ mod tests {
             cost: 0.0,
             summary: false,
             request: TokenUsage::default(),
+            model_code: None,
+            scene: None,
         }
     }
 
@@ -725,5 +766,65 @@ mod tests {
         let node = session.last_user_node().expect("user node on path");
         assert_eq!(node.content, "u2");
         assert_eq!(node.parent, Some(2), "the parent is the assistant row");
+    }
+
+    #[test]
+    fn record_model_use_dedupes_by_code_and_keeps_first_non_default_scene() {
+        let mut session = Session::new();
+        session.record_model_use(Some("zai-org/glm-5.3-flash"), None);
+        session.record_model_use(Some("deepseek-ai/deepseek-v4"), Some("Plan"));
+        session.record_model_use(Some("zai-org/glm-5.3-flash"), Some("Review"));
+        session.record_model_use(Some("deepseek-ai/deepseek-v4"), None);
+        session.record_model_use(None, Some("Plan"));
+
+        assert_eq!(
+            session.models_used,
+            vec![
+                ModelUsage {
+                    code: "zai-org/glm-5.3-flash".into(),
+                    scene: Some("Review".into()),
+                },
+                ModelUsage {
+                    code: "deepseek-ai/deepseek-v4".into(),
+                    scene: Some("Plan".into()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn from_stored_rebuilds_models_used_from_the_active_path() {
+        let mut stored = stored_session(vec![
+            stored_message(0, MsgRole::User, "u1"),
+            stored_message(1, MsgRole::Assistant, "a1"),
+            stored_message(2, MsgRole::Assistant, "summary"),
+            stored_message(3, MsgRole::User, "u2"),
+            stored_message(4, MsgRole::Assistant, "a2"),
+            stored_message(5, MsgRole::Assistant, "abandoned"),
+        ]);
+        chain(&mut stored.messages);
+        stored.leaf_id = Some(stored.messages[4].id);
+        stored.messages[1].model_code = Some("zai-org/glm-5.3-flash".into());
+        stored.messages[1].scene = None;
+        stored.messages[2].summary = true;
+        stored.messages[2].model_code = Some("anthropic/claude-summarizer".into());
+        stored.messages[4].model_code = Some("deepseek-ai/deepseek-v4".into());
+        stored.messages[4].scene = Some("Plan".into());
+        stored.messages[5].model_code = Some("off-path/model".into());
+
+        let session = Session::from_stored(stored);
+        assert_eq!(
+            session.models_used,
+            vec![
+                ModelUsage {
+                    code: "zai-org/glm-5.3-flash".into(),
+                    scene: None,
+                },
+                ModelUsage {
+                    code: "deepseek-ai/deepseek-v4".into(),
+                    scene: Some("Plan".into()),
+                },
+            ]
+        );
     }
 }

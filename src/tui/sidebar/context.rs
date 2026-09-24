@@ -2,7 +2,7 @@ use ratatui::prelude::*;
 use shuvarie_highlight::theme;
 use shuvarie_llm::TokenUsage;
 
-use crate::tui::utils::num::{fmt_cost, CachedScaledNumber};
+use crate::tui::utils::num::{CachedScaledNumber, fmt_cost};
 
 /// The sidebar Context panel: session token usage, estimated cost, and the
 /// active model's context window (from the Selune catalog, mapped through the

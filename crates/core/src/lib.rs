@@ -32,7 +32,7 @@ pub use permissions::{
     Permissions,
 };
 pub use question::{QuestionPrompt, QuestionRequest};
-pub use session::Session;
+pub use session::{ModelUsage, Session};
 pub use shuvarie_config::*;
 pub use shuvarie_db::{MsgRole, SearchHit, SearchSource, SessionSummary, StoredScroll};
 pub use shuvarie_llm::{ChatMsg, Model, Role, TokenUsage};

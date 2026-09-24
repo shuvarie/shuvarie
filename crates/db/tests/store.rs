@@ -102,6 +102,7 @@ async fn append_and_load_messages_in_order() {
                 cached_input_tokens: 11_500,
                 ..Default::default()
             },
+            &shuvarie_db::Attribution::default(),
         )
         .await
         .unwrap();
@@ -213,6 +214,7 @@ async fn reasoning_segments_round_trip_with_positions() {
             TokenUsage::default(),
             0.0,
             &TokenUsage::default(),
+            &shuvarie_db::Attribution::default(),
         )
         .await
         .unwrap();
@@ -231,6 +233,7 @@ async fn reasoning_segments_round_trip_with_positions() {
             TokenUsage::default(),
             0.0,
             &TokenUsage::default(),
+            &shuvarie_db::Attribution::default(),
         )
         .await
         .unwrap();
@@ -271,6 +274,7 @@ async fn text_segments_round_trip_with_positions() {
             TokenUsage::default(),
             0.0,
             &TokenUsage::default(),
+            &shuvarie_db::Attribution::default(),
         )
         .await
         .unwrap();
@@ -289,6 +293,7 @@ async fn text_segments_round_trip_with_positions() {
             TokenUsage::default(),
             0.0,
             &TokenUsage::default(),
+            &shuvarie_db::Attribution::default(),
         )
         .await
         .unwrap();
@@ -498,6 +503,7 @@ async fn search_finds_messages_across_sessions_ranked() {
             TokenUsage::default(),
             0.0,
             &TokenUsage::default(),
+            &shuvarie_db::Attribution::default(),
         )
         .await
         .unwrap();
@@ -907,6 +913,7 @@ async fn tree_messages_round_trip_with_parents_and_leaf() {
             TokenUsage::default(),
             0.0,
             &TokenUsage::default(),
+            &shuvarie_db::Attribution::default(),
         )
         .await
         .unwrap();
@@ -970,6 +977,7 @@ async fn delete_branch_removes_subtree_with_tool_calls() {
             TokenUsage::default(),
             0.0,
             &TokenUsage::default(),
+            &shuvarie_db::Attribution::default(),
         )
         .await
         .unwrap();
@@ -988,6 +996,7 @@ async fn delete_branch_removes_subtree_with_tool_calls() {
             TokenUsage::default(),
             0.0,
             &TokenUsage::default(),
+            &shuvarie_db::Attribution::default(),
         )
         .await
         .unwrap();
@@ -1076,6 +1085,7 @@ async fn appends_advance_the_active_leaf() {
             TokenUsage::default(),
             0.0,
             &TokenUsage::default(),
+            &shuvarie_db::Attribution::default(),
         )
         .await
         .unwrap();
