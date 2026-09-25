@@ -29,24 +29,9 @@ const GENERATING_FRAMES: [&str; 18] = [
     "  ⣠⣴⣿⠟⠋  ",
 ];
 
-const WAIT_FRAMES: [&str; 17] = [
-    "⣿⣿⣿⣿⣉⣉⣉⣉⣹",
-    "⣏⣿⣿⣿⣏⣉⣉⣉⣹",
-    "⣏⣹⣿⣿⣿⣉⣉⣉⣹",
-    "⣏⣉⣿⣿⣿⣏⣉⣉⣹",
-    "⣏⣉⣹⣿⣿⣿⣉⣉⣹",
-    "⣏⣉⣉⣿⣿⣿⣏⣉⣹",
-    "⣏⣉⣉⣹⣿⣿⣿⣉⣹",
-    "⣏⣉⣉⣉⣿⣿⣿⣏⣹",
-    "⣏⣉⣉⣉⣹⣿⣿⣿⣹",
-    "⣏⣉⣉⣉⣉⣿⣿⣿⣿",
-    "⣏⣉⣉⣉⣹⣿⣿⣿⣹",
-    "⣏⣉⣉⣉⣿⣿⣿⣏⣹",
-    "⣏⣉⣉⣹⣿⣿⣿⣉⣹",
-    "⣏⣉⣹⣿⣿⣿⣉⣉⣹",
-    "⣏⣉⣿⣿⣿⣏⣉⣉⣹",
-    "⣏⣹⣿⣿⣿⣉⣉⣉⣹",
-    "⣏⣿⣿⣿⣏⣉⣉⣉⣹",
+const WAIT_FRAMES: [&str; 2] = [
+    "⣿⣿⣿⣿⣿⣿⣿⣿⣿",
+    "         ",
 ];
 
 const TOOL_FRAMES: [&str; 28] = [
@@ -116,7 +101,7 @@ fn frameplay(kind: SpinnerKind) -> &'static Frameplay<&'static str> {
         }
         SpinnerKind::Tool => TOOL.get_or_init(|| Frameplay::new(TOOL_FRAMES, spinner_options(14))),
         SpinnerKind::Waiting => {
-            WAITING.get_or_init(|| Frameplay::new(WAIT_FRAMES, spinner_options(14)))
+            WAITING.get_or_init(|| Frameplay::new(WAIT_FRAMES, spinner_options(1)))
         }
     }
 }
