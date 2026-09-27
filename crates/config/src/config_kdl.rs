@@ -154,9 +154,48 @@ fn scalar_bool(input: &str, node: &KdlNode) -> Result<Option<bool>> {
     }
 }
 
-/// A bare switch node (`disabled`): no arguments, no children — its presence
-/// alone sets the flag to `true`. Any argument (the old `disabled #true`
-/// form) is an error.
+/// A toggle node (`disabled`/`enabled`): no properties, no children, and at
+/// most one boolean argument that defaults to `#false`. The argument is the
+/// verb's truth value, folded into the block's disabled flag —
+/// `disabled <b>` sets it to `b`, `enabled <b>` to `!b` — so `disabled
+/// #true` turns a feature off and `enabled #true` turns it back on. The
+/// bare form is inert (`None`): plain flags keep their default (blocks that
+/// spell the toggle `disabled` are enabled by default, blocks spelling it
+/// `enabled` are disabled by default) and three-valued fields (`tool`
+/// overrides) stay unspecified.
+fn toggle_flag(input: &str, node: &KdlNode) -> Result<Option<bool>> {
+    if node.entries().iter().any(|entry| entry.name().is_some()) {
+        return Err(node_error(
+            input,
+            node,
+            format!("`{}` takes no properties", node.name().value()),
+            None,
+        ));
+    }
+    if node.children().is_some() {
+        return Err(node_error(
+            input,
+            node,
+            format!("`{}` takes no children", node.name().value()),
+            None,
+        ));
+    }
+    let arg = match scalar_value(input, node)? {
+        None => None,
+        Some(KdlValue::Bool(value)) => Some(*value),
+        Some(_) => return Err(type_error(input, node, "a boolean")),
+    };
+    match node.name().value() {
+        "disabled" => Ok(arg),
+        "enabled" => Ok(arg.map(|value| !value)),
+        _ => unreachable!("toggle_flag called on `{}`", node.name().value()),
+    }
+}
+
+/// A bare switch node (`auto-gen`): no arguments, no children — its presence
+/// alone sets the flag to `true`. Any argument is an error. (Only the title
+/// `auto-gen` node still uses this: unlike the `disabled`/`enabled` toggles
+/// its default is off, so the bare form is the meaningful spelling.)
 fn switch_flag(input: &str, node: &KdlNode) -> Result<Option<bool>> {
     if !node.entries().is_empty() {
         return Err(node_error(
@@ -392,7 +431,9 @@ fn parse_embedding(node: &KdlNode, input: &str) -> Result<EmbeddingConfig> {
     let mut dimensions = None;
     for child in child_nodes(node) {
         match child.name().value() {
-            "disabled" => set_once(input, child, &mut disabled, switch_flag(input, child))?,
+            "disabled" | "enabled" => {
+                set_once(input, child, &mut disabled, toggle_flag(input, child))?
+            }
             "provider" => set_once(input, child, &mut provider, scalar_string(input, child))?,
             "model" => set_once(input, child, &mut model, scalar_string(input, child))?,
             "dimensions" => set_once(input, child, &mut dimensions, scalar_u32(input, child))?,
@@ -445,7 +486,9 @@ fn parse_lsp(node: &KdlNode, input: &str) -> Result<LspConfigRepr> {
     let mut servers = None;
     for child in child_nodes(node) {
         match child.name().value() {
-            "disabled" => set_once(input, child, &mut disabled, switch_flag(input, child))?,
+            "disabled" | "enabled" => {
+                set_once(input, child, &mut disabled, toggle_flag(input, child))?
+            }
             "servers" => {
                 set_once(input, child, &mut servers, parse_servers(child, input))?;
             }
@@ -520,7 +563,9 @@ fn parse_skills(node: &KdlNode, input: &str) -> Result<SkillsConfig> {
     let mut dirs = None;
     for child in child_nodes(node) {
         match child.name().value() {
-            "disabled" => set_once(input, child, &mut disabled, switch_flag(input, child))?,
+            "disabled" | "enabled" => {
+                set_once(input, child, &mut disabled, toggle_flag(input, child))?
+            }
             "dirs" => set_once(input, child, &mut dirs, scalar_string_vec(input, child))?,
             _ => {}
         }
@@ -584,7 +629,9 @@ fn parse_context(node: &KdlNode, input: &str) -> Result<ContextConfig> {
     let mut fallback_context_length = None;
     for child in child_nodes(node) {
         match child.name().value() {
-            "disabled" => set_once(input, child, &mut disabled, switch_flag(input, child))?,
+            "disabled" | "enabled" => {
+                set_once(input, child, &mut disabled, toggle_flag(input, child))?
+            }
             "reserved" => set_once(input, child, &mut reserved, scalar_u64(input, child))?,
             "keep-recent-tokens" => {
                 set_once(
@@ -682,7 +729,9 @@ fn parse_registry_entry(node: &KdlNode, input: &str) -> Result<RegistryEntry> {
     let mut remote_first = None;
     for child in child_nodes(node) {
         match child.name().value() {
-            "disabled" => set_once(input, child, &mut disabled, switch_flag(input, child))?,
+            "disabled" | "enabled" => {
+                set_once(input, child, &mut disabled, toggle_flag(input, child))?
+            }
             "remote-first" => {
                 set_once(input, child, &mut remote_first, scalar_bool(input, child))?;
             }
@@ -1224,7 +1273,9 @@ fn parse_web_search(node: &KdlNode, input: &str) -> Result<WebSearchConfig> {
     let mut params = None;
     for child in child_nodes(node) {
         match child.name().value() {
-            "disabled" => set_once(input, child, &mut disabled, switch_flag(input, child))?,
+            "disabled" | "enabled" => {
+                set_once(input, child, &mut disabled, toggle_flag(input, child))?
+            }
             "url" => set_once(input, child, &mut url, scalar_string(input, child))?,
             "type" => set_once(input, child, &mut kind, parse_web_search_kind(input, child))?,
             "headers" => {
@@ -2038,7 +2089,9 @@ fn parse_subagents(node: &KdlNode, input: &str) -> Result<SubagentsConfig> {
     let mut workers = BTreeMap::new();
     for child in child_nodes(node) {
         match child.name().value() {
-            "disabled" => set_once(input, child, &mut disabled, switch_flag(input, child))?,
+            "disabled" | "enabled" => {
+                set_once(input, child, &mut disabled, toggle_flag(input, child))?
+            }
             name => {
                 let worker = parse_subagent(child, input)?;
                 if workers.insert(name.to_string(), worker).is_some() {
@@ -2071,7 +2124,9 @@ fn parse_subagent(node: &KdlNode, input: &str) -> Result<SubagentConfig> {
     let mut tools = None;
     for child in child_nodes(node) {
         match child.name().value() {
-            "disabled" => set_once(input, child, &mut disabled, switch_flag(input, child))?,
+            "disabled" | "enabled" => {
+                set_once(input, child, &mut disabled, toggle_flag(input, child))?
+            }
             "thinking" => set_once(input, child, &mut thinking, scalar_bool(input, child))?,
             "system-prompts" => set_once(
                 input,
@@ -2309,13 +2364,17 @@ fn parse_tool_overrides(node: &KdlNode, input: &str) -> Result<Vec<(String, Tool
     let mut ask = None;
     for child in child_nodes(node) {
         match child.name().value() {
-            "disabled" => set_once(input, child, &mut disabled, switch_flag(input, child))?,
+            "disabled" | "enabled" => {
+                set_once(input, child, &mut disabled, toggle_flag(input, child))?
+            }
             "ask" => set_once(input, child, &mut ask, scalar_bool(input, child))?,
             other => {
                 return Err(node_error(
                     input,
                     child,
-                    format!("unknown node `{other}` in `tool` (expected `disabled` or `ask`)"),
+                    format!(
+                        "unknown node `{other}` in `tool` (expected `disabled`, `enabled`, or `ask`)"
+                    ),
                     None,
                 ));
             }
@@ -2473,7 +2532,7 @@ fn title_node(cfg: &TitleConfig) -> KdlNode {
 fn embedding_node(cfg: &EmbeddingConfig) -> Option<KdlNode> {
     let mut children = Vec::new();
     if cfg.disabled {
-        children.push(KdlNode::new("disabled"));
+        children.push(value_node("disabled", true));
     }
     if let Some(provider) = &cfg.provider {
         children.push(value_node("provider", provider.as_str()));
@@ -2502,7 +2561,7 @@ fn agent_node(cfg: &AgentConfig) -> Option<KdlNode> {
 fn lsp_node(cfg: &LspConfigRepr) -> Option<KdlNode> {
     let mut children = Vec::new();
     if cfg.disabled {
-        children.push(KdlNode::new("disabled"));
+        children.push(value_node("disabled", true));
     }
     if !cfg.servers.is_empty() {
         let mut servers = KdlNode::new("servers");
@@ -2536,7 +2595,7 @@ fn server_spec_node(name: &str, spec: &LspServerSpecRepr) -> KdlNode {
 fn skills_node(cfg: &SkillsConfig) -> Option<KdlNode> {
     let mut children = Vec::new();
     if cfg.disabled {
-        children.push(KdlNode::new("disabled"));
+        children.push(value_node("disabled", true));
     }
     children.extend(string_vec_node("dirs", &cfg.dirs));
     section_node("skills", children)
@@ -2559,7 +2618,7 @@ fn context_node(cfg: &ContextConfig) -> Option<KdlNode> {
     let defaults = ContextConfig::default();
     let mut children = Vec::new();
     if cfg.disabled {
-        children.push(KdlNode::new("disabled"));
+        children.push(value_node("disabled", true));
     }
     if cfg.reserved != defaults.reserved {
         children.push(int_node("reserved", cfg.reserved));
@@ -2810,7 +2869,7 @@ fn mcp_http_node(name: &str, cfg: &McpHttpConfig) -> KdlNode {
 fn web_search_node(cfg: &WebSearchConfig) -> KdlNode {
     let mut children = Vec::new();
     if cfg.disabled {
-        children.push(KdlNode::new("disabled"));
+        children.push(value_node("disabled", true));
     }
     children.push(value_node("url", cfg.url.as_str()));
     children.push(value_node("type", cfg.kind.as_str()));
@@ -2921,7 +2980,7 @@ fn subagents_node(cfg: &SubagentsConfig) -> Option<KdlNode> {
     }
     let mut children = Vec::new();
     if cfg.disabled {
-        children.push(KdlNode::new("disabled"));
+        children.push(value_node("disabled", true));
     }
     for (name, worker) in &cfg.workers {
         children.push(subagent_node(name, worker));
@@ -2932,7 +2991,7 @@ fn subagents_node(cfg: &SubagentsConfig) -> Option<KdlNode> {
 fn subagent_node(name: &str, worker: &SubagentConfig) -> KdlNode {
     let mut children = Vec::new();
     if worker.disabled {
-        children.push(KdlNode::new("disabled"));
+        children.push(value_node("disabled", true));
     }
     children.extend(system_prompts_node(&worker.system_prompts));
     if let Some(thinking) = worker.thinking {
@@ -2994,8 +3053,12 @@ fn tool_override_node(name: &str, tool: &ToolOverride) -> KdlNode {
     let mut node = KdlNode::new("tool");
     node.push(KdlEntry::new(name.to_string()));
     let mut children = Vec::new();
-    if tool.disabled == Some(true) {
-        children.push(KdlNode::new("disabled"));
+    // `Some(true)` spells `disabled #true`; the explicit re-enable
+    // (`Some(false)`) spells `enabled #true` so it round trips.
+    match tool.disabled {
+        Some(true) => children.push(value_node("disabled", true)),
+        Some(false) => children.push(value_node("enabled", true)),
+        None => {}
     }
     if let Some(ask) = tool.ask {
         children.push(value_node("ask", ask));
@@ -3067,7 +3130,7 @@ fn multiline_string_repr(text: &str) -> Option<String> {
 fn registry_entry_node(name: &str, entry: RegistryEntry) -> KdlNode {
     let mut children = Vec::new();
     if entry.disabled {
-        children.push(KdlNode::new("disabled"));
+        children.push(value_node("disabled", true));
     }
     if entry.remote_first {
         children.push(value_node("remote-first", true));

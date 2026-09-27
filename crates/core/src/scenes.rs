@@ -386,8 +386,8 @@ mod tests {
     #[test]
     fn tool_scene_verbs_and_overrides() {
         // Under `disable-all` only tools explicitly re-enabled with
-        // `disabled: Some(false)` survive. The config `disabled` switch has
-        // no "off" form, so these overrides are built programmatically.
+        // `disabled: Some(false)` survive; `enabled #true` in config now
+        // spells that override.
         let tools_cfg = SceneToolsConfig {
             verb: Some(SceneToolVerb::DisableAll),
             tools: BTreeMap::from([
@@ -428,7 +428,7 @@ mod tests {
                     tools {
                         ask-all
                         tool "read_file" {
-                            disabled
+                            disabled #true
                         }
                     }
                 }
@@ -461,6 +461,32 @@ mod tests {
         assert!(tools.forces_ask("run_shell"));
         assert!(tools.allows("write_file"));
         assert!(!tools.forces_ask("write_file"));
+
+        // `enabled #true` re-enables a tool under `disable-all`, straight
+        // from config.
+        let scene = plan_scene(
+            r#"
+            scenes {
+                scene name="Plan" {
+                    tools {
+                        disable-all
+                        tool "read_file" {
+                            enabled #true
+                        }
+                        tool "run_shell" {
+                            enabled #true
+                            ask #true
+                        }
+                    }
+                }
+            }
+        "#,
+        );
+        let tools = scene.tools();
+        assert!(tools.allows("read_file"), "config re-enable survives");
+        assert!(tools.allows("run_shell"));
+        assert!(tools.forces_ask("run_shell"));
+        assert!(!tools.allows("write_file"));
     }
 
     #[test]

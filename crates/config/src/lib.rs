@@ -555,7 +555,7 @@ fn default_max_turns() -> usize {
 /// trigger is still caught reactively when the provider rejects the request.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContextConfig {
-    /// Stored inverted in the file as `disabled`; defaults to enabled.
+    /// Stored inverted in the file as `disabled #true`; defaults to enabled.
     pub disabled: bool,
 
     /// Tokens reserved for the model's reply and a safety buffer. The input
@@ -609,8 +609,8 @@ pub struct ShellConfig {
 }
 
 /// Agent tools. `web-search` is on by default through the built-in DuckDuckGo
-/// Lite backend; a `web-search` block overrides that endpoint, and a bare
-/// `disabled` switch inside it turns the tool off.
+/// Lite backend; a `web-search` block overrides that endpoint, and a
+/// `disabled #true` inside it turns the tool off.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ToolsConfig {
     /// `tools { web-search { … } }` — overrides the built-in web search
@@ -803,7 +803,7 @@ pub const DUCKDUCKGO_LITE_URL: &str = "https://lite.duckduckgo.com/lite/";
 /// Lite backend.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WebSearchConfig {
-    /// Stored as a bare `disabled` switch; omitted = enabled (the default).
+    /// Stored as `disabled #true`; omitted = enabled (the default).
     pub disabled: bool,
 
     /// The search endpoint. Must start with `http://` or `https://`.
@@ -907,8 +907,7 @@ pub struct RegistriesConfig {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RegistryEntry {
-    /// Stored inverted in the file as a bare `disabled` switch; omitted =
-    /// enabled.
+    /// Stored inverted in the file as `disabled #true`; omitted = enabled.
     pub disabled: bool,
 
     /// Prefer the remote (hosted) catalog over the embedded offline one.
@@ -1217,10 +1216,10 @@ impl SceneToolVerb {
 /// layer's value).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolOverride {
-    /// `None` = unspecified, `Some(true)` = disabled (the bare `disabled`
-    /// switch in config), `Some(false)` = explicitly enabled (re-enabling a
-    /// tool under `disable-all`; built programmatically — the config switch
-    /// has no "off" form).
+    /// `None` = unspecified, `Some(true)` = disabled (`disabled #true` in
+    /// config), `Some(false)` = explicitly enabled (re-enabling a tool under
+    /// `disable-all`; spelled `enabled #true` or `disabled #false` in
+    /// config).
     pub disabled: Option<bool>,
 
     /// `None` = unspecified, `Some(true)` = the tool always asks first.
@@ -2502,7 +2501,7 @@ mod tests {
                 frame-rate 30
             }
             skills {
-                disabled
+                disabled #true
                 dirs "a" "b"
             }
         "#;
@@ -2538,15 +2537,15 @@ mod tests {
     }
 
     #[test]
-    fn disabled_switches_round_trip() {
+    fn disabled_args_round_trip() {
         let text = r#"
             embedding {
-                disabled
+                disabled #true
                 provider "openai"
                 dimensions 1536
             }
                         context {
-                                disabled
+                                disabled #true
                                 reserved 5000
                                 keep-recent-tokens 10000
                                 tool-output-max-chars 1000
@@ -2572,7 +2571,7 @@ mod tests {
     fn lsp_servers_layout() {
         let text = r#"
             lsp {
-                disabled
+                disabled #true
                 servers {
                     rust {
                         command "rust-analyzer"
@@ -2603,7 +2602,7 @@ mod tests {
     }
 
     #[test]
-    fn bare_disabled_switch_sets_the_flag() {
+    fn bare_toggle_nodes_are_inert() {
         let text = r#"
             embedding {
                 disabled
@@ -2612,24 +2611,43 @@ mod tests {
             shell
         "#;
         let parsed = config_kdl::from_kdl(text).unwrap();
-        assert!(parsed.embedding.disabled);
+        assert!(
+            !parsed.embedding.disabled,
+            "the bare form keeps the default (enabled)"
+        );
         assert_eq!(parsed.agent, AgentConfig::default());
         assert_eq!(parsed.shell, ShellConfig::default());
     }
 
     #[test]
-    fn disabled_switch_takes_no_arguments() {
+    fn toggle_node_semantics() {
+        // The optional argument is the verb's truth value: `disabled <b>`
+        // sets the flag to `b`, `enabled <b>` to `!b`.
+        let flag = |text: &str| config_kdl::from_kdl(text).unwrap().embedding.disabled;
+        assert!(flag("embedding { disabled #true }"));
+        assert!(!flag("embedding { disabled #false }"));
+        assert!(!flag("embedding { enabled #true }"));
+        assert!(flag("embedding { enabled #false }"));
+    }
+
+    #[test]
+    fn toggle_node_argument_validation() {
+        let err = config_kdl::from_kdl("embedding {\n    disabled #true #false\n}").unwrap_err();
+        assert!(err.to_string().contains("takes a single argument"), "{err}");
         for text in [
-            "embedding {\n    disabled #true\n}",
-            "embedding {\n    disabled #false\n}",
             "embedding {\n    disabled \"yes\"\n}",
+            "embedding {\n    enabled 1\n}",
         ] {
             let err = config_kdl::from_kdl(text).unwrap_err();
             assert!(
-                err.to_string().contains("takes no arguments"),
+                err.to_string().contains("must be a boolean"),
                 "{text}\n{err}"
             );
         }
+        let err = config_kdl::from_kdl("embedding {\n    disabled flag=#true\n}").unwrap_err();
+        assert!(err.to_string().contains("takes no properties"), "{err}");
+        let err = config_kdl::from_kdl("embedding {\n    disabled { x }\n}").unwrap_err();
+        assert!(err.to_string().contains("takes no children"), "{err}");
     }
 
     #[test]
@@ -3006,7 +3024,7 @@ mod tests {
             &top,
             r#"
             lsp {
-                disabled
+                disabled #true
                 servers {
                     rust {
                         command "/custom/rust-analyzer"
@@ -3150,7 +3168,7 @@ mod tests {
         let text = r#"
             registries {
                 selune {
-                    disabled
+                    disabled #true
                     remote-first #true
                 }
             }
@@ -3194,7 +3212,7 @@ mod tests {
                     remote-first #true
                 }
                 vendor-x {
-                    disabled
+                    disabled #true
                 }
                 vendor-y
             }
@@ -3458,12 +3476,12 @@ mod tests {
     }
 
     #[test]
-    fn web_search_disabled_switch_turns_tool_off() {
+    fn web_search_disabled_turns_tool_off() {
         let parsed = config_kdl::from_kdl(
             r#"
             tools {
                 web-search {
-                    disabled
+                    disabled #true
                 }
             }
         "#,
@@ -3476,7 +3494,7 @@ mod tests {
         assert_eq!(parsed.tools.effective_web_search(), None);
 
         let text = config_kdl::to_kdl(&parsed).unwrap();
-        assert!(text.contains("disabled"), "off flag kept: {text}");
+        assert!(text.contains("disabled #true"), "off flag kept: {text}");
         let reparsed = config_kdl::from_kdl(&text).unwrap();
         assert_eq!(parsed, reparsed);
     }
@@ -3540,8 +3558,12 @@ mod tests {
                 "header",
             ),
             (
-                "tools { web-search { disabled #true } }",
-                "takes no arguments",
+                "tools { web-search { disabled \"yes\" } }",
+                "must be a boolean",
+            ),
+            (
+                "tools { web-search { disabled #true #false } }",
+                "takes a single argument",
             ),
         ];
         for (text, needle) in cases {
@@ -3641,7 +3663,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        std::fs::write(&top, "tools { web-search { disabled } }").unwrap();
+        std::fs::write(&top, "tools { web-search { disabled #true } }").unwrap();
         let config = Config::load_chain(&[(global, false), (top, true)]).unwrap();
         assert!(
             config
@@ -4363,7 +4385,7 @@ mod tests {
                 scene name="Plan" {
                     description "Plan before acting"
                     subagents {
-                        disabled
+                        disabled #true
                         editor {
                             system-prompts {
                                 prelude """
@@ -4378,7 +4400,7 @@ Now we're in Plan mode: plan first, no edits.
                             tools {
                                 enable-all
                                 tool "edit_file" {
-                                    disabled
+                                    disabled #true
                                 }
                             }
                         }
@@ -4404,7 +4426,7 @@ Now we're in Plan mode: plan first, no edits.
                     tools {
                         disable-all
                         tool "write_file" "edit_file" {
-                            disabled
+                            disabled #true
                             ask #false
                         }
                         tool "run_shell" {
@@ -4415,7 +4437,7 @@ Now we're in Plan mode: plan first, no edits.
                 scene name="Build" {
                     tools {
                         tool "run_shell" {
-                            disabled
+                            disabled #true
                         }
                     }
                 }
@@ -4518,6 +4540,56 @@ Now we're in Plan mode: plan first, no edits.
     }
 
     #[test]
+    fn tool_override_enabled_re_enables() {
+        // The re-enable form finally exists in config: under `disable-all`
+        // only tools explicitly enabled survive, and `enabled #true` (or
+        // `disabled #false`) spells that override.
+        let parsed = scenes(
+            r#"
+            scenes {
+                scene name="Lean" {
+                    tools {
+                        disable-all
+                        tool "read_file" {
+                            enabled #true
+                        }
+                        tool "run_shell" {
+                            disabled #false
+                            ask #true
+                        }
+                    }
+                }
+            }
+        "#,
+        );
+        let lean = parsed.scene("Lean").unwrap();
+        let read = lean.tools.tools.get("read_file").unwrap();
+        assert_eq!(read.disabled, Some(false), "`enabled #true` re-enables");
+        let shell = lean.tools.tools.get("run_shell").unwrap();
+        assert_eq!(shell.disabled, Some(false));
+        assert_eq!(shell.ask, Some(true));
+
+        // `Some(false)` serializes as `enabled #true` and round trips.
+        let out = config_kdl::to_kdl(&config_with_scenes(parsed.clone())).unwrap();
+        assert!(out.contains("enabled #true"), "body: {out}");
+        let reparsed = config_kdl::from_kdl(&out).unwrap();
+        assert_eq!(parsed, reparsed.scenes);
+
+        // The bare toggle forms specify nothing, so an override still needs
+        // an explicit argument (or `ask`).
+        for text in [
+            "scenes { scene name=\"A\" { tools { tool \"x\" { disabled } } } }",
+            "scenes { scene name=\"A\" { tools { tool \"x\" { enabled } } } }",
+        ] {
+            let err = config_kdl::from_kdl(text).unwrap_err();
+            assert!(
+                err.to_string().contains("requires `disabled` or `ask`"),
+                "{text}\n{err}"
+            );
+        }
+    }
+
+    #[test]
     fn scenes_default_round_trips() {
         let parsed = scenes(r#"scenes { default "Build" }"#);
         assert_eq!(parsed.default.as_deref(), Some("Build"));
@@ -4546,11 +4618,11 @@ Now we're in Plan mode: plan first, no edits.
                 "requires `disabled` or `ask`",
             ),
             (
-                "scenes { scene name=\"A\" { tools { tool \"x\" { disabled #false } } } }",
-                "takes no arguments",
+                "scenes { scene name=\"A\" { tools { tool \"x\" { disabled \"yes\" } } } }",
+                "must be a boolean",
             ),
             (
-                "scenes {\n    scene name=\"A\" {\n        tools {\n            tool \"x\" { disabled }\n            tool \"x\" { ask #true }\n        }\n    }\n}",
+                "scenes {\n    scene name=\"A\" {\n        tools {\n            tool \"x\" { disabled #true }\n            tool \"x\" { ask #true }\n        }\n    }\n}",
                 "duplicate",
             ),
             (
