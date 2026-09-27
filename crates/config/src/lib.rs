@@ -30,6 +30,15 @@ pub const WORKSPACE_DIR_NAME: &str = if cfg!(debug_assertions) {
     ".shuvarie"
 };
 
+/// The global data directory name (`shuvarie`, or `shuvarie-dev` in debug
+/// builds): the per-user data dir holding the shared global store DB and the
+/// directory-session map when `db { global-store }` is enabled.
+pub const DATA_DIR_NAME: &str = if cfg!(debug_assertions) {
+    "shuvarie-dev"
+} else {
+    "shuvarie"
+};
+
 /// The `scene.d` drop-in dir name, next to each config directory: a global
 /// `<config_dir>/scene.d` and a workspace `<WORKSPACE_DIR_NAME>/scene.d`.
 pub const SCENE_DIR_NAME: &str = "scene.d";
@@ -86,6 +95,7 @@ fn merge_layer(config: &mut Config, layer: &ConfigLayer) {
     for section in &layer.sections {
         match section.as_str() {
             "ui" => config.ui = layer.config.ui.clone(),
+            "db" => config.db = layer.config.db.clone(),
             "embedding" => config.embedding = layer.config.embedding.clone(),
             "agent" => config.agent = layer.config.agent.clone(),
             "skills" => config.skills = layer.config.skills.clone(),
@@ -339,6 +349,9 @@ fn theme_set_from_levels(
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Config {
     pub ui: UiPrefs,
+
+    /// `db { … }` — where session data lives.
+    pub db: DbConfig,
 
     pub embedding: EmbeddingConfig,
 
@@ -1868,6 +1881,17 @@ pub struct LspServerSpecRepr {
     pub root_markers: Vec<String>,
 }
 
+/// `db { … }` — where session data lives: the default per-workspace store
+/// (`<WORKSPACE_DIR_NAME>/data.db`) or the shared global one.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DbConfig {
+    /// `global-store` — keep sessions in the data dir's shared `data.db`
+    /// (one store for every workspace) instead of a per-workspace DB, with
+    /// the directory-session map (`session-dir.kdl`) deciding which sessions
+    /// belong to which workspace.
+    pub global_store: bool,
+}
+
 pub fn config_dir() -> Result<PathBuf> {
     let dir = dirs::config_dir().ok_or_else(|| {
         ConfigError::Io(std::io::Error::new(
@@ -1876,6 +1900,19 @@ pub fn config_dir() -> Result<PathBuf> {
         ))
     })?;
     Ok(dir.join(CONFIG_DIR_NAME))
+}
+
+/// The global data directory (`$XDG_DATA_HOME/shuvarie[-dev]`, i.e.
+/// `~/.local/share/shuvarie` on Linux), holding the shared global store DB
+/// (`data.db`) and the directory-session map (`session-dir.kdl`).
+pub fn data_dir() -> Result<PathBuf> {
+    let dir = dirs::data_dir().ok_or_else(|| {
+        ConfigError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no data directory for this platform",
+        ))
+    })?;
+    Ok(dir.join(DATA_DIR_NAME))
 }
 
 /// The sorted `*.kdl` drop-ins of `dir` (a missing or non-directory `dir`
@@ -2398,6 +2435,64 @@ mod tests {
         assert!(text.contains("max-retries 0"), "0 must serialize: {text}");
         let parsed = config_kdl::from_kdl(&text).unwrap();
         assert_eq!(parsed, config);
+    }
+
+    #[test]
+    fn db_section_defaults() {
+        let parsed = config_kdl::from_kdl("ui { frame-rate 30 }").unwrap();
+        assert_eq!(parsed.db, DbConfig::default());
+        assert!(!parsed.db.global_store);
+
+        let parsed = config_kdl::from_kdl("db {}").unwrap();
+        assert_eq!(parsed.db, DbConfig::default());
+    }
+
+    #[test]
+    fn db_global_store_parses_positional_bool() {
+        let parsed = config_kdl::from_kdl("db { global-store #true }").unwrap();
+        assert!(parsed.db.global_store);
+
+        let parsed = config_kdl::from_kdl("db { global-store #false }").unwrap();
+        assert!(!parsed.db.global_store);
+
+        assert!(config_kdl::from_kdl("db { global-store \"yes\" }").is_err());
+    }
+
+    #[test]
+    fn db_global_store_round_trips() {
+        let mut config = Config::default();
+        config.db.global_store = true;
+        let text = config_kdl::to_kdl(&config).unwrap();
+        assert!(
+            text.contains("global-store #true"),
+            "must serialize: {text}"
+        );
+        let parsed = config_kdl::from_kdl(&text).unwrap();
+        assert_eq!(parsed, config);
+
+        // The default shape omits the section entirely.
+        let text = config_kdl::to_kdl(&Config::default()).unwrap();
+        assert!(!text.contains("db"), "default config must omit db: {text}");
+    }
+
+    #[test]
+    fn db_global_store_duplicate_errors() {
+        assert!(config_kdl::from_kdl("db { global-store #true global-store #false }").is_err());
+    }
+
+    #[test]
+    fn db_section_wins_wholesale_across_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global.kdl");
+        let local = dir.path().join("shuvarie.kdl");
+        std::fs::write(&global, "db { global-store #true }").unwrap();
+        std::fs::write(&local, "db { global-store #false }").unwrap();
+
+        let config = Config::load_chain(&[(global, false), (local, true)]).unwrap();
+        assert!(
+            !config.db.global_store,
+            "the higher-priority layer wins the whole section"
+        );
     }
 
     #[test]

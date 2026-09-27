@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 anyhow = "1"
 jiff.workspace = true
+kdl.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 selune.workspace = true

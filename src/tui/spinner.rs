@@ -29,10 +29,7 @@ const GENERATING_FRAMES: [&str; 18] = [
     "  ⣠⣴⣿⠟⠋  ",
 ];
 
-const WAIT_FRAMES: [&str; 2] = [
-    "⣿⣿⣿⣿⣿⣿⣿⣿⣿",
-    "         ",
-];
+const WAIT_FRAMES: [&str; 2] = ["⣿⣿⣿⣿⣿⣿⣿⣿⣿", "         "];
 
 const TOOL_FRAMES: [&str; 28] = [
     "         ",

@@ -63,8 +63,30 @@ pub async fn init_default_store() -> shuvarie_db::Result<shuvarie_db::Store> {
     shuvarie_db::Store::open(&shuvarie_db::Store::default_path()).await
 }
 
-pub async fn import_session(path: &std::path::Path) -> color_eyre::Result<()> {
-    let mut store = init_default_store().await?;
+/// Opens the store the CLI subcommands act on: the config's `db.global-store`
+/// decides between the shared global store and the workspace-local one. The
+/// config loads non-interactively — no trust prompt runs here — from the
+/// explicit file when given, else from the usual chain.
+async fn open_session_store(
+    config_path: Option<&PathBuf>,
+) -> color_eyre::Result<shuvarie_db::Store> {
+    let config = match config_path {
+        Some(path) => shuvarie_core::Config::load_explicit(path)?,
+        None => shuvarie_core::Config::load()?,
+    };
+    let store = if config.db.global_store {
+        shuvarie_db::Store::open_global().await?
+    } else {
+        init_default_store().await?
+    };
+    Ok(store)
+}
+
+pub async fn import_session(
+    path: &std::path::Path,
+    config_path: Option<&PathBuf>,
+) -> color_eyre::Result<()> {
+    let mut store = open_session_store(config_path).await?;
 
     let json = std::fs::read_to_string(path)
         .map_err(|e| color_eyre::eyre::eyre!("read {}: {e}", path.display()))?;
@@ -75,8 +97,12 @@ pub async fn import_session(path: &std::path::Path) -> color_eyre::Result<()> {
     Ok(())
 }
 
-pub async fn export_session(dest: &str, session: Option<Uuid>) -> color_eyre::Result<()> {
-    let mut store = init_default_store().await?;
+pub async fn export_session(
+    dest: &str,
+    session: Option<Uuid>,
+    config_path: Option<&PathBuf>,
+) -> color_eyre::Result<()> {
+    let mut store = open_session_store(config_path).await?;
 
     let stored = match session {
         Some(id) => Some(store.load_session(id).await?),

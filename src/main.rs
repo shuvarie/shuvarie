@@ -23,18 +23,16 @@ async fn main() -> color_eyre::Result<()> {
 
         match cmd {
             Import { file } => {
-                return cli::import_session(&file).await;
+                return cli::import_session(&file, args.config.as_ref()).await;
             }
             Export { dest } => {
-                return cli::export_session(&dest, args.session).await;
+                return cli::export_session(&dest, args.session, args.config.as_ref()).await;
             }
             Update => {
                 return update::run().await;
             }
         }
     }
-
-    let store = init_default_store().await?;
 
     let Some(trust::Resolved {
         config,
@@ -45,6 +43,17 @@ async fn main() -> color_eyre::Result<()> {
     else {
         return Ok(());
     };
+
+    // The store choice follows the config: the shared global data dir when
+    // `db { global-store }` is set, else the workspace-local DB. Resolving
+    // first means a store is never created for a run that quits at the trust
+    // prompt.
+    let store = if config.db.global_store {
+        shuvarie_db::Store::open_global().await?
+    } else {
+        init_default_store().await?
+    };
+
     let (cmd_tx, cmd_rx) = channel::<shuvarie_core::Command>(64);
     let (event_tx, event_rx) = channel::<shuvarie_core::Event>(64);
     let permissions = std::sync::Arc::new(
