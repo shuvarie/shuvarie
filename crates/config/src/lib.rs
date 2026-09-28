@@ -108,6 +108,18 @@ fn merge_layer(config: &mut Config, layer: &ConfigLayer) {
                 for (name, entry) in &layer.config.registries.entries {
                     config.registries.entries.insert(name.clone(), *entry);
                 }
+                for registry in &layer.config.registries.custom {
+                    if let Some(existing) = config
+                        .registries
+                        .custom
+                        .iter_mut()
+                        .find(|existing| existing.name == registry.name)
+                    {
+                        *existing = registry.clone();
+                    } else {
+                        config.registries.custom.push(registry.clone());
+                    }
+                }
             }
             "tools" => config.tools = layer.config.tools.clone(),
             "lsp" => {
@@ -898,11 +910,46 @@ impl WebSearchParams {
 }
 
 /// Registry sources for provider/model catalogs. `selune` is the built-in
-/// registry; further entries reserve names for user-defined registries and
-/// are preserved verbatim on rewrite.
+/// registry; `registry { … }` nodes define user-added sources, kept in file
+/// order; other names reserve flag-only entries (as before custom registries
+/// existed) and are preserved verbatim on rewrite.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RegistriesConfig {
+    /// Flag entries keyed by name: the built-in `selune` registry plus
+    /// reserved names declared without a `registry` block, preserved on
+    /// rewrite.
     pub entries: BTreeMap<String, RegistryEntry>,
+
+    /// The user-defined registries, in file order.
+    pub custom: Vec<CustomRegistry>,
+}
+
+/// A user-defined registry (`registries { registry { … } }`): an offline
+/// snapshot and/or a remote source. The remote source is fetched only when
+/// the online registry is initiated (or at startup with `remote-first`);
+/// the offline snapshot, when set, needs no fetch.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CustomRegistry {
+    /// The unique registry id and display name (`name "My registry"`).
+    pub name: String,
+
+    /// The remote source (`url "https://…"`), fetched only when the online
+    /// registry is initiated, or at startup with `remote-first`.
+    pub url: Option<String>,
+
+    /// The offline snapshot (`path "…"`), read when the registry is first
+    /// used — no fetch required.
+    pub path: Option<PathBuf>,
+
+    /// Headers sent with the remote fetch, in file order. Values may embed
+    /// `$ENV_VAR` references, expanded when the fetch runs.
+    pub headers: Vec<(String, String)>,
+
+    /// Stored inverted in the file as `disabled #true`; omitted = enabled.
+    pub disabled: bool,
+
+    /// Fetch `url` at startup instead of waiting for manual initiation.
+    pub remote_first: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -929,6 +976,11 @@ impl RegistriesConfig {
     /// The built-in registry's entry.
     pub fn selune(&self) -> RegistryEntry {
         self.entry("selune")
+    }
+
+    /// The custom registry with the given name, when one is defined.
+    pub fn custom_named(&self, name: &str) -> Option<&CustomRegistry> {
+        self.custom.iter().find(|registry| registry.name == name)
     }
 }
 
@@ -3340,6 +3392,366 @@ mod tests {
             config.registries.entry("vendor-y"),
             RegistryEntry::default()
         );
+    }
+
+    #[test]
+    fn registries_custom_block_parses() {
+        let text = r#"
+            registries {
+                selune {
+                    disabled #false
+                    remote-first #false
+                }
+
+                registry {
+                    name "My registry"
+                    url "https://example.com/provider.json"
+                    path "/path/to/local/provider.json"
+                    headers {
+                        Authorization "Bearer $MY_TOKEN"
+                        X-Source "vendor"
+                    }
+                }
+            }
+        "#;
+        let parsed = config_kdl::from_kdl(text).unwrap();
+        assert!(!parsed.registries.selune().disabled);
+        assert_eq!(parsed.registries.entries.len(), 1);
+        assert_eq!(parsed.registries.custom.len(), 1);
+        let registry = parsed.registries.custom_named("My registry").unwrap();
+        assert_eq!(
+            registry.url.as_deref(),
+            Some("https://example.com/provider.json")
+        );
+        assert_eq!(
+            registry.path.as_deref(),
+            Some(std::path::Path::new("/path/to/local/provider.json"))
+        );
+        assert_eq!(
+            registry.headers,
+            vec![
+                ("Authorization".to_string(), "Bearer $MY_TOKEN".to_string()),
+                ("X-Source".to_string(), "vendor".to_string()),
+            ]
+        );
+        assert!(!registry.disabled);
+        assert!(!registry.remote_first);
+    }
+
+    #[test]
+    fn registries_custom_slashdashed_children_are_ignored() {
+        let text = r#"
+            registries {
+                registry {
+                    name "My registry"
+                    url "https://example.com/provider.json"
+                    /-path "/path/to/local/provider.json"
+                }
+            }
+        "#;
+        let parsed = config_kdl::from_kdl(text).unwrap();
+        let registry = parsed.registries.custom_named("My registry").unwrap();
+        assert!(registry.path.is_none());
+    }
+
+    #[test]
+    fn registries_custom_toggles_parse() {
+        let text = r#"
+            registries {
+                registry {
+                    name "A"
+                    path "/a.json"
+                    disabled #true
+                    remote-first #true
+                }
+                registry {
+                    name "B"
+                    url "https://example.com/b.json"
+                    enabled #true
+                }
+            }
+        "#;
+        let parsed = config_kdl::from_kdl(text).unwrap();
+        let a = parsed.registries.custom_named("A").unwrap();
+        assert!(a.disabled);
+        assert!(a.remote_first);
+        assert!(a.url.is_none());
+        let b = parsed.registries.custom_named("B").unwrap();
+        assert!(!b.disabled, "`enabled #true` keeps the registry enabled");
+        assert!(!b.remote_first);
+    }
+
+    #[test]
+    fn registries_custom_headers_keep_file_order() {
+        let text = r#"
+            registries {
+                registry {
+                    name "A"
+                    url "https://example.com/a.json"
+                    headers {
+                        Z-Auth "z"
+                        A-Auth "a"
+                    }
+                }
+            }
+        "#;
+        let parsed = config_kdl::from_kdl(text).unwrap();
+        let registry = parsed.registries.custom_named("A").unwrap();
+        assert_eq!(
+            registry.headers,
+            vec![
+                ("Z-Auth".to_string(), "z".to_string()),
+                ("A-Auth".to_string(), "a".to_string()),
+            ]
+        );
+
+        let out = config_kdl::to_kdl(&parsed).unwrap();
+        let reparsed = config_kdl::from_kdl(&out).unwrap();
+        assert_eq!(parsed, reparsed);
+    }
+
+    #[test]
+    fn registries_custom_round_trips() {
+        let text = r#"
+            registries {
+                selune {
+                    remote-first #true
+                }
+                vendor-reserved
+
+                registry {
+                    name "My registry"
+                    url "https://example.com/provider.json"
+                    path "/path/to/local/provider.json"
+                    headers {
+                        Authorization "Bearer token"
+                    }
+                    disabled
+                }
+                registry {
+                    name "Second"
+                    path "relative/snapshot.json"
+                    remote-first #true
+                }
+            }
+        "#;
+        let parsed = config_kdl::from_kdl(text).unwrap();
+        assert_eq!(parsed.registries.custom.len(), 2);
+
+        let out = config_kdl::to_kdl(&parsed).unwrap();
+        assert!(out.contains("registries"), "body: {out}");
+        assert!(out.contains("My registry"), "body: {out}");
+        assert!(
+            out.contains("https://example.com/provider.json"),
+            "body: {out}"
+        );
+        assert!(out.contains("Bearer token"), "body: {out}");
+        assert!(out.contains("vendor-reserved"), "body: {out}");
+        let reparsed = config_kdl::from_kdl(&out).unwrap();
+        assert_eq!(parsed, reparsed);
+    }
+
+    #[test]
+    fn registries_custom_requires_a_name() {
+        for text in [
+            r#"registries {
+                registry {
+                    url "https://example.com/provider.json"
+                }
+            }"#,
+            r#"registries {
+                registry {
+                    name ""
+                    url "https://example.com/provider.json"
+                }
+            }"#,
+        ] {
+            let err = config_kdl::from_kdl(text).unwrap_err();
+            let ConfigError::Parse(parse_err) = err else {
+                panic!("expected config parse error");
+            };
+            assert!(parse_err.message.contains("name"), "{parse_err}");
+        }
+    }
+
+    #[test]
+    fn registries_custom_requires_a_source() {
+        let err = config_kdl::from_kdl(
+            r#"registries {
+                registry {
+                    name "My registry"
+                }
+            }"#,
+        )
+        .unwrap_err();
+        let ConfigError::Parse(parse_err) = err else {
+            panic!("expected config parse error");
+        };
+        assert!(
+            parse_err.message.contains("requires a `url` or a `path`"),
+            "{parse_err}"
+        );
+    }
+
+    #[test]
+    fn registries_custom_url_scheme_is_validated() {
+        let err = config_kdl::from_kdl(
+            r#"registries {
+                registry {
+                    name "My registry"
+                    url "ftp://example.com/provider.json"
+                }
+            }"#,
+        )
+        .unwrap_err();
+        let ConfigError::Parse(parse_err) = err else {
+            panic!("expected config parse error");
+        };
+        assert!(
+            parse_err.message.contains("http:// or https://"),
+            "{parse_err}"
+        );
+    }
+
+    #[test]
+    fn registries_custom_unknown_child_is_an_error() {
+        let err = config_kdl::from_kdl(
+            r#"registries {
+                registry {
+                    name "My registry"
+                    url "https://example.com/provider.json"
+                    urls "https://example.com/other.json"
+                }
+            }"#,
+        )
+        .unwrap_err();
+        let ConfigError::Parse(parse_err) = err else {
+            panic!("expected config parse error");
+        };
+        assert!(parse_err.message.contains("unknown node"), "{parse_err}");
+    }
+
+    #[test]
+    fn registries_custom_name_clashes_are_errors() {
+        for text in [
+            // against the built-in selune registry
+            r#"registries {
+                registry {
+                    name "selune"
+                    url "https://example.com/provider.json"
+                }
+            }"#,
+            // against a flag-only reserved name
+            r#"registries {
+                vendor-x
+                registry {
+                    name "vendor-x"
+                    url "https://example.com/provider.json"
+                }
+            }"#,
+            // and the reverse orders
+            r#"registries {
+                selune
+                registry {
+                    name "selune"
+                    url "https://example.com/provider.json"
+                }
+            }"#,
+            r#"registries {
+                registry {
+                    name "vendor-x"
+                    path "/x.json"
+                }
+                vendor-x
+            }"#,
+            // against another custom registry
+            r#"registries {
+                registry {
+                    name "A"
+                    url "https://example.com/a.json"
+                }
+                registry {
+                    name "A"
+                    url "https://example.com/other.json"
+                }
+            }"#,
+        ] {
+            let err = config_kdl::from_kdl(text).unwrap_err();
+            let ConfigError::Parse(parse_err) = err else {
+                panic!("expected config parse error");
+            };
+            assert!(parse_err.message.contains("duplicate"), "{parse_err}");
+        }
+    }
+
+    #[test]
+    fn registries_custom_chain_merges_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global.kdl");
+        let top = dir.path().join("shuvarie.kdl");
+
+        std::fs::write(
+            &global,
+            r#"
+            registries {
+                registry {
+                    name "Shared"
+                    url "https://global.example.com/provider.json"
+                }
+                registry {
+                    name "Global only"
+                    path "/global.json"
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &top,
+            r#"
+            registries {
+                registry {
+                    name "Shared"
+                    url "https://top.example.com/provider.json"
+                    remote-first #true
+                }
+                registry {
+                    name "Top only"
+                    path "/top.json"
+                }
+            }
+            "#,
+        )
+        .unwrap();
+
+        let config = Config::load_chain(&[(global, false), (top, true)]).unwrap();
+        let names: Vec<&str> = config
+            .registries
+            .custom
+            .iter()
+            .map(|registry| registry.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Shared", "Global only", "Top only"]);
+        let shared = config.registries.custom_named("Shared").unwrap();
+        assert_eq!(
+            shared.url.as_deref(),
+            Some("https://top.example.com/provider.json"),
+            "the winning layer's definition replaces the same-name registry in place"
+        );
+        assert!(shared.remote_first);
+        assert!(shared.path.is_none());
+    }
+
+    #[test]
+    fn registries_custom_named_lookup() {
+        let mut config = Config::default();
+        config.registries.custom.push(CustomRegistry {
+            name: "A".to_string(),
+            url: Some("https://example.com/a.json".to_string()),
+            ..CustomRegistry::default()
+        });
+        assert!(config.registries.custom_named("A").is_some());
+        assert!(config.registries.custom_named("B").is_none());
     }
 
     #[test]
