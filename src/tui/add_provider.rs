@@ -39,8 +39,14 @@ pub enum AddProviderMessage {
     Select,
     ToggleSource,
     OpenCustom,
-    RegistryLoaded { providers: Vec<Provider> },
-    RegistryError { error: String },
+    RegistryLoaded {
+        registry: String,
+        providers: Vec<Provider>,
+    },
+    RegistryError {
+        registry: String,
+        error: String,
+    },
     Search(SearchMessage),
     Input(char),
     Paste(String),
@@ -57,7 +63,9 @@ pub enum AddProviderMessage {
     End,
     Submit,
     Cancel,
-    Resize { viewport_height: u16 },
+    Resize {
+        viewport_height: u16,
+    },
 }
 
 #[derive(Debug, PartialEq)]
@@ -413,7 +421,17 @@ impl AddProviderForm {
                     AddProviderOutcome::None
                 }
             }
-            AddProviderMessage::RegistryLoaded { providers } => {
+            AddProviderMessage::RegistryLoaded {
+                registry,
+                providers,
+            } => {
+                // The select list only fetches the built-in registry; other
+                // registries' fetches (e.g. `remote-first` ones at startup)
+                // are not ours. The grouped list replaces this in the next
+                // phase.
+                if registry != shuvarie_core::catalog::SELUNE_REGISTRY {
+                    return AddProviderOutcome::None;
+                }
                 self.source.on_loaded();
                 if self.source.remote {
                     self.providers = providers;
@@ -421,8 +439,10 @@ impl AddProviderForm {
                 }
                 AddProviderOutcome::None
             }
-            AddProviderMessage::RegistryError { error } => {
-                self.source.on_error(error);
+            AddProviderMessage::RegistryError { registry, error } => {
+                if registry == shuvarie_core::catalog::SELUNE_REGISTRY {
+                    self.source.on_error(error);
+                }
                 AddProviderOutcome::None
             }
             AddProviderMessage::Next => match self.stage {
@@ -1254,7 +1274,10 @@ mod tests {
             "RemoteOnly",
             selune::ProviderType::Openai,
         )];
-        form.update(AddProviderMessage::RegistryLoaded { providers: remote });
+        form.update(AddProviderMessage::RegistryLoaded {
+            registry: shuvarie_core::catalog::SELUNE_REGISTRY.to_string(),
+            providers: remote,
+        });
         assert_eq!(form.source.state, FetchState::Idle);
         assert_eq!(
             form.providers.len(),
@@ -1267,7 +1290,10 @@ mod tests {
     #[test]
     fn registry_loaded_is_ignored_while_offline() {
         let mut form = form();
-        form.update(AddProviderMessage::RegistryLoaded { providers: vec![] });
+        form.update(AddProviderMessage::RegistryLoaded {
+            registry: shuvarie_core::catalog::SELUNE_REGISTRY.to_string(),
+            providers: vec![],
+        });
         assert_eq!(form.source.state, FetchState::Idle);
         assert_eq!(form.providers.len(), 2, "offline snapshot untouched");
     }
@@ -1276,10 +1302,42 @@ mod tests {
     fn registry_error_is_surfaced_and_keeps_list() {
         let mut form = form();
         form.update(AddProviderMessage::RegistryError {
+            registry: shuvarie_core::catalog::SELUNE_REGISTRY.to_string(),
             error: "offline".into(),
         });
         assert_eq!(form.source.state, FetchState::Failed("offline".into()));
         assert_eq!(form.providers.len(), 2, "list keeps the offline snapshot");
+    }
+
+    #[test]
+    fn foreign_registry_events_are_ignored() {
+        let mut form = form();
+        form.source.remote = true;
+        form.source.state = FetchState::Fetching;
+        form.update(AddProviderMessage::RegistryLoaded {
+            registry: "some-custom-registry".into(),
+            providers: vec![catalog_provider(
+                "remote-only",
+                "RemoteOnly",
+                selune::ProviderType::Openai,
+            )],
+        });
+        assert_eq!(
+            form.source.state,
+            FetchState::Fetching,
+            "another registry's fetch does not resolve this source"
+        );
+        assert_eq!(form.providers.len(), 2, "snapshot untouched");
+
+        form.update(AddProviderMessage::RegistryError {
+            registry: "some-custom-registry".into(),
+            error: "boom".into(),
+        });
+        assert_eq!(
+            form.source.state,
+            FetchState::Fetching,
+            "another registry's failure does not mark this source"
+        );
     }
 
     fn key(code: KeyCode, mods: Modifiers) -> KeyEvent {

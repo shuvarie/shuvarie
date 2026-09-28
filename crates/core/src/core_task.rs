@@ -271,19 +271,28 @@ pub async fn run(
     let mut next_bash_id: u64 = 0;
 
     let mut clients: HashMap<String, ProviderClient> = HashMap::new();
-    // Refresh the provider catalog from the hosted service before wiring up
-    // clients, so pricing/context/embedding lookups see fresh data. Only when
-    // the selune registry is remote-first and enabled: the offline-first
-    // default skips the fetch (the popups fetch on demand via Ctrl+O) and a
-    // disabled registry never fetches. Bounded so an unreachable catalog
-    // never blocks startup.
-    let selune_registry = config.registries.selune();
-    if !selune_registry.disabled && selune_registry.remote_first {
-        let refresh = tokio::task::spawn_blocking(crate::catalog::refresh);
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), refresh)
-            .await
-            .map(|r| r.unwrap_or_default())
-            .unwrap_or_default();
+    // Register the configured registries (built-in first, then the custom
+    // `[registries]` ones) before anything reads the catalog.
+    crate::catalog::init(&config.registries);
+    // Refresh registries that prefer the remote catalog before wiring up
+    // clients, so pricing/context/embedding lookups see fresh data. Only
+    // enabled registries with an online source and `remote-first` set: the
+    // offline-first default skips the fetch (the popups fetch on demand via
+    // Ctrl+O) and a disabled registry never fetches. All fetches run at once,
+    // bounded so an unreachable catalog never blocks startup.
+    let remote_first_ids = crate::catalog::remote_first_ids();
+    if !remote_first_ids.is_empty() {
+        let refreshes = remote_first_ids
+            .into_iter()
+            .map(|registry| {
+                tokio::task::spawn_blocking(move || crate::catalog::refresh_registry(&registry))
+            })
+            .collect::<Vec<_>>();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            futures_util::future::join_all(refreshes),
+        )
+        .await;
     }
     let embedding_setup = embeddings::setup(&config, &connections, &mut clients, &event_tx);
     if let Some(setup) = embedding_setup.clone() {
@@ -418,8 +427,10 @@ pub async fn run(
                     Command::Ping => {
                         let _ = ctx.event_tx.send(Event::Pong).await;
                     }
-                    Command::FetchRegistry => {
-                        let fetch = tokio::task::spawn_blocking(crate::catalog::fetch_remote);
+                    Command::FetchRegistry { registry } => {
+                        let registry_id = registry.clone();
+                        let fetch =
+                            tokio::task::spawn_blocking(move || crate::catalog::fetch_registry(&registry));
                         let outcome =
                             match tokio::time::timeout(std::time::Duration::from_secs(15), fetch)
                                 .await
@@ -431,9 +442,20 @@ pub async fn run(
                             };
                         let _ = match outcome {
                             Ok(providers) => {
-                                ctx.event_tx.send(Event::RegistryLoaded { providers }).await
+                                ctx.event_tx
+                                    .send(Event::RegistryLoaded {
+                                        registry: registry_id,
+                                        providers,
+                                    })
+                                    .await
                             }
-                            Err(error) => ctx.event_tx.send(Event::RegistryError { error }).await,
+                            Err(error) => ctx
+                                .event_tx
+                                .send(Event::RegistryError {
+                                    registry: registry_id,
+                                    error,
+                                })
+                                .await,
                         };
                     }
                     Command::ListModels { provider_name } => {

@@ -179,7 +179,13 @@ pub enum Command {
     McpReconnect {
         name: String,
     },
-    /// Fetch the hosted (Selune) provider registry on demand. Reports
-    /// [`Event::RegistryLoaded`] or [`Event::RegistryError`].
-    FetchRegistry,
+    /// Fetch one registry's online source on demand: the built-in hosted
+    /// (Selune) registry or a custom `[registries]` one. A disabled registry
+    /// or one without an online source is reported as an error. Reports
+    /// [`Event::RegistryLoaded`] or [`Event::RegistryError`], tagged with the
+    /// registry id.
+    FetchRegistry {
+        /// The registry id (`selune` for the built-in one).
+        registry: String,
+    },
 }

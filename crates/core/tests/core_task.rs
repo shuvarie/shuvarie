@@ -2354,6 +2354,251 @@ async fn manual_compact_splices_the_summary_and_forwards_the_focus() {
     let _ = handle.await;
 }
 
+/// A mock registry server: serves `body` as JSON, recording each request's
+/// head (path, headers) for assertions. Returns the base URL and the recorded
+/// requests.
+fn spawn_mock_registry(
+    body: &'static str,
+) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let requests: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = requests.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else {
+                break;
+            };
+            use std::io::{Read, Write};
+            let mut buf = [0u8; 8192];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            sink.lock()
+                .expect("request sink poisoned")
+                .push(String::from_utf8_lossy(&buf[..n]).to_lowercase());
+            let response = format!(
+                "HTTP/1.1 200 ok\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    (format!("http://{addr}/providers.json"), requests)
+}
+
+/// A config with one custom registry. Each test uses its own registry id:
+/// the catalog is a process-global shared by the parallel tests, and ids are
+/// merged by name.
+fn registry_config(
+    name: &str,
+    mutate: impl FnOnce(&mut shuvarie_config::CustomRegistry),
+) -> Config {
+    let mut config = empty_config();
+    let mut registry = shuvarie_config::CustomRegistry {
+        name: name.into(),
+        url: None,
+        path: None,
+        headers: Vec::new(),
+        disabled: false,
+        remote_first: false,
+    };
+    mutate(&mut registry);
+    config.registries.custom.push(registry);
+    config
+}
+
+async fn run_with_config(
+    config: Config,
+) -> (
+    tokio::sync::mpsc::Sender<Command>,
+    tokio::sync::mpsc::Receiver<Event>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let handle = tokio::spawn(run(
+        config,
+        empty_connections(),
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        shuvarie_core::SceneSet {
+            scenes: Default::default(),
+            warnings: Vec::new(),
+        },
+        cmd_rx,
+        event_tx,
+    ));
+    (cmd_tx, event_rx, handle)
+}
+
+/// A remote-first custom registry is fetched once at startup, before any
+/// event, so its snapshot is loaded by the time the first event arrives.
+#[tokio::test]
+async fn remote_first_custom_registry_fetches_at_startup() {
+    let (url, requests) =
+        spawn_mock_registry("[{\"name\":\"Acme\",\"id\":\"acme-remote\",\"models\":[]}]");
+    let (cmd_tx, mut event_rx, handle) = run_with_config(registry_config("acme-rf", |registry| {
+        registry.url = Some(url);
+        registry.remote_first = true;
+    }))
+    .await;
+    recv_skills_loaded(&mut event_rx).await;
+
+    let snapshot = shuvarie_core::catalog::registry_catalog("acme-rf");
+    assert_eq!(snapshot.id, "acme-rf");
+    assert_eq!(
+        snapshot.remote.map(|providers| providers.len()),
+        Some(1),
+        "the remote-first fetch ran before the startup events"
+    );
+    assert!(requests.lock().unwrap().len() >= 1, "one fetch");
+
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+/// `Command::FetchRegistry` for a custom registry reports the loaded snapshot
+/// tagged with the registry id.
+#[tokio::test]
+async fn fetch_registry_command_reports_the_configured_registry() {
+    let (url, _requests) =
+        spawn_mock_registry("[{\"name\":\"Acme\",\"id\":\"acme-remote\",\"models\":[]}]");
+    let (cmd_tx, mut event_rx, handle) =
+        run_with_config(registry_config("acme-fetch", |registry| {
+            registry.url = Some(url);
+        }))
+        .await;
+    recv_skills_loaded(&mut event_rx).await;
+
+    cmd_tx
+        .send(Command::FetchRegistry {
+            registry: "acme-fetch".into(),
+        })
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let ev = tokio::time::timeout(deadline - tokio::time::Instant::now(), event_rx.recv())
+        .await
+        .expect("timed out waiting for the registry event")
+        .expect("core task ended");
+    match ev {
+        Event::RegistryLoaded {
+            registry,
+            providers,
+        } => {
+            assert_eq!(registry, "acme-fetch");
+            assert_eq!(providers.len(), 1);
+            assert_eq!(providers[0].id.0, "acme-remote");
+        }
+        other => panic!("expected RegistryLoaded, got {other:?}"),
+    }
+
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+/// A disabled custom registry never fetches: the command is refused.
+#[tokio::test]
+async fn fetch_registry_command_refuses_a_disabled_registry() {
+    let (url, requests) =
+        spawn_mock_registry("[{\"name\":\"Acme\",\"id\":\"acme-remote\",\"models\":[]}]");
+    let (cmd_tx, mut event_rx, handle) =
+        run_with_config(registry_config("acme-sleepy", |registry| {
+            registry.url = Some(url);
+            registry.disabled = true;
+        }))
+        .await;
+    recv_skills_loaded(&mut event_rx).await;
+
+    cmd_tx
+        .send(Command::FetchRegistry {
+            registry: "acme-sleepy".into(),
+        })
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let ev = tokio::time::timeout(deadline - tokio::time::Instant::now(), event_rx.recv())
+        .await
+        .expect("timed out waiting for the registry event")
+        .expect("core task ended");
+    match ev {
+        Event::RegistryError { registry, error } => {
+            assert_eq!(registry, "acme-sleepy");
+            assert!(error.contains("disabled"), "{error}");
+        }
+        other => panic!("expected RegistryError, got {other:?}"),
+    }
+    assert_eq!(requests.lock().unwrap().len(), 0, "no fetch was attempted");
+
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+/// An unknown registry id is refused as unknown.
+#[tokio::test]
+async fn fetch_registry_command_refuses_an_unknown_registry() {
+    let (cmd_tx, mut event_rx, handle) = run_with_config(empty_config()).await;
+    recv_skills_loaded(&mut event_rx).await;
+
+    cmd_tx
+        .send(Command::FetchRegistry {
+            registry: "nowhere".into(),
+        })
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let ev = tokio::time::timeout(deadline - tokio::time::Instant::now(), event_rx.recv())
+        .await
+        .expect("timed out waiting for the registry event")
+        .expect("core task ended");
+    match ev {
+        Event::RegistryError { registry, error } => {
+            assert_eq!(registry, "nowhere");
+            assert!(error.contains("unknown registry"), "{error}");
+        }
+        other => panic!("expected RegistryError, got {other:?}"),
+    }
+
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+/// The built-in selune registry with `remote-first` fetches the hosted
+/// catalog (routed through `CATALOG_URL`) at startup.
+#[tokio::test]
+async fn remote_first_selune_registry_fetches_the_hosted_catalog() {
+    let (url, _requests) =
+        spawn_mock_registry("[{\"name\":\"Acme\",\"id\":\"acme-remote\",\"models\":[]}]");
+    unsafe { std::env::set_var("CATALOG_URL", &url) };
+    let mut config = empty_config();
+    config.registries.entries.insert(
+        "selune".into(),
+        shuvarie_config::RegistryEntry {
+            disabled: false,
+            remote_first: true,
+        },
+    );
+    let (cmd_tx, mut event_rx, handle) = run_with_config(config).await;
+    recv_skills_loaded(&mut event_rx).await;
+    unsafe { std::env::remove_var("CATALOG_URL") };
+
+    let snapshot =
+        shuvarie_core::catalog::registry_catalog(shuvarie_core::catalog::SELUNE_REGISTRY);
+    assert_eq!(
+        snapshot.remote.map(|providers| providers.len()),
+        Some(1),
+        "the hosted catalog was fetched at startup"
+    );
+
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
 /// With no summarizable span (at most the minimum tail), a manual compaction
 /// reports `nothing to compact` instead of calling the summarizer.
 #[tokio::test]

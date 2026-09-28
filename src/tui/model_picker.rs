@@ -26,6 +26,7 @@ pub enum ModelPickerMessage {
     Close,
     ToggleSource,
     RegistryLoaded {
+        registry: String,
         providers: Vec<Provider>,
     },
     ProviderModels {
@@ -343,7 +344,16 @@ impl ModelPicker {
                     None
                 }
             }
-            ModelPickerMessage::RegistryLoaded { providers } => {
+            ModelPickerMessage::RegistryLoaded {
+                registry,
+                providers,
+            } => {
+                // The picker only fetches the built-in registry; other
+                // registries' fetches (e.g. `remote-first` ones at startup)
+                // are ignored until the grouped list lands.
+                if registry != shuvarie_core::catalog::SELUNE_REGISTRY {
+                    return None;
+                }
                 self.source.on_loaded();
                 if self.source.remote {
                     self.registry = providers;
@@ -750,9 +760,29 @@ mod tests {
         );
         assert!(p.source.remote);
         p.update(ModelPickerMessage::RegistryLoaded {
+            registry: shuvarie_core::catalog::SELUNE_REGISTRY.to_string(),
             providers: vec![registry_provider("remote-co", "Remote Co", &["r-1"])],
         });
         assert!(!p.source.needs_fetch());
+    }
+
+    #[test]
+    fn foreign_registry_events_are_ignored() {
+        let mut p = picker();
+        assert_eq!(
+            p.update(ModelPickerMessage::ToggleSource),
+            Some(ModelPickerEffect::FetchRegistry)
+        );
+        let before = p.registry.len();
+        p.update(ModelPickerMessage::RegistryLoaded {
+            registry: "some-custom-registry".into(),
+            providers: vec![registry_provider("remote-co", "Remote Co", &["r-1"])],
+        });
+        assert_eq!(
+            p.registry.len(),
+            before,
+            "another registry's fetch does not refresh this picker"
+        );
     }
 
     #[test]

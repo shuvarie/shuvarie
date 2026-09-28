@@ -92,13 +92,14 @@ pub enum AppMessage {
     ConfigError {
         error: String,
     },
-    /// The on-demand hosted registry fetch (from either selector popup)
-    /// succeeded.
+    /// A registry's online fetch (from either selector popup) succeeded.
     RegistryLoaded {
+        registry: String,
         providers: Vec<selune::Provider>,
     },
-    /// The on-demand hosted registry fetch failed.
+    /// A registry's online fetch failed.
     RegistryError {
+        registry: String,
         error: String,
     },
     ModelsLoaded {
@@ -531,10 +532,16 @@ impl App {
                 }),
                 CoreEvent::ConfigSaved => Some(AppMessage::ConfigSaved),
                 CoreEvent::ConfigError { error } => Some(AppMessage::ConfigError { error }),
-                CoreEvent::RegistryLoaded { providers } => {
-                    Some(AppMessage::RegistryLoaded { providers })
+                CoreEvent::RegistryLoaded {
+                    registry,
+                    providers,
+                } => Some(AppMessage::RegistryLoaded {
+                    registry,
+                    providers,
+                }),
+                CoreEvent::RegistryError { registry, error } => {
+                    Some(AppMessage::RegistryError { registry, error })
                 }
-                CoreEvent::RegistryError { error } => Some(AppMessage::RegistryError { error }),
                 CoreEvent::SessionStarted => Some(AppMessage::SceneChanged {
                     name: self.scene_default.clone(),
                 }),
@@ -1030,7 +1037,9 @@ impl App {
                             self.close_overlay();
                         }
                         AddProviderOutcome::FetchRegistry => {
-                            self.ctx.send(shuvarie_core::Command::FetchRegistry);
+                            self.ctx.send(shuvarie_core::Command::FetchRegistry {
+                                registry: shuvarie_core::catalog::SELUNE_REGISTRY.to_string(),
+                            });
                         }
                         AddProviderOutcome::Submit {
                             kind,
@@ -1093,7 +1102,9 @@ impl App {
                                 .send(shuvarie_core::Command::SetActiveModel { model });
                         }
                         ModelPickerEffect::FetchRegistry => {
-                            self.ctx.send(shuvarie_core::Command::FetchRegistry);
+                            self.ctx.send(shuvarie_core::Command::FetchRegistry {
+                                registry: shuvarie_core::catalog::SELUNE_REGISTRY.to_string(),
+                            });
                         }
                         ModelPickerEffect::Close => {
                             if self
@@ -1222,27 +1233,37 @@ impl App {
                     form.error = Some(error);
                 }
             }
-            AppMessage::RegistryLoaded { providers } => match self.overlay {
+            AppMessage::RegistryLoaded {
+                registry,
+                providers,
+            } => match self.overlay {
                 Overlay::AddProvider => {
                     if let Some(form) = &mut self.add_provider_form {
-                        form.update(AddProviderMessage::RegistryLoaded { providers });
-                    }
-                }
-                Overlay::ModelPicker => {
-                    self.model_picker
-                        .update(ModelPickerMessage::RegistryLoaded { providers });
-                }
-                _ => {}
-            },
-            AppMessage::RegistryError { error } => match self.overlay {
-                Overlay::AddProvider => {
-                    if let Some(form) = &mut self.add_provider_form {
-                        form.update(AddProviderMessage::RegistryError {
-                            error: error.clone(),
+                        form.update(AddProviderMessage::RegistryLoaded {
+                            registry,
+                            providers,
                         });
                     }
                 }
                 Overlay::ModelPicker => {
+                    self.model_picker
+                        .update(ModelPickerMessage::RegistryLoaded {
+                            registry,
+                            providers,
+                        });
+                }
+                _ => {}
+            },
+            AppMessage::RegistryError { registry, error } => match self.overlay {
+                Overlay::AddProvider => {
+                    if let Some(form) = &mut self.add_provider_form {
+                        form.update(AddProviderMessage::RegistryError {
+                            registry,
+                            error: error.clone(),
+                        });
+                    }
+                }
+                Overlay::ModelPicker if registry == shuvarie_core::catalog::SELUNE_REGISTRY => {
                     self.model_picker.source.on_error(error);
                 }
                 _ => {}
@@ -1530,7 +1551,9 @@ impl App {
             .collect();
         let form = AddProviderForm::new(&names, &catalog_ids, self.registry);
         if form.needs_fetch() {
-            self.ctx.send(shuvarie_core::Command::FetchRegistry);
+            self.ctx.send(shuvarie_core::Command::FetchRegistry {
+                registry: shuvarie_core::catalog::SELUNE_REGISTRY.to_string(),
+            });
         }
         self.add_provider_form = Some(form);
         self.overlay = Overlay::AddProvider;
@@ -1543,7 +1566,9 @@ impl App {
         self.model_picker
             .open(&self.ctx.connections, &self.models, self.registry);
         if self.model_picker.needs_fetch() {
-            self.ctx.send(shuvarie_core::Command::FetchRegistry);
+            self.ctx.send(shuvarie_core::Command::FetchRegistry {
+                registry: shuvarie_core::catalog::SELUNE_REGISTRY.to_string(),
+            });
         }
         for provider_name in self.model_picker.pending_live_providers() {
             self.ctx

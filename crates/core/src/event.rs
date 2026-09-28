@@ -15,12 +15,18 @@ pub enum Event {
         provider_name: String,
         error: String,
     },
-    /// The hosted registry fetch (on demand) succeeded.
+    /// A registry's online fetch (on demand or `remote-first` at startup)
+    /// succeeded.
     RegistryLoaded {
+        /// The registry id (`selune` for the built-in one).
+        registry: String,
         providers: Vec<selune::Provider>,
     },
-    /// The hosted registry fetch (on demand) failed.
+    /// A registry's online fetch (on demand or `remote-first` at startup)
+    /// failed.
     RegistryError {
+        /// The registry id (`selune` for the built-in one).
+        registry: String,
         error: String,
     },
     ConfigSaved,

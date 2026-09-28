@@ -1,6 +1,11 @@
 use selune::Provider;
 use shuvarie_core::RegistryEntry;
 
+/// The built-in registry's snapshot from the core catalog.
+fn selune_catalog() -> shuvarie_core::catalog::RegistrySnapshot {
+    shuvarie_core::catalog::registry_catalog(shuvarie_core::catalog::SELUNE_REGISTRY)
+}
+
 /// The state of an on-demand remote (hosted) registry fetch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FetchState {
@@ -34,7 +39,7 @@ impl RegistrySource {
     /// snapshot is loaded yet.
     pub fn new(entry: RegistryEntry) -> Self {
         let remote = !entry.disabled && entry.remote_first;
-        let state = if remote && !shuvarie_core::catalog::remote_registry_loaded() {
+        let state = if remote && selune_catalog().remote.is_none() {
             FetchState::Fetching
         } else {
             FetchState::Idle
@@ -70,7 +75,7 @@ impl RegistrySource {
             return false;
         }
         self.remote = true;
-        if shuvarie_core::catalog::remote_registry_loaded() {
+        if selune_catalog().remote.is_some() {
             self.state = FetchState::Idle;
             false
         } else {
@@ -90,7 +95,12 @@ impl RegistrySource {
     /// The provider catalog for the active source: the remote snapshot when
     /// wanted (empty until a fetch succeeds), else the embedded one.
     pub fn snapshot(&self) -> Vec<Provider> {
-        shuvarie_core::catalog::registry_providers(self.remote)
+        let catalog = selune_catalog();
+        if self.remote {
+            catalog.remote.unwrap_or_default()
+        } else {
+            catalog.local
+        }
     }
 
     /// The human label for the active source.
