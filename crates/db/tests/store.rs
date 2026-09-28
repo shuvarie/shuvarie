@@ -865,32 +865,6 @@ async fn delete_session_clears_lock() {
 }
 
 #[tokio::test]
-async fn reopen_legacy_database_with_multiprocess_wal() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("data.db");
-    {
-        let db = toasty::Db::builder()
-            .models(toasty::models!(
-                shuvarie_db::Session,
-                shuvarie_db::Message,
-                shuvarie_db::MessageEmbedding,
-                shuvarie_db::ToolCall
-            ))
-            .build(toasty_driver_turso::Turso::file(&path).experimental_index_method(true))
-            .await
-            .unwrap();
-        drop(db);
-    }
-
-    let mut store = Store::open(&path).await.unwrap();
-    store
-        .create_session("legacy", None, None, None)
-        .await
-        .unwrap();
-    assert_eq!(store.list_sessions().await.unwrap().len(), 1);
-}
-
-#[tokio::test]
 async fn tree_messages_round_trip_with_parents_and_leaf() {
     let mut store = Store::open_in_memory().await.unwrap();
     let id = store

@@ -1,4 +1,5 @@
 pub mod dir_map;
+pub mod driver;
 pub mod error;
 pub mod model;
 pub mod session_file;
