@@ -4,8 +4,6 @@ use std::{
     sync::Arc,
 };
 
-use shuvarie_llm::{Role, TokenUsage};
-use toasty::{db::Driver, schema::db, stmt::Type};
 use crate::{
     dir_map::{SESSION_DIR_MAP_FILE, SessionDirMap},
     driver::{new_default_driver, new_default_in_memory_driver},
@@ -13,6 +11,8 @@ use crate::{
     model::*,
     session_file::{FileMessage, SessionFile, timestamp_from_millis},
 };
+use shuvarie_llm::{Role, TokenUsage};
+use toasty::{db::Driver, schema::db, stmt::Type};
 
 static MIGRATIONS: toasty::migration::MigrationSet = toasty::embed_migrations!();
 
@@ -254,8 +254,7 @@ impl Store {
     }
 
     pub async fn open_in_memory() -> Result<Self> {
-        Self::open_with_driver(new_default_in_memory_driver())
-        .await
+        Self::open_with_driver(new_default_in_memory_driver()).await
     }
 
     async fn open_with_driver(driver: impl Driver) -> Result<Self> {
@@ -303,7 +302,8 @@ impl Store {
     pub async fn open_global_in(data_dir: &Path, workspace: &Path) -> Result<Self> {
         std::fs::create_dir_all(data_dir)
             .map_err(|e| DbError::Open(format!("create dir {}: {e}", data_dir.display())))?;
-        let mut store = Self::open_with_driver(new_default_driver(data_dir.join(GLOBAL_DB_FILE))).await?;
+        let mut store =
+            Self::open_with_driver(new_default_driver(data_dir.join(GLOBAL_DB_FILE))).await?;
         let map = SessionDirMap::load(&data_dir.join(SESSION_DIR_MAP_FILE))?;
         let workspace =
             std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
