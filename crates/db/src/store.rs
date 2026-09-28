@@ -1,26 +1,27 @@
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
-use shuvarie_llm::Role;
-use shuvarie_llm::TokenUsage;
-use toasty::db::Driver;
-use toasty::schema::db;
-use toasty::stmt::Type;
-
-use crate::error::{DbError, Result};
-use crate::model::{
-    Message, MessageEmbedding, MsgRole, ReasoningSegment, Session, SessionType, TextSegment,
-    ToolCall, encode_reasoning, encode_text_segments, parse_reasoning, parse_text_segments,
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    sync::Arc,
 };
-use crate::session_file::{FileMessage, SessionFile, timestamp_from_millis};
+
+use crate::{
+    dir_map::{SESSION_DIR_MAP_FILE, SessionDirMap},
+    driver::{new_default_driver, new_default_in_memory_driver},
+    error::{DbError, Result},
+    model::*,
+    session_file::{FileMessage, SessionFile, timestamp_from_millis},
+};
+use shuvarie_llm::{Role, TokenUsage};
+use toasty::{db::Driver, schema::db, stmt::Type};
 
 static MIGRATIONS: toasty::migration::MigrationSet = toasty::embed_migrations!();
 
 pub use shuvarie_config::WORKSPACE_DIR_NAME;
 
 pub const SESSION_LOCK_TTL_MS: i64 = 30_000;
+
+/// The global store's DB file name inside the data dir.
+pub const GLOBAL_DB_FILE: &str = "data.db";
 
 pub const SESSION_LOCK_HEARTBEAT_MS: u64 = 10_000;
 
@@ -218,6 +219,19 @@ impl From<ToolCall> for StoredToolCall {
 pub struct Store {
     db: toasty::Db,
     client_id: Option<Arc<str>>,
+    /// Set only when the store is the shared global one: the data dir's
+    /// directory-session map plus this process's workspace dir. Drives the
+    /// claim/unclaim hooks and the per-dir session listing.
+    dir_map: Option<DirTracking>,
+}
+
+/// The global store's directory-session tracking: the shared
+/// `session-dir.kdl` map and the workspace directory this process runs in,
+/// captured (canonicalized) at open time.
+#[derive(Clone)]
+struct DirTracking {
+    map: SessionDirMap,
+    workspace: PathBuf,
 }
 
 impl Store {
@@ -236,17 +250,11 @@ impl Store {
                     .map_err(|e| DbError::Open(format!("write {}: {e}", gitignore.display())))?;
             }
         }
-        let driver = toasty_driver_turso::Turso::file(path)
-            .experimental_index_method(true)
-            .experimental_multiprocess_wal(true);
-        Self::open_with_driver(driver).await
+        Self::open_with_driver(new_default_driver(path)).await
     }
 
     pub async fn open_in_memory() -> Result<Self> {
-        Self::open_with_driver(
-            toasty_driver_turso::Turso::in_memory().experimental_index_method(true),
-        )
-        .await
+        Self::open_with_driver(new_default_in_memory_driver()).await
     }
 
     async fn open_with_driver(driver: impl Driver) -> Result<Self> {
@@ -267,6 +275,7 @@ impl Store {
         let mut store = Self {
             db,
             client_id: None,
+            dir_map: None,
         };
         store.ensure_session_locks().await?;
         Ok(store)
@@ -277,8 +286,139 @@ impl Store {
         self
     }
 
+    /// Opens the shared global store in the platform data dir
+    /// (`<data_dir>/data.db`): directory-session tracking is wired to
+    /// `<data_dir>/session-dir.kdl`, and the workspace dir is this process's
+    /// current directory. Unclaimed main sessions (orphans) are purged.
+    pub async fn open_global() -> Result<Self> {
+        let data_dir = shuvarie_config::data_dir()
+            .map_err(|e| DbError::Open(format!("resolve data dir: {e}")))?;
+        let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self::open_global_in(&data_dir, &workspace).await
+    }
+
+    /// [`Self::open_global`] against an explicit data dir and workspace dir,
+    /// so tests (and callers that know better) can pin both.
+    pub async fn open_global_in(data_dir: &Path, workspace: &Path) -> Result<Self> {
+        std::fs::create_dir_all(data_dir)
+            .map_err(|e| DbError::Open(format!("create dir {}: {e}", data_dir.display())))?;
+        let mut store =
+            Self::open_with_driver(new_default_driver(data_dir.join(GLOBAL_DB_FILE))).await?;
+        let map = SessionDirMap::load(&data_dir.join(SESSION_DIR_MAP_FILE))?;
+        let workspace =
+            std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+        let tracking = DirTracking { map, workspace };
+        store.purge_orphans(&tracking).await?;
+        store.dir_map = Some(tracking);
+        Ok(store)
+    }
+
+    /// The session ids claimed for this process's workspace, or `None` when
+    /// the store is not the shared global one (no filtering applies).
+    async fn workspace_sessions(&self) -> Result<Option<HashSet<uuid::Uuid>>> {
+        Ok(self.dir_map.as_ref().map(|tracking| {
+            tracking
+                .map
+                .sessions_for(&tracking.workspace)
+                .into_iter()
+                .collect()
+        }))
+    }
+
+    /// Records a freshly created main session as belonging to this process's
+    /// workspace (global store only).
+    fn claim_session(&self, id: uuid::Uuid) -> Result<()> {
+        match &self.dir_map {
+            Some(tracking) => tracking.map.claim(&tracking.workspace, id),
+            None => Ok(()),
+        }
+    }
+
+    /// Drops a deleted session's claim (global store only).
+    fn unclaim_session(&self, id: uuid::Uuid) -> Result<()> {
+        match &self.dir_map {
+            Some(tracking) => tracking.map.unclaim(id),
+            None => Ok(()),
+        }
+    }
+
+    /// Deletes every main session the directory-session map does not claim
+    /// (skipping sessions currently in use by another instance), the worker
+    /// sessions hanging off them, and the map's claims pointing at sessions
+    /// that no longer exist.
+    async fn purge_orphans(&mut self, tracking: &DirTracking) -> Result<()> {
+        let claimed = tracking.map.claimed_ids();
+        let locked = self.locked_session_ids(now_ms()).await?;
+
+        let mains = Session::filter(Session::fields().session_type().eq(SessionType::Main))
+            .exec(&mut self.db)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        let workers = Session::filter(Session::fields().session_type().eq(SessionType::Worker))
+            .exec(&mut self.db)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+
+        let main_ids: HashSet<uuid::Uuid> = mains.iter().map(|s| s.id).collect();
+        let orphan_mains: HashSet<uuid::Uuid> = mains
+            .iter()
+            .filter(|s| !claimed.contains(&s.id) && !locked.contains(&s.id))
+            .map(|s| s.id)
+            .collect();
+        let orphan_workers: HashSet<uuid::Uuid> = workers
+            .iter()
+            .filter(|w| {
+                let parent_gone = w.parent_id.is_none_or(|parent| {
+                    !main_ids.contains(&parent) || orphan_mains.contains(&parent)
+                });
+                parent_gone && !locked.contains(&w.id)
+            })
+            .map(|w| w.id)
+            .collect();
+        let orphans = orphan_mains
+            .iter()
+            .chain(orphan_workers.iter())
+            .copied()
+            .collect::<HashSet<uuid::Uuid>>();
+        for id in &orphans {
+            self.purge_session_rows(*id).await?;
+        }
+
+        // Reverse hygiene: claims pointing at sessions that no longer exist
+        // (including the ones just purged) go away, so they cannot resurrect
+        // sessions that were deleted by other means.
+        let existing: HashSet<uuid::Uuid> = mains
+            .iter()
+            .map(|s| s.id)
+            .chain(workers.iter().map(|w| w.id))
+            .filter(|id| !orphans.contains(id))
+            .collect();
+        tracking.map.prune_missing(&existing)
+    }
+
+    /// Removes every row of a purged session (its messages, tool calls and
+    /// embeddings included) — the shared store must not accumulate garbage
+    /// behind deleted session rows.
+    async fn purge_session_rows(&mut self, id: uuid::Uuid) -> Result<()> {
+        for sql in [
+            "DELETE FROM tool_calls WHERE session_id = ?1",
+            "DELETE FROM message_embeddings WHERE session_id = ?1",
+            "DELETE FROM messages WHERE session_id = ?1",
+            "DELETE FROM session_locks WHERE session_id = ?1",
+            "DELETE FROM sessions WHERE id = ?1",
+        ] {
+            toasty::sql::statement(sql)
+                .bind_typed(id.as_bytes().to_vec(), db::Type::Blob)
+                .exec(&mut self.db)
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     pub async fn list_sessions(&mut self) -> Result<Vec<SessionSummary>> {
         let locked = self.locked_session_ids(now_ms()).await?;
+        let workspace = self.workspace_sessions().await?;
         let sessions = Session::filter(Session::fields().session_type().eq(SessionType::Main))
             .latest_by(Session::fields().updated_at())
             .exec(&mut self.db)
@@ -287,6 +427,11 @@ impl Store {
 
         let mut out = Vec::with_capacity(sessions.len());
         for s in sessions {
+            if let Some(claimed) = &workspace
+                && !claimed.contains(&s.id)
+            {
+                continue;
+            }
             let count = self
                 .message_count(s.id)
                 .await
@@ -328,13 +473,17 @@ impl Store {
     }
 
     pub async fn most_recent_session(&mut self) -> Result<Option<StoredSession>> {
+        let workspace = self.workspace_sessions().await?;
         let latest = Session::filter(Session::fields().session_type().eq(SessionType::Main))
             .latest_by(Session::fields().updated_at())
-            .first()
             .exec(&mut self.db)
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
-        let Some(session) = latest else {
+        let session = match &workspace {
+            None => latest.into_iter().next(),
+            Some(claimed) => latest.into_iter().find(|s| claimed.contains(&s.id)),
+        };
+        let Some(session) = session else {
             return Ok(None);
         };
         let messages = self.messages_for_session(session.id).await?;
@@ -362,8 +511,11 @@ impl Store {
         model: Option<&str>,
         scene: Option<&str>,
     ) -> Result<uuid::Uuid> {
-        self.insert_session(title, provider, model, scene, SessionType::Main, None)
-            .await
+        let id = self
+            .insert_session(title, provider, model, scene, SessionType::Main, None)
+            .await?;
+        self.claim_session(id)?;
+        Ok(id)
     }
 
     pub async fn create_worker_session(
@@ -587,6 +739,7 @@ impl Store {
             self.delete_imported_rows(id).await;
             return Err(e);
         }
+        self.claim_session(id)?;
         Ok(id)
     }
 
@@ -855,6 +1008,7 @@ impl Store {
             .exec(&mut self.db)
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
+        self.unclaim_session(id)?;
         Ok(())
     }
 

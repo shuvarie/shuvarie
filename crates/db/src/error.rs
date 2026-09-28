@@ -12,6 +12,8 @@ pub enum DbError {
     Search(String),
     #[error("session file: {0}")]
     SessionFile(String),
+    #[error("session-dir map: {0}")]
+    Map(String),
     #[error("session {id} not found")]
     NotFound { id: uuid::Uuid },
 }

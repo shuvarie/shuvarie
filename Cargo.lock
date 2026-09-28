@@ -5799,6 +5799,7 @@ version = "0.2.2"
 dependencies = [
  "anyhow",
  "jiff",
+ "kdl",
  "selune",
  "serde",
  "serde_json",

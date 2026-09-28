@@ -21,6 +21,7 @@ pub(crate) fn from_kdl_with_sections(contents: &str) -> Result<(Config, Vec<Stri
         sections.push(node.name().value().to_string());
         match node.name().value() {
             "ui" => config.ui = parse_ui(node, contents)?,
+            "db" => config.db = parse_db(node, contents)?,
             "embedding" => config.embedding = parse_embedding(node, contents)?,
             "agent" => config.agent = parse_agent(node, contents)?,
             "lsp" => config.lsp = parse_lsp(node, contents)?,
@@ -407,6 +408,20 @@ fn parse_sidebar(input: &str, node: &KdlNode) -> Result<Option<SidebarPref>> {
             )),
         },
     }
+}
+
+fn parse_db(node: &KdlNode, input: &str) -> Result<DbConfig> {
+    let mut global_store = None;
+    for child in child_nodes(node) {
+        if child.name().value() == "global-store" {
+            set_once(input, child, &mut global_store, scalar_bool(input, child))?;
+        }
+    }
+    let mut config = DbConfig::default();
+    if let Some(value) = global_store {
+        config.global_store = value;
+    }
+    Ok(config)
 }
 
 fn parse_embedding(node: &KdlNode, input: &str) -> Result<EmbeddingConfig> {
@@ -2383,6 +2398,7 @@ pub(crate) fn to_kdl(config: &Config) -> Result<String> {
     let mut doc = KdlDocument::new();
     let sections = [
         ui_node(&config.ui),
+        db_node(&config.db),
         embedding_node(&config.embedding),
         agent_node(&config.agent),
         lsp_node(&config.lsp),
@@ -2463,6 +2479,17 @@ fn ui_node(cfg: &UiPrefs) -> Option<KdlNode> {
         children.push(title_node(&cfg.title));
     }
     section_node("ui", children)
+}
+
+/// Builds `db { … }` — the session-storage settings; omitted entirely when
+/// every field is at its default.
+fn db_node(cfg: &DbConfig) -> Option<KdlNode> {
+    let defaults = DbConfig::default();
+    let mut children = Vec::new();
+    if cfg.global_store != defaults.global_store {
+        children.push(value_node("global-store", cfg.global_store));
+    }
+    section_node("db", children)
 }
 
 /// Builds `title { … }` — the session title settings. Only called with a
