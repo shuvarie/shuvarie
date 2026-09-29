@@ -77,7 +77,7 @@ pub async fn run_tui(
     let app = App::new(
         config.ui,
         theme,
-        config.registries.selune(),
+        config.registries.clone(),
         connections,
         cmd_tx,
         initial_cols,

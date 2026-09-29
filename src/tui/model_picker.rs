@@ -12,7 +12,7 @@ use crate::tui::utils::num::fmt_scaled_number;
 
 use super::add_provider::centered_rect;
 use super::list::{render_list_item_line, scroll_offset_for};
-use super::registry::RegistrySource;
+use super::registry::{FetchState, RegistryManager, RegistryState};
 use super::search::{Search, SearchMessage, filter_indices};
 use super::theme;
 
@@ -28,6 +28,10 @@ pub enum ModelPickerMessage {
     RegistryLoaded {
         registry: String,
         providers: Vec<Provider>,
+    },
+    RegistryError {
+        registry: String,
+        error: String,
     },
     ProviderModels {
         provider_name: String,
@@ -46,7 +50,7 @@ pub enum ModelPickerEffect {
         provider: Option<String>,
         model: String,
     },
-    FetchRegistry,
+    FetchRegistries(Vec<String>),
     Close,
 }
 
@@ -88,7 +92,7 @@ pub struct ModelPicker {
     pub selected: usize,
     pub offset: usize,
     viewport_height: u16,
-    pub source: RegistrySource,
+    pub registries: RegistryManager,
     specs: Vec<ProviderSpec>,
     registry: Vec<Provider>,
     live: HashMap<String, Vec<Model>>,
@@ -103,7 +107,7 @@ impl ModelPicker {
             selected: 0,
             offset: 0,
             viewport_height: 0,
-            source: RegistrySource::new(shuvarie_core::RegistryEntry::default()),
+            registries: RegistryManager::from_config(&shuvarie_core::RegistriesConfig::default()),
             specs: Vec::new(),
             registry: Vec::new(),
             live: HashMap::new(),
@@ -115,15 +119,15 @@ impl ModelPicker {
         &mut self,
         connections: &Connections,
         live: &HashMap<String, Vec<Model>>,
-        registry: shuvarie_core::RegistryEntry,
+        registries: &shuvarie_core::RegistriesConfig,
     ) {
-        let source = RegistrySource::new(registry);
-        let snapshot = source.snapshot();
+        let registries = RegistryManager::from_config(registries);
+        let snapshot = registries.snapshot();
         self.open_with(
             snapshot,
             Self::provider_specs(connections),
             live.clone(),
-            source,
+            registries,
         );
     }
 
@@ -132,10 +136,10 @@ impl ModelPicker {
         registry: Vec<Provider>,
         specs: Vec<ProviderSpec>,
         live: HashMap<String, Vec<Model>>,
-        source: RegistrySource,
+        registries: RegistryManager,
     ) {
         self.open = true;
-        self.source = source;
+        self.registries = registries;
         self.specs = specs;
         self.live = live;
         self.registry = registry;
@@ -149,9 +153,9 @@ impl ModelPicker {
         self.search.clear();
     }
 
-    /// Whether opening should be followed by a registry fetch.
-    pub fn needs_fetch(&self) -> bool {
-        self.source.needs_fetch()
+    /// The registry ids to fetch when the picker opens.
+    pub fn ids_needing_fetch(&self) -> Vec<String> {
+        self.registries.ids_needing_fetch()
     }
 
     /// Providers whose models must be fetched live (`ListModels`): no cached
@@ -208,7 +212,7 @@ impl ModelPicker {
     }
 
     fn refresh_registry(&mut self) {
-        self.registry = self.source.snapshot();
+        self.registry = self.registries.snapshot();
         self.rebuild();
     }
 
@@ -258,7 +262,7 @@ impl ModelPicker {
     /// instead of falling through to live data.
     fn provider_model_rows(&self, spec: &ProviderSpec) -> Vec<Row> {
         if let Some(catalog_id) = &spec.catalog {
-            if self.registry.is_empty() && self.source.remote {
+            if self.registry.is_empty() && self.registries.any_fetching() {
                 return vec![Row::Status {
                     text: "loading registry…".to_string(),
                 }];
@@ -310,7 +314,7 @@ impl ModelPicker {
             return match key.code {
                 KeyCode::Char('n') => Some(ModelPickerMessage::Next),
                 KeyCode::Char('p') => Some(ModelPickerMessage::Prev),
-                KeyCode::Char('o') if self.source.can_toggle() => {
+                KeyCode::Char('o') if self.registries.can_toggle() => {
                     Some(ModelPickerMessage::ToggleSource)
                 }
                 _ => None,
@@ -337,28 +341,29 @@ impl ModelPicker {
                 Some(ModelPickerEffect::Close)
             }
             ModelPickerMessage::ToggleSource => {
-                if self.source.toggle() {
-                    Some(ModelPickerEffect::FetchRegistry)
-                } else {
+                let ids = self.registries.initiate_online();
+                if ids.is_empty() {
                     self.refresh_registry();
                     None
+                } else {
+                    Some(ModelPickerEffect::FetchRegistries(ids))
                 }
             }
             ModelPickerMessage::RegistryLoaded {
                 registry,
                 providers,
             } => {
-                // The picker only fetches the built-in registry; other
+                // Only registries this picker tracks resolve; other
                 // registries' fetches (e.g. `remote-first` ones at startup)
-                // are ignored until the grouped list lands.
-                if registry != shuvarie_core::catalog::SELUNE_REGISTRY {
-                    return None;
-                }
-                self.source.on_loaded();
-                if self.source.remote {
-                    self.registry = providers;
+                // refresh nothing here.
+                if self.registries.on_loaded(&registry, providers) {
+                    self.registry = self.registries.snapshot();
                     self.rebuild();
                 }
+                None
+            }
+            ModelPickerMessage::RegistryError { registry, error } => {
+                self.registries.on_error(&registry, error);
                 None
             }
             ModelPickerMessage::ProviderModels {
@@ -447,20 +452,24 @@ impl ModelPicker {
         let [source_area, input_area, list_area, hint_area] =
             Layout::vertical([Length(1), Length(1), Min(0), Length(1)]).areas(inner);
 
+        // The built-in registry's state stands in until the grouped list
+        // gives every registry its own header row.
+        let selune = self
+            .registries
+            .state(shuvarie_core::catalog::SELUNE_REGISTRY);
         let mut source_spans = vec![
             Span::raw("Models: ").fg(theme::text_dim()),
-            Span::raw(self.source.label()).fg(theme::accent()),
+            Span::raw(selune.map_or("offline", RegistryState::source_label)).fg(theme::accent()),
         ];
-        match self.source.state.error() {
-            Some(error) => {
+        match selune.map(|registry| &registry.state) {
+            Some(FetchState::Failed(error)) => {
                 source_spans.push(Span::raw(" — ").fg(theme::text_muted()));
-                source_spans.push(Span::raw(error.to_string()).fg(theme::error()));
+                source_spans.push(Span::raw(error.clone()).fg(theme::error()));
             }
-            None => {
-                if self.source.needs_fetch() {
-                    source_spans.push(Span::raw(" — fetching…").fg(theme::text_muted()));
-                }
+            Some(FetchState::Fetching) => {
+                source_spans.push(Span::raw(" — fetching…").fg(theme::text_muted()));
             }
+            _ => {}
         }
         frame.render_widget(Line::from(source_spans), source_area);
 
@@ -535,7 +544,7 @@ impl ModelPicker {
         } else {
             hints.push(("Enter", "select"));
         }
-        if self.source.can_toggle() {
+        if self.registries.can_toggle() {
             hints.push(("Ctrl+O", "online registry"));
         }
         hints.push(("Esc", "close"));
@@ -639,7 +648,7 @@ mod tests {
             )],
             ModelPicker::provider_specs(&connections()),
             HashMap::new(),
-            RegistrySource::new(shuvarie_core::RegistryEntry::default()),
+            RegistryManager::from_config(&shuvarie_core::RegistriesConfig::default()),
         );
         picker
     }
@@ -756,14 +765,22 @@ mod tests {
         let mut p = picker();
         assert_eq!(
             p.update(ModelPickerMessage::ToggleSource),
-            Some(ModelPickerEffect::FetchRegistry)
+            Some(ModelPickerEffect::FetchRegistries(vec![
+                shuvarie_core::catalog::SELUNE_REGISTRY.to_string()
+            ]))
         );
-        assert!(p.source.remote);
+        assert!(
+            p.registries
+                .state(shuvarie_core::catalog::SELUNE_REGISTRY)
+                .unwrap()
+                .online
+        );
         p.update(ModelPickerMessage::RegistryLoaded {
             registry: shuvarie_core::catalog::SELUNE_REGISTRY.to_string(),
             providers: vec![registry_provider("remote-co", "Remote Co", &["r-1"])],
         });
-        assert!(!p.source.needs_fetch());
+        assert!(p.ids_needing_fetch().is_empty());
+        assert_eq!(p.registry.len(), 1, "the loaded snapshot replaces the list");
     }
 
     #[test]
@@ -771,7 +788,9 @@ mod tests {
         let mut p = picker();
         assert_eq!(
             p.update(ModelPickerMessage::ToggleSource),
-            Some(ModelPickerEffect::FetchRegistry)
+            Some(ModelPickerEffect::FetchRegistries(vec![
+                shuvarie_core::catalog::SELUNE_REGISTRY.to_string()
+            ]))
         );
         let before = p.registry.len();
         p.update(ModelPickerMessage::RegistryLoaded {
@@ -803,7 +822,7 @@ mod tests {
             vec![],
             Vec::new(),
             HashMap::new(),
-            RegistrySource::new(shuvarie_core::RegistryEntry::default()),
+            RegistryManager::from_config(&shuvarie_core::RegistriesConfig::default()),
         );
         assert!(p.rows.is_empty());
         assert_eq!(p.active_default_model(), None);

@@ -9,7 +9,7 @@ use crate::tui::utils::{alt, ctrl};
 
 use super::components::InputBuffer;
 use super::list::{render_list_item, render_list_item_line, scroll_offset_for};
-use super::registry::{FetchState, RegistrySource};
+use super::registry::{FetchState, RegistryManager, RegistryState};
 use super::search::{Search, SearchMessage};
 use super::theme;
 
@@ -72,7 +72,7 @@ pub enum AddProviderMessage {
 pub enum AddProviderOutcome {
     None,
     Cancel,
-    FetchRegistry,
+    FetchRegistries(Vec<String>),
     Submit {
         kind: String,
         catalog: Option<String>,
@@ -121,7 +121,7 @@ const TRANSPORTS: [(selune::ProviderType, &str); 30] = [
 
 pub struct AddProviderForm {
     pub stage: AddProviderStage,
-    pub source: RegistrySource,
+    pub registries: RegistryManager,
     providers: Vec<Provider>,
     pub search: Search,
     pub filtered: Vec<usize>,
@@ -149,12 +149,12 @@ impl AddProviderForm {
     pub fn new(
         existing_names: &[String],
         existing_catalog_ids: &[String],
-        registry: shuvarie_core::RegistryEntry,
+        registries: &shuvarie_core::RegistriesConfig,
     ) -> Self {
-        let source = RegistrySource::new(registry);
+        let registries = RegistryManager::from_config(registries);
         Self::with_providers(
-            source.snapshot(),
-            source,
+            registries.snapshot(),
+            registries,
             existing_names,
             existing_catalog_ids,
         )
@@ -162,13 +162,13 @@ impl AddProviderForm {
 
     fn with_providers(
         providers: Vec<Provider>,
-        source: RegistrySource,
+        registries: RegistryManager,
         existing_names: &[String],
         existing_catalog_ids: &[String],
     ) -> Self {
         let mut form = Self {
             stage: AddProviderStage::Select,
-            source,
+            registries,
             providers,
             search: Search::new(),
             filtered: Vec::new(),
@@ -193,9 +193,9 @@ impl AddProviderForm {
         form
     }
 
-    /// Whether opening the form should be followed by a registry fetch.
-    pub fn needs_fetch(&self) -> bool {
-        self.source.needs_fetch()
+    /// The registry ids to fetch when the form opens.
+    pub fn ids_needing_fetch(&self) -> Vec<String> {
+        self.registries.ids_needing_fetch()
     }
 
     /// The selected select-stage row: a registry provider for indices below
@@ -327,7 +327,7 @@ impl AddProviderForm {
                     return match key.code {
                         KeyCode::Char('n') => Some(AddProviderMessage::Next),
                         KeyCode::Char('p') => Some(AddProviderMessage::Prev),
-                        KeyCode::Char('o') if self.source.can_toggle() => {
+                        KeyCode::Char('o') if self.registries.can_toggle() => {
                             Some(AddProviderMessage::ToggleSource)
                         }
                         KeyCode::Char('i') => Some(AddProviderMessage::OpenCustom),
@@ -414,35 +414,29 @@ impl AddProviderForm {
                 AddProviderStage::Select => AddProviderOutcome::Cancel,
             },
             AddProviderMessage::ToggleSource => {
-                if self.source.toggle() {
-                    AddProviderOutcome::FetchRegistry
-                } else {
+                let ids = self.registries.initiate_online();
+                if ids.is_empty() {
                     self.refresh_registry_snapshot();
                     AddProviderOutcome::None
+                } else {
+                    AddProviderOutcome::FetchRegistries(ids)
                 }
             }
             AddProviderMessage::RegistryLoaded {
                 registry,
                 providers,
             } => {
-                // The select list only fetches the built-in registry; other
-                // registries' fetches (e.g. `remote-first` ones at startup)
-                // are not ours. The grouped list replaces this in the next
-                // phase.
-                if registry != shuvarie_core::catalog::SELUNE_REGISTRY {
-                    return AddProviderOutcome::None;
-                }
-                self.source.on_loaded();
-                if self.source.remote {
-                    self.providers = providers;
+                // Only registries this popup tracks resolve; other registries'
+                // fetches (e.g. `remote-first` ones at startup) refresh
+                // nothing here.
+                if self.registries.on_loaded(&registry, providers) {
+                    self.providers = self.registries.snapshot();
                     self.refilter();
                 }
                 AddProviderOutcome::None
             }
             AddProviderMessage::RegistryError { registry, error } => {
-                if registry == shuvarie_core::catalog::SELUNE_REGISTRY {
-                    self.source.on_error(error);
-                }
+                self.registries.on_error(&registry, error);
                 AddProviderOutcome::None
             }
             AddProviderMessage::Next => match self.stage {
@@ -588,7 +582,7 @@ impl AddProviderForm {
     }
 
     fn refresh_registry_snapshot(&mut self) {
-        self.providers = self.source.snapshot();
+        self.providers = self.registries.snapshot();
         self.refilter();
     }
 
@@ -739,17 +733,24 @@ impl AddProviderForm {
     }
 
     fn source_line(&self) -> Line<'static> {
+        // The built-in registry's state stands in until the grouped list
+        // gives every registry its own header row.
+        let selune = self
+            .registries
+            .state(shuvarie_core::catalog::SELUNE_REGISTRY);
         let mut spans = vec![
             Span::raw("Registry: ").fg(theme::text_dim()),
-            Span::raw(self.source.label()).fg(theme::accent()),
+            Span::raw(selune.map_or("offline", RegistryState::source_label)).fg(theme::accent()),
         ];
-        match &self.source.state {
-            FetchState::Fetching => spans.push(Span::raw(" — fetching…").fg(theme::text_muted())),
-            FetchState::Failed(error) => {
+        match selune.map(|registry| &registry.state) {
+            Some(FetchState::Fetching) => {
+                spans.push(Span::raw(" — fetching…").fg(theme::text_muted()))
+            }
+            Some(FetchState::Failed(error)) => {
                 spans.push(Span::raw(" — ").fg(theme::text_muted()));
                 spans.push(Span::raw(error.clone()).fg(theme::error()));
             }
-            FetchState::Idle => {}
+            _ => {}
         }
         Line::from(spans)
     }
@@ -801,7 +802,7 @@ impl AddProviderForm {
             ("↑↓", "navigate"),
             ("Enter", "continue"),
         ];
-        if self.source.can_toggle() {
+        if self.registries.can_toggle() {
             hints.push(("Ctrl+O", "online registry"));
         }
         hints.push(("Ctrl+I", "custom"));
@@ -921,6 +922,7 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::registry::RegistrySeed;
     use selune::{InferenceProvider, Model as SeluneModel, ModelLimit};
     use termina::event::Modifiers;
 
@@ -960,7 +962,7 @@ mod tests {
     fn form() -> AddProviderForm {
         AddProviderForm::with_providers(
             providers(),
-            RegistrySource::new(shuvarie_core::RegistryEntry::default()),
+            RegistryManager::from_config(&shuvarie_core::RegistriesConfig::default()),
             &["Existing".to_string()],
             &[],
         )
@@ -1093,16 +1095,16 @@ mod tests {
     fn ctrl_o_is_hidden_when_registry_disabled() {
         let form = AddProviderForm::with_providers(
             vec![],
-            RegistrySource::new(shuvarie_core::RegistryEntry {
+            RegistryManager::new([RegistrySeed {
                 disabled: true,
-                remote_first: false,
-            }),
+                ..RegistrySeed::selune(shuvarie_core::RegistryEntry::default())
+            }]),
             &[],
             &[],
         );
         assert_eq!(form.filtered.len(), 0, "disabled registry lists nothing");
         assert_eq!(form.visible_len(), 1, "only the custom row");
-        assert!(!form.source.can_toggle());
+        assert!(!form.registries.can_toggle());
         assert_eq!(
             form.map_event(&key(KeyCode::Char('o'), Modifiers::CONTROL)),
             None,
@@ -1268,17 +1270,27 @@ mod tests {
     #[test]
     fn registry_loaded_refreshes_remote_snapshot() {
         let mut form = form();
-        form.source.remote = true;
-        let remote = vec![catalog_provider(
-            "remote-only",
-            "RemoteOnly",
-            selune::ProviderType::Openai,
-        )];
+        assert_eq!(
+            form.update(AddProviderMessage::ToggleSource),
+            AddProviderOutcome::FetchRegistries(vec![
+                shuvarie_core::catalog::SELUNE_REGISTRY.to_string()
+            ])
+        );
         form.update(AddProviderMessage::RegistryLoaded {
             registry: shuvarie_core::catalog::SELUNE_REGISTRY.to_string(),
-            providers: remote,
+            providers: vec![catalog_provider(
+                "remote-only",
+                "RemoteOnly",
+                selune::ProviderType::Openai,
+            )],
         });
-        assert_eq!(form.source.state, FetchState::Idle);
+        assert_eq!(
+            form.registries
+                .state(shuvarie_core::catalog::SELUNE_REGISTRY)
+                .unwrap()
+                .state,
+            FetchState::Idle
+        );
         assert_eq!(
             form.providers.len(),
             1,
@@ -1294,7 +1306,13 @@ mod tests {
             registry: shuvarie_core::catalog::SELUNE_REGISTRY.to_string(),
             providers: vec![],
         });
-        assert_eq!(form.source.state, FetchState::Idle);
+        assert_eq!(
+            form.registries
+                .state(shuvarie_core::catalog::SELUNE_REGISTRY)
+                .unwrap()
+                .state,
+            FetchState::Idle
+        );
         assert_eq!(form.providers.len(), 2, "offline snapshot untouched");
     }
 
@@ -1305,15 +1323,20 @@ mod tests {
             registry: shuvarie_core::catalog::SELUNE_REGISTRY.to_string(),
             error: "offline".into(),
         });
-        assert_eq!(form.source.state, FetchState::Failed("offline".into()));
+        assert_eq!(
+            form.registries
+                .state(shuvarie_core::catalog::SELUNE_REGISTRY)
+                .unwrap()
+                .state,
+            FetchState::Failed("offline".into())
+        );
         assert_eq!(form.providers.len(), 2, "list keeps the offline snapshot");
     }
 
     #[test]
     fn foreign_registry_events_are_ignored() {
         let mut form = form();
-        form.source.remote = true;
-        form.source.state = FetchState::Fetching;
+        form.registries.initiate_online();
         form.update(AddProviderMessage::RegistryLoaded {
             registry: "some-custom-registry".into(),
             providers: vec![catalog_provider(
@@ -1323,7 +1346,10 @@ mod tests {
             )],
         });
         assert_eq!(
-            form.source.state,
+            form.registries
+                .state(shuvarie_core::catalog::SELUNE_REGISTRY)
+                .unwrap()
+                .state,
             FetchState::Fetching,
             "another registry's fetch does not resolve this source"
         );
@@ -1334,7 +1360,10 @@ mod tests {
             error: "boom".into(),
         });
         assert_eq!(
-            form.source.state,
+            form.registries
+                .state(shuvarie_core::catalog::SELUNE_REGISTRY)
+                .unwrap()
+                .state,
             FetchState::Fetching,
             "another registry's failure does not mark this source"
         );
