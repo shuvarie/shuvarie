@@ -897,8 +897,7 @@ impl App {
                 self.ctx.send(shuvarie_core::Command::CycleVariant);
             }
             AppMessage::RequestQuit => {
-                self.confirm_quit.open();
-                self.overlay = Overlay::ConfirmQuit;
+                self.open_confirm_quit();
             }
             AppMessage::ConfirmQuit => {
                 if let Some(ConfirmQuitEffect::Confirm) =
@@ -910,7 +909,13 @@ impl App {
             }
             AppMessage::CancelQuit => {
                 self.confirm_quit.update(ConfirmQuitMessage::Cancel);
-                self.overlay = Overlay::None;
+                // The quit prompt can also open over the welcome screen, so
+                // canceling must return there instead of the bare session.
+                self.overlay = if self.welcome.open {
+                    Overlay::Welcome
+                } else {
+                    Overlay::None
+                };
             }
             AppMessage::Session(m) => {
                 let effect = self.session.update(m);
@@ -1224,6 +1229,7 @@ impl App {
                 if let Some(effect) = self.welcome.update(m) {
                     match effect {
                         WelcomeEffect::AddProvider => self.open_add_provider(),
+                        WelcomeEffect::RequestQuit => self.open_confirm_quit(),
                     }
                 }
             }
@@ -1944,6 +1950,12 @@ impl App {
         None
     }
 
+    /// Opens the quit confirmation prompt over whatever overlay is active.
+    fn open_confirm_quit(&mut self) {
+        self.confirm_quit.open();
+        self.overlay = Overlay::ConfirmQuit;
+    }
+
     fn close_overlay(&mut self) {
         self.overlay = Overlay::None;
         self.command_menu.close();
@@ -2394,6 +2406,50 @@ mod tests {
         app.update(AppMessage::RequestQuit);
         assert!(app.confirm_quit.open, "quit prompt opens");
         assert!(matches!(app.overlay, Overlay::ConfirmQuit));
+    }
+
+    #[test]
+    fn welcome_ctrl_c_opens_the_quit_prompt_and_confirming_quits() {
+        let mut app = app_with(Connections::default());
+        assert!(app.welcome.open, "welcome starts open without providers");
+        let key =
+            termina::event::KeyEvent::new(KeyCode::Char('c'), termina::event::Modifiers::CONTROL);
+        assert!(matches!(
+            app.map_event(Event::Terminal(TermEvent::Key(key))),
+            Some(AppMessage::Welcome(WelcomeMessage::RequestQuit))
+        ));
+        app.update(AppMessage::Welcome(WelcomeMessage::RequestQuit));
+        assert!(app.confirm_quit.open, "quit prompt opens over welcome");
+        assert!(matches!(app.overlay, Overlay::ConfirmQuit));
+
+        // The second Ctrl+C is routed by the confirm prompt itself.
+        assert!(matches!(
+            app.map_event(Event::Terminal(TermEvent::Key(key))),
+            Some(AppMessage::ConfirmQuit)
+        ));
+        assert!(matches!(
+            app.update(AppMessage::ConfirmQuit),
+            Some(AppEffect::Quit)
+        ));
+    }
+
+    #[test]
+    fn canceling_the_quit_prompt_restores_the_previous_screen() {
+        let mut app = app_with(Connections::default());
+        app.update(AppMessage::Welcome(WelcomeMessage::RequestQuit));
+        assert!(matches!(app.overlay, Overlay::ConfirmQuit));
+
+        app.update(AppMessage::CancelQuit);
+        assert!(!app.confirm_quit.open, "cancel closes the prompt");
+        assert!(app.welcome.open);
+        assert!(matches!(app.overlay, Overlay::Welcome));
+
+        // Outside the welcome screen, cancel still returns to the session.
+        let mut app = app_with(connected());
+        active_session(&mut app);
+        app.update(AppMessage::RequestQuit);
+        app.update(AppMessage::CancelQuit);
+        assert!(matches!(app.overlay, Overlay::None));
     }
 
     #[tokio::test]
