@@ -1,9 +1,111 @@
+use std::path::Path;
+
 use shuvarie_db::{
     LockAcquire, ReasoningSegment, SESSION_LOCK_TTL_MS, Store, StoredScroll, StoredSession,
     WORKSPACE_DIR_NAME,
 };
 use shuvarie_llm::Role;
 use shuvarie_llm::TokenUsage;
+
+fn aux_file(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut os = path.as_os_str().to_owned();
+    os.push(suffix);
+    std::path::PathBuf::from(os)
+}
+// Regression for open failures like:
+//
+//     I/O error: short read on WAL frame at offset N: expected 4096 bytes, got 0
+//
+// (tursodatabase/turso#8536, engine turso_core 0.7.2): with the
+// multiprocess-WAL driver the durable `-tshm` authority is trusted at open, so
+// the engine skips the WAL disk scan and fails reading frames the `-wal` file
+// no longer holds. The failure only manifests once the WAL outgrows the
+// authority's first frame-index generation (measured: up to ~208 frames open
+// fine after truncation, ~483 already brick the open), so the setup below
+// builds a ~900-page WAL exactly like the upstream reproduction. A plain
+// reopen cannot recover on its own; `Store::open` must: drop the stale
+// `-tshm` first so the engine falls back to a WAL disk scan (recovering
+// whatever still validates on disk), then drop `-wal` itself as a last
+// resort, falling back to the last checkpointed main file.
+// Revisit this test when the engine is bumped past the affected version.
+#[tokio::test]
+async fn open_recovers_from_truncated_wal() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.db");
+
+    // Build a WAL large enough that the trusted `-tshm` authority trips the
+    // bug once the log disappears. Raw SQL keeps this deterministic.
+    {
+        let db = turso::Builder::new_local(path.to_str().unwrap())
+            .experimental_index_method(true)
+            .experimental_multiprocess_wal(true)
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, blob BLOB)", ())
+            .await
+            .unwrap();
+        for _ in 0..900 {
+            conn.execute("INSERT INTO t (blob) VALUES (randomblob(4096))", ())
+                .await
+                .unwrap();
+        }
+        drop(conn);
+        drop(db);
+    }
+
+    let wal = aux_file(&path, "-wal");
+    let tshm = aux_file(&path, "-tshm");
+    assert!(
+        tshm.exists(),
+        "multiprocess-WAL driver must keep a durable -tshm authority"
+    );
+    assert!(
+        wal.metadata().map(|m| m.len()).unwrap_or(0) > 900 * 4096,
+        "the scenario needs a WAL spanning more than one authority index generation"
+    );
+
+    // Mirror the incident: the log the trusted authority still claims frames
+    // in is gone (crash, stale second opener, disk full, ...).
+    std::fs::File::options()
+        .write(true)
+        .open(&wal)
+        .unwrap()
+        .set_len(0)
+        .unwrap();
+
+    // Pre-recovery behavior of the exact engine configuration the store uses:
+    // the trusted -tshm authority skips the disk scan and the open fails with
+    // the WAL short-read error.
+    let err = turso::Builder::new_local(path.to_str().unwrap())
+        .experimental_index_method(true)
+        .experimental_multiprocess_wal(true)
+        .build()
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("short read on WAL frame"),
+        "expected the turso#8536 open failure, got: {err}"
+    );
+
+    // The recovery ladder must restore an openable, usable store.
+    let mut store = Store::open(&path).await.unwrap();
+    let id = store
+        .create_session("after recovery", None, None, None)
+        .await
+        .unwrap();
+    store
+        .append_message(id, None, Role::User, "hello again")
+        .await
+        .unwrap();
+    let list = store.list_sessions().await.unwrap();
+    assert!(list.iter().any(|s| s.title == "after recovery"));
+
+    // Steady state: a subsequent reopen must succeed without further fuss.
+    drop(store);
+    Store::open(&path).await.unwrap();
+}
 
 #[tokio::test]
 async fn open_seeds_gitignore_when_creating_workspace_dir() {

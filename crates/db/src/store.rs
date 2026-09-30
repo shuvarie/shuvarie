@@ -25,6 +25,18 @@ pub const GLOBAL_DB_FILE: &str = "data.db";
 
 pub const SESSION_LOCK_HEARTBEAT_MS: u64 = 10_000;
 
+/// Marker within a [`DbError::Open`] message for the failure Turso reports
+/// when the multiprocess-WAL authority file (`-tshm`) claims WAL frames the
+/// `-wal` file no longer holds (tursodatabase/turso#8536).
+const WAL_SHORT_READ_ERROR: &str = "short read on WAL frame";
+
+/// File suffix of Turso's multiprocess-WAL coordination map, created next to
+/// the database file when the driver enables `experimental_multiprocess_wal`.
+const TSHM_SUFFIX: &str = "-tshm";
+
+/// File suffix of the write-ahead log next to the database file.
+const WAL_SUFFIX: &str = "-wal";
+
 /// The `sessions.leaf_id` value marking a deliberately cleared (empty) active
 /// path: forking before the root prompt stores it, and loading treats it as
 /// "the path is empty". A `NULL` leaf, by contrast, only occurs in legacy rows
@@ -250,11 +262,46 @@ impl Store {
                     .map_err(|e| DbError::Open(format!("write {}: {e}", gitignore.display())))?;
             }
         }
-        Self::open_with_driver(new_default_driver(path)).await
+        Self::open_turso(path).await
     }
 
     pub async fn open_in_memory() -> Result<Self> {
         Self::open_with_driver(new_default_in_memory_driver()).await
+    }
+
+    /// Opens the store from a file-backed Turso driver, recovering from a
+    /// stale multiprocess-WAL auxiliary file set when open fails with a WAL
+    /// short read.
+    async fn open_turso(path: &Path) -> Result<Self> {
+        match Self::open_with_driver(new_default_driver(path)).await {
+            Ok(store) => Ok(store),
+            Err(err) if is_wal_short_read(&err) => Self::open_turso_recovering(path).await,
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Recovery ladder for the stale multiprocess-WAL authority (see
+    /// [`WAL_SHORT_READ_ERROR`]):
+    ///
+    /// 1. Drop only the stale `-tshm` coordination map. The next open then
+    ///    falls back to the engine's own WAL disk scan, which rebuilds the
+    ///    snapshot from the file and stops at the last valid commit frame —
+    ///    whatever remains valid in `-wal` is still recovered.
+    /// 2. If open still fails with a WAL short read, the `-wal` file itself is
+    ///    unusable (truncated, headerless, or salt-mismatched): drop it too and
+    ///    reopen, falling back to the last checkpointed main file. This loses
+    ///    only the uncheckpointed tail that was already unreadable.
+    async fn open_turso_recovering(path: &Path) -> Result<Self> {
+        remove_wal_aux_file(path, TSHM_SUFFIX);
+        match Self::open_with_driver(new_default_driver(path)).await {
+            Ok(store) => Ok(store),
+            Err(err) if is_wal_short_read(&err) => {
+                remove_wal_aux_file(path, WAL_SUFFIX);
+                remove_wal_aux_file(path, TSHM_SUFFIX);
+                Self::open_with_driver(new_default_driver(path)).await
+            }
+            Err(err) => Err(err),
+        }
     }
 
     async fn open_with_driver(driver: impl Driver) -> Result<Self> {
@@ -302,8 +349,7 @@ impl Store {
     pub async fn open_global_in(data_dir: &Path, workspace: &Path) -> Result<Self> {
         std::fs::create_dir_all(data_dir)
             .map_err(|e| DbError::Open(format!("create dir {}: {e}", data_dir.display())))?;
-        let mut store =
-            Self::open_with_driver(new_default_driver(data_dir.join(GLOBAL_DB_FILE))).await?;
+        let mut store = Self::open_turso(&data_dir.join(GLOBAL_DB_FILE)).await?;
         let map = SessionDirMap::load(&data_dir.join(SESSION_DIR_MAP_FILE))?;
         let workspace =
             std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
@@ -1568,6 +1614,25 @@ fn scroll_of(session: &Session) -> StoredScroll {
 
 fn now_ms() -> i64 {
     jiff::Timestamp::now().as_millisecond()
+}
+
+/// Whether an open failure is the WAL-short-read corruption
+/// ([`WAL_SHORT_READ_ERROR`]): the `-tshm` multiprocess-WAL authority claims
+/// frames the `-wal` file no longer holds, so engine-side WAL recovery alone
+/// cannot open the database.
+fn is_wal_short_read(err: &DbError) -> bool {
+    matches!(err, DbError::Open(msg) if msg.contains(WAL_SHORT_READ_ERROR))
+}
+
+/// Deletes the auxiliary file `<db><suffix>` (e.g. `data.db-tshm`) if it
+/// exists. The main database file itself is never touched.
+fn remove_wal_aux_file(path: &Path, suffix: &str) {
+    let mut aux = path.as_os_str().to_owned();
+    aux.push(suffix);
+    // Best effort: a missing file is fine (nothing to delete), and any real
+    // failure (e.g. permissions) is ignored — the retry below then fails and
+    // the original open error is surfaced to the caller.
+    let _ = std::fs::remove_file(&aux);
 }
 
 fn f32_blob(values: &[f32]) -> Vec<u8> {
