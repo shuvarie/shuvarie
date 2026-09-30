@@ -2915,6 +2915,7 @@ async fn stream_stream_to_events(
                 name,
                 args,
                 worker,
+                spawn,
                 call_id,
             } => {
                 let is_main = worker.is_none();
@@ -2967,6 +2968,7 @@ async fn stream_stream_to_events(
                         name,
                         args,
                         worker,
+                        spawn,
                         call_id,
                     })
                     .await;
@@ -2979,6 +2981,7 @@ async fn stream_stream_to_events(
                 output,
                 ok,
                 worker,
+                spawn,
                 file_change,
                 streams,
                 call_id,
@@ -3059,6 +3062,7 @@ async fn stream_stream_to_events(
                         ok,
                         output,
                         worker,
+                        spawn,
                         file_change,
                         streams,
                         duration_ms,
@@ -3092,6 +3096,10 @@ async fn stream_stream_to_events(
                 name,
                 output,
                 ok,
+                // The spawn id rides on the streamed inner items (ToolStart
+                // / ToolResult), which is where the UI labels activity; the
+                // worker block itself always pairs by call id.
+                spawn: _,
                 call_id,
             } => {
                 let duration_ms = pending_worker_starts

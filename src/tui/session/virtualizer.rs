@@ -732,6 +732,7 @@ mod tests {
                     r#"{"command":"ls"}"#.to_string(),
                     None,
                     None,
+                    None,
                 ))),
                 Block::Reasoning(ReasoningBlock::new("thinking hard")),
             ],

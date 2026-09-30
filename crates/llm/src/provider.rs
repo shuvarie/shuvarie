@@ -588,7 +588,7 @@ impl ProviderClient {
             .collect();
         let (early_tx, early_rx) = tokio::sync::mpsc::channel(64);
         let file_hook =
-            FileChangeHook::new().with_early_finish(worker_names.clone(), None, early_tx);
+            FileChangeHook::new().with_early_finish(worker_names.clone(), None, None, early_tx);
         receivers.push(early_rx);
 
         match &self.list {
@@ -1123,6 +1123,7 @@ where
     let file_hook = FileChangeHook::new().with_early_finish(
         std::collections::HashSet::new(),
         Some(req.name.clone()),
+        Some(req.spawn),
         activity_tx.clone(),
     );
     let agent = agent_with_tools(
@@ -1137,6 +1138,7 @@ where
     run_worker_agent(
         agent,
         &req.name,
+        req.spawn,
         user_msg,
         activity_tx,
         usage,
@@ -1180,7 +1182,7 @@ where
         file_hook.clone(),
     );
     // `tool_concurrency` caps how many tools run at once within an assistant
-    // message — a batch of worker spawns in a council scene convenes in
+    // message — a batch of worker briefs in an orchestration scene spawns in
     // parallel; sequential (`1`) stays the unset default. Streamed output
     // ordering is preserved either way.
     let stream = agent
@@ -1220,9 +1222,11 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_worker_agent(
     agent: rig_agent::agent::Agent,
     name: &str,
+    spawn: u64,
     prompt: rig_core::message::Message,
     activity_tx: tokio::sync::mpsc::Sender<StreamItem>,
     usage: std::sync::Arc<std::sync::Mutex<crate::TokenUsage>>,
@@ -1259,6 +1263,7 @@ async fn run_worker_agent(
                         name: tool_call.function.name,
                         args: tool_call.function.arguments,
                         worker: Some(name.to_string()),
+                        spawn: Some(spawn),
                         call_id: internal_call_id,
                     })
                     .await;
@@ -1291,6 +1296,7 @@ async fn run_worker_agent(
                         output,
                         ok,
                         worker: Some(name.to_string()),
+                        spawn: Some(spawn),
                         file_change: captured.file_change,
                         streams: captured.shell,
                         call_id: internal_call_id,
@@ -1400,6 +1406,7 @@ fn map_agent_stream(
                     name,
                     args: tool_call.function.arguments,
                     worker: None,
+                    spawn: None,
                     call_id: internal_call_id,
                 }
             }
@@ -1440,6 +1447,7 @@ fn map_agent_stream(
                     output,
                     ok,
                     worker: None,
+                    spawn: captured.spawn,
                     file_change: captured.file_change,
                     streams: captured.shell,
                     call_id: internal_call_id,
@@ -1448,6 +1456,7 @@ fn map_agent_stream(
                     name: pending_workers.pop_front().unwrap_or_default(),
                     output,
                     ok,
+                    spawn: captured.spawn,
                     call_id: internal_call_id,
                 },
             }
@@ -1582,6 +1591,7 @@ mod tests {
                 name: "read_file".into(),
                 args: json!({ "path": "x.rs" }),
                 worker: Some("explore_workspace".into()),
+                spawn: Some(1),
                 call_id: "w1".into(),
             },
             StreamItem::ToolResult {
@@ -1589,6 +1599,7 @@ mod tests {
                 output: "ok".into(),
                 ok: true,
                 worker: Some("explore_workspace".into()),
+                spawn: Some(1),
                 file_change: None,
                 streams: None,
                 call_id: "w1".into(),
@@ -1626,6 +1637,7 @@ mod tests {
             output: "found".into(),
             ok: true,
             worker: Some("explore_workspace".into()),
+            spawn: Some(1),
             file_change: None,
             streams: None,
             call_id: "w2".into(),
@@ -1908,7 +1920,7 @@ mod tests {
         ) -> StreamStream {
             let (early_tx, early_rx) = tokio::sync::mpsc::channel(16);
             let file_hook =
-                FileChangeHook::new().with_early_finish(worker_names.clone(), None, early_tx);
+                FileChangeHook::new().with_early_finish(worker_names.clone(), None, None, early_tx);
             let agent = AgentBuilder::new(model)
                 .dynamic_tools(tools)
                 .add_hook(file_hook.clone())
@@ -2095,6 +2107,7 @@ mod tests {
             let file_hook = FileChangeHook::new().with_early_finish(
                 HashSet::new(),
                 Some("run_tests".to_string()),
+                Some(7),
                 activity_tx.clone(),
             );
             let agent = AgentBuilder::new(batch_model("controlled"))
@@ -2105,6 +2118,7 @@ mod tests {
             let runner = tokio::spawn(run_worker_agent(
                 agent,
                 "run_tests",
+                7,
                 rig_core::message::Message::user("task"),
                 activity_tx,
                 usage,

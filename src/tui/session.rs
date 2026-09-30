@@ -1523,6 +1523,7 @@ mod tests {
             ok: true,
             output: output.into(),
             worker: None,
+            spawn: None,
             file_change: None,
             streams: None,
             duration_ms: 0,
@@ -2006,6 +2007,7 @@ mod tests {
             name: "read_file".into(),
             args: serde_json::json!({}),
             worker: None,
+            spawn: None,
             call_id: None,
         }));
         assert!(screen.is_busy());

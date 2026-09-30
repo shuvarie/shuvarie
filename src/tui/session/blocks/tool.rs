@@ -50,7 +50,11 @@ pub enum ToolMessage {
 /// rows, optional diff review, and LSP diagnostics. Owns its own collapse
 /// state (`question` blocks default to expanded once finished). `call_id` is
 /// the provider's per-call id (empty for persisted records) — finishes match
-/// their block by it when a model batches several calls of one tool.
+/// their block by it when a model batches several calls of one tool. `spawn`
+/// is the worker run the call happened inside (`None` for main-agent calls
+/// and persisted records): with one worker spawned several times at once,
+/// its parallel runs' activity carries distinct ids the header badges them
+/// with.
 pub struct ToolBlock {
     name: String,
     args: String,
@@ -61,6 +65,7 @@ pub struct ToolBlock {
     stderr: String,
     expanded: bool,
     worker: Option<String>,
+    spawn: Option<u64>,
     file_change: Option<FileChange>,
     started_at: Option<Instant>,
     duration_ms: u64,
@@ -88,6 +93,7 @@ impl ToolBlock {
         name: impl Into<String>,
         args: String,
         worker: Option<String>,
+        spawn: Option<u64>,
         call_id: Option<String>,
     ) -> Self {
         Self {
@@ -100,6 +106,7 @@ impl ToolBlock {
             stderr: String::new(),
             expanded: false,
             worker,
+            spawn,
             file_change: None,
             started_at: Some(Instant::now()),
             duration_ms: 0,
@@ -124,6 +131,7 @@ impl ToolBlock {
             stderr: record.stderr.clone(),
             expanded: false,
             worker: record.worker.clone(),
+            spawn: None,
             file_change: record.file_change.clone(),
             started_at: None,
             duration_ms: record.duration_ms,
@@ -139,8 +147,19 @@ impl ToolBlock {
             .get_or_init(|| serde_json::from_str(&self.args).unwrap_or(Value::Null))
     }
 
-    pub fn matches(&self, name: &str, worker: &Option<String>) -> bool {
-        self.name == name && self.worker == *worker
+    /// The name-worker-spawn fallback match: a block carrying a spawn id
+    /// only falls back to events of the same spawn, so concurrent runs of
+    /// one worker never cross-match; spawn-less blocks (main agent,
+    /// persisted records) keep the plain name+worker match.
+    pub fn matches(&self, name: &str, worker: &Option<String>, event_spawn: Option<u64>) -> bool {
+        if self.name != name || self.worker != *worker {
+            return false;
+        }
+        match (self.spawn, event_spawn) {
+            (Some(own), Some(spawn)) => own == spawn,
+            (Some(_), None) => false,
+            _ => true,
+        }
     }
 
     /// The provider call id this block was started with, if any.
@@ -526,6 +545,9 @@ impl ToolBlock {
                     }
                 }
             }
+        }
+        if let Some(spawn) = self.spawn {
+            header.push(Span::raw(format!(" · spawn {spawn}")).fg(theme::text_muted()));
         }
         Line::from(header)
     }
@@ -1030,7 +1052,7 @@ mod tests {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
         };
-        let mut block = ToolBlock::new("run_shell", r#"{"command":"ls"}"#.into(), None, None);
+        let mut block = ToolBlock::new("run_shell", r#"{"command":"ls"}"#.into(), None, None, None);
         let first = block.cached_body(80, &env);
         let again = block.cached_body(80, &env);
         assert!(
@@ -1072,7 +1094,7 @@ mod tests {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
         };
-        let mut block = ToolBlock::new("run_shell", r#"{"command":"ls"}"#.into(), None, None);
+        let mut block = ToolBlock::new("run_shell", r#"{"command":"ls"}"#.into(), None, None, None);
         let est = block.est();
         assert_eq!(
             est,
@@ -1101,6 +1123,7 @@ mod tests {
         let mut block = ToolBlock::new(
             "edit_file",
             r#"{"path":"src/main.rs"}"#.to_string(),
+            None,
             None,
             None,
         );
@@ -1174,7 +1197,13 @@ mod tests {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
         };
-        let block = ToolBlock::new("run_shell", r#"{"command":"ls"}"#.to_string(), None, None);
+        let block = ToolBlock::new(
+            "run_shell",
+            r#"{"command":"ls"}"#.to_string(),
+            None,
+            None,
+            None,
+        );
         let text = block_text(&block, &env);
         assert!(text.contains("Elapsed "), "header/body: {text}");
         assert!(!text.contains("Took "));
@@ -1186,7 +1215,13 @@ mod tests {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
         };
-        let mut block = ToolBlock::new("run_shell", r#"{"command":"ls"}"#.to_string(), None, None);
+        let mut block = ToolBlock::new(
+            "run_shell",
+            r#"{"command":"ls"}"#.to_string(),
+            None,
+            None,
+            None,
+        );
         block.update(ToolMessage::Finish {
             ok: true,
             output: "done".to_string(),
@@ -1292,7 +1327,7 @@ mod tests {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
         };
-        let mut block = ToolBlock::new("grep", r#"{"pattern":"x"}"#.to_string(), None, None);
+        let mut block = ToolBlock::new("grep", r#"{"pattern":"x"}"#.to_string(), None, None, None);
         assert_eq!(block.est().tool_rows, 0);
         let running = block_text(&block, &env);
         assert!(
@@ -1325,6 +1360,7 @@ mod tests {
             "explore_workspace",
             r#"{"task":"find the config loader"}"#.to_string(),
             Some(String::new()),
+            None,
             None,
         );
         assert_eq!(block.est().tool_rows, 1);
@@ -1361,6 +1397,7 @@ mod tests {
         let mut block = ToolBlock::new(
             "todo",
             r#"{"op":"add","text":"update UI"}"#.to_string(),
+            None,
             None,
             None,
         );
@@ -1423,6 +1460,7 @@ mod tests {
             r#"{"op":"update","id":9,"status":"done"}"#.to_string(),
             None,
             None,
+            None,
         );
         block.update(ToolMessage::Finish {
             ok: false,
@@ -1444,6 +1482,7 @@ mod tests {
         let mut block = ToolBlock::new(
             "read_file",
             r#"{"path":"src/main.rs"}"#.to_string(),
+            None,
             None,
             None,
         );
@@ -1481,6 +1520,7 @@ mod tests {
                 format!(r#"{{"path":"{path}","extra":"ignore me"}}"#),
                 None,
                 None,
+                None,
             );
             block.update(ToolMessage::Finish {
                 ok: true,
@@ -1509,6 +1549,7 @@ mod tests {
             r#"{"patch":"*** Begin Patch\n*** Add File: new.txt\n+hi\n*** End Patch"}"#.to_string(),
             None,
             None,
+            None,
         );
         block.update(ToolMessage::Finish {
             ok: true,
@@ -1533,6 +1574,7 @@ mod tests {
             r#"{"path":"src/main.rs"}"#.to_string(),
             None,
             None,
+            None,
         );
         block.update(ToolMessage::Finish {
             ok: true,
@@ -1553,7 +1595,13 @@ mod tests {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
         };
-        let mut block = ToolBlock::new("list_dir", r#"{"path":"crates"}"#.to_string(), None, None);
+        let mut block = ToolBlock::new(
+            "list_dir",
+            r#"{"path":"crates"}"#.to_string(),
+            None,
+            None,
+            None,
+        );
         block.update(ToolMessage::Finish {
             ok: true,
             output: "core/\nllm/\nmain.rs".to_string(),
@@ -1574,7 +1622,13 @@ mod tests {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
         };
-        let mut block = ToolBlock::new("skill", r#"{"skill":"tokio"}"#.to_string(), None, None);
+        let mut block = ToolBlock::new(
+            "skill",
+            r#"{"skill":"tokio"}"#.to_string(),
+            None,
+            None,
+            None,
+        );
         block.update(ToolMessage::Finish {
             ok: true,
             output: "# Tokio\nYou are an expert in async runtime internals.".to_string(),
@@ -1603,6 +1657,7 @@ mod tests {
             r#"{"path":"src/main.rs"}"#.to_string(),
             None,
             None,
+            None,
         );
         block.update(ToolMessage::Finish {
             ok: false,
@@ -1629,7 +1684,7 @@ mod tests {
     }
 
     fn finished_block(name: &str, args: &str, output: String) -> ToolBlock {
-        let mut block = ToolBlock::new(name, args.to_string(), None, None);
+        let mut block = ToolBlock::new(name, args.to_string(), None, None, None);
         block.update(ToolMessage::Finish {
             ok: true,
             output,
@@ -1709,8 +1764,13 @@ mod tests {
             .map(|i| format!("fn generated_{i}() {{}}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let mut block =
-            ToolBlock::new("write_file", r#"{"path":"gen.rs"}"#.to_string(), None, None);
+        let mut block = ToolBlock::new(
+            "write_file",
+            r#"{"path":"gen.rs"}"#.to_string(),
+            None,
+            None,
+            None,
+        );
         block.update(ToolMessage::Finish {
             ok: true,
             output: String::new(),
@@ -1753,6 +1813,7 @@ mod tests {
             r#"{"path":"old.txt"}"#.to_string(),
             None,
             None,
+            None,
         );
         block.update(ToolMessage::Finish {
             ok: true,
@@ -1790,7 +1851,13 @@ mod tests {
                 edits: Vec::new(),
             })
             .collect();
-        let mut block = ToolBlock::new("edit_file", r#"{"path":"a.rs"}"#.to_string(), None, None);
+        let mut block = ToolBlock::new(
+            "edit_file",
+            r#"{"path":"a.rs"}"#.to_string(),
+            None,
+            None,
+            None,
+        );
         block.update(ToolMessage::Finish {
             ok: true,
             output: String::new(),
@@ -1826,7 +1893,13 @@ mod tests {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
         };
-        let mut block = ToolBlock::new("run_shell", r#"{"command":"ls"}"#.to_string(), None, None);
+        let mut block = ToolBlock::new(
+            "run_shell",
+            r#"{"command":"ls"}"#.to_string(),
+            None,
+            None,
+            None,
+        );
         block.update(ToolMessage::Finish {
             ok: false,
             output: "exit 1:\n".to_string() + &big_output(300),

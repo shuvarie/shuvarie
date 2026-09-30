@@ -52,6 +52,10 @@ pub enum Event {
         name: String,
         args: serde_json::Value,
         worker: Option<String>,
+        /// The spawn id of the worker run the call happened inside (`None`
+        /// for main-agent calls): parallel spawns of one worker each carry
+        /// their own id, so the UI can keep their activity apart.
+        spawn: Option<u64>,
         call_id: String,
     },
     ToolFinished {
@@ -59,6 +63,9 @@ pub enum Event {
         ok: bool,
         output: String,
         worker: Option<String>,
+        /// The spawn id of the worker run the call happened inside (`None`
+        /// for main-agent calls.
+        spawn: Option<u64>,
         file_change: Option<FileChange>,
         streams: Option<ShellStreams>,
         duration_ms: u64,

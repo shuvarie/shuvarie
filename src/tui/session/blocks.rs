@@ -161,8 +161,8 @@ impl Block {
         matches!(self, Block::Text(_))
     }
 
-    pub fn tool_matches(&self, name: &str, worker: &Option<String>) -> bool {
-        matches!(self, Block::Tool(tool) if tool.matches(name, worker))
+    pub fn tool_matches(&self, name: &str, worker: &Option<String>, spawn: Option<u64>) -> bool {
+        matches!(self, Block::Tool(tool) if tool.matches(name, worker, spawn))
     }
 
     pub fn tool_call_id(&self) -> Option<&str> {

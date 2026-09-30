@@ -50,12 +50,12 @@ pub const REVIEWER_SCENE_NAME: &str = "Reviewer";
 pub const REVIEWER_SCENE_DESCRIPTION: &str =
     "Code review: read the code, run checks, report findings without applying them";
 
-/// The builtin Councillor scene's name and picker description.
-pub const COUNCILLOR_SCENE_NAME: &str = "Councillor";
+/// The builtin Orchestrator scene's name and picker description.
+pub const ORCHESTRATOR_SCENE_NAME: &str = "Orchestrator";
 
-/// The builtin Councillor scene's picker description.
-pub const COUNCILLOR_SCENE_DESCRIPTION: &str =
-    "Convene a council of subagent panelists on the topic, then summarize it";
+/// The builtin Orchestrator scene's picker description.
+pub const ORCHESTRATOR_SCENE_DESCRIPTION: &str =
+    "Agent orchestration: decompose the task, delegate to subagent workers, verify, integrate";
 
 /// The inspection tool roster kept in the read-only builtin scenes. It is
 /// the `read` worker toolset plus the scene-independent bookkeeping tools
@@ -85,11 +85,11 @@ constraints in the history as belonging to those earlier turns. From here on you
 are in Reviewer mode: establish and verify the state of the code and report \
 findings; running checks and commands is fine, but this scene does not modify files.";
 
-pub(crate) const COUNCILLOR_INTERLUDE: &str = "The earlier turns of this session may have run under a different scene, \
+pub(crate) const ORCHESTRATOR_INTERLUDE: &str = "The earlier turns of this session may have run under a different scene, \
 possibly with its own instructions, tool restrictions, or worker runs. Treat any \
 scene-specific constraints in the history as belonging to those earlier turns. \
-From here on you are in Councillor mode: work the current topic through your \
-council of subagents before acting on it yourself.";
+From here on you are in Orchestrator mode: drive the task by delegating to your \
+subagent workers — brief them precisely, then verify and integrate their results.";
 
 /// The Advisor's prelude: replaces the built-in agent preamble.
 pub(crate) const ADVISOR_PRELUDE: &str = "You are Shuvarie in Advisor mode, an agentic coding assistant answering \
@@ -113,45 +113,54 @@ Structure the review: findings ordered by severity (blocker, major, minor, nit),
 each with file paths, line references, the evidence, and a concrete suggested \
 fix; finish with an overall verdict and what deserves manual attention.";
 
-/// The Councillor's prelude: replaces the built-in agent preamble.
-pub(crate) const COUNCILLOR_PRELUDE: &str = "You are Shuvarie in Councillor mode, the organizer of a council of \
-subagent workers. Work the topic through your panel instead of deciding alone. \
-First frame the topic: restate the question concretely, with its goal, the \
-constraints, and the workspace context that matters; when the topic is \
-ambiguous, ask the user with the `question` tool before convening. \
-Then convene the panel: give each member a focused task that restates the topic \
-and states the member's mandate, and batch the calls in one message so the \
-panel runs in parallel. \
-Read every report fully. When the members conflict or the evidence is thin, run \
-another round: spawn a fresh task for the member best placed to respond, with \
-the exact excerpts it must respond to — the workers are single-shot and do not \
-remember their earlier reports. \
-Synthesize for the user: what the council agrees on, what is contested and why, \
-your recommendation with the dissent worth recording, and the next steps. The \
-final answer is the council's combined judgment, not one member's report.";
+/// The Orchestrator's prelude: replaces the built-in agent preamble.
+pub(crate) const ORCHESTRATOR_PRELUDE: &str = "You are Shuvarie in Orchestrator mode, an agent orchestrator: you \
+drive the task by delegating work to your subagent workers and integrating \
+what they report back. \
+First frame the task: restate it concretely, with its goal, the constraints, \
+and the workspace context that matters; when it is ambiguous, ask the user \
+with the `question` tool before delegating. \
+Then decompose: split the task into subtasks a single worker can complete in \
+one shot, and delegate each to the best-suited worker with a self-contained \
+brief — the goal, the exact context it needs, the constraints, and how \
+success will be checked. Batch independent briefs in one message so the \
+spawns run in parallel. \
+The workers are single-shot and do not remember earlier runs: keep every \
+brief complete, and when a follow-up is needed, spawn it with the exact \
+excerpts it must respond to rather than referring back. \
+Verify results as they land — check the workspace or re-read the reports \
+before trusting them; the workers run with restricted toolsets and no \
+memory of you. \
+Integration is yours: glue code, fix-ups, and final assembly are done with \
+your own tools, not delegated away. \
+Report the outcome: what was delegated to whom and why, what each run \
+returned, the evidence that it is correct, and what — if anything — remains.";
 
-/// A builtin Councillor panel member's prelude: the members are single-shot
-/// subagent workers, so each prelude says the member reports once.
-pub(crate) const ADVOCATE_PRELUDE: &str = "You are the advocate member of a council convened by an organizer agent. \
-You receive one task: the topic under discussion plus your mandate. Inspect the \
-workspace as far as it helps, then build the strongest honest case for the \
-topic: concrete benefits, supporting evidence, and what would make it succeed. \
-Stay concise and self-contained: you give one report and get no follow-up.";
+/// A builtin Orchestrator planning-bench member's prelude: the members are
+/// single-shot subagent workers, so each prelude says the member reports once.
+pub(crate) const ARCHITECT_PRELUDE: &str = "You are the architect member of a planning bench convened by an \
+orchestrator agent. You receive one task: the problem under planning plus \
+your mandate. Inspect the workspace as far as it helps, then shape the \
+approach: how the problem divides, the key decisions with their trade-offs, \
+and the order of work. Stay concise and self-contained: you give one report \
+and get no follow-up.";
 
-/// A builtin Councillor panel member's prelude.
-pub(crate) const SKEPTIC_PRELUDE: &str = "You are the skeptic member of a council convened by an organizer agent. \
-You receive one task: the topic under discussion plus your mandate. Inspect the \
-workspace as far as it helps, then stress-test the topic: hidden assumptions, \
-failure modes, costs, and counter-evidence — fair and concrete, every concern \
-marked with its likelihood and impact. Stay concise and self-contained: you \
-give one report and get no follow-up.";
+/// A builtin Orchestrator planning-bench member's prelude.
+pub(crate) const CRITIC_PRELUDE: &str = "You are the critic member of a planning bench convened by an \
+orchestrator agent. You receive one task: the plan or approach under review \
+plus your mandate. Inspect the workspace as far as it helps, then attack it: \
+hidden assumptions, failure modes, missing requirements, and cheaper or \
+simpler alternatives — fair and concrete, every concern marked with its \
+likelihood and impact. Stay concise and self-contained: you give one report \
+and get no follow-up.";
 
-/// A builtin Councillor panel member's prelude.
-pub(crate) const EXPLORER_PANEL_PRELUDE: &str = "You are the explorer member of a council convened by an organizer agent. \
-You receive one task: the topic under discussion plus your mandate. Inspect the \
-workspace as far as it helps, then propose two or three genuinely different \
-approaches or framings, each with a one-line assessment of fit and effort. \
-Stay concise and self-contained: you give one report and get no follow-up.";
+/// A builtin Orchestrator planning-bench member's prelude.
+pub(crate) const SCOUT_PRELUDE: &str = "You are the scout member of a planning bench convened by an \
+orchestrator agent. You receive one task: what to find out plus your mandate. \
+Inspect the workspace and report the facts: the layout that matters, where \
+the relevant pieces live, their current state, and anything the orchestrator \
+should know before planning. Stay concise and self-contained: you give one \
+report and get no follow-up.";
 
 /// A code-defined builtin scene: its fixed name plus config. Builtin scenes
 /// never serialize to config; they materialize under the configured scenes
@@ -170,12 +179,12 @@ impl BuiltinScene {
 
 /// The code-defined builtin scenes, in picker order under the built-in
 /// default scene: the plain default behavior, then the advisory, review, and
-/// council modes.
+/// orchestration modes.
 pub fn builtin_scenes() -> Vec<BuiltinScene> {
     vec![
         BuiltinScene::new(ADVISOR_SCENE_NAME, advisor_config()),
         BuiltinScene::new(REVIEWER_SCENE_NAME, reviewer_config()),
-        BuiltinScene::new(COUNCILLOR_SCENE_NAME, councillor_config()),
+        BuiltinScene::new(ORCHESTRATOR_SCENE_NAME, orchestrator_config()),
     ]
 }
 
@@ -234,48 +243,49 @@ fn reviewer_config() -> SceneConfig {
     }
 }
 
-/// The Councillor builtin scene: the council protocol, a panel of three
-/// contrasted members, and parallel member convening (`tool-concurrency 4`).
-/// The organizer keeps the full tool roster, so execution can also route
-/// through its workers or its own tools.
-fn councillor_config() -> SceneConfig {
+/// The Orchestrator builtin scene: the orchestration protocol, a planning
+/// bench of three contrasting members, and parallel delegation
+/// (`tool-concurrency 4`). The orchestrator keeps the full tool roster, so
+/// integration, fix-ups, and verification also run through its own tools.
+fn orchestrator_config() -> SceneConfig {
     SceneConfig {
-        description: Some(COUNCILLOR_SCENE_DESCRIPTION.into()),
+        description: Some(ORCHESTRATOR_SCENE_DESCRIPTION.into()),
         tool_concurrency: Some(4),
         subagents: SubagentsConfig {
             disabled: false,
             workers: BTreeMap::from([
                 (
-                    "advocate".into(),
-                    panel_worker(
-                        "Council panel member: build the strongest honest case for the topic \
-                         — benefits, upside, and supporting evidence from the workspace.",
-                        ADVOCATE_PRELUDE,
+                    "architect".into(),
+                    bench_worker(
+                        "Planning bench member: shape the approach for the task — how it \
+                          divides, the key decisions and their trade-offs, and the order \
+                          of work.",
+                        ARCHITECT_PRELUDE,
                     ),
                 ),
                 (
-                    "skeptic".into(),
-                    panel_worker(
-                        "Council panel member: stress-test the topic — challenge its \
-                         assumptions, surface failure modes and costs, and gather \
-                         counter-evidence from the workspace.",
-                        SKEPTIC_PRELUDE,
+                    "critic".into(),
+                    bench_worker(
+                        "Planning bench member: stress-test the plan or approach — \
+                          challenge assumptions, surface failure modes and missing \
+                          requirements, and gather counter-evidence from the workspace.",
+                        CRITIC_PRELUDE,
                     ),
                 ),
                 (
-                    "explorer".into(),
-                    panel_worker(
-                        "Council panel member: propose genuinely different approaches or \
-                         framings for the topic, each with a one-line assessment of fit \
-                         and effort.",
-                        EXPLORER_PANEL_PRELUDE,
+                    "scout".into(),
+                    bench_worker(
+                        "Planning bench member: recon the workspace for the planning \
+                          inputs — layout, where the relevant pieces live, and their \
+                          current state.",
+                        SCOUT_PRELUDE,
                     ),
                 ),
             ]),
         },
         system_prompts: SystemPromptsConfig {
-            prelude: Some(COUNCILLOR_PRELUDE.into()),
-            interlude: Some(COUNCILLOR_INTERLUDE.into()),
+            prelude: Some(ORCHESTRATOR_PRELUDE.into()),
+            interlude: Some(ORCHESTRATOR_INTERLUDE.into()),
             ..Default::default()
         },
         ..Default::default()
@@ -311,7 +321,7 @@ fn disabled_worker() -> SubagentConfig {
     }
 }
 
-fn panel_worker(description: &str, prelude: &str) -> SubagentConfig {
+fn bench_worker(description: &str, prelude: &str) -> SubagentConfig {
     SubagentConfig {
         description: Some(description.into()),
         toolset: Some(SubagentToolset::Read),
@@ -915,7 +925,7 @@ mod tests {
             names,
             vec![
                 ADVISOR_SCENE_NAME,
-                COUNCILLOR_SCENE_NAME,
+                ORCHESTRATOR_SCENE_NAME,
                 REVIEWER_SCENE_NAME
             ],
             "builtins sit in the map, sorted by name; \"Default\" stays identity-less"
@@ -923,7 +933,7 @@ mod tests {
         for (name, expected_description) in [
             (ADVISOR_SCENE_NAME, ADVISOR_SCENE_DESCRIPTION),
             (REVIEWER_SCENE_NAME, REVIEWER_SCENE_DESCRIPTION),
-            (COUNCILLOR_SCENE_NAME, COUNCILLOR_SCENE_DESCRIPTION),
+            (ORCHESTRATOR_SCENE_NAME, ORCHESTRATOR_SCENE_DESCRIPTION),
         ] {
             let config = set.scene(name).unwrap_or_else(|| panic!("{name} missing"));
             assert!(is_switchable(config), "{name} is re-enterable mid-session");
@@ -993,34 +1003,34 @@ mod tests {
     }
 
     #[test]
-    fn councillor_scene_convenes_the_panel() {
-        let scene = resolve_builtin(COUNCILLOR_SCENE_NAME, None);
+    fn orchestrator_scene_delegates_to_the_roster() {
+        let scene = resolve_builtin(ORCHESTRATOR_SCENE_NAME, None);
         assert_eq!(
             scene.tool_concurrency(),
             4,
-            "the panel convenes in one parallel batch"
+            "independent briefs spawn in one parallel batch"
         );
         let roster = scene
             .subagents()
-            .expect("councillor defines subagents")
+            .expect("orchestrator defines subagents")
             .workers
             .clone();
-        for member in ["advocate", "skeptic", "explorer"] {
-            let panel = roster
+        for member in ["architect", "critic", "scout"] {
+            let bench = roster
                 .get(member)
                 .unwrap_or_else(|| panic!("{member} missing"));
-            assert_eq!(panel.toolset, Some(SubagentToolset::Read));
+            assert_eq!(bench.toolset, Some(SubagentToolset::Read));
             assert!(
-                panel.description.is_some(),
-                "{member} tells the organizer when to spawn it"
+                bench.description.is_some(),
+                "{member} tells the orchestrator when to spawn it"
             );
             assert!(
-                panel.system_prompts.prelude.is_some(),
+                bench.system_prompts.prelude.is_some(),
                 "{member} carries its mandate"
             );
-            assert!(!panel.disabled);
+            assert!(!bench.disabled);
         }
-        // The built-in workers stay: execution can still route through them.
+        // The built-in workers stay enabled: execution still routes through them.
         assert!(!roster.contains_key("explore_workspace"));
         assert!(!roster.contains_key("edit_files"));
     }

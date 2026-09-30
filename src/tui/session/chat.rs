@@ -207,6 +207,11 @@ pub enum ChatMessage {
         name: String,
         args: Value,
         worker: Option<String>,
+        /// The spawn id of the worker run the call happened inside: with one
+        /// worker spawned several times in parallel, its runs' blocks each
+        /// carry their own id (badged in the header; the fallback match keys
+        /// on it).
+        spawn: Option<u64>,
         call_id: Option<String>,
     },
     ToolFinished {
@@ -214,6 +219,8 @@ pub enum ChatMessage {
         ok: bool,
         output: String,
         worker: Option<String>,
+        /// The spawn id of the worker run the call happened inside.
+        spawn: Option<u64>,
         file_change: Option<FileChange>,
         streams: Option<ShellStreams>,
         duration_ms: u64,
@@ -524,6 +531,7 @@ impl Chat {
                 name,
                 args,
                 worker,
+                spawn,
                 call_id,
             } => {
                 self.streaming = true;
@@ -533,6 +541,7 @@ impl Chat {
                     name,
                     args.to_string(),
                     worker,
+                    spawn,
                     call_id,
                 ))));
             }
@@ -541,6 +550,7 @@ impl Chat {
                 ok,
                 output,
                 worker,
+                spawn,
                 file_change,
                 streams,
                 duration_ms,
@@ -550,7 +560,7 @@ impl Chat {
                     Some(streams) => (streams.stdout, streams.stderr),
                     None => (output, String::new()),
                 };
-                self.with_running_tool(&name, &worker, call_id.as_deref(), |block| {
+                self.with_running_tool(&name, &worker, spawn, call_id.as_deref(), |block| {
                     block.update(BlockMessage::Tool(ToolMessage::Finish {
                         ok,
                         output: display_output,
@@ -568,9 +578,10 @@ impl Chat {
                 stdout,
                 stderr,
             } => {
-                let updated = self.with_running_tool(&tool, &worker, call_id.as_deref(), |block| {
-                    block.update(BlockMessage::Tool(ToolMessage::Output { stdout, stderr }))
-                });
+                let updated =
+                    self.with_running_tool(&tool, &worker, None, call_id.as_deref(), |block| {
+                        block.update(BlockMessage::Tool(ToolMessage::Output { stdout, stderr }))
+                    });
                 if updated {
                     self.touch_in_flight();
                 }
@@ -587,6 +598,7 @@ impl Chat {
                     name,
                     args.to_string(),
                     Some(String::new()),
+                    None,
                     call_id,
                 ))));
             }
@@ -597,15 +609,21 @@ impl Chat {
                 duration_ms,
                 call_id,
             } => {
-                self.with_running_tool(&name, &Some(String::new()), call_id.as_deref(), |block| {
-                    block.update(BlockMessage::Tool(ToolMessage::Finish {
-                        ok,
-                        output,
-                        stderr: String::new(),
-                        file_change: None,
-                        duration_ms,
-                    }))
-                });
+                self.with_running_tool(
+                    &name,
+                    &Some(String::new()),
+                    None,
+                    call_id.as_deref(),
+                    |block| {
+                        block.update(BlockMessage::Tool(ToolMessage::Finish {
+                            ok,
+                            output,
+                            stderr: String::new(),
+                            file_change: None,
+                            duration_ms,
+                        }))
+                    },
+                );
                 self.touch_in_flight();
             }
             ChatMessage::StreamDone => self.commit_done(),
@@ -1426,11 +1444,14 @@ impl Chat {
     /// to and apply it. Both carry the provider's call id when the core could
     /// resolve it, so batched calls of one tool (all `Running` at once — and
     /// their streamed shell output) each land on their own block; the
-    /// name+worker match is only a fallback for events without an id.
+    /// name+worker+spawn match is only a fallback for events without an id —
+    /// a block carrying a spawn id never cross-matches a spawn-less event or
+    /// another spawn's, so concurrent runs of one worker stay apart.
     fn with_running_tool(
         &mut self,
         name: &str,
         worker: &Option<String>,
+        spawn: Option<u64>,
         call_id: Option<&str>,
         apply: impl FnOnce(&mut Block) -> bool,
     ) -> bool {
@@ -1441,7 +1462,7 @@ impl Chat {
             let own = block.tool_call_id().unwrap_or_default();
             match call_id.filter(|id| !id.is_empty()) {
                 Some(id) if !own.is_empty() => id == own,
-                _ => block.tool_matches(name, worker),
+                _ => block.tool_matches(name, worker, spawn),
             }
         };
         let mut in_flight = self.in_flight.borrow_mut();
@@ -2175,6 +2196,7 @@ mod tests {
             name: "read_file".into(),
             args: serde_json::json!({}),
             worker: None,
+            spawn: None,
             call_id: None,
         });
         let tool_only = render_turn_lines(&chat, None, 80).unwrap();
@@ -2230,6 +2252,7 @@ mod tests {
             name: "read_file".into(),
             args: serde_json::json!({}),
             worker: None,
+            spawn: None,
             call_id: None,
         });
         chat.update(ChatMessage::ReasoningReceived {
@@ -2257,6 +2280,7 @@ mod tests {
             name: "read_file".into(),
             args: serde_json::json!({"path": "x"}),
             worker: Some("explore".into()),
+            spawn: None,
             call_id: None,
         });
         chat.update(ChatMessage::StreamDone);
@@ -2291,6 +2315,7 @@ mod tests {
             name: "grep".into(),
             args: serde_json::json!({}),
             worker: Some("explore".into()),
+            spawn: None,
             call_id: None,
         });
         assert!(
@@ -2316,6 +2341,7 @@ mod tests {
             name: "read_file".into(),
             args: serde_json::json!({"path": "x"}),
             worker: Some("explore".into()),
+            spawn: None,
             call_id: None,
         });
         chat.update(ChatMessage::StreamDone);
@@ -2330,6 +2356,7 @@ mod tests {
             ok: true,
             output: "contents".into(),
             worker: Some("explore".into()),
+            spawn: None,
             file_change: None,
             streams: None,
             duration_ms: 120,
@@ -2364,6 +2391,7 @@ mod tests {
             name: "grep".into(),
             args: serde_json::json!({}),
             worker: None,
+            spawn: None,
             call_id: None,
         });
         assert!(chat.has_running_tool_blocks());
@@ -2374,6 +2402,7 @@ mod tests {
             ok: true,
             output: "out".into(),
             worker: None,
+            spawn: None,
             file_change: None,
             streams: None,
             duration_ms: 5,
@@ -2385,6 +2414,7 @@ mod tests {
             ok: true,
             output: "out".into(),
             worker: None,
+            spawn: None,
             file_change: None,
             streams: None,
             duration_ms: 5,
@@ -2408,12 +2438,14 @@ mod tests {
             name: "todo".into(),
             args: serde_json::json!({ "op": "add", "text": "first" }),
             worker: None,
+            spawn: None,
             call_id: Some("call-1".into()),
         });
         chat.update(ChatMessage::ToolStarted {
             name: "todo".into(),
             args: serde_json::json!({ "op": "add", "text": "second" }),
             worker: None,
+            spawn: None,
             call_id: Some("call-2".into()),
         });
         chat.update(ChatMessage::ToolFinished {
@@ -2421,6 +2453,7 @@ mod tests {
             ok: true,
             output: "Todos (0/1 done)\n  #1 [ ] first".into(),
             worker: None,
+            spawn: None,
             file_change: None,
             streams: None,
             duration_ms: 1,
@@ -2431,6 +2464,7 @@ mod tests {
             ok: true,
             output: "Todos (0/2 done)\n  #1 [ ] first\n  #2 [ ] second".into(),
             worker: None,
+            spawn: None,
             file_change: None,
             streams: None,
             duration_ms: 1,
@@ -2474,12 +2508,14 @@ mod tests {
             name: "run_shell".into(),
             args: serde_json::json!({ "command": "cargo test" }),
             worker: Some("run_tests".into()),
+            spawn: None,
             call_id: Some("s1".into()),
         });
         chat.update(ChatMessage::ToolStarted {
             name: "run_shell".into(),
             args: serde_json::json!({ "command": "cargo clippy" }),
             worker: Some("run_tests".into()),
+            spawn: None,
             call_id: Some("s2".into()),
         });
         chat.update(ChatMessage::ToolOutput {
@@ -2527,6 +2563,7 @@ mod tests {
             name: "run_shell".into(),
             args: serde_json::json!({"command": "ls"}),
             worker: None,
+            spawn: None,
             call_id: None,
         });
         chat.update(ChatMessage::ToolFinished {
@@ -2534,6 +2571,7 @@ mod tests {
             ok: true,
             output: "exit 0\nout".into(),
             worker: None,
+            spawn: None,
             file_change: None,
             streams: None,
             duration_ms: 3,
@@ -2696,6 +2734,7 @@ mod tests {
             name: "edit_file".into(),
             args: serde_json::json!({}),
             worker: None,
+            spawn: None,
             call_id: None,
         });
         chat.update(ChatMessage::ToolFinished {
@@ -2703,6 +2742,7 @@ mod tests {
             ok: true,
             output: String::new(),
             worker: None,
+            spawn: None,
             file_change: None,
             streams: None,
             duration_ms: 0,
@@ -3260,6 +3300,7 @@ mod tests {
             name: "grep".into(),
             args: serde_json::json!({ "pattern": "x" }),
             worker: None,
+            spawn: None,
             call_id: None,
         });
         let output: String = (0..500)
@@ -3271,6 +3312,7 @@ mod tests {
             ok: true,
             output,
             worker: None,
+            spawn: None,
             file_change: None,
             streams: None,
             duration_ms: 0,
@@ -3349,6 +3391,7 @@ mod tests {
             name: "read_file".into(),
             args: serde_json::json!({}),
             worker: None,
+            spawn: None,
             call_id: None,
         });
         chat.update(ChatMessage::ToolFinished {
@@ -3356,6 +3399,7 @@ mod tests {
             ok: true,
             output: String::new(),
             worker: None,
+            spawn: None,
             file_change: None,
             streams: None,
             duration_ms: 0,
@@ -3451,6 +3495,7 @@ mod tests {
             name: "read_file".into(),
             args: serde_json::json!({}),
             worker: None,
+            spawn: None,
             call_id: None,
         });
         chat.update(ChatMessage::ToolFinished {
@@ -3458,6 +3503,7 @@ mod tests {
             ok: true,
             output: String::new(),
             worker: None,
+            spawn: None,
             file_change: None,
             streams: None,
             duration_ms: 0,
@@ -3796,6 +3842,7 @@ mod tests {
                 name: "read_file".into(),
                 args: serde_json::json!({ "path": format!("src/module_{i}.rs") }),
                 worker: Some("explore_workspace".into()),
+                spawn: None,
                 call_id: Some(format!("call_{i}")),
             });
             chat.update(ChatMessage::ToolFinished {
@@ -3803,6 +3850,7 @@ mod tests {
                 ok: true,
                 output: big.clone(),
                 worker: Some("explore_workspace".into()),
+                spawn: None,
                 file_change: None,
                 streams: None,
                 duration_ms: 12,
@@ -3816,6 +3864,7 @@ mod tests {
             name: "run_shell".into(),
             args: serde_json::json!({ "command": "cargo test" }),
             worker: None,
+            spawn: None,
             call_id: Some("call_running".into()),
         });
         let diags = BTreeMap::new();
@@ -3932,6 +3981,7 @@ mod tests {
             name: "run_shell".into(),
             args: serde_json::json!({ "command": "ls" }),
             worker: None,
+            spawn: None,
             call_id: Some("call_1".into()),
         });
         let diags = BTreeMap::new();
@@ -4104,6 +4154,7 @@ mod tests {
             name: "run_shell".into(),
             args: serde_json::json!({"command": "sleep 30"}),
             worker: None,
+            spawn: None,
             call_id: None,
         });
         chat.update(ChatMessage::ToolOutput {
@@ -4170,6 +4221,7 @@ mod tests {
             name: "run_shell".into(),
             args: serde_json::json!({"command": "cargo build", "timeout_secs": 30}),
             worker: None,
+            spawn: None,
             call_id: None,
         });
         chat.update(ChatMessage::ToolFinished {
@@ -4177,6 +4229,7 @@ mod tests {
             ok: false,
             output: "timeout 30s:\nsome partial output".into(),
             worker: None,
+            spawn: None,
             file_change: None,
             streams: None,
             duration_ms: 30_100,
@@ -4207,6 +4260,7 @@ mod tests {
             name: "run_shell".into(),
             args: serde_json::json!({"command": "false"}),
             worker: None,
+            spawn: None,
             call_id: None,
         });
         chat.update(ChatMessage::ToolFinished {
@@ -4214,6 +4268,7 @@ mod tests {
             ok: false,
             output: "exit 1:\nboom".into(),
             worker: None,
+            spawn: None,
             file_change: None,
             streams: None,
             duration_ms: 12,

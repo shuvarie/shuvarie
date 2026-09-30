@@ -468,6 +468,7 @@ async fn stream_done_waits_for_queued_worker_items_to_drain() {
         worker: Some("explore_workspace".into()),
         file_change: None,
         streams: None,
+        spawn: Some(1),
         call_id: "w1".into(),
     };
     let worker_request_usage = StreamItem::Usage {
@@ -576,6 +577,7 @@ async fn worker_events_forward_and_usage_accumulates() {
             name: "grep".into(),
             args: serde_json::json!({ "pattern": "bug" }),
             worker: Some("explore_workspace".into()),
+            spawn: Some(1),
             call_id: "t1".into(),
         },
         StreamItem::ToolResult {
@@ -585,12 +587,14 @@ async fn worker_events_forward_and_usage_accumulates() {
             worker: Some("explore_workspace".into()),
             file_change: None,
             streams: None,
+            spawn: Some(1),
             call_id: "t1".into(),
         },
         StreamItem::WorkerResult {
             name: "explore_workspace".into(),
             output: "summary".into(),
             ok: true,
+            spawn: Some(1),
             call_id: "w1".into(),
         },
         StreamItem::Usage {
@@ -831,6 +835,7 @@ fn main_tool_start(name: &str, call_id: &str) -> StreamItem {
         name: name.into(),
         args: serde_json::json!({}),
         worker: None,
+        spawn: Some(1),
         call_id: call_id.into(),
     }
 }
@@ -843,6 +848,7 @@ fn main_tool_result(name: &str, call_id: &str) -> StreamItem {
         worker: None,
         file_change: None,
         streams: None,
+        spawn: Some(1),
         call_id: call_id.into(),
     }
 }
@@ -855,6 +861,7 @@ fn worker_tool_result(call_id: &str) -> StreamItem {
         worker: Some("explore_workspace".into()),
         file_change: None,
         streams: None,
+        spawn: Some(1),
         call_id: call_id.into(),
     }
 }
@@ -1003,6 +1010,7 @@ async fn steered_prompt_ignores_worker_activity() {
                 name: "grep".into(),
                 args: serde_json::json!({}),
                 worker: Some("explore_workspace".into()),
+                spawn: Some(1),
                 call_id: "t1".into(),
             },
             worker_tool_result("t1"),
@@ -1055,6 +1063,7 @@ async fn steered_prompt_cuts_when_worker_batch_settles() {
                 name: "grep".into(),
                 args: serde_json::json!({}),
                 worker: Some("explore_workspace".into()),
+                spawn: Some(1),
                 call_id: "t1".into(),
             },
             worker_tool_result("t1"),
@@ -1062,6 +1071,7 @@ async fn steered_prompt_cuts_when_worker_batch_settles() {
                 name: "explore_workspace".into(),
                 output: "summary".into(),
                 ok: true,
+                spawn: Some(1),
                 call_id: "w1".into(),
             },
             StreamItem::Delta {
@@ -1162,6 +1172,7 @@ async fn permission_deny_cuts_the_turn_after_the_denied_result() {
                 worker: None,
                 file_change: None,
                 streams: None,
+                spawn: Some(1),
                 call_id: "c1".into(),
             },
             StreamItem::Done {
@@ -1390,12 +1401,14 @@ async fn steered_prompt_cuts_when_worker_straggler_result_lags() {
                 name: "grep".into(),
                 args: serde_json::json!({}),
                 worker: Some("explore_workspace".into()),
+                spawn: Some(1),
                 call_id: "t1".into(),
             },
             StreamItem::WorkerResult {
                 name: "explore_workspace".into(),
                 output: "summary".into(),
                 ok: true,
+                spawn: Some(1),
                 call_id: "w1".into(),
             },
             worker_tool_result("t1"),
@@ -2038,12 +2051,14 @@ async fn shell_chunks_resolve_to_their_own_concurrent_calls() {
             name: "run_shell".into(),
             args: serde_json::json!({ "command": "cargo test" }),
             worker: Some("run_tests".into()),
+            spawn: Some(1),
             call_id: "s1".into(),
         },
         StreamItem::ToolStart {
             name: "run_shell".into(),
             args: serde_json::json!({ "command": "cargo clippy" }),
             worker: Some("run_tests".into()),
+            spawn: Some(1),
             call_id: "s2".into(),
         },
         StreamItem::ShellOutput {
@@ -2065,6 +2080,7 @@ async fn shell_chunks_resolve_to_their_own_concurrent_calls() {
             worker: Some("run_tests".into()),
             file_change: None,
             streams: None,
+            spawn: Some(1),
             call_id: "s1".into(),
         },
         StreamItem::ShellOutput {
@@ -2077,6 +2093,7 @@ async fn shell_chunks_resolve_to_their_own_concurrent_calls() {
             name: "run_tests".into(),
             output: "done".into(),
             ok: true,
+            spawn: Some(1),
             call_id: "w1".into(),
         },
         StreamItem::Done {
@@ -2137,12 +2154,14 @@ async fn ambiguous_shell_chunk_stays_unresolved() {
             name: "run_shell".into(),
             args: serde_json::json!({ "command": "cargo test" }),
             worker: Some("run_tests".into()),
+            spawn: Some(1),
             call_id: "s1".into(),
         },
         StreamItem::ToolStart {
             name: "run_shell".into(),
             args: serde_json::json!({ "command": "cargo test" }),
             worker: Some("run_tests".into()),
+            spawn: Some(1),
             call_id: "s2".into(),
         },
         StreamItem::ShellOutput {
@@ -2186,6 +2205,7 @@ async fn merged_shell_chunks_follow_their_tool_start() {
             name: "run_shell".into(),
             args: serde_json::json!({ "command": "cargo test" }),
             worker: Some("run_tests".into()),
+            spawn: Some(1),
             call_id: "s1".into(),
         }]));
     let merged = merge_shell_chunks(llm, chunk_rx);

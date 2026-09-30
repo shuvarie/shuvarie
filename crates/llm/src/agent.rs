@@ -1,5 +1,6 @@
 use serde_json::{Value, json};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 
 use crate::TokenUsage;
@@ -7,6 +8,25 @@ use crate::TokenUsage;
 use crate::ProviderClient;
 use crate::stream::StreamItem;
 use crate::tool::{Tool, ToolContext, ToolExecutionError, ToolOutput};
+
+/// Host-only per-dispatch metadata the worker tool attaches to its
+/// `ToolContext`: the spawn id it minted for the run. The main agent's hooks
+/// read it at tool-result time to tag the surfaced worker results
+/// ([`StreamItem::WorkerResult`]) with the spawn, so consumers can group the
+/// run's activity items ([`StreamItem::ToolStart`] and
+/// [`StreamItem::ToolResult`], tagged with the same id) onto the right spawn
+/// when one worker is spawned several times in a batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpawnTag(pub u64);
+
+/// The process-wide spawn id counter: every worker run mints one id, unique
+/// across the session — even across concurrent batches of clones of one
+/// worker.
+static SPAWN_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn next_spawn_id() -> u64 {
+    SPAWN_SEQ.fetch_add(1, Ordering::Relaxed)
+}
 
 pub struct WorkerAgent {
     name: String,
@@ -25,6 +45,10 @@ pub struct WorkerAgent {
 pub struct WorkerRequest {
     pub client: ProviderClient,
     pub name: String,
+    /// The spawn id the tool minted for this run: every activity item of the
+    /// run carries it, so consumers group the run's output onto the right
+    /// spawn when one worker is spawned concurrently.
+    pub spawn: u64,
     pub model: String,
     pub preamble: String,
     pub task: String,
@@ -130,7 +154,7 @@ impl Tool for WorkerAgent {
 
     async fn call(
         &self,
-        _ctx: &mut ToolContext,
+        ctx: &mut ToolContext,
         args: Value,
     ) -> Result<ToolOutput, ToolExecutionError> {
         let task = args
@@ -144,9 +168,16 @@ impl Tool for WorkerAgent {
                 self.name
             )));
         }
+        // Mint this run's spawn id and hand it out both ways: as the request
+        // field (the run's activity items are tagged with it) and as host-only
+        // metadata the main agent's hook reads at result time (so the surfaced
+        // worker result carries it too).
+        let spawn = next_spawn_id();
+        ctx.insert_result(SpawnTag(spawn));
         let request = WorkerRequest {
             client: self.client.clone(),
             name: self.name.clone(),
+            spawn,
             model: self.model.clone(),
             preamble: self.preamble.clone(),
             task,

@@ -122,7 +122,7 @@ async fn scenes_loaded_carries_conflict_warnings() {
 }
 
 /// The builtin scenes materialize at core startup: the picker list carries
-/// the code-defined modes (Advisor/Councillor/Reviewer) under the built-in
+/// the code-defined modes (Advisor/Orchestrator/Reviewer) under the built-in
 /// default, and a configured scene of the same name merges field-wise over
 /// its builtin.
 #[tokio::test]
@@ -175,8 +175,8 @@ async fn scenes_loaded_lists_the_builtin_scenes_under_the_configured_ones() {
     let expected: Vec<(Option<&str>, &str)> = vec![
         (None, "Default"),
         (Some("Advisor"), "Advisor"),
-        (Some("Councillor"), "Councillor"),
         (Some("Draft"), "Draft"),
+        (Some("Orchestrator"), "Orchestrator"),
         (Some("Reviewer"), "Reviewer"),
     ];
     assert_eq!(
@@ -191,9 +191,9 @@ async fn scenes_loaded_lists_the_builtin_scenes_under_the_configured_ones() {
         ("Default", None, "Built-in behavior, no scene configured"),
         ("Advisor", Some("Advisor"), "my advisor"),
         (
-            "Councillor",
-            Some("Councillor"),
-            "Convene a council of subagent panelists on the topic, then summarize it",
+            "Orchestrator",
+            Some("Orchestrator"),
+            "Agent orchestration: decompose the task, delegate to subagent workers, verify, integrate",
         ),
         (
             "Reviewer",

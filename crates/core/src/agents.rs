@@ -250,7 +250,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::scenes::SKEPTIC_PRELUDE;
+    use crate::scenes::CRITIC_PRELUDE;
     use shuvarie_config::SceneConfig;
     use shuvarie_config::ScenesConfig;
 
@@ -371,26 +371,30 @@ mod tests {
     }
 
     #[test]
-    fn councillor_roster_appends_the_panel() {
-        let set = build(&builtin_scene(crate::scenes::COUNCILLOR_SCENE_NAME));
+    fn orchestrator_roster_appends_the_bench() {
+        let set = build(&builtin_scene(crate::scenes::ORCHESTRATOR_SCENE_NAME));
         assert_eq!(
             names(&set),
             vec![
                 "explore_workspace",
                 "run_tests",
                 "edit_files",
-                "advocate",
-                "explorer",
-                "skeptic",
+                "architect",
+                "critic",
+                "scout",
             ],
             "builtins keep their fixed roster order, extras follow in name order"
         );
-        let skeptic = &set.workers[5];
+        let critic = set
+            .workers
+            .iter()
+            .find(|worker| worker.name() == "critic")
+            .expect("critic materializes");
         assert_eq!(
-            skeptic.description(),
-            "Council panel member: stress-test the topic — challenge its assumptions, surface failure modes and costs, and gather counter-evidence from the workspace."
+            critic.description(),
+            "Planning bench member: stress-test the plan or approach — challenge assumptions, surface failure modes and missing requirements, and gather counter-evidence from the workspace."
         );
-        assert_eq!(skeptic.preamble(), SKEPTIC_PRELUDE);
+        assert_eq!(critic.preamble(), CRITIC_PRELUDE);
     }
 
     #[test]

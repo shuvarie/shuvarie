@@ -5,6 +5,7 @@ use rig_agent::agent::hook::{HookContext, ToolResultEvent};
 use rig_agent::agent::{AgentHook, ToolResultAction};
 use tokio::sync::mpsc::Sender;
 
+use crate::agent::SpawnTag;
 use crate::file_change::{FileChange, ShellStreams};
 use crate::stream::StreamItem;
 
@@ -68,6 +69,10 @@ struct EarlyFinish {
     /// The owning worker agent's name for a worker-agent hook: its own tool
     /// calls surface as `ToolResult { worker: Some(name) }`.
     worker: Option<String>,
+    /// The spawn id of the worker run this hook belongs to: a worker-agent
+    /// hook stamps every early-surfaced result of its run with it, so
+    /// concurrent spawns of one worker keep their activity attributable.
+    spawn: Option<u64>,
     tx: Sender<StreamItem>,
 }
 
@@ -76,6 +81,9 @@ pub struct CapturedResult {
     pub file_change: Option<FileChange>,
     pub shell: Option<ShellStreams>,
     pub failed: bool,
+    /// The worker tool's spawn tag: `Some` on worker-tool calls of the main
+    /// agent, so the surfaced worker result can carry the spawn id.
+    pub spawn: Option<u64>,
 }
 
 impl FileChangeHook {
@@ -102,16 +110,19 @@ impl FileChangeHook {
     /// `worker_names` marks worker-tool calls in the main agent — surfaced
     /// as `WorkerResult`; `worker` names the owning agent for a
     /// worker-agent hook, so its own tool calls surface as
-    /// `ToolResult { worker }`.
+    /// `ToolResult { worker }`; `spawn` is the run's spawn id, stamped on
+    /// every early-surfaced item of a worker-agent hook.
     pub fn with_early_finish(
         self,
         worker_names: HashSet<String>,
         worker: Option<String>,
+        spawn: Option<u64>,
         tx: Sender<StreamItem>,
     ) -> Self {
         self.inner.lock().unwrap().finish = Some(EarlyFinish {
             worker_names,
             worker,
+            spawn,
             tx,
         });
         self
@@ -157,6 +168,7 @@ fn early_stream_item(
             output,
             ok,
             worker: Some(worker.clone()),
+            spawn: finish.spawn,
             file_change: captured.file_change.clone(),
             streams: captured.shell.clone(),
             call_id,
@@ -165,6 +177,7 @@ fn early_stream_item(
             name,
             output,
             ok,
+            spawn: captured.spawn,
             call_id,
         },
         None => StreamItem::ToolResult {
@@ -172,6 +185,7 @@ fn early_stream_item(
             output,
             ok,
             worker: None,
+            spawn: captured.spawn,
             file_change: captured.file_change.clone(),
             streams: captured.shell.clone(),
             call_id,
@@ -195,6 +209,9 @@ impl AgentHook for FileChangeHook {
         if let Some(shell) = event.tool_context.result::<ShellStreams>() {
             captured.shell = Some(shell.clone());
         }
+        if let Some(SpawnTag(spawn)) = event.tool_context.result::<SpawnTag>() {
+            captured.spawn = Some(*spawn);
+        }
         let mut inner = self.inner.lock().unwrap();
         let (tx, item) = match inner.finish.clone() {
             Some(finish) => {
@@ -203,7 +220,11 @@ impl AgentHook for FileChangeHook {
                 (Some(finish.tx), Some(item))
             }
             None => {
-                if captured.file_change.is_some() || captured.shell.is_some() || captured.failed {
+                if captured.file_change.is_some()
+                    || captured.shell.is_some()
+                    || captured.failed
+                    || captured.spawn.is_some()
+                {
                     inner
                         .changes
                         .insert(event.internal_call_id.to_string(), captured);

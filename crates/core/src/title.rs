@@ -77,6 +77,7 @@ pub async fn generate(
     let req = WorkerRequest {
         client: client.clone(),
         name: "title".to_string(),
+        spawn: 0,
         model: model.to_string(),
         preamble: preamble.unwrap_or(DEFAULT_TITLE_PREAMBLE).to_string(),
         task,

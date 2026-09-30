@@ -265,6 +265,7 @@ pub async fn summarize(
         let req = shuvarie_llm::WorkerRequest {
             client: client.clone(),
             name: "compaction".to_string(),
+            spawn: 0,
             model: model.to_string(),
             preamble: summary_preamble(instruction),
             task,
