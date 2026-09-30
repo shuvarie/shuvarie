@@ -29,10 +29,10 @@ impl VersionBar {
 
     fn build_line(alignment: HorizontalAlignment) -> Line<'static> {
         const VERSION: &str = env!("CARGO_PKG_VERSION");
-        let mut version = format!("v{VERSION}");
-        if cfg!(debug_assertions) {
-            version += "-dev";
-        }
+        let version = match option_env!("GIT_COMMIT_SHORT_HASH") {
+            Some(hash) => format!("v{VERSION}-{hash}"),
+            None => format!("v{VERSION}"),
+        };
 
         Line::from(vec![
             Span::raw("⚔️ Shuvarie ").fg(theme::accent()).bold(),
