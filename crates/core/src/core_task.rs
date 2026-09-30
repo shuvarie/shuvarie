@@ -276,10 +276,10 @@ pub async fn run(
     crate::catalog::init(&config.registries);
     // Refresh registries that prefer the remote catalog before wiring up
     // clients, so pricing/context/embedding lookups see fresh data. Only
-    // enabled registries with an online source and `remote-first` set: the
+    // registries with an online source and `remote-first` set: the
     // offline-first default skips the fetch (the popups fetch on demand via
-    // Ctrl+O) and a disabled registry never fetches. All fetches run at once,
-    // bounded so an unreachable catalog never blocks startup.
+    // Ctrl+O), and a disabled registry is not registered at all. All fetches
+    // run at once, bounded so an unreachable catalog never blocks startup.
     let remote_first_ids = crate::catalog::remote_first_ids();
     if !remote_first_ids.is_empty() {
         let refreshes = remote_first_ids

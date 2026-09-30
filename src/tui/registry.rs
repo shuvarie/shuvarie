@@ -39,9 +39,6 @@ pub struct RegistrySeed {
     /// The display name for group headers.
     pub name: String,
 
-    /// A disabled registry never fetches; its local snapshot still shows.
-    pub disabled: bool,
-
     /// The registry starts online, fetching its remote source.
     pub remote_first: bool,
 
@@ -55,7 +52,6 @@ impl RegistrySeed {
         Self {
             id: SELUNE_REGISTRY.to_string(),
             name: SELUNE_NAME.to_string(),
-            disabled: entry.disabled,
             remote_first: entry.remote_first,
             remote_configured: true,
         }
@@ -66,7 +62,6 @@ impl RegistrySeed {
         Self {
             id: registry.name.clone(),
             name: registry.name.clone(),
-            disabled: registry.disabled,
             remote_first: registry.remote_first,
             remote_configured: registry.url.is_some(),
         }
@@ -102,7 +97,7 @@ impl RegistryState {
     /// loaded yet.
     fn new(seed: RegistrySeed) -> Self {
         let catalog = registry_catalog(&seed.id);
-        let online = !seed.disabled && seed.remote_first && seed.remote_configured;
+        let online = seed.remote_first && seed.remote_configured;
         let providers = if online {
             catalog.remote.unwrap_or_default()
         } else {
@@ -158,9 +153,7 @@ impl RegistryState {
                 return Line::from(spans);
             }
             FetchState::Idle => {
-                if self.seed.disabled {
-                    Span::raw("  · disabled".to_string()).fg(theme::text_muted())
-                } else if self.online {
+                if self.online {
                     Span::raw("  · online".to_string()).fg(theme::accent())
                 } else {
                     Span::raw("  · offline".to_string()).fg(theme::text_muted())
@@ -177,7 +170,7 @@ impl RegistryState {
 
     /// Whether this registry may go online at all.
     fn can_go_online(&self) -> bool {
-        !self.seed.disabled && self.seed.remote_configured
+        self.seed.remote_configured
     }
 
     /// Switches to the online source: the loaded remote snapshot when the
@@ -221,10 +214,22 @@ pub struct RegistryManager {
 
 impl RegistryManager {
     /// Seeds from the `[registries]` config section: the built-in registry
-    /// first, then the custom ones in config order.
+    /// first, then the custom ones in config order. Disabled registries are
+    /// not seeded at all — the popups never show them (mirroring the core
+    /// catalog, which does not register them).
     pub fn from_config(config: &RegistriesConfig) -> Self {
-        let mut seeds = vec![RegistrySeed::selune(config.selune())];
-        seeds.extend(config.custom.iter().map(RegistrySeed::custom));
+        let selune_entry = config.selune();
+        let mut seeds = Vec::new();
+        if !selune_entry.disabled {
+            seeds.push(RegistrySeed::selune(selune_entry));
+        }
+        seeds.extend(
+            config
+                .custom
+                .iter()
+                .filter(|registry| !registry.disabled)
+                .map(RegistrySeed::custom),
+        );
         Self::new(seeds)
     }
 
@@ -329,7 +334,6 @@ mod tests {
         RegistrySeed {
             id: id.to_string(),
             name: id.to_string(),
-            disabled: false,
             remote_first,
             remote_configured: true,
         }
@@ -339,13 +343,6 @@ mod tests {
         RegistrySeed {
             remote_configured: false,
             ..seed(id, false)
-        }
-    }
-
-    fn disabled_seed(id: &str) -> RegistrySeed {
-        RegistrySeed {
-            disabled: true,
-            ..seed(id, true)
         }
     }
 
@@ -385,22 +382,45 @@ mod tests {
     }
 
     #[test]
+    fn from_config_skips_disabled_registries() {
+        let mut config = RegistriesConfig::default();
+        config.entries.insert(
+            "selune".to_string(),
+            RegistryEntry {
+                disabled: true,
+                remote_first: false,
+            },
+        );
+        config.custom.push(CustomRegistry {
+            name: "sleepy".to_string(),
+            disabled: true,
+            ..CustomRegistry::default()
+        });
+        let manager = RegistryManager::from_config(&config);
+        assert_eq!(
+            manager.registries().len(),
+            0,
+            "disabled registries seed no popup group at all"
+        );
+        assert!(!manager.can_toggle());
+        assert!(manager.ids_needing_fetch().is_empty());
+    }
+
+    #[test]
     fn initiate_online_bring_every_capable_registry_online() {
         let mut manager = RegistryManager::new([
             seed("selune", false),
             seed("acme", false),
             path_only_seed("local-only"),
-            disabled_seed("off"),
         ]);
         assert_eq!(
             manager.initiate_online(),
             vec!["selune".to_string(), "acme".to_string()],
-            "path-only and disabled registries never fetch"
+            "path-only registries never fetch"
         );
         assert!(manager.state("selune").unwrap().online);
         assert!(manager.state("acme").unwrap().online);
         assert!(!manager.state("local-only").unwrap().online);
-        assert!(!manager.state("off").unwrap().online);
     }
 
     #[test]
@@ -412,16 +432,6 @@ mod tests {
         assert_eq!(manager.state("selune").unwrap().state, FetchState::Idle);
         // …but without a catalog snapshot the next initiation retries.
         assert_eq!(manager.initiate_online(), vec!["selune".to_string()]);
-    }
-
-    #[test]
-    fn disabled_registry_is_a_no_op() {
-        let mut manager = RegistryManager::new([disabled_seed("selune")]);
-        assert!(!manager.can_toggle());
-        assert!(manager.initiate_online().is_empty());
-        let registry = manager.state("selune").unwrap();
-        assert!(!registry.online);
-        assert_eq!(registry.state, FetchState::Idle);
     }
 
     #[test]
@@ -561,12 +571,5 @@ mod tests {
         let text = header_text(&header);
         assert!(text.contains("· fetching…"), "{header:?}",);
         assert!(!text.contains("failed to load"));
-    }
-
-    #[test]
-    fn header_marks_a_disabled_registry() {
-        let manager = RegistryManager::new([disabled_seed("selune")]);
-        let header = manager.state("selune").unwrap().header_line();
-        assert!(header_text(&header).contains("· disabled"), "{header:?}");
     }
 }

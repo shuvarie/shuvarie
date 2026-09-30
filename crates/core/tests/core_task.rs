@@ -2502,7 +2502,8 @@ async fn fetch_registry_command_reports_the_configured_registry() {
     let _ = handle.await;
 }
 
-/// A disabled custom registry never fetches: the command is refused.
+/// A disabled registry is not registered at all: fetching its id is refused
+/// as unknown, and no HTTP request is attempted.
 #[tokio::test]
 async fn fetch_registry_command_refuses_a_disabled_registry() {
     let (url, requests) =
@@ -2529,7 +2530,7 @@ async fn fetch_registry_command_refuses_a_disabled_registry() {
     match ev {
         Event::RegistryError { registry, error } => {
             assert_eq!(registry, "acme-sleepy");
-            assert!(error.contains("disabled"), "{error}");
+            assert!(error.contains("unknown registry"), "{error}");
         }
         other => panic!("expected RegistryError, got {other:?}"),
     }

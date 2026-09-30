@@ -14,7 +14,7 @@ use crate::tui::utils::num::fmt_scaled_number;
 use super::add_provider::centered_rect;
 use super::list::{render_list_item_line, scroll_offset_for};
 use super::registry::RegistryManager;
-use super::search::{filter_indices, Search, SearchMessage};
+use super::search::{Search, SearchMessage, filter_indices};
 use super::theme;
 
 use shuvarie_core::{Connections, Model};
@@ -522,9 +522,11 @@ impl ModelPicker {
             let row = &self.rows[idx];
             let item = match row {
                 Row::Custom => {
-                    let mut line = vec![Span::raw("Use this input anyway")
-                        .fg(theme::accent())
-                        .add_modifier(Modifier::BOLD)];
+                    let mut line = vec![
+                        Span::raw("Use this input anyway")
+                            .fg(theme::accent())
+                            .add_modifier(Modifier::BOLD),
+                    ];
                     line.push(
                         Span::raw(format!("  — {}", self.search.query.trim()))
                             .fg(theme::text_muted()),

@@ -963,7 +963,7 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::registry::{FetchState, RegistrySeed};
+    use crate::tui::registry::FetchState;
     use selune::{InferenceProvider, Model as SeluneModel, ModelLimit};
     use termina::event::Modifiers;
 
@@ -1207,11 +1207,8 @@ mod tests {
 
     #[test]
     fn an_idle_empty_group_keeps_its_header() {
-        let registries = RegistryManager::new([RegistrySeed {
-            disabled: true,
-            ..RegistrySeed::selune(shuvarie_core::RegistryEntry::default())
-        }])
-        .with_state_providers(shuvarie_core::catalog::SELUNE_REGISTRY, vec![]);
+        let registries = RegistryManager::from_config(&shuvarie_core::RegistriesConfig::default())
+            .with_state_providers(shuvarie_core::catalog::SELUNE_REGISTRY, vec![]);
         let form = AddProviderForm::with_registries(registries, &[], &[]);
         assert_eq!(list_strings(&form), vec!["HEADER:Selune", "custom"]);
         assert_eq!(form.selected, 1, "the custom row is selectable");
@@ -1256,22 +1253,14 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_o_is_hidden_when_registry_disabled() {
-        let form = AddProviderForm::with_registries(
-            RegistryManager::new([RegistrySeed {
-                disabled: true,
-                ..RegistrySeed::selune(shuvarie_core::RegistryEntry::default())
-            }])
-            .with_state_providers(shuvarie_core::catalog::SELUNE_REGISTRY, vec![]),
-            &[],
-            &[],
-        );
-        assert_eq!(form.rows.len(), 2, "header plus the custom row");
+    fn ctrl_o_is_hidden_when_nothing_can_go_online() {
+        let form = AddProviderForm::with_registries(RegistryManager::new(Vec::new()), &[], &[]);
+        assert_eq!(form.rows.len(), 1, "just the custom row");
         assert!(!form.registries.can_toggle());
         assert_eq!(
             form.map_event(&key(KeyCode::Char('o'), Modifiers::CONTROL)),
             None,
-            "no toggle mapping when disabled"
+            "no toggle mapping when nothing can go online"
         );
     }
 

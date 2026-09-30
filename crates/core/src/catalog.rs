@@ -40,15 +40,15 @@ impl RemoteSource {
     }
 }
 
-/// Per-registry catalog state. The local snapshot is always available (for
+/// Per-registry catalog state. Only enabled registries exist here: a disabled
+/// registry is never registered (config `init` drops it), so it never loads,
+/// fetches, or appears in lookups. The local snapshot is always available (for
 /// the built-in registry it is the compile-time embedded catalog; for custom
 /// registries the `path` file, loaded lazily on first use and cached, load
 /// errors included). The remote snapshot holds the latest successful fetch
 /// and is `None` until one succeeds.
 struct RegistryState {
     id: String,
-    /// A disabled registry never fetches; its local snapshot still counts.
-    disabled: bool,
     /// Fetch the remote source at startup instead of on demand.
     remote_first: bool,
     /// The online source, when the registry has one.
@@ -72,7 +72,6 @@ impl RegistryState {
     fn selune() -> Self {
         Self {
             id: SELUNE_REGISTRY.to_string(),
-            disabled: false,
             remote_first: false,
             source: Some(RemoteSource::Hosted),
             local: selune::embedded::all(),
@@ -92,7 +91,6 @@ impl RegistryState {
         });
         Self {
             id: config.name.clone(),
-            disabled: config.disabled,
             remote_first: config.remote_first,
             source,
             local: Vec::new(),
@@ -185,22 +183,26 @@ fn lock() -> std::sync::MutexGuard<'static, CatalogState> {
 
 /// Register the configured registries: the built-in one first, then every
 /// custom `registry { … }` in config order. Flag-only reserved names have no
-/// sources and are skipped. A disabled registry is still registered — it
-/// simply never fetches, mirroring the built-in registry's semantics. Called
-/// once at core startup; re-calls merge by id, keeping any loaded snapshots.
+/// sources and are skipped, and a disabled registry is not registered at all —
+/// it does not load, fetch, or appear in the union. Called once at core
+/// startup; re-calls merge by id, keeping any loaded snapshots.
 pub fn init(registries: &RegistriesConfig) {
     let mut state = lock();
     let selune_entry = registries.selune();
-    if let Some(existing) = state.find_mut(SELUNE_REGISTRY) {
-        existing.disabled = selune_entry.disabled;
+    if selune_entry.disabled {
+        state.registries.retain(|r| r.id != SELUNE_REGISTRY);
+    } else if let Some(existing) = state.find_mut(SELUNE_REGISTRY) {
         existing.remote_first = selune_entry.remote_first;
     } else {
         let mut built_in = RegistryState::selune();
-        built_in.disabled = selune_entry.disabled;
         built_in.remote_first = selune_entry.remote_first;
         state.registries.insert(0, built_in);
     }
     for custom in &registries.custom {
+        if custom.disabled {
+            state.registries.retain(|r| r.id != custom.name);
+            continue;
+        }
         let fresh = RegistryState::from_config(custom);
         if let Some(existing) = state.find_mut(&custom.name) {
             if existing.source != fresh.source {
@@ -213,7 +215,6 @@ pub fn init(registries: &RegistriesConfig) {
                 existing.local_loaded = fresh.local_loaded;
                 existing.local_error = None;
             }
-            existing.disabled = fresh.disabled;
             existing.remote_first = fresh.remote_first;
         } else {
             state.registries.push(fresh);
@@ -232,8 +233,6 @@ pub fn registry_ids() -> Vec<String> {
 pub struct RegistrySnapshot {
     /// The registry id (`selune` for the built-in one).
     pub id: String,
-    /// A disabled registry never fetches; its local snapshot still shows.
-    pub disabled: bool,
     /// The offline snapshot (the embedded catalog for the built-in registry,
     /// the `path` file for custom ones; empty when it failed to load).
     pub local: Vec<Provider>,
@@ -268,7 +267,6 @@ pub fn registry_catalog(id: &str) -> RegistrySnapshot {
     registry.ensure_local();
     RegistrySnapshot {
         id: registry.id.clone(),
-        disabled: registry.disabled,
         local: registry.local.clone(),
         local_error: registry.local_error.clone(),
         remote: registry.remote.clone(),
@@ -295,18 +293,15 @@ pub fn providers() -> Vec<Provider> {
 /// Fetch one registry's online source, storing a successful result as its
 /// remote snapshot. An empty response counts as a failure so a wrong URL
 /// serving an empty list is reported instead of silently clearing the view.
-/// A disabled registry or one without an online source never fetches.
+/// A registry without an online source (or an unknown/disabled id) errors.
 pub fn fetch_registry(id: &str) -> Result<Vec<Provider>, String> {
-    let (source, disabled) = {
+    let source = {
         let state = lock();
         match state.find(id) {
-            Some(registry) => (registry.source.clone(), registry.disabled),
+            Some(registry) => registry.source.clone(),
             None => return Err(format!("unknown registry `{id}`")),
         }
     };
-    if disabled {
-        return Err(format!("registry `{id}` is disabled"));
-    }
     let Some(source) = source else {
         return Err(format!("registry `{id}` has no online source"));
     };
@@ -331,13 +326,14 @@ pub fn refresh_registry(id: &str) {
     let _ = fetch_registry(id);
 }
 
-/// The ids of enabled registries with an online source that should be fetched
-/// at startup (`remote-first`).
+/// The ids of registries with an online source that should be fetched at
+/// startup (`remote-first`). Disabled registries are never registered, so
+/// they cannot appear here.
 pub fn remote_first_ids() -> Vec<String> {
     lock()
         .registries
         .iter()
-        .filter(|r| !r.disabled && r.remote_first && r.has_source())
+        .filter(|r| r.remote_first && r.has_source())
         .map(|r| r.id.clone())
         .collect()
 }
@@ -786,6 +782,7 @@ fn base_url_for_in(
 mod tests {
     use super::*;
     use selune::{InferenceProvider, ProviderType};
+    use shuvarie_config::RegistryEntry;
 
     fn catalog_provider(
         id: &str,
@@ -1467,9 +1464,49 @@ mod tests {
         assert!(registry_catalog("acme").remote.is_some(), "snapshot kept");
         let flags = {
             let state = lock();
-            state.find("acme").map(|r| (r.remote_first, r.disabled))
+            state.find("acme").map(|r| r.remote_first)
         };
-        assert_eq!(flags, Some((true, false)), "flags refreshed from config");
+        assert_eq!(flags, Some(true), "flags refreshed from config");
+    }
+
+    #[test]
+    fn init_does_not_register_disabled_registries() {
+        let _guard = global_lock();
+        reset_catalog();
+        let mut disabled = custom_registry("sleepy", Some("https://example.test/x.json"), None);
+        disabled.disabled = true;
+        let mut config = config_with(&[disabled]);
+        config.entries.insert(
+            SELUNE_REGISTRY.to_string(),
+            RegistryEntry {
+                disabled: true,
+                remote_first: false,
+            },
+        );
+        init(&config);
+        assert_eq!(registry_ids(), Vec::<String>::new(), "disabled ids vanish");
+        assert!(
+            providers().is_empty(),
+            "nothing loads from a disabled registry"
+        );
+        assert_eq!(
+            registry_catalog("sleepy").local,
+            Vec::new(),
+            "an unregistered registry has no snapshot data"
+        );
+
+        // Re-enabling brings the built-in registry (and its embedded local
+        // snapshot) back.
+        config.entries.insert(
+            SELUNE_REGISTRY.to_string(),
+            RegistryEntry {
+                disabled: false,
+                remote_first: false,
+            },
+        );
+        init(&config);
+        assert_eq!(registry_ids(), vec![SELUNE_REGISTRY]);
+        assert!(!registry_catalog(SELUNE_REGISTRY).local.is_empty());
     }
 
     #[test]
@@ -1574,27 +1611,32 @@ mod tests {
     }
 
     #[test]
-    fn fetch_registry_gates_unknown_disabled_and_sourceless() {
+    fn fetch_registry_gates_unknown_and_sourceless() {
         let _guard = global_lock();
         reset_catalog();
-        let mut disabled = custom_registry("acme", Some("https://example.test/x.json"), None);
-        disabled.disabled = true;
-        init(&config_with(&[
-            disabled,
-            custom_registry("local-only", None, None),
-        ]));
+        init(&config_with(&[custom_registry("local-only", None, None)]));
 
         assert_eq!(
             fetch_registry("nowhere"),
             Err("unknown registry `nowhere`".to_string())
         );
         assert_eq!(
-            fetch_registry("acme"),
-            Err("registry `acme` is disabled".to_string())
-        );
-        assert_eq!(
             fetch_registry("local-only"),
             Err("registry `local-only` has no online source".to_string())
+        );
+    }
+
+    #[test]
+    fn fetch_registry_reports_a_disabled_registry_as_unknown() {
+        let _guard = global_lock();
+        reset_catalog();
+        let mut disabled = custom_registry("acme", Some("https://example.test/x.json"), None);
+        disabled.disabled = true;
+        init(&config_with(&[disabled]));
+        assert_eq!(
+            fetch_registry("acme"),
+            Err("unknown registry `acme`".to_string()),
+            "a disabled registry is not registered, so it cannot fetch"
         );
     }
 
@@ -1637,20 +1679,18 @@ mod tests {
     }
 
     #[test]
-    fn remote_first_ids_list_enabled_sourced_registries() {
+    fn remote_first_ids_list_sourced_registries() {
         let _guard = global_lock();
         reset_catalog();
         let mut remote_first = custom_registry("rf", Some("https://example.test/x.json"), None);
         remote_first.remote_first = true;
-        let mut disabled = custom_registry("sleepy", Some("https://example.test/y.json"), None);
-        disabled.disabled = true;
         let mut offline = custom_registry("local-only", None, None);
         offline.remote_first = true;
-        init(&config_with(&[remote_first, disabled, offline]));
+        init(&config_with(&[remote_first, offline]));
         assert_eq!(
             remote_first_ids(),
             vec!["rf"],
-            "disabled and sourceless registries never fetch at startup"
+            "sourceless registries never fetch at startup"
         );
     }
 
