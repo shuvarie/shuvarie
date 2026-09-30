@@ -2265,11 +2265,15 @@ impl CoreCtx {
         );
     }
 
-    /// Delete the interrupted assistant tip (message + tool calls), walk the
-    /// leaf back to its parent (the user prompt), and re-stream from there.
-    /// Used by the auto-continue path after a context overflow and the
-    /// turn-retry resume. No undo-log entry — the retry rewrites the
-    /// same branch position.
+    /// Walk the active leaf back to the interrupted assistant tip's parent
+    /// (the user prompt) and re-stream from there. The partial reply and its
+    /// tool calls stay in the tree as an off-path branch — a retry must not
+    /// destroy the history after the last user prompt; the session tree can
+    /// still fork back to it or delete it explicitly. The retried attempt
+    /// appends its own sibling branch under the same parent, and off-path
+    /// rows never reach the request (history, tool records, and usage are
+    /// all active-path based). Used by the auto-continue path after a
+    /// context overflow and the turn-retry resume.
     async fn resume_last_turn(&mut self) {
         let Some(s) = &self.session else {
             return;
@@ -2282,8 +2286,6 @@ impl CoreCtx {
             && let Some(leaf) = stored.messages.iter().find(|m| m.id == leaf_id)
             && leaf.role == shuvarie_db::MsgRole::Assistant
         {
-            let _ = self.store.delete_tool_calls_for_message(leaf.id).await;
-            let _ = self.store.delete_message(leaf.id).await;
             let _ = self.store.set_active_leaf(sid, leaf.parent_id).await;
         }
         let loaded = match self.store.load_session(sid).await {
@@ -2997,7 +2999,11 @@ async fn stream_stream_to_events(
                 // Run compaction: summarize the head of the active path so
                 // the next turn sends [summary, tail] instead of the full
                 // history. The summary is inserted into the chain at the cut
-                // point and the first tail message reparented under it.
+                // point, the first tail message reparented under it, and the
+                // leaf returned to the pre-compaction tip so the resume
+                // below finds the interrupted turn's partial reply as the
+                // active tip and re-winds from it (the partial stays as an
+                // off-path branch instead of being deleted).
                 let mut compacted = false;
                 if let Some(sid) = session.lock().await.id
                     && let Ok(stored) = store.load_session(sid).await
