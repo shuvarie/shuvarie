@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ops::Not;
 
 use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
@@ -12,8 +13,8 @@ use crate::tui::utils::num::fmt_scaled_number;
 
 use super::add_provider::centered_rect;
 use super::list::{render_list_item_line, scroll_offset_for};
-use super::registry::{FetchState, RegistryManager, RegistryState};
-use super::search::{Search, SearchMessage, filter_indices};
+use super::registry::RegistryManager;
+use super::search::{filter_indices, Search, SearchMessage};
 use super::theme;
 
 use shuvarie_core::{Connections, Model};
@@ -62,10 +63,16 @@ struct ProviderSpec {
     active: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum Row {
     /// The pinned "Use this input anyway" row (only while a query is typed).
     Custom,
+    /// A registry's group header; resolved against the manager at render time
+    /// so badges stay live.
+    RegistryHeader {
+        registry: String,
+    },
+    /// A configured provider's group header.
     Header {
         name: String,
         active: bool,
@@ -94,7 +101,6 @@ pub struct ModelPicker {
     viewport_height: u16,
     pub registries: RegistryManager,
     specs: Vec<ProviderSpec>,
-    registry: Vec<Provider>,
     live: HashMap<String, Vec<Model>>,
     rows: Vec<Row>,
 }
@@ -109,7 +115,6 @@ impl ModelPicker {
             viewport_height: 0,
             registries: RegistryManager::from_config(&shuvarie_core::RegistriesConfig::default()),
             specs: Vec::new(),
-            registry: Vec::new(),
             live: HashMap::new(),
             rows: Vec::new(),
         }
@@ -121,19 +126,15 @@ impl ModelPicker {
         live: &HashMap<String, Vec<Model>>,
         registries: &shuvarie_core::RegistriesConfig,
     ) {
-        let registries = RegistryManager::from_config(registries);
-        let snapshot = registries.snapshot();
         self.open_with(
-            snapshot,
             Self::provider_specs(connections),
             live.clone(),
-            registries,
+            RegistryManager::from_config(registries),
         );
     }
 
     fn open_with(
         &mut self,
-        registry: Vec<Provider>,
         specs: Vec<ProviderSpec>,
         live: HashMap<String, Vec<Model>>,
         registries: RegistryManager,
@@ -142,7 +143,6 @@ impl ModelPicker {
         self.registries = registries;
         self.specs = specs;
         self.live = live;
-        self.registry = registry;
         self.search.clear();
         self.search.active = true;
         self.rebuild();
@@ -159,7 +159,7 @@ impl ModelPicker {
     }
 
     /// Providers whose models must be fetched live (`ListModels`): no cached
-    /// live models and no catalog entry in the active registry snapshot.
+    /// live models and no registry knows their catalog id.
     pub fn pending_live_providers(&self) -> Vec<String> {
         self.specs
             .iter()
@@ -167,7 +167,7 @@ impl ModelPicker {
                 let in_registry = s
                     .catalog
                     .as_deref()
-                    .is_some_and(|id| self.registry.iter().any(|p| p.id.0 == id));
+                    .is_some_and(|id| self.registries.resolving_registry_index(id).is_some());
                 !self.live.contains_key(&s.id) && !in_registry
             })
             .map(|s| s.id.clone())
@@ -211,9 +211,39 @@ impl ModelPicker {
         specs
     }
 
-    fn refresh_registry(&mut self) {
-        self.registry = self.registries.snapshot();
-        self.rebuild();
+    /// The matched model rows for one provider's group: `None` when the group
+    /// has no match while searching (its header drops out with it).
+    fn matched_spec_rows(
+        &self,
+        spec: &ProviderSpec,
+        query: &str,
+        filtering: bool,
+    ) -> Option<Vec<Row>> {
+        let models = self.provider_model_rows(spec);
+        let matched: Vec<Row> = if filtering {
+            let filtered_ids = filter_indices(query, models.len(), |i| match &models[i] {
+                Row::Model { id, .. } => id.clone(),
+                _ => String::new(),
+            });
+            if filtered_ids.len() == models.len() {
+                models
+            } else {
+                filtered_ids
+                    .into_iter()
+                    .map(|i| models[i].clone())
+                    .collect()
+            }
+        } else {
+            models
+        };
+        matched.is_empty().not().then_some(matched)
+    }
+
+    fn provider_header(spec: &ProviderSpec) -> Row {
+        Row::Header {
+            name: spec.name.clone(),
+            active: spec.active,
+        }
     }
 
     fn rebuild(&mut self) {
@@ -223,32 +253,49 @@ impl ModelPicker {
         if filtering {
             rows.push(Row::Custom);
         }
-        for spec in &self.specs {
-            let models: Vec<Row> = self.provider_model_rows(spec);
-            let matched: Vec<Row> = if filtering {
-                let filtered_ids = filter_indices(&query, models.len(), |i| match &models[i] {
-                    Row::Model { id, .. } => id.clone(),
-                    _ => String::new(),
-                });
-                if filtered_ids.len() == models.len() {
-                    models
-                } else {
-                    filtered_ids
-                        .into_iter()
-                        .map(|i| models[i].clone())
-                        .collect()
+        // Specs resolve to the first registry whose active snapshot knows
+        // their catalog id; the rest list live models with no registry above
+        // them. Live providers lead the list — the active provider often has
+        // no registry behind it — then registry groups follow in registry
+        // order. While searching, groups with no match disappear — headers
+        // included; a registry nobody resolves to has no header at all.
+        let mut ungrouped: Vec<usize> = Vec::new();
+        let mut grouped: Vec<Vec<usize>> = vec![Vec::new(); self.registries.registries().len()];
+        for (index, spec) in self.specs.iter().enumerate() {
+            match spec
+                .catalog
+                .as_deref()
+                .and_then(|id| self.registries.resolving_registry_index(id))
+            {
+                Some(registry) => grouped[registry].push(index),
+                None => ungrouped.push(index),
+            }
+        }
+        for index in ungrouped {
+            let spec = &self.specs[index];
+            if let Some(matched) = self.matched_spec_rows(spec, &query, filtering) {
+                rows.push(Self::provider_header(spec));
+                rows.extend(matched);
+            }
+        }
+        for (registry_index, specs) in grouped.into_iter().enumerate() {
+            let mut group_rows: Vec<Row> = Vec::new();
+            for index in specs {
+                let spec = &self.specs[index];
+                if let Some(matched) = self.matched_spec_rows(spec, &query, filtering) {
+                    group_rows.push(Self::provider_header(spec));
+                    group_rows.extend(matched);
                 }
-            } else {
-                models
-            };
-            if matched.is_empty() {
+            }
+            if group_rows.is_empty() {
                 continue;
             }
-            rows.push(Row::Header {
-                name: spec.name.clone(),
-                active: spec.active,
+            rows.push(Row::RegistryHeader {
+                registry: self.registries.registries()[registry_index]
+                    .id()
+                    .to_string(),
             });
-            rows.extend(matched);
+            rows.extend(group_rows);
         }
         self.rows = rows;
         self.selected = self.first_selectable();
@@ -257,17 +304,19 @@ impl ModelPicker {
     }
 
     /// The model rows for one provider: registry models when its catalog id
-    /// resolves in the active snapshot, else the live `ListModels` cache. A
-    /// catalog'd provider during a pending remote fetch shows a loading row
-    /// instead of falling through to live data.
+    /// resolves in a registry's active snapshot, else the live `ListModels`
+    /// cache. An unresolved catalog id during a pending remote fetch shows a
+    /// loading row instead of falling through to live data — the curated list
+    /// is imminent, and the spec migrates into its registry group once the
+    /// fetch resolves.
     fn provider_model_rows(&self, spec: &ProviderSpec) -> Vec<Row> {
         if let Some(catalog_id) = &spec.catalog {
-            if self.registry.is_empty() && self.registries.any_fetching() {
-                return vec![Row::Status {
-                    text: "loading registry…".to_string(),
-                }];
-            }
-            if let Some(provider) = self.registry.iter().find(|p| &p.id.0 == catalog_id) {
+            if let Some(provider) = self
+                .registries
+                .resolving_registry_index(catalog_id)
+                .and_then(|index| self.registries.registries().get(index))
+                .and_then(|registry| registry.providers().iter().find(|p| &p.id.0 == catalog_id))
+            {
                 return provider
                     .models
                     .iter()
@@ -277,6 +326,11 @@ impl ModelPicker {
                         context: m.limit.context.map(|c| c.max(0) as u32),
                     })
                     .collect();
+            }
+            if self.registries.any_fetching() {
+                return vec![Row::Status {
+                    text: "loading registry…".to_string(),
+                }];
             }
         }
         match self.live.get(&spec.id) {
@@ -342,9 +396,9 @@ impl ModelPicker {
             }
             ModelPickerMessage::ToggleSource => {
                 let ids = self.registries.initiate_online();
-                // Going online may have switched sources; the snapshot
-                // re-reads either way.
-                self.refresh_registry();
+                // Going online may have switched sources; the rows re-read
+                // the manager either way.
+                self.rebuild();
                 if ids.is_empty() {
                     None
                 } else {
@@ -359,7 +413,6 @@ impl ModelPicker {
                 // registries' fetches (e.g. `remote-first` ones at startup)
                 // refresh nothing here.
                 if self.registries.on_loaded(&registry, providers) {
-                    self.registry = self.registries.snapshot();
                     self.rebuild();
                 }
                 None
@@ -451,29 +504,8 @@ impl ModelPicker {
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
 
-        let [source_area, input_area, list_area, hint_area] =
-            Layout::vertical([Length(1), Length(1), Min(0), Length(1)]).areas(inner);
-
-        // The built-in registry's state stands in until the grouped list
-        // gives every registry its own header row.
-        let selune = self
-            .registries
-            .state(shuvarie_core::catalog::SELUNE_REGISTRY);
-        let mut source_spans = vec![
-            Span::raw("Models: ").fg(theme::text_dim()),
-            Span::raw(selune.map_or("offline", RegistryState::source_label)).fg(theme::accent()),
-        ];
-        match selune.map(|registry| &registry.state) {
-            Some(FetchState::Failed(error)) => {
-                source_spans.push(Span::raw(" — ").fg(theme::text_muted()));
-                source_spans.push(Span::raw(error.clone()).fg(theme::error()));
-            }
-            Some(FetchState::Fetching) => {
-                source_spans.push(Span::raw(" — fetching…").fg(theme::text_muted()));
-            }
-            _ => {}
-        }
-        frame.render_widget(Line::from(source_spans), source_area);
+        let [input_area, list_area, hint_area] =
+            Layout::vertical([Length(1), Min(0), Length(1)]).areas(inner);
 
         self.search.view(frame, input_area, "Type to filter models");
 
@@ -490,16 +522,22 @@ impl ModelPicker {
             let row = &self.rows[idx];
             let item = match row {
                 Row::Custom => {
-                    let mut line = vec![
-                        Span::raw("Use this input anyway")
-                            .fg(theme::accent())
-                            .add_modifier(Modifier::BOLD),
-                    ];
+                    let mut line = vec![Span::raw("Use this input anyway")
+                        .fg(theme::accent())
+                        .add_modifier(Modifier::BOLD)];
                     line.push(
                         Span::raw(format!("  — {}", self.search.query.trim()))
                             .fg(theme::text_muted()),
                     );
                     render_list_item_line(Line::from(line), is_selected)
+                }
+                Row::RegistryHeader { registry } => {
+                    let header = self
+                        .registries
+                        .state(registry)
+                        .map(|registry| registry.header_line())
+                        .unwrap_or_else(|| Line::from(String::new()));
+                    ListItem::new(header)
                 }
                 Row::Header { name, active } => {
                     let mut spans = vec![Span::raw("  ".to_string())];
@@ -640,23 +678,34 @@ mod tests {
         connections
     }
 
+    /// The fixture list: Acme (active, live models only) leads, then the
+    /// built-in registry's group serving Catalog Co's catalog id.
     fn picker() -> ModelPicker {
+        picker_with_registries(
+            RegistryManager::from_config(&shuvarie_core::RegistriesConfig::default())
+                .with_state_providers(
+                    shuvarie_core::catalog::SELUNE_REGISTRY,
+                    vec![registry_provider(
+                        "catalog-co",
+                        "Catalog Co",
+                        &["co-1", "co-2"],
+                    )],
+                ),
+        )
+    }
+
+    fn picker_with_registries(registries: RegistryManager) -> ModelPicker {
         let mut picker = ModelPicker::new();
         picker.open_with(
-            vec![registry_provider(
-                "catalog-co",
-                "Catalog Co",
-                &["co-1", "co-2"],
-            )],
             ModelPicker::provider_specs(&connections()),
             HashMap::new(),
-            RegistryManager::from_config(&shuvarie_core::RegistriesConfig::default()),
+            registries,
         );
         picker
     }
 
     #[test]
-    fn groups_are_ordered_active_first_with_headers() {
+    fn groups_are_ordered_live_first_then_by_registry() {
         let p = picker();
         assert!(matches!(p.rows[0], Row::Header { ref name, active: true } if name == "Acme"));
         assert!(
@@ -664,10 +713,20 @@ mod tests {
             "live provider loading"
         );
         assert!(
-            matches!(p.rows[2], Row::Header { ref name, active: false } if name == "Catalog Co")
+            matches!(
+                p.rows[2],
+                Row::RegistryHeader {
+                    ref registry
+                }
+                if registry == shuvarie_core::catalog::SELUNE_REGISTRY
+            ),
+            "the built-in registry groups catalog-backed providers"
+        );
+        assert!(
+            matches!(p.rows[3], Row::Header { ref name, active: false } if name == "Catalog Co")
         );
         assert!(matches!(
-            p.rows[3],
+            p.rows[4],
             Row::Model { ref id, context: Some(128_000), .. } if id == "co-1"
         ));
     }
@@ -675,7 +734,7 @@ mod tests {
     #[test]
     fn selection_skips_headers_and_status_rows() {
         let mut p = picker();
-        assert_eq!(p.selected, 3, "starts on the first model row");
+        assert_eq!(p.selected, 4, "starts on the first model row");
         // Walk to the end and back without landing on a header.
         for _ in 0..10 {
             p.update(ModelPickerMessage::Next);
@@ -782,7 +841,15 @@ mod tests {
             providers: vec![registry_provider("remote-co", "Remote Co", &["r-1"])],
         });
         assert!(p.ids_needing_fetch().is_empty());
-        assert_eq!(p.registry.len(), 1, "the loaded snapshot replaces the list");
+        assert_eq!(
+            p.registries
+                .state(shuvarie_core::catalog::SELUNE_REGISTRY)
+                .unwrap()
+                .providers()
+                .len(),
+            1,
+            "the loaded snapshot replaces the offline one"
+        );
     }
 
     #[test]
@@ -794,16 +861,20 @@ mod tests {
                 shuvarie_core::catalog::SELUNE_REGISTRY.to_string()
             ]))
         );
-        let before = p.registry.len();
+        let before = p.rows.len();
         p.update(ModelPickerMessage::RegistryLoaded {
             registry: "some-custom-registry".into(),
             providers: vec![registry_provider("remote-co", "Remote Co", &["r-1"])],
         });
         assert_eq!(
-            p.registry.len(),
+            p.rows.len(),
             before,
             "another registry's fetch does not refresh this picker"
         );
+        assert!(!p.rows.iter().any(|row| matches!(
+            row,
+            Row::Model { id, .. } if id == "r-1"
+        )));
     }
 
     #[test]
@@ -818,10 +889,103 @@ mod tests {
     }
 
     #[test]
+    fn custom_registries_group_after_the_built_in_one() {
+        let config = shuvarie_core::RegistriesConfig {
+            custom: vec![shuvarie_core::CustomRegistry {
+                name: "zeta".to_string(),
+                url: Some("https://zeta.example/providers.json".to_string()),
+                ..shuvarie_core::CustomRegistry::default()
+            }],
+            ..shuvarie_core::RegistriesConfig::default()
+        };
+        let manager = RegistryManager::from_config(&config)
+            .with_state_providers(
+                shuvarie_core::catalog::SELUNE_REGISTRY,
+                vec![registry_provider("catalog-co", "Catalog Co", &["co-1"])],
+            )
+            .with_state_providers(
+                "zeta",
+                vec![registry_provider("zeta-co", "Zeta Co", &["z-1"])],
+            );
+        let mut picker = ModelPicker::new();
+        picker.open_with(
+            vec![
+                ProviderSpec {
+                    id: "acme".into(),
+                    name: "Acme".into(),
+                    catalog: None,
+                    active: true,
+                },
+                ProviderSpec {
+                    id: "cat".into(),
+                    name: "Catalog Co".into(),
+                    catalog: Some("catalog-co".into()),
+                    active: false,
+                },
+                ProviderSpec {
+                    id: "zeta".into(),
+                    name: "Zeta Direct".into(),
+                    catalog: Some("zeta-co".into()),
+                    active: false,
+                },
+            ],
+            HashMap::new(),
+            manager,
+        );
+        // Live acme leads, then the built-in registry, then the custom one —
+        // registry order, matching the provider selector.
+        assert!(matches!(picker.rows[0], Row::Header { ref name, active: true } if name == "Acme"));
+        assert!(matches!(
+            picker.rows[2],
+            Row::RegistryHeader { ref registry } if registry == shuvarie_core::catalog::SELUNE_REGISTRY
+        ));
+        assert!(matches!(picker.rows[3], Row::Header { ref name, .. } if name == "Catalog Co"));
+        assert!(matches!(picker.rows[4], Row::Model { ref id, .. } if id == "co-1"));
+        assert!(
+            matches!(picker.rows[5], Row::RegistryHeader { ref registry } if registry == "zeta"),
+            "the custom registry groups its own providers"
+        );
+        assert!(matches!(picker.rows[6], Row::Header { ref name, .. } if name == "Zeta Direct"));
+        assert!(matches!(picker.rows[7], Row::Model { ref id, .. } if id == "z-1"));
+    }
+
+    #[test]
+    fn catalog_specs_migrate_into_their_registry_after_the_fetch() {
+        // Unseeded: the catalog id resolves nowhere, so while the fetch is
+        // pending the spec shows the registry loading row instead of falling
+        // through to live data.
+        let mut p = picker_with_registries(RegistryManager::from_config(
+            &shuvarie_core::RegistriesConfig::default(),
+        ));
+        p.update(ModelPickerMessage::ToggleSource);
+        assert!(
+            p.rows.iter().any(|row| matches!(
+                row,
+                Row::Status { text } if text == "loading registry…"
+            )),
+            "{:?}",
+            p.rows
+        );
+        // Once loaded the spec resolves and takes its place in the group.
+        p.update(ModelPickerMessage::RegistryLoaded {
+            registry: shuvarie_core::catalog::SELUNE_REGISTRY.to_string(),
+            providers: vec![registry_provider("catalog-co", "Catalog Co", &["co-1"])],
+        });
+        assert!(matches!(
+            p.rows[2],
+            Row::RegistryHeader { ref registry } if registry == shuvarie_core::catalog::SELUNE_REGISTRY
+        ));
+        assert!(matches!(p.rows[4], Row::Model { ref id, .. } if id == "co-1"));
+        assert!(!p.rows.iter().any(|row| matches!(
+            row,
+            Row::Status { text } if text == "loading registry…"
+        )));
+    }
+
+    #[test]
     fn no_providers_shows_placeholder_row() {
         let mut p = ModelPicker::new();
         p.open_with(
-            vec![],
             Vec::new(),
             HashMap::new(),
             RegistryManager::from_config(&shuvarie_core::RegistriesConfig::default()),

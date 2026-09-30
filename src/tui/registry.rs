@@ -132,11 +132,6 @@ impl RegistryState {
         &self.seed.name
     }
 
-    /// The source kind label for the active snapshot.
-    pub fn source_label(&self) -> &'static str {
-        if self.online { "online" } else { "offline" }
-    }
-
     /// The group header row for the selectable lists: the registry name plus
     /// a source badge — offline/online, fetch progress/failure while
     /// matching, or a load failure reported whenever the offline snapshot is
@@ -253,14 +248,14 @@ impl RegistryManager {
             .find(|registry| registry.seed.id == id)
     }
 
-    /// The union catalog the popup lists: per registry in order, the online
-    /// snapshot once loaded (empty until a fetch succeeds), else the offline
-    /// one.
-    pub fn snapshot(&self) -> Vec<Provider> {
+    /// The index (in list order) of the first registry whose active snapshot
+    /// contains `provider_id` — a catalog id resolves to exactly one registry,
+    /// the same first-match rule the union lookup follows. `None` when no
+    /// registry's active source knows it.
+    pub fn resolving_registry_index(&self, provider_id: &str) -> Option<usize> {
         self.registries
             .iter()
-            .flat_map(|registry| registry.providers().to_vec())
-            .collect()
+            .position(|registry| registry.providers.iter().any(|p| p.id.0 == provider_id))
     }
 
     /// The ids currently fetching — one `Command::FetchRegistry` per id is due.
@@ -359,7 +354,6 @@ mod tests {
         let manager = RegistryManager::new([seed("selune", false)]);
         let registry = manager.state("selune").unwrap();
         assert!(!registry.online);
-        assert_eq!(registry.source_label(), "offline");
         assert_eq!(registry.state, FetchState::Idle);
         assert!(manager.ids_needing_fetch().is_empty());
     }
@@ -471,14 +465,40 @@ mod tests {
         assert_eq!(manager.state("selune").unwrap().state, FetchState::Idle);
     }
 
+    /// A provider stub — the resolution check only reads its id.
+    fn provider_stub(id: &str) -> Provider {
+        Provider {
+            name: format!("{id} Co"),
+            id: selune::InferenceProvider(id.to_string()),
+            api_key: None,
+            auth: None,
+            api_endpoint: None,
+            doc: None,
+            r#type: None,
+            default_large_model_id: None,
+            default_small_model_id: None,
+            models: Vec::new(),
+            default_headers: None,
+        }
+    }
+
     #[test]
-    fn snapshot_unions_per_registry_snapshots_in_order() {
-        // The built-in registry contributes its embedded offline snapshot; an
-        // unknown custom registry contributes nothing (its `path` never
-        // loaded, its `url` never fetched).
-        let manager = RegistryManager::new([seed("selune", false), seed("acme", false)]);
-        assert_eq!(manager.snapshot(), registry_catalog("selune").local);
-        assert!(manager.state("acme").unwrap().providers().is_empty());
+    fn resolving_registry_prefers_the_first_registry_that_knows_an_id() {
+        // Resolution follows registry order: the first registry whose active
+        // snapshot knows the id wins, even when a later one knows it too.
+        let manager = RegistryManager::new([seed("selune", false), seed("acme", false)])
+            .with_state_providers("selune", vec![provider_stub("shared")])
+            .with_state_providers(
+                "acme",
+                vec![provider_stub("shared"), provider_stub("acme-only")],
+            );
+        assert_eq!(
+            manager.resolving_registry_index("shared"),
+            Some(0),
+            "the first registry knowing the id wins"
+        );
+        assert_eq!(manager.resolving_registry_index("acme-only"), Some(1));
+        assert_eq!(manager.resolving_registry_index("nowhere"), None);
     }
 
     /// The header's flat text, for badge assertions.
