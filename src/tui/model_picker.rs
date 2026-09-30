@@ -342,8 +342,10 @@ impl ModelPicker {
             }
             ModelPickerMessage::ToggleSource => {
                 let ids = self.registries.initiate_online();
+                // Going online may have switched sources; the snapshot
+                // re-reads either way.
+                self.refresh_registry();
                 if ids.is_empty() {
-                    self.refresh_registry();
                     None
                 } else {
                     Some(ModelPickerEffect::FetchRegistries(ids))

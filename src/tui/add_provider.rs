@@ -9,8 +9,8 @@ use crate::tui::utils::{alt, ctrl};
 
 use super::components::InputBuffer;
 use super::list::{render_list_item, render_list_item_line, scroll_offset_for};
-use super::registry::{FetchState, RegistryManager, RegistryState};
-use super::search::{Search, SearchMessage};
+use super::registry::RegistryManager;
+use super::search::{Search, SearchMessage, filter_indices};
 use super::theme;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,12 +119,27 @@ const TRANSPORTS: [(selune::ProviderType, &str); 30] = [
     (selune::ProviderType::Zai, "Z.ai"),
 ];
 
+/// One select-stage row: a registry's group header (rendered live from the
+/// manager so badges track fetch state), one of its providers, or the pinned
+/// custom-provider row that always ends the list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SelectRow {
+    Header { registry: String },
+    Provider { registry: String, index: usize },
+    Custom,
+}
+
+impl SelectRow {
+    fn selectable(&self) -> bool {
+        !matches!(self, SelectRow::Header { .. })
+    }
+}
+
 pub struct AddProviderForm {
     pub stage: AddProviderStage,
     pub registries: RegistryManager,
-    providers: Vec<Provider>,
+    rows: Vec<SelectRow>,
     pub search: Search,
-    pub filtered: Vec<usize>,
     pub selected: usize,
     pub offset: usize,
     viewport_height: u16,
@@ -151,17 +166,14 @@ impl AddProviderForm {
         existing_catalog_ids: &[String],
         registries: &shuvarie_core::RegistriesConfig,
     ) -> Self {
-        let registries = RegistryManager::from_config(registries);
-        Self::with_providers(
-            registries.snapshot(),
-            registries,
+        Self::with_registries(
+            RegistryManager::from_config(registries),
             existing_names,
             existing_catalog_ids,
         )
     }
 
-    fn with_providers(
-        providers: Vec<Provider>,
+    fn with_registries(
         registries: RegistryManager,
         existing_names: &[String],
         existing_catalog_ids: &[String],
@@ -169,9 +181,8 @@ impl AddProviderForm {
         let mut form = Self {
             stage: AddProviderStage::Select,
             registries,
-            providers,
+            rows: Vec::new(),
             search: Search::new(),
-            filtered: Vec::new(),
             selected: 0,
             offset: 0,
             viewport_height: 0,
@@ -189,7 +200,7 @@ impl AddProviderForm {
             existing_names: existing_names.to_vec(),
             existing_catalog_ids: existing_catalog_ids.to_vec(),
         };
-        form.refilter();
+        form.rebuild_rows();
         form
     }
 
@@ -198,33 +209,78 @@ impl AddProviderForm {
         self.registries.ids_needing_fetch()
     }
 
-    /// The selected select-stage row: a registry provider for indices below
-    /// `filtered.len()`, the pinned custom row for the last index.
+    /// The selected select-stage row's provider, `None` for the pinned custom
+    /// row.
     fn selected_provider(&self) -> Option<&Provider> {
-        self.filtered
-            .get(self.selected)
-            .map(|&i| &self.providers[i])
+        match self.rows.get(self.selected)? {
+            SelectRow::Provider { registry, index } => {
+                self.registries.state(registry)?.providers().get(*index)
+            }
+            _ => None,
+        }
     }
 
-    fn refilter(&mut self) {
-        self.filtered = self
-            .search
-            .filter_indices(self.providers.len(), |i| self.providers[i].name.clone());
-        self.selected = 0;
+    /// Rebuilds the grouped rows: one header per registry (kept even for an
+    /// idle empty group so its badge shows), its providers in filtered order,
+    /// and the pinned custom row last. While searching, groups with no match
+    /// disappear — headers included.
+    fn rebuild_rows(&mut self) {
+        let query = self.search.query.trim().to_string();
+        let filtering = !query.is_empty();
+        let mut rows: Vec<SelectRow> = Vec::new();
+        for registry in self.registries.registries() {
+            let providers = registry.providers();
+            let matched: Vec<usize> = if filtering {
+                filter_indices(&query, providers.len(), |i| providers[i].name.clone())
+            } else {
+                (0..providers.len()).collect()
+            };
+            if filtering && matched.is_empty() {
+                continue;
+            }
+            rows.push(SelectRow::Header {
+                registry: registry.id().to_string(),
+            });
+            rows.extend(matched.into_iter().map(|index| SelectRow::Provider {
+                registry: registry.id().to_string(),
+                index,
+            }));
+        }
+        rows.push(SelectRow::Custom);
+        self.rows = rows;
+        self.selected = self.first_selectable();
         self.offset = 0;
         self.recompute_offset();
     }
 
-    fn recompute_offset(&mut self) {
-        let vh = self.viewport_height as usize;
-        let len = self.visible_len();
-        self.offset = scroll_offset_for(self.selected, self.offset, vh, len);
+    fn first_selectable(&self) -> usize {
+        self.rows
+            .iter()
+            .position(SelectRow::selectable)
+            .unwrap_or(self.rows.len().saturating_sub(1))
     }
 
-    /// Select-stage row count: the matched providers plus the pinned custom
-    /// row.
-    fn visible_len(&self) -> usize {
-        self.filtered.len() + 1
+    fn recompute_offset(&mut self) {
+        let vh = self.viewport_height as usize;
+        self.offset = scroll_offset_for(self.selected, self.offset, vh, self.rows.len());
+    }
+
+    /// Steps the selection by `dir`, skipping group headers; the movement is
+    /// a no-op when nothing selectable lies in that direction.
+    fn move_selection(&mut self, dir: isize) {
+        let len = self.rows.len() as isize;
+        if len == 0 {
+            return;
+        }
+        let mut next = self.selected as isize + dir;
+        while next >= 0 && next < len && !self.rows[next as usize].selectable() {
+            next += dir;
+        }
+        if next < 0 {
+            return;
+        }
+        self.selected = (next as usize).min(len as usize - 1);
+        self.recompute_offset();
     }
 
     fn recompute_kind_offset(&mut self) {
@@ -415,8 +471,11 @@ impl AddProviderForm {
             },
             AddProviderMessage::ToggleSource => {
                 let ids = self.registries.initiate_online();
+                // Going online may have switched sources (an already-loaded
+                // snapshot appears, a pending fetch empties one); the rows
+                // re-balance either way.
+                self.rebuild_rows();
                 if ids.is_empty() {
-                    self.refresh_registry_snapshot();
                     AddProviderOutcome::None
                 } else {
                     AddProviderOutcome::FetchRegistries(ids)
@@ -430,8 +489,7 @@ impl AddProviderForm {
                 // fetches (e.g. `remote-first` ones at startup) refresh
                 // nothing here.
                 if self.registries.on_loaded(&registry, providers) {
-                    self.providers = self.registries.snapshot();
-                    self.refilter();
+                    self.rebuild_rows();
                 }
                 AddProviderOutcome::None
             }
@@ -446,11 +504,7 @@ impl AddProviderForm {
                     AddProviderOutcome::None
                 }
                 _ => {
-                    let len = self.visible_len();
-                    if len > 0 {
-                        self.selected = (self.selected + 1).min(len - 1);
-                        self.recompute_offset();
-                    }
+                    self.move_selection(1);
                     AddProviderOutcome::None
                 }
             },
@@ -461,8 +515,7 @@ impl AddProviderForm {
                     AddProviderOutcome::None
                 }
                 _ => {
-                    self.selected = self.selected.saturating_sub(1);
-                    self.recompute_offset();
+                    self.move_selection(-1);
                     AddProviderOutcome::None
                 }
             },
@@ -486,7 +539,7 @@ impl AddProviderForm {
             }
             AddProviderMessage::Search(m) => {
                 self.search.update(m);
-                self.refilter();
+                self.rebuild_rows();
                 AddProviderOutcome::None
             }
             AddProviderMessage::NextField => {
@@ -508,7 +561,7 @@ impl AddProviderForm {
                         for c in flat.chars() {
                             self.search.update(SearchMessage::Input(c));
                         }
-                        self.refilter();
+                        self.rebuild_rows();
                     }
                     _ => {
                         self.field_buf(self.field).insert_str(&flat);
@@ -579,11 +632,6 @@ impl AddProviderForm {
                 AddProviderStage::Details => AddProviderOutcome::None,
             },
         }
-    }
-
-    fn refresh_registry_snapshot(&mut self) {
-        self.providers = self.registries.snapshot();
-        self.refilter();
     }
 
     fn submit(&mut self) -> AddProviderOutcome {
@@ -732,29 +780,6 @@ impl AddProviderForm {
         }
     }
 
-    fn source_line(&self) -> Line<'static> {
-        // The built-in registry's state stands in until the grouped list
-        // gives every registry its own header row.
-        let selune = self
-            .registries
-            .state(shuvarie_core::catalog::SELUNE_REGISTRY);
-        let mut spans = vec![
-            Span::raw("Registry: ").fg(theme::text_dim()),
-            Span::raw(selune.map_or("offline", RegistryState::source_label)).fg(theme::accent()),
-        ];
-        match selune.map(|registry| &registry.state) {
-            Some(FetchState::Fetching) => {
-                spans.push(Span::raw(" — fetching…").fg(theme::text_muted()))
-            }
-            Some(FetchState::Failed(error)) => {
-                spans.push(Span::raw(" — ").fg(theme::text_muted()));
-                spans.push(Span::raw(error.clone()).fg(theme::error()));
-            }
-            _ => {}
-        }
-        Line::from(spans)
-    }
-
     fn view_select(&self, frame: &mut Frame<'_>, area: Rect) {
         let popup = centered_rect(50, 55, area);
         frame.render_widget(Clear, popup);
@@ -762,10 +787,9 @@ impl AddProviderForm {
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
 
-        let [source_area, search_area, list_area, hint_area] =
-            Layout::vertical([Length(1), Length(1), Min(0), Length(1)]).areas(inner);
+        let [search_area, list_area, hint_area] =
+            Layout::vertical([Length(1), Min(0), Length(1)]).areas(inner);
 
-        frame.render_widget(self.source_line(), source_area);
         self.search
             .view(frame, search_area, "Type to filter providers");
 
@@ -773,27 +797,44 @@ impl AddProviderForm {
             self.selected,
             self.offset,
             list_area.height as usize,
-            self.visible_len(),
+            self.rows.len(),
         );
         let visible_len = list_area.height as usize;
         let mut items: Vec<ListItem> = Vec::new();
-        for row in offset..self.visible_len().min(offset + visible_len) {
-            if let Some(&orig) = self.filtered.get(row) {
-                let provider = &self.providers[orig];
-                let mut line = vec![Span::raw(provider.name.clone()).fg(theme::text())];
-                if self.existing_catalog_ids.contains(&provider.id.0) {
-                    line.push(Span::raw("  ✓ configured").fg(theme::text_muted()));
+        for row in offset..self.rows.len().min(offset + visible_len) {
+            let is_selected = self.selected == row;
+            let item = match &self.rows[row] {
+                SelectRow::Header { registry } => {
+                    let header = self
+                        .registries
+                        .state(registry)
+                        .map(|registry| registry.header_line())
+                        .unwrap_or_else(|| Line::from(String::new()));
+                    ListItem::new(header)
                 }
-                items.push(render_list_item_line(
-                    Line::from(line),
-                    row == self.selected,
-                ));
-            } else {
-                items.push(render_list_item(
-                    "Add custom provider…".to_string(),
-                    row == self.selected,
-                ));
-            }
+                SelectRow::Provider { registry, index } => {
+                    match self
+                        .registries
+                        .state(registry)
+                        .and_then(|registry| registry.providers().get(*index))
+                    {
+                        Some(provider) => {
+                            let mut line = vec![Span::raw(provider.name.clone()).fg(theme::text())];
+                            if self.existing_catalog_ids.contains(&provider.id.0) {
+                                line.push(Span::raw("  ✓ configured").fg(theme::text_muted()));
+                            }
+                            render_list_item_line(Line::from(line), is_selected)
+                        }
+                        // Rows are always in step with the manager; defensive
+                        // fallback that renders nothing.
+                        None => ListItem::new(Line::from(String::new())),
+                    }
+                }
+                SelectRow::Custom => {
+                    render_list_item("Add custom provider…".to_string(), is_selected)
+                }
+            };
+            items.push(item);
         }
         frame.render_widget(List::new(items), list_area);
 
@@ -922,7 +963,7 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::registry::RegistrySeed;
+    use crate::tui::registry::{FetchState, RegistrySeed};
     use selune::{InferenceProvider, Model as SeluneModel, ModelLimit};
     use termina::event::Modifiers;
 
@@ -960,12 +1001,60 @@ mod tests {
     }
 
     fn form() -> AddProviderForm {
-        AddProviderForm::with_providers(
-            providers(),
-            RegistryManager::from_config(&shuvarie_core::RegistriesConfig::default()),
+        AddProviderForm::with_registries(
+            RegistryManager::from_config(&shuvarie_core::RegistriesConfig::default())
+                .with_state_providers(shuvarie_core::catalog::SELUNE_REGISTRY, providers()),
             &["Existing".to_string()],
             &[],
         )
+    }
+
+    /// A second registry after selune, each with fixture providers.
+    fn form_with_acme() -> AddProviderForm {
+        let mut config = shuvarie_core::RegistriesConfig::default();
+        config.custom.push(shuvarie_core::CustomRegistry {
+            name: "acme".to_string(),
+            url: Some("https://example.com/providers.json".to_string()),
+            ..shuvarie_core::CustomRegistry::default()
+        });
+        AddProviderForm::with_registries(
+            RegistryManager::from_config(&config)
+                .with_state_providers(shuvarie_core::catalog::SELUNE_REGISTRY, providers())
+                .with_state_providers(
+                    "acme",
+                    vec![catalog_provider(
+                        "acme-x",
+                        "Acme X",
+                        selune::ProviderType::OpenaiCompat,
+                    )],
+                ),
+            &[],
+            &[],
+        )
+    }
+
+    /// The grouped select-stage list flattened for assertions: group header
+    /// rows as `HEADER:<registry>`, a provider row's provider name, and the
+    /// pinned custom row as `custom`.
+    fn list_strings(form: &AddProviderForm) -> Vec<String> {
+        form.rows
+            .iter()
+            .map(|row| match row {
+                SelectRow::Header { registry } => format!(
+                    "HEADER:{}",
+                    form.registries
+                        .state(registry)
+                        .map(|state| state.name().to_string())
+                        .unwrap_or_default()
+                ),
+                SelectRow::Provider { registry, index } => {
+                    form.registries.state(registry).unwrap().providers()[*index]
+                        .name
+                        .clone()
+                }
+                SelectRow::Custom => "custom".to_string(),
+            })
+            .collect()
     }
 
     fn custom_form() -> AddProviderForm {
@@ -1032,25 +1121,100 @@ mod tests {
     }
 
     #[test]
-    fn empty_query_lists_all_providers() {
+    fn empty_query_lists_all_providers_grouped_by_registry() {
         let form = form();
-        assert_eq!(form.filtered, vec![0, 1]);
-        assert_eq!(form.visible_len(), 3, "providers plus the custom row");
+        assert_eq!(
+            list_strings(&form),
+            vec!["HEADER:Selune", "OpenAI", "Ollama", "custom"]
+        );
+        assert_eq!(form.selected, 1, "selection starts past the header");
     }
 
     #[test]
-    fn query_filters_providers_and_custom_row_stays_last() {
+    fn groups_follow_registry_order_and_the_custom_row_stays_last() {
+        let form = form_with_acme();
+        assert_eq!(
+            list_strings(&form),
+            vec![
+                "HEADER:Selune",
+                "OpenAI",
+                "Ollama",
+                "HEADER:acme",
+                "Acme X",
+                "custom"
+            ]
+        );
+    }
+
+    #[test]
+    fn navigation_skips_header_rows() {
+        let mut form = form_with_acme();
+        assert_eq!(form.selected, 1, "the first header is skipped");
+        form.update(AddProviderMessage::Next);
+        assert_eq!(form.selected, 2, "Ollama");
+        form.update(AddProviderMessage::Next);
+        assert_eq!(form.selected, 4, "the acme header is skipped");
+        form.update(AddProviderMessage::Prev);
+        assert_eq!(form.selected, 2, "the acme header is skipped again");
+        form.update(AddProviderMessage::Prev);
+        form.update(AddProviderMessage::Prev);
+        assert_eq!(form.selected, 1, "nothing selectable above the first row");
+        for _ in 0..4 {
+            form.update(AddProviderMessage::Next);
+        }
+        assert_eq!(
+            form.selected,
+            form.rows.len() - 1,
+            "the custom row is the last selectable"
+        );
+    }
+
+    #[test]
+    fn query_filters_providers_and_the_custom_row_stays_last() {
         let mut form = form();
         form.update(AddProviderMessage::Search(SearchMessage::Input('p')));
-        assert_eq!(form.filtered.len(), 1, "only OpenAI fuzzy-matches 'p'");
-        assert_eq!(form.visible_len(), 2);
-        assert_eq!(form.selected, 0);
+        assert_eq!(
+            list_strings(&form),
+            vec!["HEADER:Selune", "OpenAI", "custom"],
+            "only OpenAI fuzzy-matches 'p'"
+        );
         form.update(AddProviderMessage::Next);
         assert_eq!(
             form.selected,
-            form.filtered.len(),
-            "second row after refilter"
+            form.rows.len() - 1,
+            "custom row after a Next"
         );
+    }
+
+    #[test]
+    fn searching_hides_groups_without_matches() {
+        let mut form = form_with_acme();
+        form.update(AddProviderMessage::Search(SearchMessage::Input('p')));
+        assert_eq!(
+            list_strings(&form),
+            vec!["HEADER:Selune", "OpenAI", "custom"],
+            "the acme group matches nothing"
+        );
+
+        let mut form = form_with_acme();
+        form.update(AddProviderMessage::Search(SearchMessage::Input('x')));
+        assert_eq!(
+            list_strings(&form),
+            vec!["HEADER:acme", "Acme X", "custom"],
+            "only the acme group matches 'x'"
+        );
+    }
+
+    #[test]
+    fn an_idle_empty_group_keeps_its_header() {
+        let registries = RegistryManager::new([RegistrySeed {
+            disabled: true,
+            ..RegistrySeed::selune(shuvarie_core::RegistryEntry::default())
+        }])
+        .with_state_providers(shuvarie_core::catalog::SELUNE_REGISTRY, vec![]);
+        let form = AddProviderForm::with_registries(registries, &[], &[]);
+        assert_eq!(list_strings(&form), vec!["HEADER:Selune", "custom"]);
+        assert_eq!(form.selected, 1, "the custom row is selectable");
     }
 
     #[test]
@@ -1069,7 +1233,7 @@ mod tests {
     #[test]
     fn custom_row_focuses_name_with_empty_fields() {
         let mut form = form();
-        form.selected = form.filtered.len();
+        form.selected = form.rows.len() - 1;
         form.update(AddProviderMessage::Select);
         assert_eq!(form.stage, AddProviderStage::Details);
         assert_eq!(form.field, FormField::Name, "custom origin starts on Name");
@@ -1093,17 +1257,16 @@ mod tests {
 
     #[test]
     fn ctrl_o_is_hidden_when_registry_disabled() {
-        let form = AddProviderForm::with_providers(
-            vec![],
+        let form = AddProviderForm::with_registries(
             RegistryManager::new([RegistrySeed {
                 disabled: true,
                 ..RegistrySeed::selune(shuvarie_core::RegistryEntry::default())
-            }]),
+            }])
+            .with_state_providers(shuvarie_core::catalog::SELUNE_REGISTRY, vec![]),
             &[],
             &[],
         );
-        assert_eq!(form.filtered.len(), 0, "disabled registry lists nothing");
-        assert_eq!(form.visible_len(), 1, "only the custom row");
+        assert_eq!(form.rows.len(), 2, "header plus the custom row");
         assert!(!form.registries.can_toggle());
         assert_eq!(
             form.map_event(&key(KeyCode::Char('o'), Modifiers::CONTROL)),
@@ -1292,11 +1455,10 @@ mod tests {
             FetchState::Idle
         );
         assert_eq!(
-            form.providers.len(),
-            1,
+            list_strings(&form),
+            vec!["HEADER:Selune", "RemoteOnly", "custom"],
             "snapshot shows the remote registry"
         );
-        assert_eq!(form.filtered, vec![0]);
     }
 
     #[test]
@@ -1313,7 +1475,11 @@ mod tests {
                 .state,
             FetchState::Idle
         );
-        assert_eq!(form.providers.len(), 2, "offline snapshot untouched");
+        assert_eq!(
+            list_strings(&form),
+            vec!["HEADER:Selune", "OpenAI", "Ollama", "custom"],
+            "offline snapshot untouched"
+        );
     }
 
     #[test]
@@ -1330,13 +1496,21 @@ mod tests {
                 .state,
             FetchState::Failed("offline".into())
         );
-        assert_eq!(form.providers.len(), 2, "list keeps the offline snapshot");
+        assert_eq!(
+            list_strings(&form),
+            vec!["HEADER:Selune", "OpenAI", "Ollama", "custom"],
+            "list keeps the offline snapshot"
+        );
     }
 
     #[test]
     fn foreign_registry_events_are_ignored() {
         let mut form = form();
-        form.registries.initiate_online();
+        assert!(matches!(
+            form.update(AddProviderMessage::ToggleSource),
+            AddProviderOutcome::FetchRegistries(_)
+        ));
+        let before = list_strings(&form);
         form.update(AddProviderMessage::RegistryLoaded {
             registry: "some-custom-registry".into(),
             providers: vec![catalog_provider(
@@ -1353,7 +1527,7 @@ mod tests {
             FetchState::Fetching,
             "another registry's fetch does not resolve this source"
         );
-        assert_eq!(form.providers.len(), 2, "snapshot untouched");
+        assert_eq!(list_strings(&form), before, "snapshot untouched");
 
         form.update(AddProviderMessage::RegistryError {
             registry: "some-custom-registry".into(),

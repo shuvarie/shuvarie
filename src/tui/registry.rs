@@ -1,6 +1,10 @@
+use ratatui::prelude::*;
+use ratatui::style::Modifier;
 use selune::Provider;
 use shuvarie_core::catalog::{SELUNE_REGISTRY, registry_catalog};
 use shuvarie_core::{CustomRegistry, RegistriesConfig, RegistryEntry};
+
+use super::theme;
 
 /// The display name for the built-in registry's group.
 const SELUNE_NAME: &str = "Selune";
@@ -14,7 +18,8 @@ pub enum FetchState {
 }
 
 impl FetchState {
-    /// The failure message, when failed. (Rendered by the grouped list.)
+    /// The failure message, when failed. (The group headers render the error
+    /// inline.)
     #[allow(dead_code)]
     pub fn error(&self) -> Option<&str> {
         match self {
@@ -85,6 +90,10 @@ pub struct RegistryState {
     /// The providers for the active source: the online snapshot once loaded
     /// (empty until a fetch succeeds), else the offline one.
     providers: Vec<Provider>,
+
+    /// The offline snapshot failed to load (a broken or missing `path`
+    /// file); the group header reports it while offline.
+    local_error: Option<String>,
 }
 
 impl RegistryState {
@@ -92,11 +101,12 @@ impl RegistryState {
     /// `remote-first` is set, marking a pending fetch when no snapshot is
     /// loaded yet.
     fn new(seed: RegistrySeed) -> Self {
+        let catalog = registry_catalog(&seed.id);
         let online = !seed.disabled && seed.remote_first && seed.remote_configured;
         let providers = if online {
-            registry_catalog(&seed.id).remote.unwrap_or_default()
+            catalog.remote.unwrap_or_default()
         } else {
-            registry_catalog(&seed.id).local
+            catalog.local
         };
         let state = if online && providers.is_empty() {
             FetchState::Fetching
@@ -108,30 +118,61 @@ impl RegistryState {
             online,
             state,
             providers,
+            local_error: catalog.local_error,
         }
     }
 
-    /// The registry id (`selune` for the built-in one). (Group headers.)
-    #[allow(dead_code)]
+    /// The registry id (`selune` for the built-in one). (Grouped list rows.)
     pub fn id(&self) -> &str {
         &self.seed.id
     }
 
     /// The display name for group headers.
-    #[allow(dead_code)]
     pub fn name(&self) -> &str {
         &self.seed.name
-    }
-
-    /// A disabled registry never fetches; its local snapshot still shows.
-    #[allow(dead_code)]
-    pub fn disabled(&self) -> bool {
-        self.seed.disabled
     }
 
     /// The source kind label for the active snapshot.
     pub fn source_label(&self) -> &'static str {
         if self.online { "online" } else { "offline" }
+    }
+
+    /// The group header row for the selectable lists: the registry name plus
+    /// a source badge — offline/online, fetch progress/failure while
+    /// matching, or a load failure reported whenever the offline snapshot is
+    /// the active source.
+    pub fn header_line(&self) -> Line<'static> {
+        let mut spans = vec![
+            Span::raw("  "),
+            Span::raw(self.name().to_string())
+                .fg(theme::text_dim())
+                .add_modifier(Modifier::BOLD),
+        ];
+        if !self.online
+            && let Some(error) = &self.local_error
+        {
+            spans.push(Span::raw("  · failed to load — ".to_string()).fg(theme::text_muted()));
+            spans.push(Span::raw(error.clone()).fg(theme::error()));
+            return Line::from(spans);
+        }
+        spans.push(match &self.state {
+            FetchState::Fetching => Span::raw("  · fetching…".to_string()).fg(theme::text_muted()),
+            FetchState::Failed(error) => {
+                spans.push(Span::raw("  · fetch failed — ".to_string()).fg(theme::text_muted()));
+                spans.push(Span::raw(error.clone()).fg(theme::error()));
+                return Line::from(spans);
+            }
+            FetchState::Idle => {
+                if self.seed.disabled {
+                    Span::raw("  · disabled".to_string()).fg(theme::text_muted())
+                } else if self.online {
+                    Span::raw("  · online".to_string()).fg(theme::accent())
+                } else {
+                    Span::raw("  · offline".to_string()).fg(theme::text_muted())
+                }
+            }
+        });
+        Line::from(spans)
     }
 
     /// The providers for the active source.
@@ -201,7 +242,6 @@ impl RegistryManager {
 
     /// The per-registry states, in list order. (The grouped list iterates
     /// these for its header rows.)
-    #[allow(dead_code)]
     pub fn registries(&self) -> &[RegistryState] {
         &self.registries
     }
@@ -272,6 +312,17 @@ impl RegistryManager {
         if let Some(registry) = self.registries.iter_mut().find(|r| r.seed.id == id) {
             registry.on_error(error);
         }
+    }
+
+    /// Test-only seeding: replaces one registry's provider list (the popup
+    /// and state-machine tests need fixture providers instead of whatever
+    /// the process-global core catalog currently holds).
+    #[cfg(test)]
+    pub(crate) fn with_state_providers(mut self, id: &str, providers: Vec<Provider>) -> Self {
+        if let Some(registry) = self.registries.iter_mut().find(|r| r.seed.id == id) {
+            registry.providers = providers;
+        }
+        self
     }
 }
 
@@ -428,5 +479,74 @@ mod tests {
         let manager = RegistryManager::new([seed("selune", false), seed("acme", false)]);
         assert_eq!(manager.snapshot(), registry_catalog("selune").local);
         assert!(manager.state("acme").unwrap().providers().is_empty());
+    }
+
+    /// The header's flat text, for badge assertions.
+    fn header_text(header: &Line<'_>) -> String {
+        header
+            .spans
+            .iter()
+            .map(|span| span.content.clone().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn header_name_and_badges_reflect_the_source_state() {
+        let manager = RegistryManager::new([seed("selune", false)]);
+
+        let header = manager.state("selune").unwrap().header_line();
+        assert!(header_text(&header).starts_with("  selune"), "{header:?}");
+        assert!(header_text(&header).contains("· offline"));
+
+        let mut manager = manager;
+        manager.registries[0].state = FetchState::Failed("boom".to_string());
+        let header = manager.state("selune").unwrap().header_line();
+        assert!(
+            header_text(&header).contains("· fetch failed — boom"),
+            "{header:?}"
+        );
+
+        manager.registries[0].online = true;
+        manager.registries[0].state = FetchState::Idle;
+        let header = manager.state("selune").unwrap().header_line();
+        assert!(header_text(&header).contains("· online"), "{header:?}");
+    }
+
+    #[test]
+    fn header_name_shows_the_display_name() {
+        let manager = RegistryManager::new([RegistrySeed::selune(RegistryEntry::default())]);
+        let header = manager.state("selune").unwrap().header_line();
+        assert!(header_text(&header).starts_with("  Selune"), "{header:?}");
+    }
+
+    #[test]
+    fn header_reports_a_local_load_failure_while_offline() {
+        let mut manager = RegistryManager::new([path_only_seed("local-only")]);
+        manager.registries[0].local_error = Some("read failed: boom".to_string());
+        manager.registries[0].providers.clear();
+        let header = manager.state("local-only").unwrap().header_line();
+        let text = header_text(&header);
+        assert!(
+            text.contains("· failed to load — read failed: boom"),
+            "{header:?}"
+        );
+    }
+
+    #[test]
+    fn a_fetch_in_flight_beats_a_stale_local_load_failure() {
+        let mut manager = RegistryManager::new([seed("selune", false)]);
+        manager.registries[0].local_error = Some("read failed: boom".to_string());
+        manager.initiate_online();
+        let header = manager.state("selune").unwrap().header_line();
+        let text = header_text(&header);
+        assert!(text.contains("· fetching…"), "{header:?}",);
+        assert!(!text.contains("failed to load"));
+    }
+
+    #[test]
+    fn header_marks_a_disabled_registry() {
+        let manager = RegistryManager::new([disabled_seed("selune")]);
+        let header = manager.state("selune").unwrap().header_line();
+        assert!(header_text(&header).contains("· disabled"), "{header:?}");
     }
 }
