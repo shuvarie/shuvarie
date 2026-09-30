@@ -59,3 +59,4 @@ Closing issues via commit:
 ## Conventions
 
 - Add an end newline when creating a new file
+- When creating test cases, make sure they're reliably reproducible and able to represent typical use cases or edge cases.
