@@ -7330,6 +7330,7 @@ dependencies = [
  "smallvec",
  "strum 0.26.3",
  "strum_macros 0.26.4",
+ "tantivy",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",

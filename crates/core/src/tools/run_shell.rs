@@ -559,17 +559,28 @@ mod tests {
                 json!({ "command": "sleep 30 & sleep 30", "timeout_secs": 1 }),
             )
             .await;
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let out = StdCommand::new("sh")
-            .arg("-c")
-            .arg("pgrep -f '[s]leep 30' | wc -l")
-            .output()
-            .unwrap();
-        let count: u32 = String::from_utf8_lossy(&out.stdout)
-            .trim()
-            .parse()
-            .unwrap_or(0);
-        assert_eq!(count, 0, "sleep children survived the group kill");
+        // Children may take a beat to die after the group kill; poll instead
+        // of asserting after a fixed delay.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let out = StdCommand::new("pgrep")
+                .arg("-f")
+                .arg("[s]leep 30")
+                .output()
+                .expect("pgrep");
+            let alive = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|pids| !pids.is_empty())
+                .count();
+            if alive == 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "sleep children survived the group kill: {alive}"
+            );
+        }
         drop(dir);
     }
 

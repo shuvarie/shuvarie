@@ -18,8 +18,14 @@ pub(crate) fn workspace_root() -> Result<PathBuf, String> {
 }
 
 pub(crate) fn expand_home(path: &str) -> String {
+    expand_home_in(path, dirs::home_dir().as_deref())
+}
+
+/// [`expand_home`] with an explicit home directory, so tests can exercise
+/// tilde expansion without mutating the process environment.
+pub(crate) fn expand_home_in(path: &str, home: Option<&std::path::Path>) -> String {
     if (path == "~" || path.starts_with("~/") || path.starts_with("~\\"))
-        && let Some(home) = dirs::home_dir()
+        && let Some(home) = home
     {
         let rest = path
             .strip_prefix("~/")
@@ -42,8 +48,16 @@ pub(crate) fn resolve_read(path: &str) -> Result<PathBuf, String> {
 /// closest existing ancestor is canonicalized, missing components appended).
 /// The permission engine decides whether the target may be written.
 pub(crate) fn resolve_write(path: &str) -> Result<PathBuf, String> {
+    resolve_write_in(path, dirs::home_dir().as_deref())
+}
+
+/// [`resolve_write`] with an explicit home directory, for tests.
+pub(crate) fn resolve_write_in(
+    path: &str,
+    home: Option<&std::path::Path>,
+) -> Result<PathBuf, String> {
     let root = workspace_root()?;
-    let joined = root.join(expand_home(path));
+    let joined = root.join(expand_home_in(path, home));
     if joined.exists() {
         return joined.canonicalize().map_err(|e| format!("{path}: {e}"));
     }

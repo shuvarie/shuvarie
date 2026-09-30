@@ -451,7 +451,7 @@ pub fn edit_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::permissions::{resolve_read, resolve_write};
+    use crate::permissions::{resolve_read, resolve_write, resolve_write_in};
     use crate::test_util::tempdir;
     use shuvarie_config::{SceneToolVerb, SceneToolsConfig, ToolOverride};
     use tempfile::TempDir;
@@ -630,18 +630,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn tilde_paths_expand() {
-        let (dir, _guard) = tempdir();
-        let original_home = std::env::var("HOME").ok();
         let home = TempDir::new().unwrap();
-        unsafe { std::env::set_var("HOME", home.path()) };
         std::fs::write(home.path().join("homefile.txt"), "x").unwrap();
-        let abs = resolve_write("~/homefile.txt").unwrap();
+        let abs = resolve_write_in("~/homefile.txt", Some(home.path())).unwrap();
         assert_eq!(abs, home.path().join("homefile.txt"));
-        match original_home {
-            Some(home_path) => unsafe { std::env::set_var("HOME", home_path) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
-        drop(dir);
     }
 
     #[test]

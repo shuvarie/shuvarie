@@ -19,7 +19,7 @@ shuvarie-llm.workspace = true
 thiserror.workspace = true
 toasty = { version = "0.11", features = ["turso", "jiff", "migration"] }
 toasty-cli = "0.11"
-toasty-driver-turso = "0.11"
+toasty-driver-turso = { version = "0.11", features = ["fts"] }
 tokio.workspace = true
 turso = { version = "0.8", features = ["pure-rust-crypto"] }
 uuid.workspace = true
