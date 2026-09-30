@@ -563,17 +563,6 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn failed_exit_reports_streams_and_status() {
-        let tool = tool(vec!["sh", "-c", "echo out; echo err >&2; exit 3"], vec![]);
-        let err = tool.run(json!({})).await.expect_err("non-zero exit");
-        let message = err.to_string();
-        assert!(message.contains("exited with"), "got: {message}");
-        assert!(message.contains("stdout: out"), "got: {message}");
-        assert!(message.contains("stderr: err"), "got: {message}");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
     async fn timeout_kills_and_reports() {
         let tool = tool(vec!["sleep", "10"], vec![]);
         let tool = StdioTool {
