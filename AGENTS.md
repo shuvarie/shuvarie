@@ -9,7 +9,7 @@
 - `./crates/db/` (`shuvarie-db`): DB module (migrations and Toasty ORM)
 - `./crates/highlight/` (`shuvarie-highlight`): Highlight module
 - `./crates/lsp/` (`shuvarie-lsp`): LSP module
-- `./crates/mcp/` (`shuvarie-lsp`): MCP module
+- `./crates/mcp/` (`shuvarie-mcp`): MCP module
 
 ## Architecture
 
