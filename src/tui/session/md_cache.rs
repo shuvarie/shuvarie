@@ -34,6 +34,9 @@ struct LineRun {
 struct Render {
     width: u16,
     rev: u64,
+    /// The renderer-palette generation this render was made under: a palette
+    /// swap invalidates the baked colors, forcing a full re-render.
+    palette_gen: u64,
     committed: Vec<LineRun>,
     committed_bytes: usize,
     committed_lines: u32,
@@ -160,6 +163,14 @@ impl MdCache {
 
     fn ensure(&self, width: u16) {
         let mut render = self.render.borrow_mut();
+        // A renderer palette swap invalidates every baked color: the whole
+        // content re-renders (same shape as the width-change path).
+        if render
+            .as_ref()
+            .is_some_and(|r| r.palette_gen != current_palette_generation())
+        {
+            *render = None;
+        }
         match render.as_mut() {
             None => *render = Some(self.full_render(width)),
             Some(r) if r.rev == self.rev && r.width == width => {}
@@ -186,6 +197,7 @@ impl MdCache {
         Render {
             width,
             rev: self.rev,
+            palette_gen: current_palette_generation(),
             committed,
             committed_bytes,
             committed_lines: stable as u32,
@@ -243,6 +255,12 @@ fn bundle_runs(lines: &[Line<'static>], counts: &[u32]) -> Vec<LineRun> {
 /// The last pass boundary's line count, if any.
 fn stable_lines(pass: &shuvarie_highlight::MdPass) -> usize {
     pass.boundaries.last().map_or(0, |&(_, lines)| lines)
+}
+
+/// The renderer palette's generation: bumped on every palette swap, so a
+/// cached render made under an older one has stale baked colors.
+fn current_palette_generation() -> u64 {
+    shuvarie_highlight::theme::generation()
 }
 
 fn line_width(line: &Line<'_>) -> u32 {
@@ -305,6 +323,54 @@ mod tests {
             })
             .map(|line| line.to_string())
             .collect()
+    }
+
+    /// The heading line's foreground color across the cache's chunks.
+    fn heading_fg(cache: &MdCache, width: u16) -> Option<Option<Color>> {
+        cache
+            .chunks(width)
+            .unwrap_or_default()
+            .iter()
+            .flat_map(|chunk| match chunk {
+                BodyChunk::Fixed(chunk) => chunk.lines.to_vec(),
+                BodyChunk::Sliced(chunk) => chunk
+                    .rows()
+                    .map(|i| chunk.source.row(i))
+                    .collect::<Vec<_>>(),
+            })
+            .find(|line| line.spans.iter().any(|s| s.content.contains("Heading")))
+            .and_then(|line| {
+                line.spans
+                    .iter()
+                    .find(|s| s.content.contains("Heading"))
+                    .map(|s| s.style.fg)
+            })
+    }
+
+    #[test]
+    fn palette_swap_invalidates_baked_markdown_colors() {
+        // Serializes the process-wide palette (same guard the picker tests
+        // use) and restores afterwards even on panic.
+        let guard = crate::tui::theme::lock_for_tests();
+        let previous = crate::tui::theme::current();
+
+        let cache = MdCache::new("# Heading\n\nprose");
+        let rendered = heading_fg(&cache, 80);
+        assert_eq!(rendered, Some(Some(Color::Rgb(212, 175, 95))));
+
+        // Swap without touching the cache: the next view re-renders the whole
+        // content with the new palette (committed runs included).
+        crate::tui::theme::set(shuvarie_core::ThemeColors::tokyo_night_storm());
+        let rendered = heading_fg(&cache, 80);
+        assert_eq!(rendered, Some(Some(Color::Rgb(122, 162, 247))));
+        assert_eq!(
+            lines_of(&cache, 80),
+            lines_of(&cache, 80),
+            "same shape across the swap"
+        );
+
+        crate::tui::theme::set(previous);
+        drop(guard);
     }
 
     /// Appends the parts with a frame render between each, like the live

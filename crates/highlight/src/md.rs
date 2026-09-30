@@ -16,7 +16,7 @@ pub const OPTIONS: Options = Options::all()
 
 pub fn plain(text: &str) -> Vec<Line<'static>> {
     text.lines()
-        .map(|l| Line::from(Span::raw(l.to_string()).style(theme::PLAIN)))
+        .map(|l| Line::from(Span::raw(l.to_string()).style(theme::plain())))
         .collect()
 }
 
@@ -272,9 +272,9 @@ impl Ctx {
                     CodeBlockKind::Indented => String::new(),
                 };
                 if fenced {
-                    let mut fence = Line::from(Span::raw("```").style(theme::FENCE));
+                    let mut fence = Line::from(Span::raw("```").style(theme::fence()));
                     if !lang.is_empty() {
-                        fence.push_span(Span::raw(lang.clone()).style(theme::FENCE_LANG));
+                        fence.push_span(Span::raw(lang.clone()).style(theme::fence_lang()));
                     }
                     self.lines.push(fence);
                 }
@@ -302,9 +302,11 @@ impl Ctx {
                     None => String::new(),
                 };
                 let style = if self.dim {
-                    Style::new().fg(theme::TEXT_DIM)
+                    Style::new().fg(theme::text_dim())
                 } else {
-                    Style::new().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+                    Style::new()
+                        .fg(theme::accent())
+                        .add_modifier(Modifier::BOLD)
                 };
                 self.item_marker = Some((text, style));
             }
@@ -360,7 +362,7 @@ impl Ctx {
                     self.lines.append(&mut block);
                     if code.fenced {
                         self.lines
-                            .push(Line::from(Span::raw("```").style(theme::FENCE)));
+                            .push(Line::from(Span::raw("```").style(theme::fence())));
                     }
                     self.lines.push(Line::from(""));
                 }
@@ -436,9 +438,9 @@ impl Ctx {
             return;
         }
         let style = if self.dim {
-            theme::REASONING
+            theme::reasoning()
         } else {
-            Style::new().fg(theme::TEXT).bg(theme::ACCENT_BG)
+            Style::new().fg(theme::text()).bg(theme::accent_bg())
         };
         self.spans.push(Span::raw(code).style(style));
     }
@@ -447,7 +449,7 @@ impl Ctx {
         if self.skip > 0 {
             return;
         }
-        self.spans.push(Span::raw(html).fg(theme::TEXT_DIM));
+        self.spans.push(Span::raw(html).fg(theme::text_dim()));
     }
 
     fn soft_break(&mut self) {
@@ -469,20 +471,21 @@ impl Ctx {
             return;
         }
         self.flush_line(false);
-        self.lines
-            .push(Line::from(Span::raw("─".repeat(60)).fg(theme::TEXT_MUTED)));
+        self.lines.push(Line::from(
+            Span::raw("─".repeat(60)).fg(theme::text_muted()),
+        ));
         self.lines.push(Line::from(""));
     }
 
     fn task_marker(&mut self, checked: bool) {
         let text = if checked { "[x] " } else { "[ ] " }.to_string();
         let style = if self.dim {
-            Style::new().fg(theme::TEXT_DIM)
+            Style::new().fg(theme::text_dim())
         } else {
             Style::new().fg(if checked {
-                theme::SUCCESS
+                theme::success()
             } else {
-                theme::TEXT_MUTED
+                theme::text_muted()
             })
         };
         self.item_marker = Some((text, style));
@@ -490,7 +493,7 @@ impl Ctx {
 
     fn inline_style(&self) -> Style {
         if self.dim {
-            let mut style = theme::REASONING;
+            let mut style = theme::reasoning();
             if self.heading.is_some() || self.strong > 0 {
                 style = style.add_modifier(Modifier::BOLD);
             }
@@ -502,15 +505,17 @@ impl Ctx {
             }
             return style;
         }
-        let mut style = Style::new().fg(theme::TEXT);
+        let mut style = Style::new().fg(theme::text());
         if let Some(level) = self.heading {
             if level == HeadingLevel::H1 || level == HeadingLevel::H2 {
-                style = style.fg(theme::ACCENT);
+                style = style.fg(theme::accent());
             }
             style = style.add_modifier(Modifier::BOLD);
         }
         if self.link > 0 {
-            style = style.fg(theme::STEEL).add_modifier(Modifier::UNDERLINED);
+            style = style
+                .fg(theme::code_type())
+                .add_modifier(Modifier::UNDERLINED);
         }
         if self.emph > 0 {
             style = style.add_modifier(Modifier::ITALIC);
@@ -533,7 +538,7 @@ impl Ctx {
             spans.push(Span::styled(marker, style));
         }
         if self.in_quote {
-            spans.push(Span::raw("│ ").fg(theme::TEXT_MUTED));
+            spans.push(Span::raw("│ ").fg(theme::text_muted()));
         }
         spans.append(&mut self.spans);
         self.lines.push(Line::from(spans));

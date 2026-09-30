@@ -264,6 +264,10 @@ pub enum ChatMessage {
         path: String,
         diagnostics: Vec<DiagnosticInfo>,
     },
+    /// The active theme palette changed (theme picker preview, a picker or
+    /// `/theme` apply, or a restore): cached turn renders carry resolved
+    /// theme colors, so they must rebuild with the new palette.
+    ThemeChanged,
     ScrollUp,
     ScrollDown,
     /// Left-button mouse activity at a terminal cell inside the history
@@ -655,6 +659,24 @@ impl Chat {
                     self.lsp_diagnostics.insert(path, diagnostics);
                 }
                 self.env_rev += 1;
+            }
+            ChatMessage::ThemeChanged => {
+                // Every cached turn render (block headers, diff decorations,
+                // dimmed rows) carries resolved theme colors, so like a width
+                // change drop all caches to force a re-render. The rev bump
+                // additionally re-keys the block-level caches — tool headers
+                // are cached by `(width, env_rev, body_rev)` — so they rebuild
+                // too even though they live outside the turn cache.
+                self.env_rev += 1;
+                for turn in self.turns.borrow_mut().iter_mut() {
+                    turn.cache = None;
+                }
+                for turn in self.steered.borrow_mut().iter_mut() {
+                    turn.cache = None;
+                }
+                if let Some(turn) = self.in_flight.borrow_mut().as_mut() {
+                    turn.cache = None;
+                }
             }
             ChatMessage::ScrollUp => {
                 let mut scroll = self.scroll.borrow_mut();
@@ -4048,6 +4070,151 @@ mod tests {
             tool_line.starts_with(glyph.content.as_ref()),
             "tool segment must still render the current spinner glyph: {tool_line:?}"
         );
+    }
+
+    #[test]
+    fn theme_change_bumps_env_rev_and_drops_all_turn_caches() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::TokenReceived {
+            content: "Working on it.".into(),
+        });
+        chat.update(ChatMessage::ToolStarted {
+            name: "run_shell".into(),
+            args: serde_json::json!({ "command": "ls" }),
+            worker: None,
+            spawn: None,
+            call_id: Some("call_1".into()),
+        });
+        let diags = BTreeMap::new();
+        let env = ChatEnv {
+            lsp_diagnostics: &diags,
+            rev: 0,
+        };
+        {
+            let mut turn = chat.in_flight.borrow_mut();
+            let turn = turn.as_mut().expect("in-flight turn");
+            turn.ensure_cache(
+                0,
+                80,
+                &env,
+                0,
+                TurnFlags {
+                    in_flight: true,
+                    interrupted_marker: false,
+                },
+            );
+        }
+        assert!(
+            chat.in_flight
+                .borrow()
+                .as_ref()
+                .expect("in-flight")
+                .cache()
+                .is_some(),
+            "test setup renders the turn"
+        );
+
+        chat.update(ChatMessage::ThemeChanged);
+        assert_eq!(chat.env_rev, 1, "the rev re-keys block-level caches");
+        assert!(
+            chat.in_flight
+                .borrow()
+                .as_ref()
+                .expect("in-flight")
+                .cache()
+                .is_none(),
+            "the in-flight turn's cache is dropped"
+        );
+        assert!(
+            chat.turns
+                .borrow()
+                .iter()
+                .all(|turn| turn.cache().is_none()),
+            "committed turns' caches are dropped"
+        );
+        assert!(
+            chat.steered
+                .borrow()
+                .iter()
+                .all(|turn| turn.cache().is_none()),
+            "steered turns' caches are dropped"
+        );
+    }
+
+    #[test]
+    fn theme_changed_repaints_cached_markdown_lines() {
+        // Serializes the process-wide palette swaps (same guard the app-level
+        // picker tests use) and snapshots the stock palette to restore after.
+        let guard = crate::tui::theme::lock_for_tests();
+        let previous = crate::tui::theme::current();
+
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::TokenReceived {
+            content: "# Heading\n\nsee `inline` code".into(),
+        });
+        chat.update(ChatMessage::StreamDone);
+        let turns = chat.turns.borrow().len();
+        assert!(turns > 0, "stream done commits the turn");
+
+        // Finds the heading and inline-code colors across the committed
+        // turn's rendered cache.
+        let renders = |chat: &Chat| -> (Option<Option<Color>>, Option<Option<Color>>) {
+            let mut turns = chat.turns.borrow_mut();
+            let idx = turns.len() - 1;
+            let env_rev = 0;
+            let env = ChatEnv {
+                lsp_diagnostics: &BTreeMap::new(),
+                rev: env_rev,
+            };
+            turns[idx].ensure_cache(
+                idx,
+                80,
+                &env,
+                env_rev,
+                TurnFlags {
+                    in_flight: false,
+                    interrupted_marker: false,
+                },
+            );
+            let cache = turns[idx].cache().expect("rendered cache");
+            let mut heading: Option<Option<Color>> = None;
+            let mut inline: Option<Option<Color>> = None;
+            for line in cache.segs.iter().flat_map(|seg| seg.segment.flattened()) {
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                if heading.is_none() && text.contains("Heading") {
+                    heading = line
+                        .spans
+                        .iter()
+                        .find(|s| s.content.contains("Heading"))
+                        .map(|s| s.style.fg);
+                }
+                if inline.is_none()
+                    && let Some(span) = line.spans.iter().find(|s| s.content.contains("inline"))
+                {
+                    inline = Some(span.style.bg);
+                }
+            }
+            (heading, inline)
+        };
+
+        // With the stock Faerun palette: the H1 heading is bold accent gold
+        // and inline code sits on the accent background.
+        let (heading, inline) = renders(&chat);
+        assert_eq!(heading, Some(Some(Color::Rgb(212, 175, 95))));
+        assert_eq!(inline, Some(Some(Color::Rgb(52, 48, 42))));
+
+        // A palette swap plus the cache-drop repaints both: the heading now
+        // renders in Tokyo Night storm's blue accent and inline code on
+        // storm's accent background.
+        crate::tui::theme::set(shuvarie_core::ThemeColors::tokyo_night_storm());
+        chat.update(ChatMessage::ThemeChanged);
+        assert_eq!(chat.env_rev, 1, "the swap re-keys block-level caches");
+        let (heading, inline) = renders(&chat);
+        assert_eq!(heading, Some(Some(Color::Rgb(122, 162, 247))));
+        assert_eq!(inline, Some(Some(Color::Rgb(50, 60, 89))));
+
+        crate::tui::theme::set(previous);
+        drop(guard);
     }
 
     fn steered_contents(chat: &Chat) -> Vec<String> {

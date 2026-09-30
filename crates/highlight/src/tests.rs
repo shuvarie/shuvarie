@@ -50,7 +50,7 @@ fn plain_preserves_lines() {
     let lines = plain("hello\nworld");
     assert_eq!(lines.len(), 2);
     assert_eq!(texts(&lines[0]), ["hello"]);
-    assert_eq!(lines[0].spans[0].style.fg, Some(theme::TEXT));
+    assert_eq!(lines[0].spans[0].style.fg, Some(theme::text()));
 }
 
 #[test]
@@ -96,14 +96,14 @@ fn inline_code_has_bg() {
     let lines = render("use `foo`");
     assert_eq!(lines.len(), 1);
     let code_idx = texts(&lines[0]).iter().position(|t| t == "foo").unwrap();
-    assert_eq!(lines[0].spans[code_idx].style.bg, Some(theme::ACCENT_BG));
+    assert_eq!(lines[0].spans[code_idx].style.bg, Some(theme::accent_bg()));
 }
 
 #[test]
 fn heading_styles() {
     let lines = render("# Big\n\n### Small");
     assert_eq!(texts(&lines[0]), ["Big"]);
-    assert_eq!(lines[0].spans[0].style.fg, Some(theme::ACCENT));
+    assert_eq!(lines[0].spans[0].style.fg, Some(theme::accent()));
     assert!(
         lines[0].spans[0]
             .style
@@ -111,7 +111,7 @@ fn heading_styles() {
             .contains(Modifier::BOLD)
     );
     assert_eq!(texts(&lines[2]), ["Small"]);
-    assert_eq!(lines[2].spans[0].style.fg, Some(theme::TEXT));
+    assert_eq!(lines[2].spans[0].style.fg, Some(theme::text()));
     assert!(
         lines[2].spans[0]
             .style
@@ -128,10 +128,10 @@ fn code_block_fences_and_highlight() {
     assert_eq!(lines.len(), 3);
     assert!(joined(&lines[1]).contains("fn main"));
     assert_eq!(lines[1].style.bg, None);
-    assert_eq!(lines[0].spans[0].style.fg, Some(theme::TEXT_MUTED));
+    assert_eq!(lines[0].spans[0].style.fg, Some(theme::text_muted()));
     let has_keyword = styles_of(&lines[1])
         .iter()
-        .any(|s| s.fg == Some(theme::ACCENT));
+        .any(|s| s.fg == Some(theme::accent()));
     assert!(has_keyword, "expected a keyword-colored span");
 }
 
@@ -140,7 +140,7 @@ fn code_block_plain_fallback() {
     let lines = render("```nosuchlang123\narbitrary text\n```");
     let text = rows(&lines);
     assert_eq!(text, vec!["```nosuchlang123", "arbitrary text", "```"]);
-    assert_eq!(lines[1].spans[0].style.fg, Some(theme::TEXT));
+    assert_eq!(lines[1].spans[0].style.fg, Some(theme::text()));
 }
 
 #[test]
@@ -164,10 +164,10 @@ fn code_block_diff_still_colored() {
     let lines = render("```diff\n+ added\n- removed\n@@ hunk @@\ncontext\n```");
     let text = rows(&lines);
     assert_eq!(text.len(), 6);
-    assert_eq!(lines[1].spans[0].style.fg, Some(theme::SUCCESS));
-    assert_eq!(lines[2].spans[0].style.fg, Some(theme::ERROR));
-    assert_eq!(lines[3].spans[0].style.fg, Some(theme::ACCENT));
-    assert_eq!(lines[4].spans[0].style.fg, Some(theme::TEXT_DIM));
+    assert_eq!(lines[1].spans[0].style.fg, Some(theme::success()));
+    assert_eq!(lines[2].spans[0].style.fg, Some(theme::error()));
+    assert_eq!(lines[3].spans[0].style.fg, Some(theme::accent()));
+    assert_eq!(lines[4].spans[0].style.fg, Some(theme::text_dim()));
     assert_eq!(text[0], "```diff");
     assert_eq!(text[5], "```");
 }
@@ -233,7 +233,7 @@ fn table_renders_box_drawing() {
         ]
     );
     let border = lines[0].spans[0].style.fg;
-    assert_eq!(border, Some(theme::TEXT_MUTED));
+    assert_eq!(border, Some(theme::text_muted()));
     let header_bold = lines[1]
         .spans
         .iter()
@@ -335,16 +335,16 @@ fn wrap_cell_hard_splits_tokens() {
 fn wrap_cell_keeps_span_styles() {
     let wrapped = table::wrap_cell(
         &[
-            Span::raw("ab").style(Style::new().fg(theme::SAGE)),
-            Span::raw(" cde").fg(theme::STEEL),
+            Span::raw("ab").style(Style::new().fg(theme::code_string())),
+            Span::raw(" cde").fg(theme::code_type()),
         ],
         4,
     );
     assert_eq!(wrapped.len(), 2);
     assert_eq!(wrapped[0][0].content, "ab");
-    assert_eq!(wrapped[0][0].style.fg, Some(theme::SAGE));
+    assert_eq!(wrapped[0][0].style.fg, Some(theme::code_string()));
     assert_eq!(wrapped[1][0].content, "cde");
-    assert_eq!(wrapped[1][0].style.fg, Some(theme::STEEL));
+    assert_eq!(wrapped[1][0].style.fg, Some(theme::code_type()));
 }
 
 #[test]
@@ -433,14 +433,14 @@ fn wide_chars_do_not_panic() {
 #[test]
 fn diff_module_marks_lines() {
     let lines = diff::highlight_diff("+a\n-b\n@@c\n d\n\\e");
-    assert_eq!(lines[0].spans[0].style.fg, Some(theme::SUCCESS));
-    assert_eq!(lines[1].spans[0].style.fg, Some(theme::ERROR));
-    assert_eq!(lines[2].spans[0].style.fg, Some(theme::ACCENT));
+    assert_eq!(lines[0].spans[0].style.fg, Some(theme::success()));
+    assert_eq!(lines[1].spans[0].style.fg, Some(theme::error()));
+    assert_eq!(lines[2].spans[0].style.fg, Some(theme::accent()));
     assert_eq!(
         lines[3].spans.last().unwrap().style.fg,
-        Some(theme::TEXT_DIM)
+        Some(theme::text_dim())
     );
-    assert_eq!(lines[4].spans[0].style.fg, Some(theme::TEXT_MUTED));
+    assert_eq!(lines[4].spans[0].style.fg, Some(theme::text_muted()));
     assert_eq!(
         lines[3].spans[0].content.to_string(),
         "\u{a0}",
@@ -490,7 +490,7 @@ fn highlight_code_rust_tokens() {
     let has_string = lines[0]
         .spans
         .iter()
-        .any(|s| s.style.fg == Some(theme::SAGE));
+        .any(|s| s.style.fg == Some(theme::code_string()));
     assert!(has_string, "expected a string-colored span");
 }
 
@@ -507,11 +507,11 @@ fn dim_prose_keeps_reasoning_style() {
     let styles = styles_of(&lines[0]);
     let t = texts(&lines[0]);
     let idx = t.iter().position(|x| x.starts_with("plain")).unwrap();
-    assert_eq!(styles[idx].fg, Some(theme::TEXT_DIM));
+    assert_eq!(styles[idx].fg, Some(theme::text_dim()));
     assert!(styles[idx].add_modifier.contains(Modifier::ITALIC));
     assert_eq!(styles[idx].bg, None);
     let strong = t.iter().position(|x| x == "strong").unwrap();
-    assert_eq!(styles[strong].fg, Some(theme::TEXT_DIM));
+    assert_eq!(styles[strong].fg, Some(theme::text_dim()));
     assert!(styles[strong].add_modifier.contains(Modifier::BOLD));
     let gone = t.iter().position(|x| x == "gone").unwrap();
     assert!(styles[gone].add_modifier.contains(Modifier::CROSSED_OUT));
@@ -521,7 +521,7 @@ fn dim_prose_keeps_reasoning_style() {
 fn dim_headings_and_links_stay_dim() {
     let lines = render_dim("# Big\n\nread [docs](https://example.com)");
     assert_eq!(texts(&lines[0]), ["Big"]);
-    assert_eq!(lines[0].spans[0].style.fg, Some(theme::TEXT_DIM));
+    assert_eq!(lines[0].spans[0].style.fg, Some(theme::text_dim()));
     assert!(
         lines[0].spans[0]
             .style
@@ -530,7 +530,7 @@ fn dim_headings_and_links_stay_dim() {
     );
     let link_idx = texts(&lines[2]).iter().position(|t| t == "docs").unwrap();
     let link = &lines[2].spans[link_idx];
-    assert_eq!(link.style.fg, Some(theme::TEXT_DIM));
+    assert_eq!(link.style.fg, Some(theme::text_dim()));
     assert!(link.style.add_modifier.contains(Modifier::UNDERLINED));
 }
 
@@ -539,7 +539,7 @@ fn dim_inline_code_stays_quiet() {
     let lines = render_dim("use `foo`");
     let idx = texts(&lines[0]).iter().position(|t| t == "foo").unwrap();
     let span = &lines[0].spans[idx];
-    assert_eq!(span.style.fg, Some(theme::TEXT_DIM));
+    assert_eq!(span.style.fg, Some(theme::text_dim()));
     assert_eq!(span.style.bg, None);
 }
 
@@ -548,24 +548,24 @@ fn dim_list_and_task_markers_stay_quiet() {
     let lines = render_dim("- a\n\n1. b\n\n- [x] done");
     let bullet = &lines[0].spans[0];
     assert_eq!(bullet.content.to_string(), "• ");
-    assert_eq!(bullet.style.fg, Some(theme::TEXT_DIM));
+    assert_eq!(bullet.style.fg, Some(theme::text_dim()));
     assert!(!bullet.style.add_modifier.contains(Modifier::BOLD));
     let numbered = &lines[1].spans[0];
     assert_eq!(numbered.content.to_string(), "1. ");
-    assert_eq!(numbered.style.fg, Some(theme::TEXT_DIM));
+    assert_eq!(numbered.style.fg, Some(theme::text_dim()));
     let task = &lines[2].spans[0];
     assert_eq!(task.content.to_string(), "[x] ");
-    assert_eq!(task.style.fg, Some(theme::TEXT_DIM));
+    assert_eq!(task.style.fg, Some(theme::text_dim()));
 }
 
 #[test]
 fn dim_table_cells_stay_dim() {
     let lines = render_dim("| a | b |\n|---|---|\n| c | d |");
     let header = lines[1].spans.iter().find(|s| s.content == "a").unwrap();
-    assert_eq!(header.style.fg, Some(theme::TEXT_DIM));
+    assert_eq!(header.style.fg, Some(theme::text_dim()));
     assert!(header.style.add_modifier.contains(Modifier::BOLD));
     let body = lines[3].spans.iter().find(|s| s.content == "c").unwrap();
-    assert_eq!(body.style.fg, Some(theme::TEXT_DIM));
+    assert_eq!(body.style.fg, Some(theme::text_dim()));
     assert!(!body.style.add_modifier.contains(Modifier::BOLD));
 }
 
@@ -575,15 +575,15 @@ fn dim_code_blocks_keep_normal_colors() {
     assert_eq!(rows(&lines)[0], "```rust");
     assert_eq!(
         lines[0].spans[0].style.fg,
-        Some(theme::TEXT_MUTED),
+        Some(theme::text_muted()),
         "the fence keeps its normal color"
     );
     let has_keyword = styles_of(&lines[1])
         .iter()
-        .any(|s| s.fg == Some(theme::ACCENT));
+        .any(|s| s.fg == Some(theme::accent()));
     assert!(has_keyword, "code text keeps its syntax colors");
     let prose_idx = texts(&lines[4]).iter().position(|t| t == "tail").unwrap();
-    assert_eq!(lines[4].spans[prose_idx].style.fg, Some(theme::TEXT_DIM));
+    assert_eq!(lines[4].spans[prose_idx].style.fg, Some(theme::text_dim()));
 }
 
 #[test]

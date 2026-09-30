@@ -39,6 +39,15 @@ pub enum Command {
     SelectVariant {
         variant: Option<String>,
     },
+    /// Set the configured TUI theme (`/theme [name[:variant]]`): writes
+    /// `ui.theme` to the config file, `None` returning to the default
+    /// (built-in Faerun by the terminal's mode). The TUI validates the value
+    /// against the theme set before sending and reports the swap itself;
+    /// the core reports [`crate::Event::ConfigSaved`] once the file is
+    /// written.
+    SetUiTheme {
+        pref: Option<String>,
+    },
     SaveConfig,
     NewSession,
     /// Start a user turn. `model` optionally overrides the streaming target

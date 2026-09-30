@@ -647,6 +647,19 @@ pub async fn run(
                         )
                         .await;
                     }
+                    Command::SetUiTheme { pref } => {
+                        if ctx.config.ui.theme != pref {
+                            ctx.config.ui.theme = pref;
+                            persist(
+                                &ctx.config,
+                                &ctx.connections,
+                                config_path.as_deref(),
+                                connections_path.as_deref(),
+                                &ctx.event_tx,
+                            )
+                            .await;
+                        }
+                    }
                     Command::SaveConfig => {
                         persist(
                             &ctx.config,

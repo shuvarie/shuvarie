@@ -5821,6 +5821,7 @@ version = "0.2.2"
 dependencies = [
  "pulldown-cmark",
  "ratatui",
+ "shuvarie-config",
  "syntect",
  "unicode-width 0.2.2",
 ]

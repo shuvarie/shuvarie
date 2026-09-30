@@ -111,6 +111,10 @@ pub enum SidebarMessage {
     Toggle,
     /// The render loop's spinner wake: recapture the animated spinner span.
     SpinnerUpdate,
+    /// The theme palette changed (theme picker preview/apply/restore or a
+    /// config reload): the cached body lines carry resolved theme colors, so
+    /// they must be rebuilt; handled by the trailing cache rebuild below.
+    ThemeChanged,
 }
 
 impl Sidebar {
@@ -187,6 +191,13 @@ impl Sidebar {
                 self.manual = Some(!self.collapsed_at(self.width));
             }
             SidebarMessage::SpinnerUpdate => {
+                self.spinner_span = super::spinner::spinner();
+            }
+            SidebarMessage::ThemeChanged => {
+                // Re-bake the stateful pieces (the version bar's captured
+                // line and the spinner span's accent); the trailing rebuild
+                // below re-renders the body lines with the current palette.
+                self.version_bar.theme_changed();
                 self.spinner_span = super::spinner::spinner();
             }
         }
@@ -1291,5 +1302,128 @@ mod scene_tests {
         let line = sidebar.workspace_line(200);
         let rendered: String = line.spans.iter().map(|s| s.content.clone()).collect();
         assert!(rendered.contains("⌗ Plan"), "line: {rendered}");
+    }
+
+    /// (fg, bg) of every span, for palette comparisons.
+    fn fg_bgs(lines: &[Line<'static>]) -> Vec<(Option<Color>, Option<Color>)> {
+        lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| (s.style.fg, s.style.bg)))
+            .collect()
+    }
+
+    #[test]
+    fn theme_changed_rebuilds_cached_lines_with_the_new_palette() {
+        struct Restore(shuvarie_core::ThemeColors);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                theme::set(self.0);
+            }
+        }
+        let _lock = theme::lock_for_tests();
+        let original = theme::current();
+        let _restore = Restore(original);
+
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::SetTodos { done: 1, total: 2 });
+        let body = text(sidebar.rendered_lines());
+        let palette = fg_bgs(sidebar.rendered_lines());
+        assert!(sidebar.rendered_lines().iter().any(|l| !l.spans.is_empty()));
+
+        // No palette change: the rebuild is a stable no-op.
+        sidebar.update(SidebarMessage::ThemeChanged);
+        assert_eq!(text(sidebar.rendered_lines()), body);
+        assert_eq!(fg_bgs(sidebar.rendered_lines()), palette);
+
+        // A new palette plus the broadcast: same content, new colors.
+        let storm = shuvarie_core::ThemeColors::tokyo_night_storm();
+        assert_ne!(
+            theme::current(),
+            storm,
+            "the test depends on distinct palettes"
+        );
+        theme::set(storm);
+        sidebar.update(SidebarMessage::ThemeChanged);
+        assert_eq!(text(sidebar.rendered_lines()), body, "content unchanged");
+        assert_ne!(
+            fg_bgs(sidebar.rendered_lines()),
+            palette,
+            "the cached lines repaint with the new palette"
+        );
+    }
+
+    /// The effective fg of the line whose trimmed text is exactly `needle`:
+    /// the line-level style's fg, falling back to its sole span's.
+    fn line_fgs(lines: &[Line<'static>], needle: &str) -> Vec<Option<Color>> {
+        lines
+            .iter()
+            .filter(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+                    .trim()
+                    == needle
+            })
+            .map(|l| {
+                l.style
+                    .fg
+                    .or_else(|| l.spans.first().and_then(|s| s.style.fg))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn context_section_repaints_with_the_tui_palette() {
+        struct Restore(shuvarie_core::ThemeColors);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                theme::set(self.0);
+            }
+        }
+        let _lock = theme::lock_for_tests();
+        let original = theme::current();
+        let _restore = Restore(original);
+
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage {
+                total_tokens: 22_400,
+                input_tokens: 10_100,
+                output_tokens: 12_300,
+                ..Default::default()
+            },
+            cost: 0.125,
+            context_tokens: None,
+        });
+
+        // The Context section's title runs on the swappable TUI accent (not
+        // the highlight crate's static palette), so a theme swap repaints it.
+        let defaults = line_fgs(sidebar.rendered_lines(), "Context");
+        assert_eq!(
+            defaults,
+            vec![Some(Color::Rgb(212, 175, 95))],
+            "the Context title carries Faerun's accent"
+        );
+        let usage = line_fgs(sidebar.rendered_lines(), "↑10.1k ↓12.3k");
+        assert_eq!(
+            usage,
+            vec![Some(Color::Rgb(128, 120, 104))],
+            "the usage line carries Faerun's text_dim"
+        );
+
+        let storm = shuvarie_core::ThemeColors::tokyo_night_storm();
+        theme::set(storm);
+        sidebar.update(SidebarMessage::ThemeChanged);
+        assert_eq!(
+            line_fgs(sidebar.rendered_lines(), "Context"),
+            vec![Some(Color::Rgb(122, 162, 247))],
+            "the Context title repaints with the new accent"
+        );
+        assert_eq!(
+            line_fgs(sidebar.rendered_lines(), "↑10.1k ↓12.3k"),
+            vec![Some(Color::Rgb(169, 177, 214))],
+            "the usage line repaints with the new text_dim"
+        );
     }
 }

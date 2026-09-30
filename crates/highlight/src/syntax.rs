@@ -73,12 +73,15 @@ fn rule(scopes: &str, style: StyleModifier) -> ThemeItem {
     }
 }
 
-fn heraldic_theme() -> SyntectTheme {
+/// The syntect theme for the active renderer palette: rebuilt per highlight
+/// request so a palette swap takes effect on the next rendered block (the
+/// theme is a handful of items, so the rebuild is negligible next to parsing).
+fn syntect_theme() -> SyntectTheme {
     SyntectTheme {
         name: Some("shuvarie".to_string()),
         author: None,
         settings: ThemeSettings {
-            foreground: Some(to_syntect_color(theme::TEXT)),
+            foreground: Some(to_syntect_color(theme::text())),
             background: None,
             caret: None,
             line_highlight: None,
@@ -112,71 +115,60 @@ fn heraldic_theme() -> SyntectTheme {
         scopes: vec![
             rule(
                 "keyword, keyword.control, keyword.operator, keyword.other, storage.type.function, storage.modifier",
-                fg(theme::ACCENT),
+                fg(theme::code_keyword()),
             ),
             rule(
                 "constant.language, constant.numeric, constant.other.color, variable.language",
-                fg(theme::AMBER),
+                fg(theme::warning()),
             ),
             rule(
                 "string, string.quoted, punctuation.definition.string, string.regexp, string.escape",
-                fg(theme::SAGE),
+                fg(theme::code_string()),
             ),
             rule(
                 "comment, comment.block.documentation",
-                fg_italic(theme::TEXT_DIM),
+                fg_italic(theme::text_dim()),
             ),
             rule(
                 "entity.name.type, entity.name.class, entity.name.struct, entity.name.namespace, support.type",
-                fg(theme::STEEL),
+                fg(theme::code_type()),
             ),
             rule(
                 "entity.name.function, support.function, meta.function-call, support.type.property-name",
-                fg(theme::BRONZE),
+                fg(theme::code_function()),
             ),
             rule(
                 "variable, variable.other, variable.parameter, entity.name.variable, meta.block",
-                fg(theme::TEXT),
+                fg(theme::text()),
             ),
             rule(
                 "entity.other.attribute-name, support.other.variable",
-                fg(theme::WARNING),
+                fg(theme::warning()),
             ),
             rule(
                 "punctuation, punctuation.definition, punctuation.section, punctuation.separator, meta.delimiter, delimiter",
-                fg(theme::TEXT_DIM),
+                fg(theme::text_dim()),
             ),
             rule(
                 "meta.tag, tag, tag.name, tag.structure, markup.tag",
-                fg(theme::ACCENT),
+                fg(theme::accent()),
             ),
             rule(
                 "markup.heading, entity.name.section",
-                fg_bold(theme::ACCENT),
+                fg_bold(theme::accent()),
             ),
             rule(
                 "markup.quote, markup.underline.link, markup.raw.inline",
-                fg(theme::TEXT_DIM),
+                fg(theme::text_dim()),
             ),
-            rule("invalid, invalid.illegal", fg(theme::ERROR)),
+            rule("invalid, invalid.illegal", fg(theme::error())),
         ],
     }
-}
-
-fn shuvarie_theme() -> &'static SyntectTheme {
-    static THEME: LazyLock<SyntectTheme> = LazyLock::new(heraldic_theme);
-    &THEME
 }
 
 fn syntax_set() -> &'static SyntaxSet {
     static SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
     &SET
-}
-
-fn highlighter() -> &'static Highlighter<'static> {
-    static HIGHLIGHTER: LazyLock<Highlighter<'static>> =
-        LazyLock::new(|| Highlighter::new(shuvarie_theme()));
-    &HIGHLIGHTER
 }
 
 fn highlight_line<'a>(
@@ -201,13 +193,14 @@ pub fn is_supported(lang: &str) -> bool {
 
 pub fn highlight_code(lang: &str, code_text: &str) -> Vec<Line<'static>> {
     let set = syntax_set();
-    let highlighter = highlighter();
+    let theme = syntect_theme();
+    let highlighter = Highlighter::new(&theme);
     let syntax = set
         .find_syntax_by_token(lang)
         .or_else(|| set.find_syntax_by_extension(lang))
         .unwrap_or_else(|| set.find_syntax_plain_text());
 
-    let mut highlight_state = HighlightState::new(highlighter, ScopeStack::new());
+    let mut highlight_state = HighlightState::new(&highlighter, ScopeStack::new());
     let mut parse_state = ParseState::new(syntax);
 
     let mut lines = Vec::new();
@@ -217,13 +210,13 @@ pub fn highlight_code(lang: &str, code_text: &str) -> Vec<Line<'static>> {
             &mut highlight_state,
             &mut parse_state,
             set,
-            highlighter,
+            &highlighter,
             &line,
         ) {
             Some(r) => r,
             None => {
                 lines.push(code::keep_indent(Line::from(
-                    Span::raw(line).style(theme::PLAIN),
+                    Span::raw(line).style(theme::plain()),
                 )));
                 continue;
             }

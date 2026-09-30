@@ -47,6 +47,17 @@ fn temp_connections_path(name: &str) -> PathBuf {
     dir.join("shuvarie").join("connections.kdl")
 }
 
+fn temp_config_path(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "shuvarie-test-{name}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    dir.join("shuvarie").join("config.kdl")
+}
+
 async fn recv_skills_loaded(
     event_rx: &mut tokio::sync::mpsc::Receiver<Event>,
 ) -> Vec<shuvarie_core::McpStatus> {
@@ -872,6 +883,70 @@ async fn add_provider_emits_saved() {
     drop(cmd_tx);
     let _ = handle.await;
     let _ = std::fs::remove_file(connections_path);
+}
+
+#[tokio::test]
+async fn set_ui_theme_persists_ui_theme() {
+    // The core task persists to the given config path; assert the event is
+    // emitted and `ui.theme` lands in the temp config file.
+    let config_path = temp_config_path("set-ui-theme");
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+
+    let handle = tokio::spawn(run(
+        empty_config(),
+        empty_connections(),
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        Some(config_path.clone()),
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        Default::default(),
+        cmd_rx,
+        event_tx,
+    ));
+    cmd_tx
+        .send(Command::SetUiTheme {
+            pref: Some("Kanagawa:wave".into()),
+        })
+        .await
+        .unwrap();
+
+    let mut saw_saved = false;
+    for _ in 0..5 {
+        match event_rx.recv().await {
+            Some(Event::ConfigSaved) => {
+                saw_saved = true;
+                break;
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    assert!(saw_saved, "expected ConfigSaved event");
+
+    let loaded = Config::load_from(&config_path).expect("load persisted config");
+    assert_eq!(loaded.ui.theme.as_deref(), Some("Kanagawa:wave"));
+
+    // Re-selecting the unset default clears the key again.
+    cmd_tx
+        .send(Command::SetUiTheme { pref: None })
+        .await
+        .unwrap();
+    for _ in 0..5 {
+        match event_rx.recv().await {
+            Some(Event::ConfigSaved) => break,
+            Some(_) => {}
+            None => break,
+        }
+    }
+    let loaded = Config::load_from(&config_path).expect("load persisted config");
+    assert_eq!(loaded.ui.theme, None, "the unset default is cleared");
+
+    drop(cmd_tx);
+    let _ = handle.await;
+    let _ = std::fs::remove_file(config_path);
 }
 
 #[tokio::test]

@@ -1,5 +1,13 @@
+//! The active TUI palette: one static, swappable set of colors that every
+//! view reads through the accessor functions below. `init` installs the
+//! resolved theme at startup; `set` swaps it live (the theme picker walks
+//! palettes through it and restores the previous one on cancel). Swapping
+//! here also re-syncs the markdown/code renderer palette
+//! ([`shuvarie_highlight::theme`]), so chat rendering follows every preview,
+//! apply, and restore.
+
 use std::io::Write;
-use std::sync::OnceLock;
+use std::sync::RwLock;
 use std::time::Duration;
 
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -13,17 +21,39 @@ use shuvarie_core::{ResolvedTheme, Rgb, ThemeColors, ThemeVariant};
 
 use super::escape;
 
-static ACTIVE: OnceLock<ThemeColors> = OnceLock::new();
+static ACTIVE: RwLock<ThemeColors> = RwLock::new(ThemeColors::faerun());
 
 /// Installs the resolved theme for this run: every palette access below
 /// paints its colors from then on. Without a call the built-in Faerun
 /// palette stays active.
 pub fn init(resolved: ResolvedTheme) {
-    let _ = ACTIVE.set(resolved.colors);
+    set(resolved.colors);
 }
 
-fn active() -> &'static ThemeColors {
-    ACTIVE.get_or_init(ThemeColors::faerun)
+/// Swaps the active palette in place: the next frame paints with `colors`.
+/// Used by the theme picker to preview a highlighted palette and to restore
+/// the previous one. The markdown/code renderer palette is kept in lockstep.
+pub fn set(colors: ThemeColors) {
+    *ACTIVE.write().expect("theme palette lock") = colors;
+    shuvarie_highlight::theme::set(colors);
+}
+
+/// A snapshot of the active palette (for restoring it after a preview).
+pub fn current() -> ThemeColors {
+    active()
+}
+
+fn active() -> ThemeColors {
+    *ACTIVE.read().expect("theme palette")
+}
+
+/// Serializes the palette-mutating tests (the palette is process-wide state).
+#[cfg(test)]
+pub(crate) fn lock_for_tests() -> std::sync::MutexGuard<'static, ()> {
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn paint(color: Rgb) -> Color {
@@ -295,5 +325,30 @@ mod tests {
             "the Faerun light background"
         );
         assert_eq!(luminance_variant(200, 200, 200), ThemeVariant::Light);
+    }
+
+    #[test]
+    fn set_swaps_the_active_palette_and_restores_it() {
+        // Swap, observe, restore, inside one test so cross-test interleaving
+        // cannot flake (the palette global is process-wide).
+        let _guard = lock_for_tests();
+        let previous = *ACTIVE.read().unwrap();
+        set(ThemeColors::tokyo_night_night());
+        assert_eq!(*ACTIVE.read().unwrap(), ThemeColors::tokyo_night_night());
+        assert_eq!(accent(), Color::Rgb(122, 162, 247));
+        assert_eq!(bg(), Color::Rgb(26, 27, 38));
+        // The markdown/code renderer palette follows the same swap.
+        assert_eq!(
+            shuvarie_highlight::theme::code_string(),
+            shuvarie_highlight::theme::Palette::from_theme(&ThemeColors::tokyo_night_night())
+                .code_string
+        );
+        set(previous);
+        assert_eq!(*ACTIVE.read().unwrap(), previous);
+        assert_eq!(
+            shuvarie_highlight::theme::current(),
+            shuvarie_highlight::theme::Palette::from_theme(&previous),
+            "restoring restores the renderer palette too"
+        );
     }
 }

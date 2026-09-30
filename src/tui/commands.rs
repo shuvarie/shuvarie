@@ -8,6 +8,7 @@ pub enum CommandAction {
     OpenTree,
     OpenScenePicker,
     OpenVariantPicker,
+    OpenThemePicker,
     NewSession,
     EditTitle,
     GenTitle,
@@ -25,13 +26,14 @@ pub enum CommandAction {
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 20] = [
+    pub const ALL: [CommandAction; 21] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::OpenSessionPicker,
         CommandAction::OpenTree,
         CommandAction::OpenScenePicker,
         CommandAction::OpenVariantPicker,
+        CommandAction::OpenThemePicker,
         CommandAction::NewSession,
         CommandAction::EditTitle,
         CommandAction::GenTitle,
@@ -56,6 +58,7 @@ impl CommandAction {
             CommandAction::OpenTree => "tree",
             CommandAction::OpenScenePicker => "scene",
             CommandAction::OpenVariantPicker => "variant",
+            CommandAction::OpenThemePicker => "theme",
             CommandAction::NewSession => "new",
             CommandAction::EditTitle => "title",
             CommandAction::GenTitle => "gen-title",
@@ -84,6 +87,7 @@ impl CommandAction {
                 | CommandAction::McpReconnect
                 | CommandAction::OpenScenePicker
                 | CommandAction::OpenVariantPicker
+                | CommandAction::OpenThemePicker
                 | CommandAction::Search
         )
     }
@@ -189,6 +193,11 @@ pub fn default_commands() -> Vec<CommandEntry> {
             "Select variant",
             "Pick the model's reasoning effort",
             CommandAction::OpenVariantPicker,
+        ),
+        CommandEntry::builtin(
+            "Theme",
+            "Pick the TUI theme (previews live)",
+            CommandAction::OpenThemePicker,
         ),
         CommandEntry::builtin(
             "Edit title",
@@ -483,6 +492,13 @@ mod tests {
                 args: None
             })
         );
+        assert_eq!(
+            parse_command("/theMe"),
+            Some(ParsedCommand {
+                action: CommandAction::OpenThemePicker,
+                args: None
+            })
+        );
     }
 
     #[test]
@@ -543,6 +559,27 @@ mod tests {
             Some(ParsedCommand {
                 action: CommandAction::OpenVariantPicker,
                 args: Some("HIGH".into())
+            })
+        );
+        assert_eq!(
+            parse_command("/theme Kanagawa:lotus"),
+            Some(ParsedCommand {
+                action: CommandAction::OpenThemePicker,
+                args: Some("Kanagawa:lotus".into())
+            })
+        );
+        assert_eq!(
+            parse_command("/theme default"),
+            Some(ParsedCommand {
+                action: CommandAction::OpenThemePicker,
+                args: Some("default".into())
+            })
+        );
+        assert_eq!(
+            parse_command("/theme Tokyo Night:storm"),
+            Some(ParsedCommand {
+                action: CommandAction::OpenThemePicker,
+                args: Some("Tokyo Night:storm".into())
             })
         );
     }

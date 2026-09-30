@@ -6,13 +6,13 @@ use crate::{code, theme};
 fn line_style(line: &str) -> Style {
     let c = line.chars().next().unwrap_or(' ');
     match c {
-        '+' => Style::new().fg(theme::SUCCESS),
-        '-' => Style::new().fg(theme::ERROR),
+        '+' => Style::new().fg(theme::success()),
+        '-' => Style::new().fg(theme::error()),
         '@' => Style::new()
-            .fg(theme::ACCENT)
+            .fg(theme::accent())
             .add_modifier(ratatui::style::Modifier::BOLD),
-        '\\' => Style::new().fg(theme::TEXT_MUTED),
-        _ => Style::new().fg(theme::TEXT_DIM),
+        '\\' => Style::new().fg(theme::text_muted()),
+        _ => Style::new().fg(theme::text_dim()),
     }
 }
 

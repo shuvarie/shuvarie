@@ -126,6 +126,10 @@ pub enum SessionMessage {
     },
     Question(QuestionMessage),
     Slash(SlashMessage),
+    /// The theme palette changed (theme picker preview/apply/restore or a
+    /// config reload): repaint the chat's cached turn renders and the
+    /// sidebar's cached lines with the new palette.
+    ThemeChanged,
     /// Sidebar control: collapse toggle (Ctrl+W) and pref/width updates.
     Sidebar(SidebarMessage),
     /// `[ui] copy-on-select`: copy the chat selection on mouse-up.
@@ -1038,6 +1042,11 @@ impl SessionScreen {
             SessionMessage::SpinnerUpdate => {
                 self.chat.update(ChatMessage::SpinnerUpdate);
                 self.sidebar.update(SidebarMessage::SpinnerUpdate);
+                None
+            }
+            SessionMessage::ThemeChanged => {
+                self.chat.update(ChatMessage::ThemeChanged);
+                self.sidebar.update(SidebarMessage::ThemeChanged);
                 None
             }
         }

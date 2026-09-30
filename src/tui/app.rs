@@ -31,6 +31,7 @@ use super::session_picker::{SessionPicker, SessionPickerEffect, SessionPickerMes
 use super::sidebar::SidebarMessage;
 use super::spinner::SpinnerKind;
 use super::theme;
+use super::theme_picker::{ThemePicker, ThemePickerEffect, ThemePickerMessage};
 use super::title::{TitleEffect, TitleMessage, TitlePopup};
 use super::variant;
 use super::warning::{WarningMessage, WarningPopup};
@@ -51,6 +52,7 @@ pub enum Overlay {
     Tree,
     Scene,
     Variant,
+    ThemePicker,
     AssistedBy,
 }
 
@@ -74,6 +76,7 @@ pub enum AppMessage {
     Tree(TreeMessage),
     Scene(scene::SceneMessage),
     Variant(variant::VariantMessage),
+    Theme(ThemePickerMessage),
     AssistedBy(AssistedByMessage),
     /// The configured scene set (startup), for the switcher; `warnings`
     /// carries one message per same-level scene conflict.
@@ -196,6 +199,7 @@ pub struct App {
     pub history_search: HistorySearch,
     pub title_popup: TitlePopup,
     pub assisted_by: AssistedByPopup,
+    pub theme_picker: ThemePicker,
     pub warning: WarningPopup,
     pub auth: AuthPopup,
     pub models: HashMap<String, Vec<Model>>,
@@ -207,6 +211,12 @@ pub struct App {
     scene_default: Option<String>,
     /// The session's current scene (`None` = built-in Default).
     current_scene: Option<String>,
+    /// Every selectable theme for the picker (the unset default first).
+    theme_choices: Vec<shuvarie_core::ThemeChoice>,
+    /// The current `ui.theme` pref (`None` = the unset default).
+    current_theme_pref: Option<String>,
+    /// The palette painted before the picker opened, restored on cancel.
+    theme_backup: Option<shuvarie_core::ThemeColors>,
     quit: bool,
 }
 
@@ -243,9 +253,11 @@ fn catalog_variants(connections: &Connections) -> Option<Vec<String>> {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         ui: UiPrefs,
         theme: shuvarie_core::ResolvedTheme,
+        theme_choices: Vec<shuvarie_core::ThemeChoice>,
         registries: RegistriesConfig,
         connections: Connections,
         cmd_tx: Sender<shuvarie_core::Command>,
@@ -269,6 +281,7 @@ impl App {
             .as_deref()
             .and_then(|id| connections.providers.get(id).map(|p| p.name.clone()));
         let initial_context_length = catalog_context_length(&connections);
+        let current_theme_pref = ui.theme.clone();
         Self {
             ctx: UpdateCtx::new(connections, cmd_tx),
             overlay: if welcome.open {
@@ -307,6 +320,10 @@ impl App {
             history_search: HistorySearch::new(),
             title_popup: TitlePopup::new(),
             assisted_by: AssistedByPopup::new(),
+            theme_picker: ThemePicker::new(),
+            theme_choices,
+            current_theme_pref,
+            theme_backup: None,
             warning,
             auth: AuthPopup::new(),
             models: HashMap::new(),
@@ -458,6 +475,9 @@ impl App {
                         }
                         Overlay::Variant => {
                             return self.variant_picker.map_event(&key).map(AppMessage::Variant);
+                        }
+                        Overlay::ThemePicker => {
+                            return self.theme_picker.map_event(&key).map(AppMessage::Theme);
                         }
                         Overlay::HistorySearch => {
                             return self
@@ -847,6 +867,7 @@ impl App {
             | Overlay::Tree
             | Overlay::Scene
             | Overlay::Variant
+            | Overlay::ThemePicker
             | Overlay::AssistedBy => None,
             Overlay::ModelPicker => {
                 let flat = super::components::flatten_newlines(text);
@@ -964,6 +985,35 @@ impl App {
                                 .send(shuvarie_core::Command::SelectVariant { variant });
                         }
                         variant::VariantEffect::Close => self.close_overlay(),
+                    }
+                }
+            }
+            AppMessage::Theme(m) => {
+                if let Some(effect) = self.theme_picker.update(m) {
+                    match effect {
+                        ThemePickerEffect::Preview { colors } => {
+                            // Live preview while walking: repaint with the
+                            // highlighted palette immediately.
+                            theme::set(colors);
+                            self.session.update(SessionMessage::ThemeChanged);
+                        }
+                        ThemePickerEffect::Select { pref } => {
+                            // Keep the previewed palette; record the choice
+                            // in the config file.
+                            self.theme_backup = None;
+                            self.current_theme_pref = pref.clone();
+                            self.close_overlay();
+                            self.ctx.send(shuvarie_core::Command::SetUiTheme { pref });
+                        }
+                        ThemePickerEffect::Close => {
+                            // Walked away without picking: repaint with the
+                            // palette active at open.
+                            if let Some(colors) = self.theme_backup.take() {
+                                theme::set(colors);
+                                self.session.update(SessionMessage::ThemeChanged);
+                            }
+                            self.close_overlay();
+                        }
                     }
                 }
             }
@@ -1228,6 +1278,7 @@ impl App {
                     | Overlay::Tree
                     | Overlay::Scene
                     | Overlay::Variant
+                    | Overlay::ThemePicker
                     | Overlay::AssistedBy => {}
                 }
             }
@@ -1643,6 +1694,66 @@ impl App {
             .update(SidebarMessage::SetScene { name });
     }
 
+    /// Opens the theme picker, or with an argument (`/theme <name[:variant]>`)
+    /// applies that palette directly: `default` clears to the unset default,
+    /// a selectable `name` or `name:variant` (exactly as one of the picker's
+    /// choices) switches in place, anything else shows an error listing the
+    /// selectable themes.
+    fn open_theme_picker(&mut self, args: Option<String>) {
+        match args {
+            None => {
+                self.theme_backup = Some(theme::current());
+                self.theme_picker
+                    .open(&self.theme_choices, self.current_theme_pref.as_deref());
+                self.overlay = Overlay::ThemePicker;
+            }
+            Some(arg) => {
+                if arg.eq_ignore_ascii_case("default") {
+                    let colors = self
+                        .theme_choices
+                        .first()
+                        .map(|choice| choice.colors)
+                        .unwrap_or_else(theme::current);
+                    self.apply_theme(None, colors);
+                    return;
+                }
+                match self
+                    .theme_choices
+                    .iter()
+                    .find(|choice| choice.pref.as_deref() == Some(arg.as_str()))
+                {
+                    Some(choice) => {
+                        let colors = choice.colors;
+                        self.apply_theme(choice.pref.clone(), colors);
+                    }
+                    None => {
+                        let available: Vec<String> = self
+                            .theme_choices
+                            .iter()
+                            .filter_map(|choice| choice.pref.clone())
+                            .collect();
+                        self.session.update(SessionMessage::ShowError {
+                            error: format!(
+                                "unknown theme `{arg}` — available: default, {}",
+                                available.join(", ")
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Applies a theme palette: swaps the active palette, records the pref,
+    /// and persists it to the config file. `pref` = `None` selects the unset
+    /// default (Faerun by the terminal's mode).
+    fn apply_theme(&mut self, pref: Option<String>, colors: shuvarie_core::ThemeColors) {
+        theme::set(colors);
+        self.session.update(SessionMessage::ThemeChanged);
+        self.current_theme_pref = pref.clone();
+        self.ctx.send(shuvarie_core::Command::SetUiTheme { pref });
+    }
+
     /// The spinners currently animating, so the render loop can wake at the
     /// earliest next frame change.
     pub fn active_spinners(&self) -> impl Iterator<Item = SpinnerKind> + '_ {
@@ -1731,6 +1842,9 @@ impl App {
             }
             CommandAction::OpenVariantPicker => {
                 self.open_variant_picker(args);
+            }
+            CommandAction::OpenThemePicker => {
+                self.open_theme_picker(args);
             }
             CommandAction::NewSession => {
                 self.save_scroll();
@@ -1842,6 +1956,13 @@ impl App {
         self.title_popup.close();
         self.assisted_by.close();
         self.variant_picker.close();
+        self.theme_picker.close();
+        // Walking away from the theme picker repaints with the palette
+        // active at open (already cleared to `None` by a selection).
+        if let Some(colors) = self.theme_backup.take() {
+            theme::set(colors);
+            self.session.update(SessionMessage::ThemeChanged);
+        }
         if self.welcome.open {
             self.welcome.close();
         }
@@ -1912,6 +2033,7 @@ impl App {
         self.tree_popup.view(frame, area);
         self.scene_picker.view(frame, area);
         self.variant_picker.view(frame, area);
+        self.theme_picker.view(frame, area);
         self.history_search.view(frame, area);
         self.command_menu.view(frame, area);
         self.title_popup.view(frame, area);
@@ -1981,6 +2103,7 @@ mod tests {
         App::new(
             UiPrefs::default(),
             shuvarie_core::ResolvedTheme::faerun(),
+            shuvarie_core::ThemeSet::default().choices(shuvarie_core::ThemeVariant::Dark),
             RegistriesConfig::default(),
             connections,
             tx,
@@ -1996,6 +2119,7 @@ mod tests {
         let app = App::new(
             UiPrefs::default(),
             shuvarie_core::ResolvedTheme::faerun(),
+            shuvarie_core::ThemeSet::default().choices(shuvarie_core::ThemeVariant::Dark),
             RegistriesConfig::default(),
             connections,
             tx,
@@ -2576,5 +2700,143 @@ mod tests {
                 variant: Some(ref v)
             } if v == "low"
         ));
+    }
+
+    #[test]
+    fn theme_picker_opens_previews_and_restores_on_cancel() {
+        let _guard = theme::lock_for_tests();
+        let mut app = app_with(Connections::default());
+        let original = theme::current();
+        let _restore = PaletteRestore(original);
+        // Seed cached sidebar lines so the repaint below is observable.
+        app.update(AppMessage::Session(SessionMessage::Sidebar(
+            SidebarMessage::SetTodos { done: 1, total: 2 },
+        )));
+        app.run_command(CommandAction::OpenThemePicker, None);
+        assert!(matches!(app.overlay, Overlay::ThemePicker));
+        assert!(app.theme_picker.open, "preselected the current theme");
+        assert!(app.theme_backup.is_some(), "the palette snapshot is kept");
+        let before = fg_bgs(&app);
+
+        // Walking previews the highlighted palette live — both the global
+        // palette and the sidebar's cached lines (which only rebuild on
+        // messages) flip.
+        app.update(AppMessage::Theme(ThemePickerMessage::Next));
+        assert_ne!(app.theme_backup, Some(theme::current()), "preview repaints");
+        assert_ne!(fg_bgs(&app), before, "the sidebar repaints during preview");
+
+        // …and closing without a selection restores the palette at open.
+        app.update(AppMessage::Theme(ThemePickerMessage::Close));
+        assert!(matches!(app.overlay, Overlay::None), "the overlay closes");
+        assert_eq!(theme::current(), original);
+        assert_eq!(fg_bgs(&app), before, "the sidebar cache is restored");
+    }
+
+    #[tokio::test]
+    async fn theme_picker_select_persists_the_choice() {
+        let _guard = theme::lock_for_tests();
+        let original = theme::current();
+        let _restore = PaletteRestore(original);
+        let (mut app, mut rx) = app_with_rx(Connections::default());
+        app.run_command(CommandAction::OpenThemePicker, None);
+        assert!(app.theme_picker.open);
+        app.update(AppMessage::Theme(ThemePickerMessage::Next));
+        let previewed = theme::current();
+        app.update(AppMessage::Theme(ThemePickerMessage::Select));
+        assert!(matches!(app.overlay, Overlay::None), "the picker closes");
+        assert!(
+            app.theme_backup.is_none(),
+            "the snapshot is dropped: keep the preview"
+        );
+        assert_eq!(theme::current(), previewed, "the previewed palette stays");
+        assert_eq!(app.current_theme_pref.as_deref(), Some("Faerun:light"));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            shuvarie_core::Command::SetUiTheme {
+                pref: Some(ref pref)
+            } if pref == "Faerun:light"
+        ));
+    }
+
+    #[tokio::test]
+    async fn theme_command_with_an_argument_applies_directly() {
+        let _guard = theme::lock_for_tests();
+        let original = theme::current();
+        let _restore = PaletteRestore(original);
+        let (mut app, mut rx) = app_with_rx(Connections::default());
+        let expected = app
+            .theme_choices
+            .iter()
+            .find(|choice| choice.pref.as_deref() == Some("Kanagawa:lotus"))
+            .expect("the built-in choice")
+            .colors;
+        app.welcome.close();
+        app.overlay = Overlay::None;
+        app.run_command(
+            CommandAction::OpenThemePicker,
+            Some("Kanagawa:lotus".into()),
+        );
+        assert!(matches!(app.overlay, Overlay::None), "no overlay opens");
+        assert_eq!(theme::current(), expected);
+        assert_eq!(app.current_theme_pref.as_deref(), Some("Kanagawa:lotus"));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            shuvarie_core::Command::SetUiTheme {
+                pref: Some(ref pref)
+            } if pref == "Kanagawa:lotus"
+        ));
+    }
+
+    #[tokio::test]
+    async fn theme_command_default_clears_the_pref() {
+        let _guard = theme::lock_for_tests();
+        let original = theme::current();
+        let _restore = PaletteRestore(original);
+        let (mut app, mut rx) = app_with_rx(Connections::default());
+        app.welcome.close();
+        app.overlay = Overlay::None;
+        app.run_command(CommandAction::OpenThemePicker, Some("default".into()));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(app.current_theme_pref, None);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            shuvarie_core::Command::SetUiTheme { pref: None }
+        ));
+    }
+
+    #[test]
+    fn theme_command_with_an_unknown_argument_shows_an_error() {
+        let _guard = theme::lock_for_tests();
+        let original = theme::current();
+        let _restore = PaletteRestore(original);
+        let (mut app, mut rx) = app_with_rx(Connections::default());
+        app.welcome.close();
+        app.overlay = Overlay::None;
+        app.run_command(CommandAction::OpenThemePicker, Some("Nord".into()));
+        assert_eq!(
+            app.session.error.as_deref().map(|e| e.contains("Nord")),
+            Some(true),
+            "the error names the unknown theme"
+        );
+        assert_eq!(theme::current(), original, "the palette is untouched");
+        assert!(rx.try_recv().is_err(), "no command is sent");
+    }
+
+    struct PaletteRestore(shuvarie_core::ThemeColors);
+
+    impl Drop for PaletteRestore {
+        fn drop(&mut self) {
+            theme::set(self.0);
+        }
+    }
+
+    /// (fg, bg) of every cached sidebar span, for repaint assertions.
+    fn fg_bgs(app: &App) -> Vec<(Option<Color>, Option<Color>)> {
+        app.session
+            .sidebar
+            .rendered_lines()
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| (s.style.fg, s.style.bg)))
+            .collect()
     }
 }

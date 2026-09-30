@@ -41,6 +41,7 @@ mod sidebar;
 mod slash;
 mod spinner;
 mod theme;
+mod theme_picker;
 mod title;
 pub mod trust;
 mod utils;
@@ -63,10 +64,9 @@ pub async fn run_tui(
     term.enter_raw_mode()?;
 
     let reader = term.event_reader();
-    let theme = theme_set.resolve(
-        config.ui.theme.as_deref(),
-        self::theme::detect_variant(&mut term, &reader),
-    );
+    let detected = self::theme::detect_variant(&mut term, &reader);
+    let theme = theme_set.resolve(config.ui.theme.as_deref(), detected);
+    let theme_choices = theme_set.choices(detected);
     let event_stream = EventStream::new(reader.clone(), |_| true);
 
     let initial_cols = term.get_dimensions()?.cols;
@@ -77,6 +77,7 @@ pub async fn run_tui(
     let app = App::new(
         config.ui,
         theme,
+        theme_choices,
         config.registries.clone(),
         connections,
         cmd_tx,

@@ -1,5 +1,5 @@
+use crate::tui::theme;
 use ratatui::prelude::*;
-use shuvarie_highlight::theme;
 use shuvarie_llm::TokenUsage;
 
 use crate::tui::utils::num::{CachedScaledNumber, fmt_cost};
@@ -112,11 +112,11 @@ impl ContextDisplay {
     }
 
     pub fn view(&self, lines: &mut Vec<Line<'static>>) {
-        lines.push(Line::from("Context").fg(theme::ACCENT).bold());
+        lines.push(Line::from("Context").fg(theme::accent()).bold());
         let window = self.context_length.as_ref().filter(|c| c.num() > 0);
         lines.push(
             Line::from(format!("  ↑{} ↓{}", self.input_tokens, self.output_tokens,))
-                .fg(theme::TEXT_DIM),
+                .fg(theme::text_dim()),
         );
         if let Some(ctx) = window {
             let line = match self.context_tokens {
@@ -128,7 +128,7 @@ impl ContextDisplay {
                 }
                 None => format!("  {}", ctx),
             };
-            lines.push(Line::from(line).fg(theme::TEXT_DIM));
+            lines.push(Line::from(line).fg(theme::text_dim()));
         }
         let mut request = Vec::new();
         if let Some(ref read) = self.read_tokens {
@@ -138,16 +138,17 @@ impl ContextDisplay {
             request.push(format!("CH{pct}%"));
         }
         if !request.is_empty() {
-            lines.push(Line::from(format!("  {}", request.join(" "))).fg(theme::TEXT_DIM));
+            lines.push(Line::from(format!("  {}", request.join(" "))).fg(theme::text_dim()));
         }
         if self.reasoning_tokens.num() > 0 {
-            lines
-                .push(Line::from(format!("  Think {}", self.reasoning_tokens)).fg(theme::TEXT_DIM));
+            lines.push(
+                Line::from(format!("  Think {}", self.reasoning_tokens)).fg(theme::text_dim()),
+            );
         }
         if self.cached_tokens.num() > 0 {
-            lines.push(Line::from(format!("  Cache {}", self.cached_tokens)).fg(theme::TEXT_DIM));
+            lines.push(Line::from(format!("  Cache {}", self.cached_tokens)).fg(theme::text_dim()));
         }
-        lines.push(Line::from(format!("  Cost {}", fmt_cost(self.cost))).fg(theme::TEXT_DIM));
+        lines.push(Line::from(format!("  Cost {}", fmt_cost(self.cost))).fg(theme::text_dim()));
         lines.push(Line::from(""));
     }
 
@@ -158,7 +159,7 @@ impl ContextDisplay {
         let mut spans = Vec::new();
         spans.push(
             Span::raw(format!("↑{} ↓{}", self.input_tokens, self.output_tokens))
-                .fg(theme::TEXT_DIM),
+                .fg(theme::text_dim()),
         );
         if let Some(window) = self.context_length.as_ref().filter(|c| c.num() > 0) {
             let window_text = match self.context_tokens {
@@ -170,15 +171,15 @@ impl ContextDisplay {
                 }
                 None => format!(" {}", window),
             };
-            spans.push(Span::raw(window_text).fg(theme::TEXT_DIM));
+            spans.push(Span::raw(window_text).fg(theme::text_dim()));
         }
         if let Some(ref read) = self.read_tokens {
-            spans.push(Span::raw(format!(" R{}", read)).fg(theme::TEXT_DIM));
+            spans.push(Span::raw(format!(" R{}", read)).fg(theme::text_dim()));
         }
         if let Some(pct) = self.cached_pct {
-            spans.push(Span::raw(format!(" CH{pct}%")).fg(theme::TEXT_DIM));
+            spans.push(Span::raw(format!(" CH{pct}%")).fg(theme::text_dim()));
         }
-        spans.push(Span::raw(format!(" {}", fmt_cost(self.cost))).fg(theme::TEXT_DIM));
+        spans.push(Span::raw(format!(" {}", fmt_cost(self.cost))).fg(theme::text_dim()));
         spans
     }
 }

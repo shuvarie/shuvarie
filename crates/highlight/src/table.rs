@@ -7,7 +7,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::theme;
 
 /// Border drawing style for table rules and cell edges.
-const BORDER: Style = Style::new().fg(theme::TEXT_MUTED);
+fn border() -> Style {
+    Style::new().fg(theme::text_muted())
+}
 
 /// Longest cell content before it wraps inside the box (the padding spaces
 /// excluded): column widths are capped at this plus one padding space per
@@ -68,7 +70,7 @@ fn row_lines(
     let mut lines = Vec::with_capacity(height);
     for r in 0..height {
         let mut spans: Vec<Span<'static>> = Vec::new();
-        spans.push(Span::raw("│").style(BORDER));
+        spans.push(Span::raw("│").style(border()));
         for (i, &w) in widths.iter().enumerate() {
             let cell = wrapped[i].get(r).map(Vec::as_slice).unwrap_or_default();
             let pad = w.saturating_sub(cell_width(cell) + 2);
@@ -90,7 +92,7 @@ fn row_lines(
             if right > 0 {
                 spans.push(Span::raw(" ".repeat(right)));
             }
-            spans.push(Span::raw("│").style(BORDER));
+            spans.push(Span::raw("│").style(border()));
         }
         lines.push(Line::from(spans));
     }
@@ -216,7 +218,7 @@ fn edge(left: char, mid: char, right: char, widths: &[usize]) -> Line<'static> {
         text.extend(core::iter::repeat_n('─', w));
     }
     text.push(right);
-    Line::from(Span::raw(text).style(BORDER))
+    Line::from(Span::raw(text).style(border()))
 }
 
 fn cell_width(cell: &[Span<'static>]) -> usize {

@@ -1347,8 +1347,11 @@ impl ToolOverride {
 pub type Rgb = (u8, u8, u8);
 
 /// The palette role names a `theme` node may set, in the order the TUI uses
-/// them. A role a theme does not name keeps the built-in Faerun value.
-pub const THEME_ROLES: [&str; 22] = [
+/// them. A role a theme does not name keeps the built-in Faerun value. The
+/// trailing `code-*` roles feed the markdown/code renderer palette (chat
+/// prose, fenced code, diff coloring); unset code roles keep the Faerun
+/// renderer values.
+pub const THEME_ROLES: [&str; 26] = [
     "bg",
     "surface",
     "surface-focused",
@@ -1371,6 +1374,10 @@ pub const THEME_ROLES: [&str; 22] = [
     "success",
     "warning",
     "error",
+    "code-keyword",
+    "code-string",
+    "code-type",
+    "code-function",
 ];
 
 /// The terminal appearance a theme definition targets — the `mode` value of
@@ -1432,6 +1439,14 @@ pub struct ThemeColors {
     pub success: Rgb,
     pub warning: Rgb,
     pub error: Rgb,
+    /// The markdown/code renderer: keywords (and the fence-side tag hues).
+    pub code_keyword: Rgb,
+    /// The markdown/code renderer: string literals.
+    pub code_string: Rgb,
+    /// The markdown/code renderer: types, class names, links.
+    pub code_type: Rgb,
+    /// The markdown/code renderer: function names and calls.
+    pub code_function: Rgb,
 }
 
 impl ThemeColors {
@@ -1461,6 +1476,10 @@ impl ThemeColors {
             success: (138, 146, 90),
             warning: (192, 152, 72),
             error: (186, 88, 72),
+            code_keyword: (212, 175, 95),
+            code_string: (160, 176, 118),
+            code_type: (148, 160, 204),
+            code_function: (176, 158, 122),
         }
     }
 
@@ -1490,6 +1509,331 @@ impl ThemeColors {
             success: (61, 122, 55),
             warning: (163, 98, 10),
             error: (168, 50, 50),
+            code_keyword: (160, 94, 3),
+            code_string: (92, 124, 58),
+            code_type: (58, 88, 131),
+            code_function: (140, 94, 40),
+        }
+    }
+
+    /// The built-in Tokyo Night night palette, defined in code and never
+    /// serialized.
+    pub const fn tokyo_night_night() -> Self {
+        Self {
+            bg: (26, 27, 38),
+            surface: (33, 36, 51),
+            surface_focused: (41, 46, 66),
+            overlay: (40, 43, 61),
+            accent: (122, 162, 247),
+            accent_bg: (41, 49, 71),
+            selection: (41, 46, 66),
+            text: (192, 202, 245),
+            text_dim: (169, 177, 214),
+            text_muted: (86, 95, 137),
+            prompt_bg: (36, 44, 72),
+            running_bg: (41, 46, 66),
+            success_bg: (43, 50, 47),
+            warning_bg: (50, 45, 46),
+            error_bg: (51, 33, 43),
+            diff_add_bg: (38, 63, 75),
+            diff_add_emph_bg: (45, 86, 98),
+            diff_del_bg: (57, 40, 50),
+            diff_del_emph_bg: (74, 47, 56),
+            success: (115, 218, 202),
+            warning: (255, 158, 100),
+            error: (219, 75, 75),
+            code_keyword: (125, 207, 255),
+            code_string: (158, 206, 106),
+            code_type: (42, 195, 222),
+            code_function: (122, 162, 247),
+        }
+    }
+
+    /// The built-in Tokyo Night storm palette.
+    pub const fn tokyo_night_storm() -> Self {
+        Self {
+            bg: (36, 40, 59),
+            surface: (38, 43, 62),
+            surface_focused: (41, 46, 66),
+            overlay: (46, 51, 75),
+            accent: (122, 162, 247),
+            accent_bg: (50, 60, 89),
+            selection: (41, 46, 66),
+            text: (192, 202, 245),
+            text_dim: (169, 177, 214),
+            text_muted: (86, 95, 137),
+            prompt_bg: (43, 54, 88),
+            running_bg: (41, 46, 66),
+            success_bg: (52, 62, 65),
+            warning_bg: (59, 56, 64),
+            error_bg: (60, 45, 61),
+            diff_add_bg: (45, 73, 90),
+            diff_add_emph_bg: (50, 93, 109),
+            diff_del_bg: (64, 49, 66),
+            diff_del_emph_bg: (80, 54, 69),
+            success: (115, 218, 202),
+            warning: (255, 158, 100),
+            error: (219, 75, 75),
+            code_keyword: (125, 207, 255),
+            code_string: (158, 206, 106),
+            code_type: (42, 195, 222),
+            code_function: (122, 162, 247),
+        }
+    }
+
+    /// The built-in Tokyo Night day palette.
+    pub const fn tokyo_night_day() -> Self {
+        Self {
+            bg: (225, 226, 231),
+            surface: (212, 214, 225),
+            surface_focused: (196, 200, 218),
+            overlay: (238, 239, 242),
+            accent: (47, 121, 227),
+            accent_bg: (197, 209, 230),
+            selection: (196, 200, 218),
+            text: (55, 96, 191),
+            text_dim: (97, 114, 176),
+            text_muted: (132, 140, 181),
+            prompt_bg: (208, 213, 227),
+            running_bg: (196, 200, 218),
+            success_bg: (207, 212, 208),
+            warning_bg: (215, 212, 211),
+            error_bg: (221, 205, 210),
+            diff_add_bg: (180, 205, 212),
+            diff_add_emph_bg: (153, 192, 201),
+            diff_del_bg: (217, 199, 204),
+            diff_del_emph_bg: (213, 184, 190),
+            success: (88, 117, 57),
+            warning: (177, 92, 0),
+            error: (198, 67, 67),
+            code_keyword: (0, 113, 151),
+            code_string: (88, 117, 57),
+            code_type: (24, 128, 146),
+            code_function: (41, 109, 207),
+        }
+    }
+
+    /// The built-in Kanagawa wave palette.
+    pub const fn kanagawa_wave() -> Self {
+        Self {
+            bg: (31, 31, 40),
+            surface: (32, 40, 55),
+            surface_focused: (34, 50, 73),
+            overlay: (33, 44, 63),
+            accent: (230, 195, 132),
+            accent_bg: (63, 57, 55),
+            selection: (34, 50, 73),
+            text: (220, 215, 186),
+            text_dim: (200, 192, 147),
+            text_muted: (114, 113, 105),
+            prompt_bg: (45, 79, 103),
+            running_bg: (34, 50, 73),
+            success_bg: (43, 51, 40),
+            warning_bg: (73, 68, 60),
+            error_bg: (67, 36, 43),
+            diff_add_bg: (43, 51, 40),
+            diff_add_emph_bg: (84, 104, 76),
+            diff_del_bg: (67, 36, 43),
+            diff_del_emph_bg: (137, 51, 56),
+            success: (152, 187, 108),
+            warning: (192, 163, 110),
+            error: (232, 36, 36),
+            code_keyword: (149, 127, 184),
+            code_string: (152, 187, 108),
+            code_type: (122, 168, 159),
+            code_function: (126, 156, 216),
+        }
+    }
+
+    /// The built-in Kanagawa dragon palette.
+    pub const fn kanagawa_dragon() -> Self {
+        Self {
+            bg: (24, 22, 22),
+            surface: (31, 30, 30),
+            surface_focused: (40, 39, 39),
+            overlay: (35, 34, 34),
+            accent: (196, 178, 138),
+            accent_bg: (46, 42, 37),
+            selection: (34, 50, 73),
+            text: (197, 201, 197),
+            text_dim: (200, 192, 147),
+            text_muted: (115, 124, 115),
+            prompt_bg: (57, 56, 54),
+            running_bg: (40, 39, 39),
+            success_bg: (43, 51, 40),
+            warning_bg: (73, 68, 60),
+            error_bg: (67, 36, 43),
+            diff_add_bg: (43, 51, 40),
+            diff_add_emph_bg: (84, 104, 76),
+            diff_del_bg: (67, 36, 43),
+            diff_del_emph_bg: (137, 51, 56),
+            success: (138, 154, 123),
+            warning: (182, 146, 123),
+            error: (232, 36, 36),
+            code_keyword: (137, 146, 167),
+            code_string: (138, 154, 123),
+            code_type: (142, 164, 162),
+            code_function: (139, 164, 176),
+        }
+    }
+
+    /// The built-in Kanagawa lotus palette.
+    pub const fn kanagawa_lotus() -> Self {
+        Self {
+            bg: (242, 236, 188),
+            surface: (229, 230, 199),
+            surface_focused: (199, 215, 224),
+            overlay: (220, 213, 172),
+            accent: (168, 100, 22),
+            accent_bg: (241, 222, 162),
+            selection: (201, 203, 209),
+            text: (84, 84, 100),
+            text_dim: (112, 112, 116),
+            text_muted: (139, 136, 130),
+            prompt_bg: (181, 203, 210),
+            running_bg: (231, 219, 160),
+            success_bg: (213, 214, 164),
+            warning_bg: (249, 215, 145),
+            error_bg: (234, 205, 169),
+            diff_add_bg: (183, 208, 174),
+            diff_add_emph_bg: (146, 176, 134),
+            diff_del_bg: (217, 165, 148),
+            diff_del_emph_bg: (216, 123, 115),
+            success: (89, 114, 61),
+            warning: (142, 92, 12),
+            error: (200, 64, 83),
+            code_keyword: (98, 76, 131),
+            code_string: (111, 137, 78),
+            code_type: (89, 123, 117),
+            code_function: (77, 105, 155),
+        }
+    }
+
+    /// The built-in Ayu dark palette.
+    pub const fn ayu_dark() -> Self {
+        Self {
+            bg: (16, 20, 28),
+            surface: (13, 16, 23),
+            surface_focused: (20, 24, 33),
+            overlay: (15, 19, 26),
+            accent: (230, 180, 80),
+            accent_bg: (48, 44, 36),
+            selection: (25, 49, 85),
+            text: (191, 189, 182),
+            text_dim: (104, 104, 105),
+            text_muted: (90, 99, 120),
+            prompt_bg: (49, 45, 34),
+            running_bg: (20, 24, 33),
+            success_bg: (28, 42, 36),
+            warning_bg: (40, 32, 32),
+            error_bg: (40, 28, 35),
+            diff_add_bg: (32, 49, 38),
+            diff_add_emph_bg: (45, 71, 45),
+            diff_del_bg: (50, 33, 42),
+            diff_del_emph_bg: (77, 44, 53),
+            success: (112, 191, 86),
+            warning: (255, 143, 64),
+            error: (217, 87, 87),
+            code_keyword: (255, 143, 64),
+            code_string: (170, 217, 76),
+            code_type: (89, 194, 255),
+            code_function: (255, 180, 84),
+        }
+    }
+
+    /// The built-in Ayu light palette.
+    pub const fn ayu_light() -> Self {
+        Self {
+            bg: (252, 252, 252),
+            surface: (248, 249, 250),
+            surface_focused: (235, 238, 240),
+            overlay: (255, 255, 255),
+            accent: (126, 75, 0),
+            accent_bg: (239, 234, 227),
+            selection: (215, 228, 246),
+            text: (92, 97, 102),
+            text_dim: (130, 142, 159),
+            text_muted: (105, 113, 122),
+            prompt_bg: (254, 238, 195),
+            running_bg: (234, 240, 249),
+            success_bg: (234, 240, 231),
+            warning_bg: (248, 242, 237),
+            error_bg: (250, 240, 240),
+            diff_add_bg: (229, 242, 222),
+            diff_add_emph_bg: (206, 232, 193),
+            diff_del_bg: (252, 234, 236),
+            diff_del_emph_bg: (253, 218, 222),
+            success: (102, 151, 81),
+            warning: (207, 123, 65),
+            error: (230, 80, 80),
+            code_keyword: (208, 110, 40),
+            code_string: (108, 144, 2),
+            code_type: (28, 139, 198),
+            code_function: (186, 128, 1),
+        }
+    }
+
+    /// The built-in One dark palette (One Half dark).
+    pub const fn one_dark() -> Self {
+        Self {
+            bg: (40, 44, 52),
+            surface: (49, 54, 64),
+            surface_focused: (61, 68, 81),
+            overlay: (33, 37, 43),
+            accent: (97, 175, 239),
+            accent_bg: (49, 64, 80),
+            selection: (71, 78, 93),
+            text: (220, 223, 228),
+            text_dim: (145, 155, 170),
+            text_muted: (92, 99, 112),
+            prompt_bg: (33, 37, 43),
+            running_bg: (49, 54, 64),
+            success_bg: (55, 64, 61),
+            warning_bg: (63, 62, 61),
+            error_bg: (64, 52, 60),
+            diff_add_bg: (60, 71, 64),
+            diff_add_emph_bg: (74, 89, 73),
+            diff_del_bg: (71, 55, 63),
+            diff_del_emph_bg: (93, 63, 71),
+            success: (152, 195, 121),
+            warning: (229, 192, 123),
+            error: (224, 108, 117),
+            code_keyword: (198, 120, 221),
+            code_string: (152, 195, 121),
+            code_type: (229, 192, 123),
+            code_function: (97, 175, 239),
+        }
+    }
+
+    /// The built-in One light palette (One Half light).
+    pub const fn one_light() -> Self {
+        Self {
+            bg: (250, 250, 250),
+            surface: (240, 240, 240),
+            surface_focused: (228, 230, 232),
+            overlay: (255, 255, 255),
+            accent: (1, 132, 188),
+            accent_bg: (220, 236, 243),
+            selection: (191, 206, 255),
+            text: (56, 58, 66),
+            text_dim: (111, 115, 125),
+            text_muted: (160, 161, 167),
+            prompt_bg: (240, 240, 240),
+            running_bg: (231, 233, 234),
+            success_bg: (226, 238, 226),
+            warning_bg: (243, 236, 220),
+            error_bg: (248, 232, 231),
+            diff_add_bg: (223, 236, 223),
+            diff_add_emph_bg: (202, 225, 202),
+            diff_del_bg: (247, 229, 227),
+            diff_del_emph_bg: (245, 212, 209),
+            success: (70, 120, 74),
+            warning: (138, 102, 27),
+            error: (185, 79, 71),
+            code_keyword: (166, 38, 164),
+            code_string: (73, 147, 72),
+            code_type: (177, 121, 1),
+            code_function: (1, 132, 188),
         }
     }
 
@@ -1519,6 +1863,10 @@ impl ThemeColors {
                 "success" => self.success = *value,
                 "warning" => self.warning = *value,
                 "error" => self.error = *value,
+                "code-keyword" => self.code_keyword = *value,
+                "code-string" => self.code_string = *value,
+                "code-type" => self.code_type = *value,
+                "code-function" => self.code_function = *value,
                 _ => {}
             }
         }
@@ -1526,9 +1874,9 @@ impl ThemeColors {
 }
 
 /// `themes { … }` — the named themes: per-theme palette overrides over the
-/// built-in Faerun colors. The built-in Faerun theme (dark base plus light
-/// variant) is code, not config; this section only defines named themes on
-/// top of it.
+/// built-in Faerun colors. The built-in themes (Faerun, Tokyo Night,
+/// Kanagawa, Ayu, One) are code, not config; this section only defines
+/// named themes on top of (or shadowing) them per name and variant.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ThemesConfig {
     /// The defined themes, keyed by name and optional variant name.
@@ -1601,21 +1949,112 @@ impl ThemeDef {
         self.mode = higher.mode;
     }
 
-    /// The built-in theme definitions, consulted when no user definition
-    /// shadows them per name and variant: the Faerun dark base plus its
-    /// light variant.
-    pub fn builtins() -> Vec<ThemeDef> {
+    /// The built-in theme definitions with their family names, consulted when
+    /// no user definition shadows them per name and variant: each family's
+    /// base definition first, then its variants.
+    pub fn builtins() -> Vec<(&'static str, ThemeDef)> {
+        let def = |colors: ThemeColors, variant: Option<&str>, mode: ThemeVariant| ThemeDef {
+            colors: all_roles(colors),
+            variant: variant.map(str::to_string),
+            mode,
+        };
         vec![
-            ThemeDef {
-                colors: all_roles(ThemeColors::faerun()),
-                variant: None,
-                mode: ThemeVariant::Dark,
-            },
-            ThemeDef {
-                colors: all_roles(ThemeColors::faerun_light()),
-                variant: Some("light".to_string()),
-                mode: ThemeVariant::Light,
-            },
+            (
+                "Faerun",
+                def(ThemeColors::faerun(), None, ThemeVariant::Dark),
+            ),
+            (
+                "Faerun",
+                def(
+                    ThemeColors::faerun_light(),
+                    Some("light"),
+                    ThemeVariant::Light,
+                ),
+            ),
+            // Tokyo Night: night is the default dark style, storm the
+            // alternate dark one, day the light one.
+            (
+                "Tokyo Night",
+                def(ThemeColors::tokyo_night_night(), None, ThemeVariant::Dark),
+            ),
+            (
+                "Tokyo Night",
+                def(
+                    ThemeColors::tokyo_night_night(),
+                    Some("night"),
+                    ThemeVariant::Dark,
+                ),
+            ),
+            (
+                "Tokyo Night",
+                def(
+                    ThemeColors::tokyo_night_storm(),
+                    Some("storm"),
+                    ThemeVariant::Dark,
+                ),
+            ),
+            (
+                "Tokyo Night",
+                def(
+                    ThemeColors::tokyo_night_day(),
+                    Some("day"),
+                    ThemeVariant::Light,
+                ),
+            ),
+            // Kanagawa: wave the default dark theme, dragon the darker
+            // one, lotus the light one.
+            (
+                "Kanagawa",
+                def(ThemeColors::kanagawa_wave(), None, ThemeVariant::Dark),
+            ),
+            (
+                "Kanagawa",
+                def(
+                    ThemeColors::kanagawa_wave(),
+                    Some("wave"),
+                    ThemeVariant::Dark,
+                ),
+            ),
+            (
+                "Kanagawa",
+                def(
+                    ThemeColors::kanagawa_dragon(),
+                    Some("dragon"),
+                    ThemeVariant::Dark,
+                ),
+            ),
+            (
+                "Kanagawa",
+                def(
+                    ThemeColors::kanagawa_lotus(),
+                    Some("lotus"),
+                    ThemeVariant::Light,
+                ),
+            ),
+            (
+                "Ayu",
+                def(ThemeColors::ayu_dark(), None, ThemeVariant::Dark),
+            ),
+            (
+                "Ayu",
+                def(ThemeColors::ayu_dark(), Some("dark"), ThemeVariant::Dark),
+            ),
+            (
+                "Ayu",
+                def(ThemeColors::ayu_light(), Some("light"), ThemeVariant::Light),
+            ),
+            (
+                "One",
+                def(ThemeColors::one_dark(), None, ThemeVariant::Dark),
+            ),
+            (
+                "One",
+                def(ThemeColors::one_dark(), Some("dark"), ThemeVariant::Dark),
+            ),
+            (
+                "One",
+                def(ThemeColors::one_light(), Some("light"), ThemeVariant::Light),
+            ),
         ]
     }
 }
@@ -1646,6 +2085,10 @@ fn all_roles(colors: ThemeColors) -> BTreeMap<String, Rgb> {
     roles.insert("success".to_string(), colors.success);
     roles.insert("warning".to_string(), colors.warning);
     roles.insert("error".to_string(), colors.error);
+    roles.insert("code-keyword".to_string(), colors.code_keyword);
+    roles.insert("code-string".to_string(), colors.code_string);
+    roles.insert("code-type".to_string(), colors.code_type);
+    roles.insert("code-function".to_string(), colors.code_function);
     roles
 }
 
@@ -1706,10 +2149,10 @@ impl ThemeSet {
     /// whose `mode` match win — the base definition first, then alphabetical
     /// variants — and with no match the base definition, else the first
     /// remaining one, is used so a defined theme still wins over the
-    /// built-in. `Faerun` resolves against its built-in dark and light
-    /// palettes; user definitions shadow built-ins per name and variant.
-    /// Unknown names and unknown explicit variants warn and fall back to the
-    /// built-in Faerun.
+    /// built-in. Built-in themes (Faerun, Tokyo Night, Kanagawa, Ayu, One)
+    /// resolve against their built-in palettes; user definitions shadow
+    /// built-ins per name and variant. Unknown names and unknown explicit
+    /// variants warn and fall back to the built-in Faerun.
     pub fn resolve(&self, pref: Option<&str>, detected: ThemeVariant) -> ResolvedTheme {
         let mut colors = builtin_colors(detected);
         let mut warnings = self.warnings.clone();
@@ -1717,11 +2160,9 @@ impl ThemeSet {
             let (name, variant) = self.split_pref(pref);
             let defs = self.candidates(&name);
             if defs.is_empty() {
-                if name != BUILTIN_FAERUN {
-                    warnings.push(format!(
-                        "theme `{pref}` is not defined by `themes {{ … }}` or a `themes.d` drop-in; using the built-in Faerun theme"
-                    ));
-                }
+                warnings.push(format!(
+                    "theme `{pref}` is not defined by `themes {{ … }}`, a `themes.d` drop-in, or the built-in themes; using the built-in Faerun theme"
+                ));
             } else if let Some(variant) = variant {
                 match defs
                     .iter()
@@ -1756,8 +2197,9 @@ impl ThemeSet {
     }
 
     /// Every definition of the theme with the given name: the merged user
-    /// definitions plus the unshadowed built-ins (only `Faerun` has those),
-    /// base definition first, then alphabetical variants.
+    /// definitions plus the unshadowed built-ins of every built-in family
+    /// with that name (Faerun, Tokyo Night, Kanagawa, Ayu, One), base
+    /// definition first, then alphabetical variants.
     fn candidates(&self, name: &str) -> Vec<ThemeDef> {
         let mut defs: Vec<ThemeDef> = self
             .themes
@@ -1766,9 +2208,9 @@ impl ThemeSet {
             .filter(|(key, _)| key.0 == name)
             .map(|(_, def)| def.clone())
             .collect();
-        if name == BUILTIN_FAERUN {
-            for builtin in ThemeDef::builtins() {
-                let key = (BUILTIN_FAERUN.to_string(), builtin.variant.clone());
+        for (builtin_name, builtin) in ThemeDef::builtins() {
+            if builtin_name == name {
+                let key = (name.to_string(), builtin.variant.clone());
                 if !self.themes.themes.contains_key(&key) {
                     defs.push(builtin);
                 }
@@ -1776,11 +2218,80 @@ impl ThemeSet {
         }
         defs
     }
+
+    /// Every selectable theme for the picker: the unset default leads (the
+    /// built-in Faerun palette by the detected terminal mode), then the
+    /// built-in themes in family order — each family's own row resolving by
+    /// mode, then one row per explicit variant — then the user-defined
+    /// themes alphabetically, base definition first, then variants. User
+    /// definitions shadow built-ins per name and variant, through [`Self::resolve`].
+    pub fn choices(&self, detected: ThemeVariant) -> Vec<ThemeChoice> {
+        let mut choices = vec![ThemeChoice {
+            pref: None,
+            label: "Faerun (auto)".to_string(),
+            variant: None,
+            colors: builtin_colors(detected),
+        }];
+        let builtins = ThemeDef::builtins();
+        // Built-in rows: each family's own (mode-detected) row, then one row
+        // per explicit variant definition. Faerun has no family row beyond
+        // the auto row (a user-defined Faerun base shows up below instead).
+        let mut family_seen: Vec<&'static str> = Vec::new();
+        for (name, def) in &builtins {
+            if *name != "Faerun" && !family_seen.contains(name) {
+                family_seen.push(name);
+                choices.push(ThemeChoice {
+                    pref: Some((*name).to_string()),
+                    label: (*name).to_string(),
+                    variant: None,
+                    colors: self.resolve(Some(name), detected).colors,
+                });
+            }
+            if let Some(variant) = &def.variant {
+                let pref = format!("{name}:{variant}");
+                choices.push(ThemeChoice {
+                    pref: Some(pref.clone()),
+                    label: (*name).to_string(),
+                    variant: Some(variant.clone()),
+                    colors: self.resolve(Some(&pref), detected).colors,
+                });
+            }
+        }
+        // User-defined rows, alphabetical by name with the base definition
+        // first (the key order), skipping definitions that shadow a built-in
+        // (the built-in row resolves to their colors already).
+        for key in self.themes.themes.keys() {
+            if builtins
+                .iter()
+                .any(|(name, def)| *name == key.0 && def.variant == key.1)
+            {
+                continue;
+            }
+            let pref = match &key.1 {
+                Some(variant) => format!("{}:{}", key.0, variant),
+                None => key.0.clone(),
+            };
+            choices.push(ThemeChoice {
+                colors: self.resolve(Some(&pref), detected).colors,
+                pref: Some(pref),
+                label: key.0.clone(),
+                variant: key.1.clone(),
+            });
+        }
+        choices
+    }
 }
 
-/// The built-in theme's name; `themes` definitions with this name shadow the
-/// built-in palettes per variant.
-const BUILTIN_FAERUN: &str = "Faerun";
+/// One selectable row for the theme picker: the `ui.theme` value it writes
+/// (`None` = the unset default), its display label, the explicit variant it
+/// paints when one is, and the resolved palette for the run's detected mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThemeChoice {
+    pub pref: Option<String>,
+    pub label: String,
+    pub variant: Option<String>,
+    pub colors: ThemeColors,
+}
 
 /// The built-in Faerun palette for the detected terminal mode.
 fn builtin_colors(detected: ThemeVariant) -> ThemeColors {
@@ -1893,8 +2404,10 @@ pub struct UiPrefs {
     pub copy_on_select: bool,
 
     /// The theme the TUI paints with: `theme "name"` selects a theme defined
-    /// by `themes { … }` or a `themes.d` drop-in. `None` keeps the built-in
-    /// Faerun theme; an unknown name warns and keeps Faerun.
+    /// by `themes { … }`, a `themes.d` drop-in, or one of the built-ins
+    /// (Faerun, Tokyo Night, Kanagawa, Ayu, One). `None` keeps the default:
+    /// the built-in Faerun theme by the terminal's mode; an unknown name
+    /// warns and keeps Faerun.
     pub theme: Option<String>,
 
     /// How a new session's title is drafted. Defaults to deriving it from
@@ -5771,6 +6284,10 @@ Now we're in Plan mode: plan first, no edits.
                     success "#a6cc70"
                     warning "#e6b674"
                     error "#f07178"
+                    code-keyword "#ff8f40"
+                    code-string "#aad94c"
+                    code-type "#59c2ff"
+                    code-function "#ffb454"
                 }
                 theme name="One Dark" {
                     bg "#282c34"
@@ -5798,10 +6315,16 @@ Now we're in Plan mode: plan first, no edits.
         assert_eq!(parsed.themes.len(), 2);
 
         let ayu = parsed.theme("Ayu").unwrap();
-        assert_eq!(ayu.colors.len(), 22, "every palette role is set");
+        assert_eq!(
+            ayu.colors.len(),
+            THEME_ROLES.len(),
+            "every palette role is set",
+        );
         assert_eq!(ayu.colors.get("bg"), Some(&(11, 14, 20)));
         assert_eq!(ayu.colors.get("accent"), Some(&(255, 180, 84)));
         assert_eq!(ayu.colors.get("success"), Some(&(166, 204, 112)));
+        assert_eq!(ayu.colors.get("code-keyword"), Some(&(255, 143, 64)));
+        assert_eq!(ayu.colors.get("code-string"), Some(&(170, 217, 76)));
 
         let one_dark = parsed.theme("One Dark").unwrap();
         assert_eq!(one_dark.colors.get("bg"), Some(&(40, 44, 52)));
@@ -6245,12 +6768,158 @@ Now we're in Plan mode: plan first, no edits.
                 .is_empty()
         );
         assert_eq!(
-            set.resolve(Some("Ayu"), ThemeVariant::Dark).colors,
+            set.resolve(Some("Nord"), ThemeVariant::Dark).colors,
             ThemeColors::faerun()
         );
-        let warnings = set.resolve(Some("Ayu"), ThemeVariant::Light).warnings;
+        let warnings = set.resolve(Some("Nord"), ThemeVariant::Light).warnings;
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("Ayu"));
+        assert!(warnings[0].contains("Nord"));
+    }
+
+    #[test]
+    fn builtins_resolve_by_name_and_variant() {
+        let set = ThemeSet::default();
+        // The unset default stays Faerun by mode.
+        assert_eq!(
+            set.resolve(None, ThemeVariant::Dark).colors,
+            ThemeColors::faerun()
+        );
+        // Plain names pick the family's definition for the detected mode.
+        assert_eq!(
+            set.resolve(Some("Tokyo Night"), ThemeVariant::Dark).colors,
+            ThemeColors::tokyo_night_night()
+        );
+        assert_eq!(
+            set.resolve(Some("Tokyo Night"), ThemeVariant::Light).colors,
+            ThemeColors::tokyo_night_day()
+        );
+        assert_eq!(
+            set.resolve(Some("Kanagawa"), ThemeVariant::Dark).colors,
+            ThemeColors::kanagawa_wave()
+        );
+        assert_eq!(
+            set.resolve(Some("Kanagawa"), ThemeVariant::Light).colors,
+            ThemeColors::kanagawa_lotus()
+        );
+        assert_eq!(
+            set.resolve(Some("Ayu"), ThemeVariant::Light).colors,
+            ThemeColors::ayu_light()
+        );
+        assert_eq!(
+            set.resolve(Some("One"), ThemeVariant::Dark).colors,
+            ThemeColors::one_dark()
+        );
+        // Explicit variants ignore the detected mode.
+        assert_eq!(
+            set.resolve(Some("Tokyo Night:storm"), ThemeVariant::Light)
+                .colors,
+            ThemeColors::tokyo_night_storm()
+        );
+        assert_eq!(
+            set.resolve(Some("Kanagawa:dragon"), ThemeVariant::Light)
+                .colors,
+            ThemeColors::kanagawa_dragon()
+        );
+        assert_eq!(
+            set.resolve(Some("Ayu:light"), ThemeVariant::Dark).colors,
+            ThemeColors::ayu_light()
+        );
+        assert_eq!(
+            set.resolve(Some("One:light"), ThemeVariant::Dark).colors,
+            ThemeColors::one_light()
+        );
+        assert_eq!(
+            set.resolve(Some("Faerun:light"), ThemeVariant::Dark).colors,
+            ThemeColors::faerun_light()
+        );
+        assert!(
+            set.resolve(Some("Kanagawa:wave"), ThemeVariant::Dark)
+                .warnings
+                .is_empty()
+        );
+        // An unknown theme still warns and falls back to Faerun.
+        assert!(
+            set.resolve(Some("Tokyp"), ThemeVariant::Dark)
+                .warnings
+                .is_empty()
+                == false
+        );
+    }
+
+    #[test]
+    fn choices_list_every_palette_in_picker_order() {
+        let set = ThemeSet::default();
+        let choices = set.choices(ThemeVariant::Dark);
+        let prefs: Vec<Option<&str>> = choices.iter().map(|c| c.pref.as_deref()).collect();
+        assert_eq!(
+            prefs,
+            vec![
+                None,
+                Some("Faerun:light"),
+                Some("Tokyo Night"),
+                Some("Tokyo Night:night"),
+                Some("Tokyo Night:storm"),
+                Some("Tokyo Night:day"),
+                Some("Kanagawa"),
+                Some("Kanagawa:wave"),
+                Some("Kanagawa:dragon"),
+                Some("Kanagawa:lotus"),
+                Some("Ayu"),
+                Some("Ayu:dark"),
+                Some("Ayu:light"),
+                Some("One"),
+                Some("One:dark"),
+                Some("One:light"),
+            ]
+        );
+        assert_eq!(choices[0].colors, ThemeColors::faerun());
+        assert_eq!(choices[3].colors, ThemeColors::tokyo_night_night());
+        assert_eq!(choices[9].colors, ThemeColors::kanagawa_lotus());
+    }
+
+    #[test]
+    fn choices_include_user_themes_and_shadow_builtins() {
+        let set = theme_set(
+            r##"
+            themes {
+                theme name="Nord" { accent "#111111" }
+                theme name="Ayu" variant="light" mode="light" { accent "#222222" }
+                theme name="Faerun" variant="light" mode="light" { accent "#333333" }
+            }
+        "##,
+        );
+        let choices = set.choices(ThemeVariant::Dark);
+        let find = |pref: &str| {
+            choices
+                .iter()
+                .find(|c| c.pref.as_deref() == Some(pref))
+                .expect("choice")
+        };
+        // The user base theme is listed after the built-ins…
+        assert_eq!(find("Nord").label, "Nord");
+        assert_eq!(find("Nord").colors.accent, (17, 17, 17));
+        // …a user variant shadows the built-in variant row (not duplicated)…
+        assert!(find("Ayu:light").colors.accent == (34, 34, 34));
+        // …and a shadowed built-in definition resolves to the user colors.
+        assert_eq!(find("Faerun:light").colors.accent, (51, 51, 51));
+    }
+
+    #[test]
+    fn ui_theme_builtin_values_round_trip() {
+        let text = "ui { theme \"Kanagawa:wave\" }";
+        let config = config_kdl::from_kdl(text).unwrap();
+        assert_eq!(config.ui.theme.as_deref(), Some("Kanagawa:wave"));
+        let out = config_kdl::to_kdl(&config).unwrap();
+        assert!(out.contains("theme Kanagawa:wave"), "body: {out}");
+        let config = config_kdl::from_kdl(&out).unwrap();
+        assert_eq!(config.ui.theme.as_deref(), Some("Kanagawa:wave"));
+
+        let text = "ui { theme \"Tokyo Night:night\" }";
+        let config = config_kdl::from_kdl(text).unwrap();
+        assert_eq!(config.ui.theme.as_deref(), Some("Tokyo Night:night"));
+        let out = config_kdl::to_kdl(&config).unwrap();
+        assert!(out.contains("\"Tokyo Night:night\""), "body: {out}");
+        assert_eq!(config_kdl::from_kdl(&out).unwrap(), config);
     }
 
     #[test]
@@ -6600,15 +7269,53 @@ Now we're in Plan mode: plan first, no edits.
     }
 
     #[test]
-    fn builtin_defs_cover_every_role_for_both_modes() {
+    fn builtin_defs_cover_every_role_for_every_definition() {
         let builtins = ThemeDef::builtins();
-        assert_eq!(builtins.len(), 2);
+        assert!(builtins.len() >= 16, "{}", builtins.len());
         for def in &builtins {
-            assert_eq!(def.colors.len(), THEME_ROLES.len());
+            assert_eq!(def.1.colors.len(), THEME_ROLES.len());
         }
-        assert_eq!(builtins[0].variant, None);
-        assert_eq!(builtins[0].mode, ThemeVariant::Dark);
-        assert_eq!(builtins[1].variant.as_deref(), Some("light"));
-        assert_eq!(builtins[1].mode, ThemeVariant::Light);
+        assert_eq!(builtins[0].0, "Faerun");
+        assert_eq!(builtins[0].1.variant, None);
+        assert_eq!(builtins[0].1.mode, ThemeVariant::Dark);
+        assert_eq!(builtins[1].1.variant.as_deref(), Some("light"));
+        assert_eq!(builtins[1].1.mode, ThemeVariant::Light);
+    }
+
+    #[test]
+    fn faerun_keeps_the_renderer_identity_for_code_roles() {
+        // The default theme's code roles are exactly the renderer palette's
+        // historical constants, so enabling the synced renderer palette changes
+        // nothing for the default look.
+        assert_eq!(ThemeColors::faerun().code_keyword, (212, 175, 95));
+        assert_eq!(ThemeColors::faerun().code_string, (160, 176, 118));
+        assert_eq!(ThemeColors::faerun().code_type, (148, 160, 204));
+        assert_eq!(ThemeColors::faerun().code_function, (176, 158, 122));
+    }
+
+    #[test]
+    fn code_roles_apply_and_default_to_faerun() {
+        let set = theme_set(
+            r##"
+            themes {
+                theme name="Nord" {
+                    code-keyword "#111111"
+                    code-string "#222222"
+                    code-type "#333333"
+                    code-function "#444444"
+                }
+            }
+        "##,
+        );
+        let colors = set.resolve(Some("Nord"), ThemeVariant::Dark).colors;
+        assert_eq!(colors.code_keyword, (17, 17, 17));
+        assert_eq!(colors.code_string, (34, 34, 34));
+        assert_eq!(colors.code_type, (51, 51, 51));
+        assert_eq!(colors.code_function, (68, 68, 68));
+        assert_eq!(
+            colors.accent,
+            ThemeColors::faerun().accent,
+            "unspecified roles keep the Faerun values"
+        );
     }
 }
