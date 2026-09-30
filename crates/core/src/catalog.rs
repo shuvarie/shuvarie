@@ -1,119 +1,383 @@
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use selune::{Client, Provider};
-use shuvarie_config::{Connections, ProviderConfig};
+use shuvarie_config::{Connections, CustomRegistry, ProviderConfig, RegistriesConfig};
 use shuvarie_llm::TokenUsage;
 
 const CACHE_READ_FACTOR: f64 = 0.1;
 const REASONING_FACTOR: f64 = 0.6;
 
-/// Process-global provider catalog. The embedded snapshot is fixed at first
-/// use; the remote snapshot holds the latest successful hosted fetch (see
-/// [`fetch_remote`]). Metadata lookups ([`providers`]) see the remote snapshot
-/// once loaded, else the embedded one; the registry popups pick a source
-/// explicitly via [`registry_providers`].
+/// The registry id of the built-in hosted registry.
+pub const SELUNE_REGISTRY: &str = "selune";
+
+/// How long a remote fetch may run before the HTTP client gives up. The
+/// caller wraps the blocking fetch in a task timeout too; this bounds the
+/// underlying thread either way.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Where a registry's online snapshot comes from. The built-in registry goes
+/// through the selune client (honoring `CATALOG_URL`); custom registries fetch
+/// their own URL with configured headers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RemoteSource {
+    /// The hosted selune service.
+    Hosted,
+    /// A custom registry's URL plus the headers to send with the fetch.
+    Url {
+        url: String,
+        headers: Vec<(String, String)>,
+    },
+}
+
+impl RemoteSource {
+    fn fetch(&self) -> Result<Vec<Provider>, String> {
+        match self {
+            RemoteSource::Hosted => fetch_hosted(),
+            RemoteSource::Url { url, headers } => fetch_url(url, headers),
+        }
+    }
+}
+
+/// Per-registry catalog state. Only enabled registries exist here: a disabled
+/// registry is never registered (config `init` drops it), so it never loads,
+/// fetches, or appears in lookups. The local snapshot is always available (for
+/// the built-in registry it is the compile-time embedded catalog; for custom
+/// registries the `path` file, loaded lazily on first use and cached, load
+/// errors included). The remote snapshot holds the latest successful fetch
+/// and is `None` until one succeeds.
+struct RegistryState {
+    id: String,
+    /// Fetch the remote source at startup instead of on demand.
+    remote_first: bool,
+    /// The online source, when the registry has one.
+    source: Option<RemoteSource>,
+    /// The offline snapshot, kept after a successful load (or error).
+    local: Vec<Provider>,
+    /// The `path` file backing the local snapshot, when set.
+    local_path: Option<std::path::PathBuf>,
+    /// Whether the local snapshot has been loaded (`path` registries only).
+    local_loaded: bool,
+    /// Why the local snapshot failed to load, cached so a broken file is
+    /// read once instead of on every access.
+    local_error: Option<String>,
+    /// The latest successful remote fetch.
+    remote: Option<Vec<Provider>>,
+}
+
+impl RegistryState {
+    /// The built-in registry: the embedded offline catalog and the hosted
+    /// service as its online source.
+    fn selune() -> Self {
+        Self {
+            id: SELUNE_REGISTRY.to_string(),
+            remote_first: false,
+            source: Some(RemoteSource::Hosted),
+            local: selune::embedded::all(),
+            local_path: None,
+            local_loaded: true,
+            local_error: None,
+            remote: None,
+        }
+    }
+
+    /// A custom registry from config. The local snapshot stays unloaded until
+    /// first use.
+    fn from_config(config: &CustomRegistry) -> Self {
+        let source = config.url.as_ref().map(|url| RemoteSource::Url {
+            url: url.clone(),
+            headers: config.headers.clone(),
+        });
+        Self {
+            id: config.name.clone(),
+            remote_first: config.remote_first,
+            source,
+            local: Vec::new(),
+            local_path: config.path.clone(),
+            local_loaded: config.path.is_none(),
+            local_error: None,
+            remote: None,
+        }
+    }
+
+    fn has_source(&self) -> bool {
+        self.source.is_some()
+    }
+
+    /// Load the `path` snapshot on first use. A load error is cached: a
+    /// broken file is reported once instead of being retried on every read.
+    fn ensure_local(&mut self) {
+        if self.local_loaded {
+            return;
+        }
+        self.local_loaded = true;
+        let path = self
+            .local_path
+            .as_deref()
+            .map(|p| expand_tilde_in(Path::new(p), dirs::home_dir().as_deref()))
+            .unwrap_or_default();
+        match load_local_file(&path) {
+            Ok(providers) => self.local = providers,
+            Err(error) => self.local_error = Some(error),
+        }
+    }
+
+    /// The effective providers of one registry: the remote snapshot once a
+    /// fetch succeeded, else the local one.
+    fn effective(&self) -> Vec<Provider> {
+        self.remote.clone().unwrap_or_else(|| self.local.clone())
+    }
+}
+
+/// Expand a leading `~` to the home directory; the rest is kept as written
+/// (the same convention the trust store uses).
+fn expand_tilde_in(path: &Path, home: Option<&Path>) -> std::path::PathBuf {
+    let text = path.to_string_lossy();
+    if text == "~" {
+        home.map(Path::to_path_buf)
+            .unwrap_or_else(|| path.to_path_buf())
+    } else if let Some(rest) = text.strip_prefix("~/") {
+        match home {
+            Some(home) => home.join(rest),
+            None => path.to_path_buf(),
+        }
+    } else {
+        path.to_path_buf()
+    }
+}
+
+struct CatalogState {
+    registries: Vec<RegistryState>,
+}
+
+impl CatalogState {
+    fn find(&self, id: &str) -> Option<&RegistryState> {
+        self.registries.iter().find(|r| r.id == id)
+    }
+
+    fn find_mut(&mut self, id: &str) -> Option<&mut RegistryState> {
+        self.registries.iter_mut().find(|r| r.id == id)
+    }
+}
+
+/// Process-global provider catalog: the built-in registry plus every custom
+/// one from `[registries]`, in config order. Metadata lookups ([`providers`])
+/// see the union of all registries, each contributing its remote snapshot
+/// once loaded, else its local snapshot — so a registry that was never
+/// fetched contributes its offline data. First match wins.
 fn state() -> &'static Mutex<CatalogState> {
     static STATE: OnceLock<Mutex<CatalogState>> = OnceLock::new();
     STATE.get_or_init(|| {
         Mutex::new(CatalogState {
-            embedded: selune::embedded::all(),
-            remote: None,
+            registries: vec![RegistryState::selune()],
         })
     })
 }
 
-struct CatalogState {
-    embedded: Vec<Provider>,
-    remote: Option<Vec<Provider>>,
-}
-
-impl CatalogState {
-    fn effective(&self) -> Vec<Provider> {
-        self.remote.clone().unwrap_or_else(|| self.embedded.clone())
-    }
-}
-
-/// Snapshot of the currently effective provider catalog (remote once loaded,
-/// else embedded).
-pub fn providers() -> Vec<Provider> {
+fn lock() -> std::sync::MutexGuard<'static, CatalogState> {
     state()
         .lock()
         .expect("catalog mutex should not be poisoned")
-        .effective()
 }
 
-/// The offline embedded registry.
-pub fn embedded_registry() -> Vec<Provider> {
-    state()
-        .lock()
-        .expect("catalog mutex should not be poisoned")
-        .embedded
-        .clone()
-}
-
-/// The remote registry snapshot, when a hosted fetch has succeeded this
-/// session.
-pub fn remote_registry() -> Option<Vec<Provider>> {
-    state()
-        .lock()
-        .expect("catalog mutex should not be poisoned")
-        .remote
-        .clone()
-}
-
-/// Whether a remote registry snapshot is loaded.
-pub fn remote_registry_loaded() -> bool {
-    state()
-        .lock()
-        .expect("catalog mutex should not be poisoned")
-        .remote
-        .is_some()
-}
-
-/// Providers for the registry popups: the remote snapshot when `remote` is
-/// wanted (empty until a fetch succeeds), else the embedded one.
-pub fn registry_providers(remote: bool) -> Vec<Provider> {
-    if remote {
-        remote_registry().unwrap_or_default()
+/// Register the configured registries: the built-in one first, then every
+/// custom `registry { … }` in config order. Flag-only reserved names have no
+/// sources and are skipped, and a disabled registry is not registered at all —
+/// it does not load, fetch, or appear in the union. Called once at core
+/// startup; re-calls merge by id, keeping any loaded snapshots.
+pub fn init(registries: &RegistriesConfig) {
+    let mut state = lock();
+    let selune_entry = registries.selune();
+    if selune_entry.disabled {
+        state.registries.retain(|r| r.id != SELUNE_REGISTRY);
+    } else if let Some(existing) = state.find_mut(SELUNE_REGISTRY) {
+        existing.remote_first = selune_entry.remote_first;
     } else {
-        embedded_registry()
+        let mut built_in = RegistryState::selune();
+        built_in.remote_first = selune_entry.remote_first;
+        state.registries.insert(0, built_in);
+    }
+    for custom in &registries.custom {
+        if custom.disabled {
+            state.registries.retain(|r| r.id != custom.name);
+            continue;
+        }
+        let fresh = RegistryState::from_config(custom);
+        if let Some(existing) = state.find_mut(&custom.name) {
+            if existing.source != fresh.source {
+                existing.source = fresh.source;
+                existing.remote = None;
+            }
+            if existing.local_path != fresh.local_path {
+                existing.local_path = fresh.local_path;
+                existing.local = Vec::new();
+                existing.local_loaded = fresh.local_loaded;
+                existing.local_error = None;
+            }
+            existing.remote_first = fresh.remote_first;
+        } else {
+            state.registries.push(fresh);
+        }
     }
 }
 
-/// Store the remote registry snapshot.
-pub fn set_remote_registry(providers: Vec<Provider>) {
-    state()
-        .lock()
-        .expect("catalog mutex should not be poisoned")
-        .remote = Some(providers);
+/// The configured registry ids in catalog order: the built-in one first,
+/// then the custom ones in config order.
+pub fn registry_ids() -> Vec<String> {
+    lock().registries.iter().map(|r| r.id.clone()).collect()
 }
 
-/// Fetch the provider catalog from the service, falling back to the current
-/// effective snapshot (i.e. embedded) on any failure. Returns the effective
-/// providers. Used by the bounded startup refresh; the on-demand path uses
-/// [`fetch_remote`], which surfaces errors instead.
-pub fn refresh() -> Vec<Provider> {
-    match Client::new().get_providers() {
-        Ok(providers) if !providers.is_empty() => {
-            set_remote_registry(providers.clone());
-            providers
+/// A point-in-time view of one registry: what it offers offline and online.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RegistrySnapshot {
+    /// The registry id (`selune` for the built-in one).
+    pub id: String,
+    /// The offline snapshot (the embedded catalog for the built-in registry,
+    /// the `path` file for custom ones; empty when it failed to load).
+    pub local: Vec<Provider>,
+    /// Why the offline snapshot failed to load, when it did.
+    pub local_error: Option<String>,
+    /// The online snapshot, loaded once a fetch has succeeded.
+    pub remote: Option<Vec<Provider>>,
+    /// Whether the registry has an online source at all.
+    pub remote_configured: bool,
+}
+
+impl RegistrySnapshot {
+    /// The snapshot the registry popups show: remote once loaded, else local.
+    pub fn effective(&self) -> &[Provider] {
+        match &self.remote {
+            Some(remote) => remote,
+            None => &self.local,
         }
-        _ => providers(),
     }
 }
 
-/// Fetch the hosted registry, storing a successful result as the remote
-/// snapshot. Unlike [`refresh`] there is no fallback: an empty or failed
-/// fetch is an error so the caller can report it.
-pub fn fetch_remote() -> Result<Vec<Provider>, String> {
-    match Client::new().get_providers() {
-        Ok(providers) if !providers.is_empty() => {
-            set_remote_registry(providers.clone());
-            Ok(providers)
+/// Snapshot of one registry, loading its `path` file on first access.
+/// Unknown ids yield an empty default snapshot.
+pub fn registry_catalog(id: &str) -> RegistrySnapshot {
+    let mut state = lock();
+    let Some(registry) = state.find_mut(id) else {
+        return RegistrySnapshot {
+            id: id.to_string(),
+            ..RegistrySnapshot::default()
+        };
+    };
+    registry.ensure_local();
+    RegistrySnapshot {
+        id: registry.id.clone(),
+        local: registry.local.clone(),
+        local_error: registry.local_error.clone(),
+        remote: registry.remote.clone(),
+        remote_configured: registry.has_source(),
+    }
+}
+
+/// Snapshot of the effective provider catalog: the union of all registries in
+/// order, each contributing its remote snapshot once loaded, else its local
+/// one. The built-in registry comes first, so its entries win id collisions
+/// against custom registries.
+pub fn providers() -> Vec<Provider> {
+    let mut state = lock();
+    for registry in &mut state.registries {
+        registry.ensure_local();
+    }
+    state
+        .registries
+        .iter()
+        .flat_map(RegistryState::effective)
+        .collect()
+}
+
+/// Fetch one registry's online source, storing a successful result as its
+/// remote snapshot. An empty response counts as a failure so a wrong URL
+/// serving an empty list is reported instead of silently clearing the view.
+/// A registry without an online source (or an unknown/disabled id) errors.
+pub fn fetch_registry(id: &str) -> Result<Vec<Provider>, String> {
+    let source = {
+        let state = lock();
+        match state.find(id) {
+            Some(registry) => registry.source.clone(),
+            None => return Err(format!("unknown registry `{id}`")),
         }
+    };
+    let Some(source) = source else {
+        return Err(format!("registry `{id}` has no online source"));
+    };
+    let providers = source.fetch()?;
+    if providers.is_empty() {
+        return Err(format!("registry `{id}` returned no providers"));
+    }
+    store_remote(id, providers.clone());
+    Ok(providers)
+}
+
+/// Store a registry's remote snapshot.
+fn store_remote(id: &str, providers: Vec<Provider>) {
+    if let Some(registry) = lock().find_mut(id) {
+        registry.remote = Some(providers);
+    }
+}
+
+/// Fetch a registry's remote source for the bounded startup refresh,
+/// swallowing errors (the union falls back to the offline snapshot).
+pub fn refresh_registry(id: &str) {
+    let _ = fetch_registry(id);
+}
+
+/// The ids of registries with an online source that should be fetched at
+/// startup (`remote-first`). Disabled registries are never registered, so
+/// they cannot appear here.
+pub fn remote_first_ids() -> Vec<String> {
+    lock()
+        .registries
+        .iter()
+        .filter(|r| r.remote_first && r.has_source())
+        .map(|r| r.id.clone())
+        .collect()
+}
+
+/// Fetch the hosted selune registry. An empty response is an error so the
+/// caller can report it.
+fn fetch_hosted() -> Result<Vec<Provider>, String> {
+    match Client::new().get_providers() {
+        Ok(providers) if !providers.is_empty() => Ok(providers),
         Ok(_) => Err("the hosted registry returned no providers".to_string()),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Fetch a custom registry from its URL, sending the configured headers with
+/// `$ENV_VAR` placeholders (in the URL too) expanded from the environment.
+fn fetch_url(url: &str, headers: &[(String, String)]) -> Result<Vec<Provider>, String> {
+    let url = resolve_env(url);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(FETCH_TIMEOUT)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut request = client.get(&url);
+    for (name, value) in headers {
+        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+            .map_err(|e| format!("invalid header name `{name}`: {e}"))?;
+        let value = reqwest::header::HeaderValue::from_str(&resolve_env(value))
+            .map_err(|e| format!("invalid header value for `{name}`: {e}"))?;
+        request = request.header(name, value);
+    }
+    let response = request.send().map_err(|e| e.to_string())?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("unexpected status code: {}", status.as_u16()));
+    }
+    response.json::<Vec<Provider>>().map_err(|e| e.to_string())
+}
+
+/// Load a registry's offline snapshot from a local `providers.json` file
+/// (the same format the registries serve).
+fn load_local_file(path: &Path) -> Result<Vec<Provider>, String> {
+    let json =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    serde_json::from_str(&json).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
 /// Look up a provider by id in the given catalog.
@@ -518,6 +782,7 @@ fn base_url_for_in(
 mod tests {
     use super::*;
     use selune::{InferenceProvider, ProviderType};
+    use shuvarie_config::RegistryEntry;
 
     fn catalog_provider(
         id: &str,
@@ -990,5 +1255,457 @@ mod tests {
         assert!(oauth_device_login_kind("copilot", None));
         assert!(!oauth_device_login_kind("anthropic", None));
         assert!(!oauth_device_login_kind("not-a-kind", None));
+    }
+
+    // --- multi-registry state -------------------------------------------
+
+    use std::sync::Arc;
+
+    /// Serializes the tests that mutate the process-global catalog. Locks
+    /// through poison: one test's panic must not cascade into unrelated
+    /// failures.
+    static GLOBAL: Mutex<()> = Mutex::new(());
+
+    fn global_lock() -> std::sync::MutexGuard<'static, ()> {
+        match GLOBAL.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// Drops every registry but the built-in one, clearing its remote.
+    fn reset_catalog() {
+        let mut state = lock();
+        state.registries = vec![RegistryState::selune()];
+    }
+
+    fn custom_registry(
+        name: &str,
+        url: Option<&str>,
+        path: Option<&std::path::Path>,
+    ) -> CustomRegistry {
+        CustomRegistry {
+            name: name.to_string(),
+            url: url.map(str::to_string),
+            path: path.map(Path::to_path_buf),
+            headers: Vec::new(),
+            disabled: false,
+            remote_first: false,
+        }
+    }
+
+    fn config_with(customs: &[CustomRegistry]) -> RegistriesConfig {
+        RegistriesConfig {
+            entries: Default::default(),
+            custom: customs.to_vec(),
+        }
+    }
+
+    fn provider_json(id: &str, name: &str) -> String {
+        format!("[{{\"name\":\"{name}\",\"id\":\"{id}\",\"models\":[]}}]")
+    }
+
+    /// A mock registry server: serves one fixed body, recording every
+    /// request's head (method, path, headers) for assertions.
+    struct MockRegistry {
+        url: String,
+        requests: Arc<Mutex<Vec<String>>>,
+    }
+
+    fn spawn_mock_registry(body: &'static str, status: u16) -> MockRegistry {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = requests.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else {
+                    break;
+                };
+                use std::io::{Read, Write};
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                sink.lock()
+                    .expect("request sink poisoned")
+                    .push(String::from_utf8_lossy(&buf[..n]).to_lowercase());
+                let response = format!(
+                    "HTTP/1.1 {status} test\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        MockRegistry {
+            url: format!("http://{addr}/providers.json"),
+            requests,
+        }
+    }
+
+    #[test]
+    fn expand_tilde_resolves_the_home_prefix() {
+        let home = Some(Path::new("/home/u"));
+        assert_eq!(
+            expand_tilde_in(Path::new("~"), home),
+            std::path::PathBuf::from("/home/u")
+        );
+        assert_eq!(
+            expand_tilde_in(Path::new("~/providers.json"), home),
+            std::path::PathBuf::from("/home/u/providers.json")
+        );
+        assert_eq!(
+            expand_tilde_in(Path::new("/abs/providers.json"), home),
+            std::path::PathBuf::from("/abs/providers.json")
+        );
+        assert_eq!(
+            expand_tilde_in(Path::new("~"), None),
+            std::path::PathBuf::from("~"),
+            "without a home the path is kept as written"
+        );
+    }
+
+    #[test]
+    fn load_local_file_parses_a_provider_json_array() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.json");
+        std::fs::write(&path, provider_json("acme", "Acme")).unwrap();
+        let providers = load_local_file(&path).expect("loads");
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id.0, "acme");
+    }
+
+    #[test]
+    fn load_local_file_reports_missing_and_broken_files() {
+        let missing =
+            load_local_file(Path::new("/nonexistent/providers.json")).expect_err("missing file");
+        assert!(missing.contains("read"), "{missing}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.json");
+        std::fs::write(&path, "{\"name\":\"x\"}").unwrap();
+        let broken = load_local_file(&path).expect_err("an object is not a registry");
+        assert!(broken.contains("parse"), "{broken}");
+    }
+
+    #[test]
+    fn fetch_url_sends_configured_headers_with_env_expanded() {
+        unsafe { std::env::set_var("SHUVARIE_TEST_TOKEN", "bearer-token") };
+        let mock = spawn_mock_registry("[{\"name\":\"Acme\",\"id\":\"acme\",\"models\":[]}]", 200);
+        let providers = fetch_url(
+            &mock.url,
+            &[
+                (
+                    "Authorization".to_string(),
+                    "Bearer $SHUVARIE_TEST_TOKEN".to_string(),
+                ),
+                ("X-Static".to_string(), "static".to_string()),
+            ],
+        )
+        .expect("fetches");
+        assert_eq!(providers.len(), 1);
+        unsafe { std::env::remove_var("SHUVARIE_TEST_TOKEN") };
+
+        let requests = mock.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "one request");
+        assert!(
+            requests[0].starts_with("get /providers.json"),
+            "{}",
+            requests[0]
+        );
+        assert!(
+            requests[0].contains("authorization: bearer bearer-token"),
+            "expanded env var: {}",
+            requests[0]
+        );
+        assert!(requests[0].contains("x-static: static"), "{}", requests[0]);
+    }
+
+    #[test]
+    fn fetch_url_reports_status_and_decode_errors() {
+        let mock = spawn_mock_registry("[]", 500);
+        let error = fetch_url(&mock.url, &[]).expect_err("status error");
+        assert_eq!(error, "unexpected status code: 500");
+
+        let mock = spawn_mock_registry("<html>not json</html>", 200);
+        let error = fetch_url(&mock.url, &[]).expect_err("decode error");
+        assert!(error.contains("decoding"), "{}", error);
+    }
+
+    #[test]
+    fn init_registers_selune_then_customs_in_config_order() {
+        let _guard = global_lock();
+        reset_catalog();
+        init(&config_with(&[
+            custom_registry("first", Some("https://example.test/providers.json"), None),
+            custom_registry("second", None, None),
+        ]));
+        assert_eq!(
+            registry_ids(),
+            vec!["selune", "first", "second"],
+            "built-in first, then config order"
+        );
+    }
+
+    #[test]
+    fn init_merges_by_id_keeping_loaded_snapshots() {
+        let _guard = global_lock();
+        reset_catalog();
+        let custom = custom_registry("acme", Some("https://example.test/x.json"), None);
+        init(&config_with(&[custom.clone()]));
+        store_remote("acme", vec![test_provider("acme-entry", [])]);
+        let mut changed = custom.clone();
+        changed.remote_first = true;
+        init(&config_with(&[changed]));
+        assert_eq!(
+            registry_ids(),
+            vec!["selune", "acme"],
+            "no duplicate registration"
+        );
+        assert!(registry_catalog("acme").remote.is_some(), "snapshot kept");
+        let flags = {
+            let state = lock();
+            state.find("acme").map(|r| r.remote_first)
+        };
+        assert_eq!(flags, Some(true), "flags refreshed from config");
+    }
+
+    #[test]
+    fn init_does_not_register_disabled_registries() {
+        let _guard = global_lock();
+        reset_catalog();
+        let mut disabled = custom_registry("sleepy", Some("https://example.test/x.json"), None);
+        disabled.disabled = true;
+        let mut config = config_with(&[disabled]);
+        config.entries.insert(
+            SELUNE_REGISTRY.to_string(),
+            RegistryEntry {
+                disabled: true,
+                remote_first: false,
+            },
+        );
+        init(&config);
+        assert_eq!(registry_ids(), Vec::<String>::new(), "disabled ids vanish");
+        assert!(
+            providers().is_empty(),
+            "nothing loads from a disabled registry"
+        );
+        assert_eq!(
+            registry_catalog("sleepy").local,
+            Vec::new(),
+            "an unregistered registry has no snapshot data"
+        );
+
+        // Re-enabling brings the built-in registry (and its embedded local
+        // snapshot) back.
+        config.entries.insert(
+            SELUNE_REGISTRY.to_string(),
+            RegistryEntry {
+                disabled: false,
+                remote_first: false,
+            },
+        );
+        init(&config);
+        assert_eq!(registry_ids(), vec![SELUNE_REGISTRY]);
+        assert!(!registry_catalog(SELUNE_REGISTRY).local.is_empty());
+    }
+
+    #[test]
+    fn union_joins_registries_in_order_remote_over_local() {
+        let _guard = global_lock();
+        reset_catalog();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.json");
+        std::fs::write(&path, provider_json("acme-local", "Acme Local")).unwrap();
+        init(&config_with(&[custom_registry("acme", None, Some(&path))]));
+
+        let ids =
+            |providers: &[Provider]| providers.iter().map(|p| p.id.0.clone()).collect::<Vec<_>>();
+        let custom_first = ids(&providers())
+            .into_iter()
+            .rev()
+            .take(1)
+            .collect::<Vec<_>>()
+            .pop();
+        assert_eq!(
+            custom_first.as_deref(),
+            Some("acme-local"),
+            "path loads lazily"
+        );
+        let selune_len = registry_catalog(SELUNE_REGISTRY).local.len();
+        let custom_at = providers()
+            .iter()
+            .position(|p| p.id.0 == "acme-local")
+            .expect("the custom registry's local snapshot is in the union");
+        assert!(
+            custom_at >= selune_len,
+            "the built-in registry leads the union"
+        );
+
+        let remote = vec![test_provider("acme-remote", [])];
+        store_remote("acme", remote);
+        assert!(
+            providers().iter().any(|p| p.id.0 == "acme-remote"),
+            "the loaded remote replaces the local snapshot"
+        );
+        assert!(
+            !providers().iter().any(|p| p.id.0 == "acme-local"),
+            "per registry, remote wins over local"
+        );
+    }
+
+    #[test]
+    fn registry_catalog_loads_the_path_snapshot_once() {
+        let _guard = global_lock();
+        reset_catalog();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.json");
+        std::fs::write(&path, provider_json("acme-local", "Acme Local")).unwrap();
+        init(&config_with(&[custom_registry("acme", None, Some(&path))]));
+
+        let first = registry_catalog("acme");
+        assert_eq!(first.local.len(), 1, "the path file loads on first access");
+        assert_eq!(first.local_error, None);
+        assert_eq!(first.remote_configured, false, "path-only registry");
+        assert_eq!(first.effective().len(), 1);
+
+        std::fs::write(&path, "<html>").unwrap();
+        let second = registry_catalog("acme");
+        assert_eq!(
+            second.local.len(),
+            1,
+            "the loaded snapshot is kept; the file is not re-read"
+        );
+    }
+
+    #[test]
+    fn registry_catalog_caches_a_load_error() {
+        let _guard = global_lock();
+        reset_catalog();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.json");
+        init(&config_with(&[custom_registry("acme", None, Some(&path))]));
+
+        let first = registry_catalog("acme");
+        let error = first.local_error.expect("missing file is an error");
+        assert!(error.contains("read"), "{error}");
+        assert!(first.local.is_empty());
+
+        std::fs::write(&path, provider_json("acme-local", "Acme")).unwrap();
+        let second = registry_catalog("acme");
+        assert!(
+            second.local_error.is_some(),
+            "the error is cached; the file is not retried"
+        );
+        assert!(second.local.is_empty());
+    }
+
+    #[test]
+    fn registry_catalog_unknown_id_is_an_empty_snapshot() {
+        let _guard = global_lock();
+        reset_catalog();
+        let snapshot = registry_catalog("nowhere");
+        assert_eq!(snapshot.id, "nowhere");
+        assert!(snapshot.local.is_empty());
+        assert!(snapshot.remote.is_none());
+        assert!(!snapshot.remote_configured);
+    }
+
+    #[test]
+    fn fetch_registry_gates_unknown_and_sourceless() {
+        let _guard = global_lock();
+        reset_catalog();
+        init(&config_with(&[custom_registry("local-only", None, None)]));
+
+        assert_eq!(
+            fetch_registry("nowhere"),
+            Err("unknown registry `nowhere`".to_string())
+        );
+        assert_eq!(
+            fetch_registry("local-only"),
+            Err("registry `local-only` has no online source".to_string())
+        );
+    }
+
+    #[test]
+    fn fetch_registry_reports_a_disabled_registry_as_unknown() {
+        let _guard = global_lock();
+        reset_catalog();
+        let mut disabled = custom_registry("acme", Some("https://example.test/x.json"), None);
+        disabled.disabled = true;
+        init(&config_with(&[disabled]));
+        assert_eq!(
+            fetch_registry("acme"),
+            Err("unknown registry `acme`".to_string()),
+            "a disabled registry is not registered, so it cannot fetch"
+        );
+    }
+
+    #[test]
+    fn fetch_registry_stores_the_remote_snapshot() {
+        let _guard = global_lock();
+        reset_catalog();
+        let mock = spawn_mock_registry("[{\"name\":\"Acme\",\"id\":\"acme\",\"models\":[]}]", 200);
+        let mut custom = custom_registry("acme", Some(&mock.url), None);
+        custom.headers = vec![("X-Custom".to_string(), "1".to_string())];
+        init(&config_with(&[custom]));
+
+        let providers = fetch_registry("acme").expect("fetches");
+        assert_eq!(providers.len(), 1);
+        assert_eq!(
+            registry_catalog("acme").remote.as_ref().map(|p| p.len()),
+            Some(1)
+        );
+        assert!(
+            mock.requests.lock().unwrap()[0].contains("x-custom: 1"),
+            "config headers are sent"
+        );
+    }
+
+    #[test]
+    fn fetch_registry_reports_an_empty_remote() {
+        let _guard = global_lock();
+        reset_catalog();
+        let mock = spawn_mock_registry("[]", 200);
+        init(&config_with(&[custom_registry(
+            "acme",
+            Some(&mock.url),
+            None,
+        )]));
+        assert_eq!(
+            fetch_registry("acme"),
+            Err("registry `acme` returned no providers".to_string())
+        );
+        assert!(registry_catalog("acme").remote.is_none());
+    }
+
+    #[test]
+    fn remote_first_ids_list_sourced_registries() {
+        let _guard = global_lock();
+        reset_catalog();
+        let mut remote_first = custom_registry("rf", Some("https://example.test/x.json"), None);
+        remote_first.remote_first = true;
+        let mut offline = custom_registry("local-only", None, None);
+        offline.remote_first = true;
+        init(&config_with(&[remote_first, offline]));
+        assert_eq!(
+            remote_first_ids(),
+            vec!["rf"],
+            "sourceless registries never fetch at startup"
+        );
+    }
+
+    #[test]
+    fn selune_registry_snapshot_carries_the_embedded_catalog() {
+        let _guard = global_lock();
+        reset_catalog();
+        let snapshot = registry_catalog(SELUNE_REGISTRY);
+        assert_eq!(snapshot.id, SELUNE_REGISTRY);
+        assert!(snapshot.remote_configured);
+        assert!(snapshot.local_error.is_none());
+        assert!(
+            !snapshot.local.is_empty(),
+            "the embedded catalog is preloaded"
+        );
+        assert_eq!(snapshot.effective().len(), snapshot.local.len());
     }
 }

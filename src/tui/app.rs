@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use ratatui::prelude::*;
-use shuvarie_core::{Connections, Event as CoreEvent, Model, RegistryEntry, UiPrefs};
+use shuvarie_core::{Connections, Event as CoreEvent, Model, RegistriesConfig, UiPrefs};
 use termina::Event as TermEvent;
 use termina::event::{KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use tokio::sync::mpsc::Sender;
@@ -92,13 +92,14 @@ pub enum AppMessage {
     ConfigError {
         error: String,
     },
-    /// The on-demand hosted registry fetch (from either selector popup)
-    /// succeeded.
+    /// A registry's online fetch (from either selector popup) succeeded.
     RegistryLoaded {
+        registry: String,
         providers: Vec<selune::Provider>,
     },
-    /// The on-demand hosted registry fetch failed.
+    /// A registry's online fetch failed.
     RegistryError {
+        registry: String,
         error: String,
     },
     ModelsLoaded {
@@ -198,7 +199,7 @@ pub struct App {
     pub warning: WarningPopup,
     pub auth: AuthPopup,
     pub models: HashMap<String, Vec<Model>>,
-    registry: RegistryEntry,
+    registries: RegistriesConfig,
     pending_model_pick: Option<String>,
     /// The configured scene set (built-in Default first) for the switcher.
     scene_entries: Vec<shuvarie_core::scenes::SceneListEntry>,
@@ -245,7 +246,7 @@ impl App {
     pub fn new(
         ui: UiPrefs,
         theme: shuvarie_core::ResolvedTheme,
-        registry: RegistryEntry,
+        registries: RegistriesConfig,
         connections: Connections,
         cmd_tx: Sender<shuvarie_core::Command>,
         viewport_cols: u16,
@@ -309,7 +310,7 @@ impl App {
             warning,
             auth: AuthPopup::new(),
             models: HashMap::new(),
-            registry,
+            registries,
             pending_model_pick: None,
             scene_entries: Vec::new(),
             scene_default: None,
@@ -531,10 +532,16 @@ impl App {
                 }),
                 CoreEvent::ConfigSaved => Some(AppMessage::ConfigSaved),
                 CoreEvent::ConfigError { error } => Some(AppMessage::ConfigError { error }),
-                CoreEvent::RegistryLoaded { providers } => {
-                    Some(AppMessage::RegistryLoaded { providers })
+                CoreEvent::RegistryLoaded {
+                    registry,
+                    providers,
+                } => Some(AppMessage::RegistryLoaded {
+                    registry,
+                    providers,
+                }),
+                CoreEvent::RegistryError { registry, error } => {
+                    Some(AppMessage::RegistryError { registry, error })
                 }
-                CoreEvent::RegistryError { error } => Some(AppMessage::RegistryError { error }),
                 CoreEvent::SessionStarted => Some(AppMessage::SceneChanged {
                     name: self.scene_default.clone(),
                 }),
@@ -1029,8 +1036,11 @@ impl App {
                         AddProviderOutcome::Cancel => {
                             self.close_overlay();
                         }
-                        AddProviderOutcome::FetchRegistry => {
-                            self.ctx.send(shuvarie_core::Command::FetchRegistry);
+                        AddProviderOutcome::FetchRegistries(ids) => {
+                            for registry in ids {
+                                self.ctx
+                                    .send(shuvarie_core::Command::FetchRegistry { registry });
+                            }
                         }
                         AddProviderOutcome::Submit {
                             kind,
@@ -1092,8 +1102,11 @@ impl App {
                             self.ctx
                                 .send(shuvarie_core::Command::SetActiveModel { model });
                         }
-                        ModelPickerEffect::FetchRegistry => {
-                            self.ctx.send(shuvarie_core::Command::FetchRegistry);
+                        ModelPickerEffect::FetchRegistries(ids) => {
+                            for registry in ids {
+                                self.ctx
+                                    .send(shuvarie_core::Command::FetchRegistry { registry });
+                            }
                         }
                         ModelPickerEffect::Close => {
                             if self
@@ -1222,28 +1235,39 @@ impl App {
                     form.error = Some(error);
                 }
             }
-            AppMessage::RegistryLoaded { providers } => match self.overlay {
+            AppMessage::RegistryLoaded {
+                registry,
+                providers,
+            } => match self.overlay {
                 Overlay::AddProvider => {
                     if let Some(form) = &mut self.add_provider_form {
-                        form.update(AddProviderMessage::RegistryLoaded { providers });
+                        form.update(AddProviderMessage::RegistryLoaded {
+                            registry,
+                            providers,
+                        });
                     }
                 }
                 Overlay::ModelPicker => {
                     self.model_picker
-                        .update(ModelPickerMessage::RegistryLoaded { providers });
+                        .update(ModelPickerMessage::RegistryLoaded {
+                            registry,
+                            providers,
+                        });
                 }
                 _ => {}
             },
-            AppMessage::RegistryError { error } => match self.overlay {
+            AppMessage::RegistryError { registry, error } => match self.overlay {
                 Overlay::AddProvider => {
                     if let Some(form) = &mut self.add_provider_form {
                         form.update(AddProviderMessage::RegistryError {
+                            registry,
                             error: error.clone(),
                         });
                     }
                 }
                 Overlay::ModelPicker => {
-                    self.model_picker.source.on_error(error);
+                    self.model_picker
+                        .update(ModelPickerMessage::RegistryError { registry, error });
                 }
                 _ => {}
             },
@@ -1528,9 +1552,10 @@ impl App {
             .values()
             .filter_map(|p| p.catalog_id().map(str::to_string))
             .collect();
-        let form = AddProviderForm::new(&names, &catalog_ids, self.registry);
-        if form.needs_fetch() {
-            self.ctx.send(shuvarie_core::Command::FetchRegistry);
+        let form = AddProviderForm::new(&names, &catalog_ids, &self.registries);
+        for registry in form.ids_needing_fetch() {
+            self.ctx
+                .send(shuvarie_core::Command::FetchRegistry { registry });
         }
         self.add_provider_form = Some(form);
         self.overlay = Overlay::AddProvider;
@@ -1541,9 +1566,10 @@ impl App {
     /// `ListModels` fetch.
     fn open_model_picker(&mut self) {
         self.model_picker
-            .open(&self.ctx.connections, &self.models, self.registry);
-        if self.model_picker.needs_fetch() {
-            self.ctx.send(shuvarie_core::Command::FetchRegistry);
+            .open(&self.ctx.connections, &self.models, &self.registries);
+        for registry in self.model_picker.ids_needing_fetch() {
+            self.ctx
+                .send(shuvarie_core::Command::FetchRegistry { registry });
         }
         for provider_name in self.model_picker.pending_live_providers() {
             self.ctx
@@ -1951,7 +1977,7 @@ mod tests {
         App::new(
             UiPrefs::default(),
             shuvarie_core::ResolvedTheme::faerun(),
-            RegistryEntry::default(),
+            RegistriesConfig::default(),
             connections,
             tx,
             120,
@@ -1966,7 +1992,7 @@ mod tests {
         let app = App::new(
             UiPrefs::default(),
             shuvarie_core::ResolvedTheme::faerun(),
-            RegistryEntry::default(),
+            RegistriesConfig::default(),
             connections,
             tx,
             120,

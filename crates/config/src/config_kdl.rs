@@ -714,14 +714,32 @@ fn parse_retry(node: &KdlNode, input: &str) -> Result<RetryConfig> {
 
 fn parse_registries(node: &KdlNode, input: &str) -> Result<RegistriesConfig> {
     let mut entries = BTreeMap::new();
+    let mut custom: Vec<CustomRegistry> = Vec::new();
     for child in child_nodes(node) {
         let name = child.name().value().to_string();
-        let entry = parse_registry_entry(child, input)?;
-        if entries.insert(name.clone(), entry).is_some() {
-            return Err(duplicate(input, child, &name));
+        if name == "registry" {
+            let registry = parse_custom_registry(child, input)?;
+            // The built-in registry is always defined, even when the file
+            // never mentions `selune`.
+            if registry.name == "selune" {
+                return Err(duplicate(input, child, &registry.name));
+            }
+            if entries.contains_key(registry.name.as_str())
+                || custom.iter().any(|defined| defined.name == registry.name)
+            {
+                return Err(duplicate(input, child, &registry.name));
+            }
+            custom.push(registry);
+        } else {
+            let entry = parse_registry_entry(child, input)?;
+            let clash = entries.insert(name.clone(), entry).is_some()
+                || custom.iter().any(|defined| defined.name == name);
+            if clash {
+                return Err(duplicate(input, child, &name));
+            }
         }
     }
-    Ok(RegistriesConfig { entries })
+    Ok(RegistriesConfig { entries, custom })
 }
 
 fn parse_registry_entry(node: &KdlNode, input: &str) -> Result<RegistryEntry> {
@@ -742,6 +760,122 @@ fn parse_registry_entry(node: &KdlNode, input: &str) -> Result<RegistryEntry> {
         disabled: disabled.unwrap_or_default(),
         remote_first: remote_first.unwrap_or_default(),
     })
+}
+
+/// `registry { name "…"; url "…"; path "…"; headers { … }; disabled;
+/// remote-first }` — a user-defined registry: an offline snapshot (`path`)
+/// and/or a remote source (`url`) fetched only when the online registry is
+/// initiated or, with `remote-first`, at startup.
+fn parse_custom_registry(node: &KdlNode, input: &str) -> Result<CustomRegistry> {
+    reject_positionals(input, node)?;
+    reject_unknown_props(input, node, &[])?;
+    let mut name = None;
+    let mut url = None;
+    let mut path = None;
+    let mut headers = None;
+    let mut disabled = None;
+    let mut remote_first = None;
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "name" => set_once(input, child, &mut name, scalar_string(input, child))?,
+            "url" => set_once(input, child, &mut url, scalar_string(input, child))?,
+            "path" => set_once(
+                input,
+                child,
+                &mut path,
+                scalar_string(input, child).map(|value| value.map(PathBuf::from)),
+            )?,
+            "headers" => set_once(
+                input,
+                child,
+                &mut headers,
+                parse_registry_headers(child, input).map(Some),
+            )?,
+            "disabled" | "enabled" => {
+                set_once(input, child, &mut disabled, toggle_flag(input, child))?
+            }
+            "remote-first" => {
+                set_once(input, child, &mut remote_first, scalar_bool(input, child))?;
+            }
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!(
+                        "unknown node `{other}` in `registry` (expected `name`, `url`, \
+                         `path`, `headers`, `disabled`, or `remote-first`)"
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    let name = name.ok_or_else(|| node_error(input, node, "`registry` requires a `name`", None))?;
+    if name.is_empty() {
+        return Err(node_error(
+            input,
+            node,
+            "`registry` `name` must not be empty",
+            None,
+        ));
+    }
+    if let Some(url) = &url
+        && !url.starts_with("http://")
+        && !url.starts_with("https://")
+    {
+        return Err(node_error(
+            input,
+            node,
+            format!("registry `{name}` url must start with http:// or https://"),
+            None,
+        ));
+    }
+    if url.is_none() && path.is_none() {
+        return Err(node_error(
+            input,
+            node,
+            format!("registry `{name}` requires a `url` or a `path`"),
+            None,
+        ));
+    }
+    Ok(CustomRegistry {
+        name,
+        url,
+        path,
+        headers: headers.unwrap_or_default(),
+        disabled: disabled.unwrap_or_default(),
+        remote_first: remote_first.unwrap_or_default(),
+    })
+}
+
+/// The `headers { … }` block of a `registry`: one string-valued node per
+/// header, kept in file order.
+fn parse_registry_headers(node: &KdlNode, input: &str) -> Result<Vec<(String, String)>> {
+    let mut headers: Vec<(String, String)> = Vec::new();
+    for child in child_nodes(node) {
+        let name = child.name().value().to_string();
+        if !is_header_token(&name) {
+            return Err(node_error(
+                input,
+                child,
+                format!("`{name}` is not a valid header name"),
+                None,
+            ));
+        }
+        let Some(value) = scalar_string(input, child)? else {
+            return Err(node_error(
+                input,
+                child,
+                format!("header `{name}` takes a single string value"),
+                None,
+            ));
+        };
+        if headers.iter().any(|(defined, _)| *defined == name) {
+            return Err(duplicate(input, child, &name));
+        }
+        headers.push((name, value));
+    }
+    Ok(headers)
 }
 
 fn parse_tools(node: &KdlNode, input: &str) -> Result<ToolsConfig> {
@@ -2905,12 +3039,52 @@ fn web_search_node(cfg: &WebSearchConfig) -> KdlNode {
 }
 
 fn registries_node(cfg: &RegistriesConfig) -> Option<KdlNode> {
-    let children = cfg
-        .entries
-        .iter()
-        .map(|(name, entry)| registry_entry_node(name, *entry))
-        .collect();
+    let mut children = Vec::new();
+    if let Some(entry) = cfg.entries.get("selune") {
+        children.push(registry_entry_node("selune", *entry));
+    }
+    for registry in &cfg.custom {
+        children.push(custom_registry_node(registry));
+    }
+    for (name, entry) in &cfg.entries {
+        if name == "selune" {
+            continue;
+        }
+        children.push(registry_entry_node(name, *entry));
+    }
     section_node("registries", children)
+}
+
+/// Builds `registry { … }` — one user-defined registry, in file order.
+fn custom_registry_node(registry: &CustomRegistry) -> KdlNode {
+    let mut children = Vec::new();
+    children.push(value_node("name", registry.name.as_str()));
+    if let Some(url) = &registry.url {
+        children.push(value_node("url", url.as_str()));
+    }
+    if let Some(path) = &registry.path {
+        children.push(value_node("path", path.display().to_string()));
+    }
+    if !registry.headers.is_empty() {
+        let mut headers = KdlNode::new("headers");
+        let mut body = KdlDocument::new();
+        for (name, value) in &registry.headers {
+            body.nodes_mut().push(value_node(name, value.as_str()));
+        }
+        headers.set_children(body);
+        children.push(headers);
+    }
+    if registry.disabled {
+        children.push(value_node("disabled", true));
+    }
+    if registry.remote_first {
+        children.push(value_node("remote-first", true));
+    }
+    let mut node = KdlNode::new("registry");
+    let mut body = KdlDocument::new();
+    body.nodes_mut().extend(children);
+    node.set_children(body);
+    node
 }
 
 fn scenes_node(cfg: &ScenesConfig) -> Option<KdlNode> {
