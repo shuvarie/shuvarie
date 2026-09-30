@@ -1078,6 +1078,11 @@ pub struct SceneConfig {
 
     /// Tool availability inside the scene.
     pub tools: SceneToolsConfig,
+
+    /// How many tool calls the agent may run concurrently within one
+    /// assistant message (`tool-concurrency N`); `None` inherits the lower
+    /// layer, and the unset default is sequential (`1`).
+    pub tool_concurrency: Option<usize>,
 }
 
 impl SceneConfig {
@@ -1091,6 +1096,9 @@ impl SceneConfig {
         }
         if higher.thinking.is_some() {
             self.thinking = higher.thinking;
+        }
+        if higher.tool_concurrency.is_some() {
+            self.tool_concurrency = higher.tool_concurrency;
         }
         self.subagents.merge(higher.subagents);
         self.system_prompts.merge(higher.system_prompts);
@@ -1120,10 +1128,23 @@ impl SubagentsConfig {
 }
 
 /// One `subagents { <name> { … } }` entry: per-worker prompt, thinking, and
-/// tool overrides, or the worker dropped from the roster entirely.
+/// tool overrides, or the worker dropped from the roster entirely. An entry
+/// keyed by a built-in worker name (`explore_workspace`, `run_tests`,
+/// `edit_files`) overrides that worker; any other key defines a new extra
+/// worker, materialized from `description` + `toolset`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SubagentConfig {
     pub disabled: bool,
+
+    /// Model-facing description for an extra worker; ignored for an entry
+    /// that overrides a built-in worker (its description stays built-in).
+    pub description: Option<String>,
+
+    /// Which built-in tool set backs the worker (`toolset "read"`):
+    /// `read` (inspection tools), `command` (`run_shell`), `edit` (file
+    /// modification), or `none` (no tools). Overrides a built-in worker's
+    /// set; extra workers default to `read`.
+    pub toolset: Option<SubagentToolset>,
 
     /// Reserved for the per-provider thinking toggle (not wired yet).
     pub thinking: Option<bool>,
@@ -1136,11 +1157,44 @@ pub struct SubagentConfig {
 impl SubagentConfig {
     fn merge(&mut self, higher: SubagentConfig) {
         self.disabled |= higher.disabled;
+        if higher.description.is_some() {
+            self.description = higher.description;
+        }
+        if higher.toolset.is_some() {
+            self.toolset = higher.toolset;
+        }
         if higher.thinking.is_some() {
             self.thinking = higher.thinking;
         }
         self.system_prompts.merge(higher.system_prompts);
         self.tools.merge(higher.tools);
+    }
+}
+
+/// The built-in tool set a worker runs with (`toolset "…"`): what the
+/// worker can do before the scene's per-tool gating applies on top. Extra
+/// workers without an explicit `toolset` materialize with [`Self::Read`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SubagentToolset {
+    /// No tools: the worker reasons and reports from the task text alone.
+    None,
+    /// Default: the inspection roster (`read_file`, `grep`, `lsp`, …).
+    #[default]
+    Read,
+    /// The command runner (`run_shell`).
+    Command,
+    /// The file-modification roster (`apply_patch`, `edit_file`, …).
+    Edit,
+}
+
+impl SubagentToolset {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Read => "read",
+            Self::Command => "command",
+            Self::Edit => "edit",
+        }
     }
 }
 
@@ -5007,6 +5061,121 @@ Now we're in Plan mode: plan first, no edits.
         assert_eq!(parsed.default.as_deref(), Some("Build"));
         let out = config_kdl::to_kdl(&config_with_scenes(parsed)).unwrap();
         assert!(out.contains("default Build"), "body: {out}");
+    }
+
+    #[test]
+    fn scene_tool_concurrency_parses_clamps_and_round_trips() {
+        let parsed = scenes(
+            r#"
+            scenes {
+                scene name="Council" {
+                    description "council"
+                    tool-concurrency 4
+                }
+                scene name="Zero" {
+                    tool-concurrency 0
+                }
+            }
+        "#,
+        );
+        let council = parsed.scene("Council").unwrap();
+        assert_eq!(council.tool_concurrency, Some(4));
+        let zero = parsed.scene("Zero").unwrap();
+        assert_eq!(
+            zero.tool_concurrency,
+            Some(1),
+            "0 means sequential, like the unset default"
+        );
+
+        let out = config_kdl::to_kdl(&config_with_scenes(parsed.clone())).unwrap();
+        assert!(out.contains("tool-concurrency 4"), "body: {out}");
+        let reparsed = config_kdl::from_kdl(&out).unwrap();
+        assert_eq!(
+            parsed, reparsed.scenes,
+            "the field round trips with the scene"
+        );
+    }
+
+    #[test]
+    fn scene_tool_concurrency_errors() {
+        for text in [
+            "scenes { scene name=\"A\" { tool-concurrency \"four\" } }",
+            "scenes { scene name=\"A\" { tool-concurrency 4 tool-concurrency 2 } }",
+        ] {
+            let err = config_kdl::from_kdl(text).unwrap_err();
+            assert!(
+                err.to_string().contains("tool-concurrency"),
+                "{text}\n{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn subagent_description_and_toolset_parse_and_round_trip() {
+        let parsed = scenes(
+            r#"
+            scenes {
+                scene name="Council" {
+                    subagents {
+                        advocate {
+                            description "argue the strongest case"
+                            toolset "read"
+                        }
+                        recorder {
+                            toolset "none"
+                        }
+                        stenographer {
+                            toolset "command"
+                        }
+                        editor {
+                            toolset "edit"
+                        }
+                    }
+                }
+            }
+        "#,
+        );
+        let council = parsed.scene("Council").unwrap();
+        let workers = &council.subagents.workers;
+        assert_eq!(
+            workers.get("advocate").unwrap().toolset,
+            Some(SubagentToolset::Read)
+        );
+        assert_eq!(
+            workers.get("advocate").unwrap().description.as_deref(),
+            Some("argue the strongest case")
+        );
+        assert_eq!(
+            workers.get("recorder").unwrap().toolset,
+            Some(SubagentToolset::None)
+        );
+        assert_eq!(
+            workers.get("stenographer").unwrap().toolset,
+            Some(SubagentToolset::Command)
+        );
+        assert_eq!(
+            workers.get("editor").unwrap().toolset,
+            Some(SubagentToolset::Edit)
+        );
+
+        let out = config_kdl::to_kdl(&config_with_scenes(parsed.clone())).unwrap();
+        assert!(out.contains("toolset read"), "body: {out}");
+        assert!(out.contains("\"argue the strongest case\""), "\n{out}");
+        let reparsed = config_kdl::from_kdl(&out).unwrap();
+        assert_eq!(parsed, reparsed.scenes);
+    }
+
+    #[test]
+    fn subagent_toolset_errors() {
+        let err = config_kdl::from_kdl(
+            "scenes { scene name=\"A\" { subagents { helper { toolset \"write\" } } } }",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("must be `none`, `read`, `command`, or `edit`"),
+            "{err}"
+        );
     }
 
     #[test]

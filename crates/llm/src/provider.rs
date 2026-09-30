@@ -556,6 +556,7 @@ impl ProviderClient {
         tools: Vec<DynamicTool>,
         workers: &mut [crate::agent::WorkerAgent],
         max_turns: usize,
+        tool_concurrency: usize,
         context_budget: Option<crate::context_hook::ContextBudget>,
         seed_usage: Option<crate::TokenUsage>,
     ) -> StreamStream {
@@ -605,6 +606,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -623,6 +625,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -641,6 +644,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -659,6 +663,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -677,6 +682,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -695,6 +701,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -713,6 +720,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -731,6 +739,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -749,6 +758,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -767,6 +777,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -785,6 +796,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -803,6 +815,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -821,6 +834,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -839,6 +853,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -857,6 +872,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -875,6 +891,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -893,6 +910,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -911,6 +929,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -929,6 +948,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -947,6 +967,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -965,6 +986,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -983,6 +1005,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -1001,6 +1024,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -1019,6 +1043,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -1037,6 +1062,7 @@ impl ProviderClient {
                     receivers,
                     worker_names,
                     max_turns,
+                    tool_concurrency,
                     tracker,
                 )
                 .await
@@ -1135,6 +1161,7 @@ async fn stream_via<C>(
     receivers: Vec<tokio::sync::mpsc::Receiver<StreamItem>>,
     worker_names: std::collections::HashSet<String>,
     max_turns: usize,
+    tool_concurrency: usize,
     tracker: std::sync::Arc<crate::context_hook::UsageTracker>,
 ) -> StreamStream
 where
@@ -1152,9 +1179,14 @@ where
         tracker_for_hook,
         file_hook.clone(),
     );
+    // `tool_concurrency` caps how many tools run at once within an assistant
+    // message — a batch of worker spawns in a council scene convenes in
+    // parallel; sequential (`1`) stays the unset default. Streamed output
+    // ordering is preserved either way.
     let stream = agent
         .stream_chat(user_msg, rig_history)
         .max_turns(max_turns)
+        .tool_concurrency(tool_concurrency)
         .await;
     map_agent_stream(stream, receivers, worker_names, tracker, file_hook)
 }

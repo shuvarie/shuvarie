@@ -344,6 +344,18 @@ pub async fn run(
     }
     let shell = shell_resolution.shell;
 
+    // The builtin scenes form the bottom layer: a configured scene of the
+    // same name merges field-wise over its builtin (an override overrides
+    // only the fields it sets), any other name joins on top of them.
+    let scene_set = {
+        let mut scenes = crate::scenes::builtin_set();
+        scenes.stack(scene_set.scenes);
+        shuvarie_config::SceneSet {
+            scenes,
+            warnings: scene_set.warnings,
+        }
+    };
+
     let scene_list = {
         let mut entries = vec![crate::scenes::SceneListEntry {
             id: None,
@@ -2392,6 +2404,7 @@ impl CoreCtx {
             &self.skills,
         );
         let prior = crate::scenes::inject_history(&scene, &prior, Some(&content), announce);
+        let tool_concurrency = scene.tool_concurrency();
         let stream = client
             .stream(
                 &model,
@@ -2401,6 +2414,7 @@ impl CoreCtx {
                 tools,
                 &mut worker_set.workers,
                 self.manager_turns,
+                tool_concurrency,
                 budget,
                 seed_usage,
             )

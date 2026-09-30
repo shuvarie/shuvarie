@@ -121,6 +121,105 @@ async fn scenes_loaded_carries_conflict_warnings() {
     let _ = handle.await;
 }
 
+/// The builtin scenes materialize at core startup: the picker list carries
+/// the code-defined modes (Advisor/Councillor/Reviewer) under the built-in
+/// default, and a configured scene of the same name merges field-wise over
+/// its builtin.
+#[tokio::test]
+async fn scenes_loaded_lists_the_builtin_scenes_under_the_configured_ones() {
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+
+    let mut scenes = shuvarie_config::ScenesConfig::default();
+    scenes.scenes.insert(
+        "Draft".into(),
+        shuvarie_config::SceneConfig {
+            description: Some("draft mode".into()),
+            ..Default::default()
+        },
+    );
+    // A same-name builtin redefinition overrides only what it sets.
+    let override_kdl = r#"
+        scenes {
+            scene name="Advisor" {
+                description "my advisor"
+            }
+        }
+    "#;
+    let user_advisor = shuvarie_config::ScenesConfig::from_kdl(override_kdl).unwrap();
+    let mut merged = shuvarie_core::SceneSet {
+        scenes,
+        warnings: Vec::new(),
+    };
+    merged.scenes.stack(user_advisor);
+    let scene_set = merged;
+    let handle = tokio::spawn(run(
+        empty_config(),
+        empty_connections(),
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        scene_set,
+        cmd_rx,
+        event_tx,
+    ));
+    let _ = event_rx.recv().await.expect("SkillsLoaded");
+    let _ = event_rx.recv().await.expect("CustomCommandsLoaded");
+    let row_names = match event_rx.recv().await.expect("event") {
+        Event::ScenesLoaded { scenes: rows, .. } => rows,
+        other => panic!("expected ScenesLoaded, got {other:?}"),
+    };
+    let expected: Vec<(Option<&str>, &str)> = vec![
+        (None, "Default"),
+        (Some("Advisor"), "Advisor"),
+        (Some("Councillor"), "Councillor"),
+        (Some("Draft"), "Draft"),
+        (Some("Reviewer"), "Reviewer"),
+    ];
+    assert_eq!(
+        row_names
+            .iter()
+            .map(|row| (row.id.as_deref(), row.name.as_str()))
+            .collect::<Vec<_>>(),
+        expected,
+        "the builtins sit under the configured scenes in name order"
+    );
+    for (name, id, description) in [
+        ("Default", None, "Built-in behavior, no scene configured"),
+        ("Advisor", Some("Advisor"), "my advisor"),
+        (
+            "Councillor",
+            Some("Councillor"),
+            "Convene a council of subagent panelists on the topic, then summarize it",
+        ),
+        (
+            "Reviewer",
+            Some("Reviewer"),
+            "Code review: read the code, run checks, report findings without applying them",
+        ),
+    ] {
+        let row = row_names
+            .iter()
+            .find(|row| row.name == name)
+            .unwrap_or_else(|| panic!("{name} row missing"));
+        assert_eq!(row.id.as_deref(), id);
+        assert_eq!(row.description.as_deref(), Some(description));
+        assert!(row.switchable, "{name} is re-enterable mid-session");
+    }
+    let draft = row_names.iter().find(|row| row.name == "Draft").unwrap();
+    assert_eq!(draft.description.as_deref(), Some("draft mode"));
+    assert!(
+        !draft.switchable,
+        "the interlude-less user scene stays start-only"
+    );
+
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
 fn permissions_for_tests() -> std::sync::Arc<shuvarie_core::permissions::Permissions> {
     std::sync::Arc::new(
         shuvarie_core::permissions::Permissions::build(

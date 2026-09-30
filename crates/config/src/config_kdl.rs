@@ -2015,6 +2015,7 @@ fn parse_scene(node: &KdlNode, input: &str) -> Result<(String, SceneConfig)> {
     let mut subagents = None;
     let mut system_prompts = None;
     let mut thinking = None;
+    let mut tool_concurrency = None;
     let mut tools = None;
     for child in child_nodes(node) {
         match child.name().value() {
@@ -2032,6 +2033,12 @@ fn parse_scene(node: &KdlNode, input: &str) -> Result<(String, SceneConfig)> {
                 parse_system_prompts(child, input).map(Some),
             )?,
             "thinking" => set_once(input, child, &mut thinking, scalar_bool(input, child))?,
+            "tool-concurrency" => set_once(
+                input,
+                child,
+                &mut tool_concurrency,
+                parse_tool_concurrency(input, child),
+            )?,
             "tools" => set_once(
                 input,
                 child,
@@ -2044,7 +2051,8 @@ fn parse_scene(node: &KdlNode, input: &str) -> Result<(String, SceneConfig)> {
                     child,
                     format!(
                         "unknown node `{other}` in `scene` (expected `description`, \
-                         `subagents`, `system-prompts`, `thinking`, or `tools`)"
+                         `subagents`, `system-prompts`, `thinking`, `tool-concurrency`, \
+                         or `tools`)"
                     ),
                     None,
                 ));
@@ -2059,8 +2067,19 @@ fn parse_scene(node: &KdlNode, input: &str) -> Result<(String, SceneConfig)> {
             system_prompts: system_prompts.unwrap_or_default(),
             thinking,
             tools: tools.unwrap_or_default(),
+            tool_concurrency,
         },
     ))
+}
+
+/// `tool-concurrency N`: how many tool calls the agent may run concurrently
+/// within one assistant message. `0` means sequential — same as the unset
+/// default — and is accepted to spare callers a clamp on their side.
+fn parse_tool_concurrency(input: &str, node: &KdlNode) -> Result<Option<usize>> {
+    match scalar_usize(input, node)? {
+        None => Ok(None),
+        Some(value) => Ok(Some(value.max(1))),
+    }
 }
 
 fn parse_themes(node: &KdlNode, input: &str) -> Result<ThemesConfig> {
@@ -2253,7 +2272,9 @@ fn parse_subagent(node: &KdlNode, input: &str) -> Result<SubagentConfig> {
         ));
     }
     let mut disabled = None;
+    let mut description = None;
     let mut thinking = None;
+    let mut toolset = None;
     let mut system_prompts = None;
     let mut tools = None;
     for child in child_nodes(node) {
@@ -2261,7 +2282,14 @@ fn parse_subagent(node: &KdlNode, input: &str) -> Result<SubagentConfig> {
             "disabled" | "enabled" => {
                 set_once(input, child, &mut disabled, toggle_flag(input, child))?
             }
+            "description" => set_once(
+                input,
+                child,
+                &mut description,
+                parse_prompt_text(input, child, "description"),
+            )?,
             "thinking" => set_once(input, child, &mut thinking, scalar_bool(input, child))?,
+            "toolset" => set_once(input, child, &mut toolset, parse_toolset(input, child))?,
             "system-prompts" => set_once(
                 input,
                 child,
@@ -2279,8 +2307,8 @@ fn parse_subagent(node: &KdlNode, input: &str) -> Result<SubagentConfig> {
                     input,
                     child,
                     format!(
-                        "unknown node `{other}` in `{}` (expected `disabled`, `thinking`, \
-                         `system-prompts`, or `tools`)",
+                        "unknown node `{other}` in `{}` (expected `disabled`, `description`, \
+                         `thinking`, `toolset`, `system-prompts`, or `tools`)",
                         node.name().value()
                     ),
                     None,
@@ -2290,10 +2318,35 @@ fn parse_subagent(node: &KdlNode, input: &str) -> Result<SubagentConfig> {
     }
     Ok(SubagentConfig {
         disabled: disabled.unwrap_or_default(),
+        description,
+        toolset,
         thinking,
         system_prompts: system_prompts.unwrap_or_default(),
         tools: tools.unwrap_or_default(),
     })
+}
+
+/// `toolset "read"` inside a worker: which built-in tool set backs the
+/// worker, before the scene's per-tool overrides gate it.
+fn parse_toolset(input: &str, node: &KdlNode) -> Result<Option<SubagentToolset>> {
+    match scalar_string(input, node) {
+        Ok(None) => Ok(None),
+        Ok(Some(kind)) => match kind.as_str() {
+            "none" => Ok(Some(SubagentToolset::None)),
+            "read" => Ok(Some(SubagentToolset::Read)),
+            "command" => Ok(Some(SubagentToolset::Command)),
+            "edit" => Ok(Some(SubagentToolset::Edit)),
+            other_kind => Err(node_error(
+                input,
+                node,
+                format!(
+                    "`toolset` must be `none`, `read`, `command`, or `edit` (got `{other_kind}`)"
+                ),
+                None,
+            )),
+        },
+        Err(err) => Err(err),
+    }
 }
 
 fn parse_system_prompts(node: &KdlNode, input: &str) -> Result<SystemPromptsConfig> {
@@ -3144,6 +3197,9 @@ fn scene_node(name: &str, scene: &SceneConfig) -> KdlNode {
     if let Some(thinking) = scene.thinking {
         children.push(value_node("thinking", thinking));
     }
+    if let Some(concurrency) = scene.tool_concurrency {
+        children.push(int_node("tool-concurrency", concurrency as i128));
+    }
     children.extend(scene_tools_node(&scene.tools));
     node_with_prop("scene", "name", name, children)
 }
@@ -3166,6 +3222,12 @@ fn subagent_node(name: &str, worker: &SubagentConfig) -> KdlNode {
     let mut children = Vec::new();
     if worker.disabled {
         children.push(value_node("disabled", true));
+    }
+    if let Some(description) = &worker.description {
+        children.push(prompt_node("description", description));
+    }
+    if let Some(toolset) = worker.toolset {
+        children.push(value_node("toolset", toolset.as_str()));
     }
     children.extend(system_prompts_node(&worker.system_prompts));
     if let Some(thinking) = worker.thinking {
