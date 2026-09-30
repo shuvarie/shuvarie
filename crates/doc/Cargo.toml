@@ -1,0 +1,19 @@
+[package]
+name = "shuvarie-doc"
+description = "Blazingly fast AI coding TUI for chivalrous people (document conversion module)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+calamine = "0.36"
+csv = "1"
+html-to-markdown-rs = { version = "3", default-features = false }
+pdf-extract = "0.12.1"
+quick-xml = "0.42"
+rtf-parser = { version = "0.4.3", default-features = false }
+zip = { version = "8.6", default-features = false, features = [
+    "deflate-flate2-zlib-rs",
+] }

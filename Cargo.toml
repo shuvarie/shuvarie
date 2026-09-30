@@ -84,6 +84,7 @@ serde_json = "1"
 shuvarie-config = { path = "crates/config", version = "0.2" }
 shuvarie-core = { path = "crates/core", version = "0.2" }
 shuvarie-db = { path = "crates/db", version = "0.2" }
+shuvarie-doc = { path = "crates/doc", version = "0.2" }
 shuvarie-highlight = { path = "crates/highlight", version = "0.2" }
 shuvarie-llm = { path = "crates/llm", version = "0.2" }
 shuvarie-lsp = { path = "crates/lsp", version = "0.2" }

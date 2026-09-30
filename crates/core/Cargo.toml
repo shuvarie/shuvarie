@@ -23,6 +23,7 @@ serde_json.workspace = true
 selune.workspace = true
 shuvarie-config.workspace = true
 shuvarie-db.workspace = true
+shuvarie-doc.workspace = true
 shuvarie-llm.workspace = true
 shuvarie-lsp.workspace = true
 shuvarie-mcp.workspace = true

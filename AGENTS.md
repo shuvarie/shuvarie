@@ -7,6 +7,7 @@
 - `./crates/config/` (`shuvarie-config`): config module (for KDL parser etc)
 - `./crates/llm/` (`shuvarie-llm`): LLM module (Rig bridge)
 - `./crates/db/` (`shuvarie-db`): DB module (migrations and Toasty ORM)
+- `./crates/doc/` (`shuvarie-doc`): Document → GitHub-Flavored Markdown conversion (office docs, pdf, spreadsheets, epub, csv)
 - `./crates/highlight/` (`shuvarie-highlight`): Highlight module
 - `./crates/lsp/` (`shuvarie-lsp`): LSP module
 - `./crates/mcp/` (`shuvarie-mcp`): MCP module

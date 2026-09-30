@@ -8,6 +8,7 @@ mod list_dir;
 mod lsp;
 mod mcp_tool;
 mod question;
+mod read_document;
 mod read_file;
 mod run_shell;
 mod skill;
@@ -39,6 +40,7 @@ use list_dir::ListDir;
 use lsp::Lsp;
 use mcp_tool::McpTool;
 use question::Question;
+use read_document::ReadDocument;
 use read_file::ReadFile;
 use run_shell::RunShell;
 use skill::SkillTool;
@@ -102,7 +104,8 @@ where
     }
 }
 
-/// Per-turn dedupe cache for `read_file`: tracks `(path, offset, limit)` keys
+/// Per-turn dedupe cache for `read_file`/`read_document`: tracks namespaced
+/// `(path, offset, limit)` keys
 /// that have already been returned to the model this turn, plus a set of all
 /// paths read this turn (any range) used by `write_file`'s read-first check
 /// for overwrites. Repeated identical reads get a short note instead of
@@ -122,9 +125,20 @@ impl ReadCache {
     /// Returns `true` if this exact `(path, offset, limit)` was already read
     /// this turn, otherwise records it and returns `false`.
     fn mark(&self, path: &str, offset: Option<u64>, limit: Option<u64>) -> bool {
-        let key = (path.to_string(), offset, limit);
+        self.mark_key(format!("file::{path}"), path, offset, limit)
+    }
+
+    /// `read_document` variant: keys are namespaced so a converted read (e.g.
+    /// csv via `read_document`) and a plain `read_file` of the same path
+    /// never dedupe against each other, while both count as "the path was
+    /// read" for `write_file`'s read-first check.
+    fn mark_document(&self, path: &str, offset: Option<u64>, limit: Option<u64>) -> bool {
+        self.mark_key(format!("document::{path}"), path, offset, limit)
+    }
+
+    fn mark_key(&self, key: String, path: &str, offset: Option<u64>, limit: Option<u64>) -> bool {
         let mut seen = self.seen.lock().unwrap();
-        let fresh = seen.insert(key);
+        let fresh = seen.insert((key, offset, limit));
         if fresh {
             self.read_paths.lock().unwrap().insert(path.to_string());
         }
@@ -256,6 +270,20 @@ pub fn all_tools(
             access,
         )
     }));
+    tools.extend(scene_tool(
+        "read_document",
+        scene,
+        &access,
+        true,
+        |access| {
+            ReadDocument::new(
+                read_cache.clone(),
+                max_output_chars,
+                max_output_bytes,
+                access,
+            )
+        },
+    ));
     tools.extend(scene_tool("write_file", scene, &access, true, |access| {
         WriteFile::new(read_cache.clone(), Some(lsp.clone()), locks.clone(), access)
     }));
@@ -363,6 +391,20 @@ pub fn read_tools(
             access,
         )
     }));
+    tools.extend(scene_tool(
+        "read_document",
+        scene,
+        &access,
+        true,
+        |access| {
+            ReadDocument::new(
+                read_cache.clone(),
+                max_output_chars,
+                max_output_bytes,
+                access,
+            )
+        },
+    ));
     tools.extend(scene_tool("list_dir", scene, &access, true, |access| {
         ListDir::new(access)
     }));
@@ -430,6 +472,20 @@ pub fn edit_tools(
             access,
         )
     }));
+    tools.extend(scene_tool(
+        "read_document",
+        scene,
+        &access,
+        true,
+        |access| {
+            ReadDocument::new(
+                read_cache.clone(),
+                max_output_chars,
+                max_output_bytes,
+                access,
+            )
+        },
+    ));
     tools.extend(scene_tool("write_file", scene, &access, true, |access| {
         WriteFile::new(read_cache, Some(lsp.clone()), locks.clone(), access)
     }));
@@ -496,6 +552,7 @@ mod tests {
     fn the_default_scene_builds_every_tool() {
         let names = roster(&ToolScene::default());
         for expected in [
+            "read_document",
             "read_file",
             "write_file",
             "edit_file",
