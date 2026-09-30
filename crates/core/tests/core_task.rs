@@ -835,9 +835,10 @@ async fn ping_pong() {
 
 #[tokio::test]
 async fn add_provider_emits_saved() {
-    // The core task persists to the given connections path; we assert the event
-    // is emitted and the provider lands in the temp file, not the user config.
+    // Both paths are set: a `None` makes `persist` fall back to the real
+    // user config dir (`config.save()`), clobbering the user's files.
     let connections_path = temp_connections_path("add-provider");
+    let config_path = temp_config_path("add-provider");
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
@@ -846,7 +847,7 @@ async fn add_provider_emits_saved() {
         empty_connections(),
         Store::open_in_memory().await.unwrap(),
         StartupSession::None,
-        None,
+        Some(config_path.clone()),
         Some(connections_path.clone()),
         permissions_for_tests(),
         TrustGrants::all(),
@@ -883,13 +884,17 @@ async fn add_provider_emits_saved() {
     drop(cmd_tx);
     let _ = handle.await;
     let _ = std::fs::remove_file(connections_path);
+    let _ = std::fs::remove_file(config_path);
 }
 
 #[tokio::test]
 async fn set_ui_theme_persists_ui_theme() {
     // The core task persists to the given config path; assert the event is
-    // emitted and `ui.theme` lands in the temp config file.
+    // emitted and `ui.theme` lands in the temp config file. Both paths are
+    // set: a `None` makes `persist` fall back to the real user connections
+    // file (`connections.save()`), clobbering the user's API keys.
     let config_path = temp_config_path("set-ui-theme");
+    let connections_path = temp_connections_path("set-ui-theme");
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
@@ -899,7 +904,7 @@ async fn set_ui_theme_persists_ui_theme() {
         Store::open_in_memory().await.unwrap(),
         StartupSession::None,
         Some(config_path.clone()),
-        None,
+        Some(connections_path.clone()),
         permissions_for_tests(),
         TrustGrants::all(),
         Default::default(),
@@ -947,11 +952,13 @@ async fn set_ui_theme_persists_ui_theme() {
     drop(cmd_tx);
     let _ = handle.await;
     let _ = std::fs::remove_file(config_path);
+    let _ = std::fs::remove_file(connections_path);
 }
 
 #[tokio::test]
 async fn remove_provider_clears_active() {
     let connections_path = temp_connections_path("remove-provider");
+    let config_path = temp_config_path("remove-provider");
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
@@ -970,7 +977,7 @@ async fn remove_provider_clears_active() {
         connections,
         Store::open_in_memory().await.unwrap(),
         StartupSession::None,
-        None,
+        Some(config_path.clone()),
         Some(connections_path.clone()),
         permissions_for_tests(),
         TrustGrants::all(),
@@ -1000,6 +1007,7 @@ async fn remove_provider_clears_active() {
     drop(cmd_tx);
     let _ = handle.await;
     let _ = std::fs::remove_file(connections_path);
+    let _ = std::fs::remove_file(config_path);
 }
 
 #[tokio::test]
