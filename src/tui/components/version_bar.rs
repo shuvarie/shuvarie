@@ -30,7 +30,7 @@ impl VersionBar {
     fn build_line(alignment: HorizontalAlignment) -> Line<'static> {
         const VERSION: &str = env!("CARGO_PKG_VERSION");
         let version = match option_env!("GIT_COMMIT_SHORT_HASH") {
-            Some(hash) => format!("v{VERSION}-{hash}"),
+            Some(hash) => format!("vdebug-{hash}"),
             None => format!("v{VERSION}"),
         };
 
