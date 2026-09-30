@@ -17,10 +17,11 @@ selune.workspace = true
 shuvarie-config.workspace = true
 shuvarie-llm.workspace = true
 thiserror.workspace = true
-toasty = { version = "0.10", features = ["turso", "jiff", "migration"] }
-toasty-cli = "0.10"
-toasty-driver-turso = "0.10"
+toasty = { version = "0.11", features = ["turso", "jiff", "migration"] }
+toasty-cli = "0.11"
+toasty-driver-turso = "0.11"
 tokio.workspace = true
+turso = { version = "0.8", features = ["pure-rust-crypto"] }
 uuid.workspace = true
 
 [dev-dependencies]

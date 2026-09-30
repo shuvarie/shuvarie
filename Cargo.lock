@@ -187,6 +187,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "antithesis_sdk"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8ed6751597568a284314fd9e2db420665898600109dedc7d8d9b588f00ae9c4"
+dependencies = [
+ "libc",
+ "libloading",
+ "linkme",
+ "once_cell",
+ "rand 0.8.8",
+ "rustc_version_runtime",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -259,9 +275,9 @@ dependencies = [
 
 [[package]]
 name = "async-compression"
-version = "0.4.48"
+version = "0.4.49"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb61aea1a7def73ee7c350a184f0e70b32c182344e2e75bf70c9b621b83417fd"
+checksum = "a3789ca2cd1c4e8ce71fe9bd6312566014e20ff3016fc87bc71c59ff93b5fa61"
 dependencies = [
  "compression-codecs",
  "compression-core",
@@ -406,9 +422,9 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "bigdecimal"
-version = "0.4.10"
+version = "0.4.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d6867f1565b3aad85681f1015055b087fcfd840d6aeee6eee7f2da317603695"
+checksum = "8fa3f3d8cbf4dffcfe4991de61d012bef509a409ecbe9dd41049bfe32b4d4653"
 dependencies = [
  "autocfg",
  "libm",
@@ -911,9 +927,9 @@ dependencies = [
 
 [[package]]
 name = "compression-codecs"
-version = "0.4.43"
+version = "0.4.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bef16c47ba2797aa6a909cc37d39911f3a6743811fe7408ac0b0cc0276b656e9"
+checksum = "5f018b36ac50598f7bfb0aa6094281e253e6b3cbc507a69652d2fb963a326d8d"
 dependencies = [
  "brotli",
  "compression-core",
@@ -1985,9 +2001,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 5.3.0",
  "wasip2",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -5811,6 +5829,7 @@ dependencies = [
  "toasty-cli",
  "toasty-driver-turso",
  "tokio",
+ "turso 0.8.1",
  "uuid",
 ]
 
@@ -5988,9 +6007,9 @@ dependencies = [
 
 [[package]]
 name = "softaes"
-version = "0.1.6"
+version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "736f1ed2c000587b7154d7a0cf19658b745b2ea6ff9b3c912d102a7aa8ee623b"
+checksum = "c4fdfe13e1c42e45f497416afb8dc4e783bf0e25b7be9077c1c77c5fb14cb998"
 
 [[package]]
 name = "spki"
@@ -6710,9 +6729,9 @@ dependencies = [
 
 [[package]]
 name = "toasty"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c526dee282a42d5a2e61b189b8767181586a74a3d6494ef9076fc8d8a1daa7b9"
+checksum = "82c0ad66cbf23d9aeff0d85404e3799788dcea052d835997ed7e85bb3773725c"
 dependencies = [
  "async-trait",
  "bit-set 0.11.1",
@@ -6740,9 +6759,9 @@ dependencies = [
 
 [[package]]
 name = "toasty-cli"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b31a55c15b5bd72db9465f00966ade3ac522eb34d80752ecb3038b991240bbf"
+checksum = "756d16e2809ceaad4e2e78c0f65f7241160951648574435b331ec8ec50735cbd"
 dependencies = [
  "anyhow",
  "clap",
@@ -6759,9 +6778,9 @@ dependencies = [
 
 [[package]]
 name = "toasty-core"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ce096128c41a7b5a86b0a3570a8ffa866de889a081281956bb73c6a7ba0b88a"
+checksum = "06ce722358481c0ad55b7b5edaaf9d0669ee5de6e9c737a73ca4c27621003732"
 dependencies = [
  "async-trait",
  "bit-set 0.11.1",
@@ -6781,9 +6800,9 @@ dependencies = [
 
 [[package]]
 name = "toasty-driver-mysql"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a7a281dccebd99defe5e84ab56e8871cf22296ac3bcca8d333e427697c8b7ea"
+checksum = "dfa5622479dff74a1db2178c8475e014f32ab434ffb06c8cb69142b0abebd876"
 dependencies = [
  "async-trait",
  "jiff",
@@ -6799,9 +6818,9 @@ dependencies = [
 
 [[package]]
 name = "toasty-driver-postgresql"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "695e13090ba6c14ee3c827f539b2301a712127f503aca234c5b7f7af00c504e0"
+checksum = "b6cdb083715b23faddc3b667151cfda8b02feac02e0066acd933d8f8028fce4c"
 dependencies = [
  "async-trait",
  "fallible-iterator 0.2.0",
@@ -6825,9 +6844,9 @@ dependencies = [
 
 [[package]]
 name = "toasty-driver-sqlite"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8dc7c7bdc6db7b857528680ef3be77f3a156cd187e600e2cab1e8a425d55edf4"
+checksum = "ffaebb64e79526666cb2628a7de5979da5ef282bb3f36a7e3b6a5acc55936794"
 dependencies = [
  "async-trait",
  "rusqlite",
@@ -6840,9 +6859,9 @@ dependencies = [
 
 [[package]]
 name = "toasty-driver-turso"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec35095292c40a0b42f7886055bd8e3f4a161a257a422328d7617255a9ced220"
+checksum = "27f3d4680ddf5e6ec2ba584ec91763420b572d0d818e10ca105a85d312d6f10a"
 dependencies = [
  "async-trait",
  "serde",
@@ -6850,18 +6869,18 @@ dependencies = [
  "toasty-sql",
  "tokio",
  "tracing",
- "turso",
+ "turso 0.7.2",
  "uuid",
 ]
 
 [[package]]
 name = "toasty-macros"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a46f85a2a258f59e32789b2de7a5b171e4c68835311dcec9ca71ef6e7901714d"
+checksum = "6f5b5a87266b1cccdd184244733b26fdac9ed3997446c5aca88c2c71f5b03f61"
 dependencies = [
- "hashbrown 0.17.1",
  "heck",
+ "indexmap",
  "pluralizer",
  "proc-macro2",
  "quote",
@@ -6871,9 +6890,9 @@ dependencies = [
 
 [[package]]
 name = "toasty-sql"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b44b08035efcf8e087c6377ae18942066b1f8e976cd3821571e45463ecf3d6f"
+checksum = "29b50cee2799bc54257ba202a9497f07b59df7e446b6df27fbf801cffe4b1b8a"
 dependencies = [
  "jiff",
  "serde",
@@ -6950,9 +6969,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-rustls"
-version = "0.26.5"
+version = "0.26.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0c85f2c3ef0b1cd58b36682f4b17aaa995f0e5db534d85692b4903abce21f67"
+checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
 dependencies = [
  "rustls",
  "tokio",
@@ -7231,13 +7250,27 @@ version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9491d7a80312c5abe66a4409e4dce02065503a235453c94b9e4133877e39ffc"
 dependencies = [
+ "thiserror 2.0.21",
+ "tracing",
+ "tracing-subscriber",
+ "turso_core 0.7.2",
+ "turso_sdk_kit 0.7.2",
+ "turso_sync_sdk_kit 0.7.2",
+]
+
+[[package]]
+name = "turso"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7de8cbeace6385bf3fcb346d4aace8d9ba0de5cffe5e5a0ed210beebd671c208"
+dependencies = [
  "mimalloc",
  "thiserror 2.0.21",
  "tracing",
  "tracing-subscriber",
- "turso_core",
- "turso_sdk_kit",
- "turso_sync_sdk_kit",
+ "turso_core 0.8.1",
+ "turso_sdk_kit 0.8.1",
+ "turso_sync_sdk_kit 0.8.1",
 ]
 
 [[package]]
@@ -7250,7 +7283,7 @@ dependencies = [
  "aes",
  "aes-gcm",
  "allocator-api2 0.4.0",
- "antithesis_sdk",
+ "antithesis_sdk 0.2.9",
  "arc-swap",
  "aristo",
  "bigdecimal",
@@ -7297,14 +7330,88 @@ dependencies = [
  "smallvec",
  "strum 0.26.3",
  "strum_macros 0.26.4",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+ "tracing-subscriber",
+ "turso_ext 0.7.2",
+ "turso_macros 0.7.2",
+ "turso_parser 0.7.2",
+ "twox-hash",
+ "uncased",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "turso_core"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "58e5f09aaead5dfc87c5a22a2b3e95fb85e2d666e27e5f4a2474c42198af20ec"
+dependencies = [
+ "aegis",
+ "aes",
+ "aes-gcm",
+ "allocator-api2 0.4.0",
+ "antithesis_sdk 0.3.0",
+ "arc-swap",
+ "aristo",
+ "bigdecimal",
+ "bitflags 2.13.2",
+ "branches",
+ "bumpalo",
+ "bytemuck",
+ "cfg_aliases",
+ "cfg_block",
+ "chrono",
+ "crc32c",
+ "crc32fast",
+ "crossbeam-epoch",
+ "crossbeam-utils",
+ "either",
+ "fallible-iterator 0.3.0",
+ "fastbloom",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "hex",
+ "icu_collator",
+ "icu_locale",
+ "intrusive-collections",
+ "io-uring",
+ "libc",
+ "libloading",
+ "libm",
+ "loom",
+ "miette",
+ "num-bigint",
+ "num-traits",
+ "pack1",
+ "parking_lot",
+ "pastey",
+ "polling",
+ "rand 0.9.5",
+ "rapidhash",
+ "regex",
+ "regex-syntax",
+ "roaring",
+ "rustc-hash 2.1.3",
+ "rustix 1.1.5",
+ "ryu",
+ "serde_json",
+ "shuttle",
+ "simdutf8",
+ "simsimd",
+ "smallvec",
+ "strum 0.26.3",
+ "strum_macros 0.26.4",
  "tantivy",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
  "tracing-subscriber",
- "turso_ext",
- "turso_macros",
- "turso_parser",
+ "turso_ext 0.8.1",
+ "turso_macros 0.8.1",
+ "turso_parser 0.8.1",
  "twox-hash",
  "uncased",
  "uuid",
@@ -7319,7 +7426,18 @@ checksum = "e7452fe676450b6840e9eb80e512d14293265221154eba66aba3845dfc0d659f"
 dependencies = [
  "chrono",
  "getrandom 0.4.3",
- "turso_macros",
+ "turso_macros 0.7.2",
+]
+
+[[package]]
+name = "turso_ext"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3902472c63d19191d5982d28542595d1babef787a8482175422ecf7f28100261"
+dependencies = [
+ "chrono",
+ "getrandom 0.4.3",
+ "turso_macros 0.8.1",
 ]
 
 [[package]]
@@ -7327,6 +7445,17 @@ name = "turso_macros"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b2825eaa6b7b893693636947f988e252c1196393fa54d4b85637c70d616d92fa"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "turso_macros"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63bd5f0f7186707a8b4cf54bbaddff9056c218823befab15508ef6e7502c2340"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7345,7 +7474,22 @@ dependencies = [
  "strum 0.26.3",
  "strum_macros 0.26.4",
  "thiserror 2.0.21",
- "turso_macros",
+ "turso_macros 0.7.2",
+]
+
+[[package]]
+name = "turso_parser"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25b6d3428f16fff69a13bf7f966628d9fc8e0d097fec6cd84ce1af3d5a9be6b1"
+dependencies = [
+ "bitflags 2.13.2",
+ "memchr",
+ "miette",
+ "strum 0.26.3",
+ "strum_macros 0.26.4",
+ "thiserror 2.0.21",
+ "turso_macros 0.8.1",
 ]
 
 [[package]]
@@ -7360,9 +7504,26 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
- "turso_core",
- "turso_ext",
- "turso_sdk_kit_macros",
+ "turso_core 0.7.2",
+ "turso_ext 0.7.2",
+ "turso_sdk_kit_macros 0.7.2",
+]
+
+[[package]]
+name = "turso_sdk_kit"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2f96fb1bf669ebd868caf17d865cfa7dc94ad5b2e840402bb28525be09767fc"
+dependencies = [
+ "bindgen",
+ "env_logger",
+ "parking_lot",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "turso_core 0.8.1",
+ "turso_ext 0.8.1",
+ "turso_sdk_kit_macros 0.8.1",
 ]
 
 [[package]]
@@ -7370,6 +7531,17 @@ name = "turso_sdk_kit_macros"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4708b5fe678b8730c85964e3d378f75e18c23c4409971360b2209f4e53e4956"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "turso_sdk_kit_macros"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "592f57f212b0ce58c876ab760ef84b219719ee2ade738b53f180db87c0232432"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7394,8 +7566,31 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tracing",
- "turso_core",
- "turso_parser",
+ "turso_core 0.7.2",
+ "turso_parser 0.7.2",
+ "uuid",
+]
+
+[[package]]
+name = "turso_sync_engine"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ef57fe72ac7905ad0cfe1cb3f1f24ee1d671176c57a5151709ba9bbf4e1f050"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "crc32c",
+ "genawaiter",
+ "http",
+ "libc",
+ "prost",
+ "roaring",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tracing",
+ "turso_core 0.8.1",
+ "turso_parser 0.8.1",
  "uuid",
 ]
 
@@ -7412,10 +7607,29 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
- "turso_core",
- "turso_sdk_kit",
- "turso_sdk_kit_macros",
- "turso_sync_engine",
+ "turso_core 0.7.2",
+ "turso_sdk_kit 0.7.2",
+ "turso_sdk_kit_macros 0.7.2",
+ "turso_sync_engine 0.7.2",
+]
+
+[[package]]
+name = "turso_sync_sdk_kit"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b83c90ebfc04dc00d1c98cf030510b0d132ec819c355b9ed64d6b767f13db686"
+dependencies = [
+ "bindgen",
+ "env_logger",
+ "genawaiter",
+ "parking_lot",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "turso_core 0.8.1",
+ "turso_sdk_kit 0.8.1",
+ "turso_sdk_kit_macros 0.8.1",
+ "turso_sync_engine 0.8.1",
 ]
 
 [[package]]
