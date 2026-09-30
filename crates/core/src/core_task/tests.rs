@@ -2205,3 +2205,221 @@ async fn merged_shell_chunks_follow_their_tool_start() {
         "the chunk follows: {items:?}"
     );
 }
+
+/// A minimal `CoreCtx` for driving run-loop helpers directly: default
+/// config, and no active provider so a replay inside `resume_last_turn`
+/// deterministically stops at the "no active provider" guard instead of
+/// touching the network. Returns the event receiver the test can inspect.
+async fn resume_ctx(store: Store, session: Session) -> (CoreCtx, Receiver<Event>) {
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<Event>(16);
+    let (stream_done_tx, _stream_done_rx) = tokio::sync::mpsc::channel(4);
+    let (question_tx, _question_rx) = tokio::sync::mpsc::channel(8);
+    let config = shuvarie_config::Config::default();
+    let manager_turns = config.agent.effective_max_turns();
+    let worker_turns = config.agent.effective_worker_max_turns();
+    let max_output_chars = config.context.tool_output_max_chars;
+    let max_output_bytes = config.context.tool_output_max_bytes;
+    let lsp_config = crate::lsp_manager::lsp_config_from_repr(&config.lsp);
+    let shell = crate::shell::resolve(config.shell.path.as_deref()).shell;
+    let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let ctx = CoreCtx {
+        store,
+        connections: Connections::default(),
+        clients: HashMap::new(),
+        embedding_setup: None,
+        lsp: Arc::new(tokio::sync::Mutex::new(shuvarie_lsp::LspManager::new(
+            workspace_root.clone(),
+            lsp_config.enabled,
+            lsp_config.resolve(),
+        ))),
+        mcp: crate::mcp_manager::mcp_manager(&config.tools.mcp),
+        active_stream: None,
+        turn_state: None,
+        event_tx,
+        stream_done_tx,
+        question_tx,
+        access: crate::test_util::access(),
+        config,
+        trust: shuvarie_config::TrustGrants::none(),
+        workspace_root,
+        shell,
+        context_announced: false,
+        skills: crate::skills::Skills::default(),
+        session: Some(Arc::new(tokio::sync::Mutex::new(session))),
+        locked_session: None,
+        manager_turns,
+        worker_turns,
+        max_output_chars,
+        max_output_bytes,
+        steer: SteerSignal::default(),
+        scenes: shuvarie_config::Config::default().scenes,
+    };
+    (ctx, event_rx)
+}
+
+/// The persisted state a failed turn leaves behind: the user prompt with an
+/// interrupted partial reply (text streamed and a tool call executed before
+/// the connection broke) as the active tip.
+async fn failed_turn_state() -> (Store, uuid::Uuid, shuvarie_db::StoredMessage) {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let sid = store
+        .create_session("retry", None, None, None)
+        .await
+        .unwrap();
+    let prompt = store
+        .append_message(sid, None, shuvarie_llm::Role::User, "hi")
+        .await
+        .unwrap();
+    let partial = store
+        .append_assistant_message(
+            sid,
+            Some(prompt.id),
+            "partial",
+            &[],
+            &[],
+            true,
+            TokenUsage::default(),
+            0.0,
+            &TokenUsage::default(),
+            &shuvarie_db::Attribution::default(),
+        )
+        .await
+        .unwrap();
+    // The tool call never returned: it ran before the error and was cut off.
+    store
+        .append_tool_call(
+            sid,
+            partial.id,
+            0,
+            "read_file",
+            "{}",
+            "",
+            "",
+            true,
+            true,
+            None,
+            "",
+            None,
+            None,
+            0,
+        )
+        .await
+        .unwrap();
+    // `append_assistant_message` already pointed the leaf at the partial row.
+    let stored = store.load_session(sid).await.unwrap();
+    assert_eq!(stored.leaf_id, Some(partial.id));
+    (store, sid, partial)
+}
+
+#[tokio::test]
+async fn turn_retry_resume_keeps_the_interrupted_partial_branch() {
+    // A connection error mid-turn must not destroy the history after the
+    // last user prompt: the retry walks the leaf back to the prompt but the
+    // partial reply (and its tool call) stays in the tree as an off-path
+    // branch, re-windable from the session tree instead of deleted.
+    let (mut store, sid, partial) = failed_turn_state().await;
+    let session = Session::from_stored(store.load_session(sid).await.unwrap());
+    assert_eq!(session.messages.len(), 2, "path counts the partial too");
+    let (mut ctx, mut event_rx) = resume_ctx(store, session).await;
+
+    ctx.resume_last_turn().await;
+
+    let stored = ctx.store.load_session(sid).await.unwrap();
+    // The partial reply and its tool calls survive — off the path, but in
+    // the tree.
+    let kept = stored
+        .messages
+        .iter()
+        .find(|m| m.id == partial.id)
+        .expect("the partial reply row is kept");
+    assert_eq!(kept.content, "partial");
+    assert!(
+        kept.interrupted,
+        "the kept partial stays marked interrupted"
+    );
+    assert!(
+        stored
+            .tool_calls
+            .iter()
+            .any(|tc| tc.message_id == partial.id),
+        "the tool calls of the partial branch survive"
+    );
+    // The active tip is the user prompt again: the retried turn re-appends
+    // its own assistant branch under it.
+    assert_eq!(stored.leaf_id, Some(stored.messages[0].id));
+
+    // The reloaded in-memory path ends at the prompt: the retried request's
+    // history stops there, `last_assistant_interrupted` can't report the
+    // abandoned partial, and the off-path rows don't leak into tool records.
+    let guard = ctx.session.as_ref().unwrap().lock().await;
+    assert_eq!(
+        guard
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["hi"],
+        "the retried turn re-streams from the prompt"
+    );
+    assert!(!guard.last_assistant_interrupted());
+    assert_eq!(
+        guard.tool_records.len(),
+        0,
+        "off-path tool calls are skipped"
+    );
+    drop(guard);
+
+    // The TUI reloads the pane off the prompt, and the replay attempt hits
+    // the harness's no-active-provider guard (no network).
+    let first = event_rx.recv().await.expect("Forked event");
+    match first {
+        Event::Forked { session, prompt } => {
+            assert!(prompt.is_none(), "a retry resume recalls nothing");
+            assert_eq!(
+                session
+                    .messages
+                    .iter()
+                    .map(|m| m.content.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["hi"],
+            );
+        }
+        other => panic!("expected Forked first, got: {other:?}"),
+    }
+    let second = event_rx.recv().await.expect("replay guard error");
+    assert!(
+        matches!(second, Event::StreamError { ref error } if error == "no active provider"),
+        "unexpected event: {second:?}"
+    );
+}
+
+#[tokio::test]
+async fn turn_retry_resume_does_not_rewind_past_a_user_tip() {
+    // When the turn failed before producing any output (no assistant row
+    // exists), the active tip is the user prompt itself: the resume must
+    // leave it there — walking it back would drop the prompt from the path
+    // while the retry re-streams it.
+    let mut store = Store::open_in_memory().await.unwrap();
+    let sid = store
+        .create_session("retry", None, None, None)
+        .await
+        .unwrap();
+    let prompt = store
+        .append_message(sid, None, shuvarie_llm::Role::User, "hi")
+        .await
+        .unwrap();
+    let session = Session::from_stored(store.load_session(sid).await.unwrap());
+    let (mut ctx, _event_rx) = resume_ctx(store, session).await;
+
+    ctx.resume_last_turn().await;
+
+    let stored = ctx.store.load_session(sid).await.unwrap();
+    assert_eq!(
+        stored.leaf_id,
+        Some(prompt.id),
+        "the prompt stays the active tip"
+    );
+    let guard = ctx.session.as_ref().unwrap().lock().await;
+    assert_eq!(guard.messages.len(), 1, "the prompt survives the resume");
+    assert_eq!(guard.messages[0].content, "hi");
+}
