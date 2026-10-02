@@ -1,4 +1,13 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// Content bytes of attachments, keyed by lowercase sha256 hex — the same key
+/// [`Attachment`]'s `sha256` field uses. The caller assembles the set from the
+/// store's blob table (or the freshly prepared attachments of the prompt)
+/// before handing history to the provider; attachments whose key is absent
+/// (pruned blob, metadata-only import) render as content-unavailable text
+/// notes instead of multimodal parts.
+pub type Blobs = HashMap<String, Vec<u8>>;
 
 /// The media category of an attachment: images ride inside the LLM request as
 /// multimodal parts; documents are converted to markdown text before the

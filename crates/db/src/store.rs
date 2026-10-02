@@ -1401,14 +1401,21 @@ impl Store {
     /// message row exists; re-calling for the same message replaces its rows.
     /// The [`shuvarie_llm::Attachment`] metadata's `size` must match
     /// `content.len()` — the caller computes both from the same bytes.
+    /// Persist one user message's attachments (a turn or replay): upserting
+    /// each `Some` blob (missing ones keep the already-stored content) and
+    /// replacing the message's metadata rows in `seq` order. A `None` byte
+    /// set attaches metadata only — used when re-sending a stored attachment
+    /// whose blob content could not be loaded.
     pub async fn attach_message_content(
         &mut self,
         message_id: u64,
         session_id: uuid::Uuid,
-        items: &[(shuvarie_llm::Attachment, Vec<u8>)],
+        items: &[(shuvarie_llm::Attachment, Option<Vec<u8>>)],
     ) -> Result<()> {
         for (attachment, content) in items {
-            self.put_blob_once(&attachment.sha256, content).await?;
+            if let Some(content) = content {
+                self.put_blob_once(&attachment.sha256, content).await?;
+            }
         }
         MessageAttachment::filter_by_message_id(message_id)
             .delete()
@@ -1841,7 +1848,7 @@ mod tests {
                         size: content.len() as u64,
                         sha256: sha256_hex(&content),
                     },
-                    content,
+                    Some(content),
                 )],
             )
             .await
@@ -1885,7 +1892,7 @@ mod tests {
                         size: content.len() as u64,
                         sha256: sha256_hex(&content),
                     },
-                    content,
+                    Some(content),
                 )],
             )
             .await

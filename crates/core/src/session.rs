@@ -298,6 +298,18 @@ impl Session {
         self.messages.push(ChatMsg::user(content));
     }
 
+    /// `push_user` carrying attachment metadata (resolved and prepared by
+    /// the turn's resolve step before anything persists).
+    pub fn push_user_with(
+        &mut self,
+        content: impl Into<String>,
+        attachments: Vec<shuvarie_llm::Attachment>,
+    ) {
+        let mut msg = ChatMsg::user(content);
+        msg.attachments = attachments;
+        self.messages.push(msg);
+    }
+
     pub fn push_assistant(&mut self, content: impl Into<String>) {
         self.messages.push(ChatMsg::assistant(content));
     }

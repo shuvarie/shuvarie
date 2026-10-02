@@ -41,11 +41,11 @@ async fn attach_round_trips_metadata_and_content_through_reload() {
     let items = vec![
         (
             attachment(AttachmentKind::Image, "screenshot.png", &image),
-            image.clone(),
+            Some(image.clone()),
         ),
         (
             attachment(AttachmentKind::Document, "spec.pdf", &document),
-            document.clone(),
+            Some(document.clone()),
         ),
     ];
     store
@@ -83,7 +83,7 @@ async fn blobs_survive_while_any_message_still_references_them() {
     let image = b"identical bytes".to_vec();
     let item = (
         attachment(AttachmentKind::Image, "same.png", &image),
-        image.clone(),
+        Some(image.clone()),
     );
     let sha = item.0.sha256.clone();
     store
@@ -132,7 +132,10 @@ async fn attach_replaces_a_messages_previous_rows() {
         .attach_message_content(
             message.id,
             id,
-            &[(attachment(AttachmentKind::Image, "a.png", &first), first)],
+            &[(
+                attachment(AttachmentKind::Image, "a.png", &first),
+                Some(first),
+            )],
         )
         .await
         .unwrap();
@@ -140,7 +143,10 @@ async fn attach_replaces_a_messages_previous_rows() {
         .attach_message_content(
             message.id,
             id,
-            &[(attachment(AttachmentKind::Image, "b.png", &second), second)],
+            &[(
+                attachment(AttachmentKind::Image, "b.png", &second),
+                Some(second),
+            )],
         )
         .await
         .unwrap();
@@ -158,7 +164,7 @@ async fn deleting_a_branch_gcs_its_unique_blob() {
     let image = b"unique bytes".to_vec();
     let item = (
         attachment(AttachmentKind::Image, "doomed.png", &image),
-        image.clone(),
+        Some(image.clone()),
     );
     let sha = item.0.sha256.clone();
     store
@@ -189,11 +195,11 @@ async fn export_import_round_trips_attachments() {
             &[
                 (
                     attachment(AttachmentKind::Image, "photo.png", &image),
-                    image.clone(),
+                    Some(image.clone()),
                 ),
                 (
                     attachment(AttachmentKind::Document, "readme.pdf", &document),
-                    document.clone(),
+                    Some(document.clone()),
                 ),
             ],
         )

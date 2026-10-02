@@ -58,6 +58,13 @@ pub enum Command {
     /// queued behind a busy agent (steered) keeps its override.
     SendMessage {
         content: String,
+        /// The composer's `@path` attachment directives for this turn:
+        /// relative paths resolve against the workspace root (`@`-prefix
+        /// stripped), absolute paths are user intent. The core resolves them
+        /// (sniffs, bounds images, converts documents) before the turn
+        /// starts; any failure reports [`crate::Event::StreamError`] and
+        /// aborts the send without persisting anything.
+        attachments: Vec<String>,
         model: Option<String>,
     },
     /// Run a bash-mode (`!`-prefixed) command through the resolved shell.

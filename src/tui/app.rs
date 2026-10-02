@@ -926,9 +926,16 @@ impl App {
                 }
                 if let Some(effect) = effect {
                     match effect {
-                        SessionEffect::SendMessage { content, model } => {
-                            self.ctx
-                                .send(shuvarie_core::Command::SendMessage { content, model });
+                        SessionEffect::SendMessage {
+                            content,
+                            attachments,
+                            model,
+                        } => {
+                            self.ctx.send(shuvarie_core::Command::SendMessage {
+                                content,
+                                attachments,
+                                model,
+                            });
                         }
                         SessionEffect::RunBash { command } => {
                             self.ctx.send(shuvarie_core::Command::RunBash { command });

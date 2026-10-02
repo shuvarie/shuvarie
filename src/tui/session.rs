@@ -423,6 +423,7 @@ impl SessionScreen {
         match command.invocation_content(args.as_deref()) {
             Ok(content) => Some(SessionEffect::SendMessage {
                 content,
+                attachments: Vec::new(),
                 model: command.model.clone(),
             }),
             Err(error) => {
@@ -637,6 +638,7 @@ impl SessionScreen {
                                     self.sync_slash();
                                     return Some(SessionEffect::SendMessage {
                                         content: expanded,
+                                        attachments: Vec::new(),
                                         model,
                                     });
                                 }
@@ -661,6 +663,7 @@ impl SessionScreen {
                             self.sync_slash();
                             return Some(SessionEffect::SendMessage {
                                 content: expanded,
+                                attachments: Vec::new(),
                                 model: None,
                             });
                         }
@@ -1403,9 +1406,12 @@ impl SessionScreen {
 pub enum SessionEffect {
     /// Send a prompt. `model` is the per-turn streaming override
     /// (`<provider_kind>/<model>` from a custom command's frontmatter);
-    /// `None` streams on the active provider.
+    /// `None` streams on the active provider. `attachments` are the
+    /// composer's pending `@path` directives (empty until the compose UX
+    /// gains the attach strip).
     SendMessage {
         content: String,
+        attachments: Vec<String>,
         model: Option<String>,
     },
     /// Run a bash-mode (`!`-prefixed) command locally through the resolved
@@ -2487,7 +2493,7 @@ mod tests {
         assert!(effect.is_none());
         screen.input.buffer.set("/commit tidy the tests");
         match screen.update(SessionMessage::Text(TextAreaMessage::Submit)) {
-            Some(SessionEffect::SendMessage { content, model }) => {
+            Some(SessionEffect::SendMessage { content, model, .. }) => {
                 assert_eq!(content, "Commit with tidy the tests please");
                 assert_eq!(model.as_deref(), Some("openai/gpt-test"));
             }
@@ -2508,7 +2514,7 @@ mod tests {
         assert!(effect.is_none());
         screen.input.buffer.set("/commit");
         match screen.update(SessionMessage::Text(TextAreaMessage::Submit)) {
-            Some(SessionEffect::SendMessage { content, model }) => {
+            Some(SessionEffect::SendMessage { content, model, .. }) => {
                 assert_eq!(content, "Commit with  please");
                 assert_eq!(model.as_deref(), Some("openai/gpt-test"));
             }

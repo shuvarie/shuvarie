@@ -1,5 +1,6 @@
 pub mod agents;
 pub mod apply_patch;
+pub mod attachments;
 pub mod catalog;
 pub mod command;
 pub mod compaction;
