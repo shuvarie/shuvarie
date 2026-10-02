@@ -1333,7 +1333,9 @@ async fn cancel_dispatches_first_steered_prompt() {
     let mut dispatched = false;
     for _ in 0..10 {
         match event_rx.recv().await {
-            Some(Event::TurnStarted { content, steered }) => {
+            Some(Event::TurnStarted {
+                content, steered, ..
+            }) => {
                 assert!(steered, "dispatch must be flagged as steered");
                 assert_eq!(content, "second");
                 dispatched = true;
@@ -2954,17 +2956,68 @@ async fn attachments_ride_the_request_as_multimodal_parts() {
         .unwrap();
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut turn_attachments = Vec::new();
     loop {
         match tokio::time::timeout(deadline - tokio::time::Instant::now(), event_rx.recv()).await {
-            Ok(Some(ev)) => {
-                if matches!(ev, Event::StreamDone { .. }) {
-                    break;
+            Ok(Some(ev)) => match ev {
+                Event::TurnStarted {
+                    attachments,
+                    steered,
+                    ..
+                } => {
+                    assert!(!steered, "a fresh submit is not steered");
+                    turn_attachments = attachments;
                 }
-            }
+                Event::StreamDone { .. } => break,
+                other => {
+                    let _ = other;
+                }
+            },
             Ok(None) => panic!("core task ended"),
             Err(_) => panic!("timed out waiting for the turn"),
         }
     }
+    assert!(
+        turn_attachments
+            .iter()
+            .any(|a| a.kind == shuvarie_llm::AttachmentKind::Image),
+        "TurnStarted must carry the attachment metadata: {turn_attachments:?}"
+    );
+    let image_sha = turn_attachments
+        .iter()
+        .find(|a| a.kind == shuvarie_llm::AttachmentKind::Image)
+        .map(|a| a.sha256.clone())
+        .unwrap();
+
+    // Media display path: the TUI requests the blobs by hash; the reply must
+    // carry the exact persisted bytes (the tiny PNG passed the ingest
+    // unmodified), and unknown hashes degrade to `None`.
+    cmd_tx
+        .send(Command::LoadAttachmentMedia {
+            hashes: vec![image_sha.clone(), "not-in-store".into()],
+        })
+        .await
+        .unwrap();
+    let items = loop {
+        match tokio::time::timeout(deadline - tokio::time::Instant::now(), event_rx.recv()).await {
+            Ok(Some(Event::AttachmentMedia { items })) => break items,
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("core task ended"),
+            Err(_) => panic!("timed out waiting for the media reply"),
+        }
+    };
+    let fetched = items
+        .iter()
+        .find(|item| item.sha256 == image_sha)
+        .expect("the requested image hash is answered");
+    assert_eq!(fetched.bytes.as_deref(), Some(image_bytes.as_slice()));
+    assert!(
+        items
+            .iter()
+            .find(|item| item.sha256 == "not-in-store")
+            .is_some_and(|item| item.bytes.is_none()),
+        "unknown hashes answer with None"
+    );
 
     let captured = bodies.lock().expect("bodies").join("\n---body---\n");
     let expected_data = base64::engine::general_purpose::STANDARD.encode(&image_bytes);

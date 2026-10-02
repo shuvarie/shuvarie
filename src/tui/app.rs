@@ -23,6 +23,7 @@ use super::history_search::{HistorySearch, HistorySearchEffect, HistorySearchMes
 use super::model_picker::{ModelPicker, ModelPickerEffect, ModelPickerMessage};
 use super::scene;
 use super::search::SearchMessage;
+use super::session::media::MediaBytes;
 use super::session::tree::{TreeEffect, TreeMessage, TreePopup};
 use super::session::{
     BashMessage, ChatMessage, MouseKind, SessionEffect, SessionMessage, SessionScreen,
@@ -306,6 +307,9 @@ impl App {
                     cols: viewport_cols,
                 });
                 s.sidebar.update(SidebarMessage::SetWorkspace { workspace });
+                s.update(SessionMessage::Chat(ChatMessage::ImageConfig {
+                    cell_size: ui.image.cell_size,
+                }));
                 s
             },
             command_menu: CommandMenu::new(),
@@ -688,12 +692,28 @@ impl App {
                 CoreEvent::PromptSteered { content } => Some(AppMessage::Session(
                     SessionMessage::Chat(ChatMessage::SteeredQueued { content }),
                 )),
-                CoreEvent::TurnStarted { content, steered } => {
-                    Some(AppMessage::Session(SessionMessage::TurnStarted {
-                        content,
-                        steered,
-                    }))
-                }
+                CoreEvent::TurnStarted {
+                    content,
+                    attachments,
+                    steered,
+                } => Some(AppMessage::Session(SessionMessage::TurnStarted {
+                    content,
+                    attachments,
+                    steered,
+                })),
+                CoreEvent::AttachmentMedia { items } => Some(AppMessage::Session(
+                    SessionMessage::Chat(ChatMessage::MediaArrived {
+                        items: items
+                            .into_iter()
+                            .map(|item| {
+                                (
+                                    item.sha256,
+                                    item.bytes.map(|bytes| MediaBytes(bytes.into())),
+                                )
+                            })
+                            .collect(),
+                    }),
+                )),
                 CoreEvent::SteeredRecalled { stacked, content } => {
                     Some(AppMessage::Session(SessionMessage::SteeredRecalled {
                         stacked,
@@ -936,6 +956,10 @@ impl App {
                                 attachments,
                                 model,
                             });
+                        }
+                        SessionEffect::LoadMedia { hashes } => {
+                            self.ctx
+                                .send(shuvarie_core::Command::LoadAttachmentMedia { hashes });
                         }
                         SessionEffect::RunBash { command } => {
                             self.ctx.send(shuvarie_core::Command::RunBash { command });
@@ -2389,6 +2413,7 @@ mod tests {
         app.overlay = Overlay::None;
         app.session.update(SessionMessage::TurnStarted {
             content: "hi".into(),
+            attachments: Vec::new(),
             steered: false,
         });
         app.session

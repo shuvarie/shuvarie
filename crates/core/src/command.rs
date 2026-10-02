@@ -74,6 +74,13 @@ pub enum Command {
     },
     CancelStream,
     ListSessions,
+    /// Fetch attachment blob bytes for the TUI's display. The reply is one
+    /// [`crate::Event::AttachmentMedia`] event whose items carry each hash's
+    /// bytes (or `None` when the store cannot serve it). Only sent from the
+    /// TUI; the request itself is read-only.
+    LoadAttachmentMedia {
+        hashes: Vec<String>,
+    },
     LoadSession {
         id: uuid::Uuid,
     },

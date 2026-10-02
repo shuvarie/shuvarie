@@ -822,6 +822,20 @@ pub async fn run(
                                 .await;
                         }
                     },
+                    Command::LoadAttachmentMedia { hashes } => {
+                        let mut items = Vec::with_capacity(hashes.len());
+                        for hash in hashes {
+                            let bytes = ctx.store.attachment_blob(&hash).await.ok().flatten();
+                            items.push(crate::event::LoadedAttachment {
+                                sha256: hash,
+                                bytes,
+                            });
+                        }
+                        ctx.event_tx
+                            .send(Event::AttachmentMedia { items })
+                            .await
+                            .ok();
+                    }
                     Command::LoadSession { id } => {
                         if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
@@ -2231,10 +2245,18 @@ impl CoreCtx {
             }
         }
 
+        let attachments = s
+            .lock()
+            .await
+            .messages
+            .last()
+            .map(|message| message.attachments.clone())
+            .unwrap_or_default();
         let _ = self
             .event_tx
             .send(Event::TurnStarted {
                 content: content.clone(),
+                attachments,
                 steered,
             })
             .await;

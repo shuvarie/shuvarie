@@ -1393,6 +1393,7 @@ mod tests {
 
     #[test]
     fn paste_label_renders_inline_without_content() {
+        let _guard = crate::tui::theme::lock_for_tests();
         let mut b = InputBuffer::new();
         b.paste("l1\nl2\nl3");
         let lines = b.cursor_lines(

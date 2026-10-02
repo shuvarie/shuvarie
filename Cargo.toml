@@ -17,6 +17,10 @@ frameplay = "0.2"
 futures-util.workspace = true
 gix = { version = "0.87", default-features = false, features = ["sha1"] }
 nucleo = "0.5"
+image.workspace = true
+ratatui-image = { version = "11.1", default-features = false, features = [
+    "image-defaults",
+] }
 ratatui = { version = "0.30.2", default-features = false, features = [
     "all-widgets",
     "layout-cache",
@@ -74,6 +78,7 @@ base64 = "0.23"
 dirs = "7"
 futures-util = { version = "0.3", default-features = false, features = ["std", "alloc"] }
 http = "1"
+image = "0.25"
 jiff = "0.2"
 kdl = "6.7"
 regex = "1"

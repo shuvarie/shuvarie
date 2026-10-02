@@ -1051,6 +1051,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let mut block = ToolBlock::new("run_shell", r#"{"command":"ls"}"#.into(), None, None, None);
         let first = block.cached_body(80, &env);
@@ -1080,6 +1081,7 @@ mod tests {
         let env2 = ChatEnv {
             rev: 1,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let after_env = block.cached_body(80, &env2);
         assert!(
@@ -1093,6 +1095,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let mut block = ToolBlock::new("run_shell", r#"{"command":"ls"}"#.into(), None, None, None);
         let est = block.est();
@@ -1162,6 +1165,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let block = finished_edit_block();
         let width = 80u16;
@@ -1196,6 +1200,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let block = ToolBlock::new(
             "run_shell",
@@ -1214,6 +1219,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let mut block = ToolBlock::new(
             "run_shell",
@@ -1239,6 +1245,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let block = ToolBlock::from_record(&ToolRecord {
             name: "run_shell".to_string(),
@@ -1265,6 +1272,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let record = ToolRecord {
             name: "run_shell".to_string(),
@@ -1297,6 +1305,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let record = ToolRecord {
             name: "run_shell".to_string(),
@@ -1326,6 +1335,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let mut block = ToolBlock::new("grep", r#"{"pattern":"x"}"#.to_string(), None, None, None);
         assert_eq!(block.est().tool_rows, 0);
@@ -1355,6 +1365,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let mut block = ToolBlock::new(
             "explore_workspace",
@@ -1393,6 +1404,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let mut block = ToolBlock::new(
             "todo",
@@ -1426,6 +1438,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let block = ToolBlock::from_record(&ToolRecord {
             name: "todo".to_string(),
@@ -1454,6 +1467,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let mut block = ToolBlock::new(
             "todo",
@@ -1478,6 +1492,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let mut block = ToolBlock::new(
             "read_file",
@@ -1509,6 +1524,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         for (name, path) in [
             ("write_file", "gen.rs"),
@@ -1543,6 +1559,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let mut block = ToolBlock::new(
             "apply_patch",
@@ -1568,6 +1585,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let mut block = ToolBlock::new(
             "read_file",
@@ -1594,6 +1612,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let mut block = ToolBlock::new(
             "list_dir",
@@ -1621,6 +1640,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let mut block = ToolBlock::new(
             "skill",
@@ -1651,6 +1671,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let mut block = ToolBlock::new(
             "read_file",
@@ -1700,6 +1721,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let mut block = finished_block("grep", r#"{"pattern":"x"}"#, big_output(300));
         block.toggle();
@@ -1738,6 +1760,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let block = finished_block("grep", r#"{"pattern":"x"}"#, big_output(300));
         let width = 80u16;
@@ -1759,6 +1782,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let content: String = (0..200)
             .map(|i| format!("fn generated_{i}() {{}}"))
@@ -1807,6 +1831,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let mut block = ToolBlock::new(
             "delete_file",
@@ -1837,6 +1862,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let diff = (0..200)
             .map(|i| DiffLine {
@@ -1892,6 +1918,7 @@ mod tests {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
         };
         let mut block = ToolBlock::new(
             "run_shell",

@@ -14,7 +14,7 @@ unicode-normalization = "0.1"
 globset = "0.4"
 grep = "0.4"
 html-to-markdown-rs = { version = "3", default-features = false }
-image = "0.25"
+image.workspace = true
 ignore = "0.4"
 sha2.workspace = true
 miette = "7"

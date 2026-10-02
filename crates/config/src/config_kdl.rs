@@ -250,6 +250,7 @@ fn parse_ui(node: &KdlNode, input: &str) -> Result<UiPrefs> {
     let mut copy_on_select = None;
     let mut theme = None;
     let mut title = None;
+    let mut image = None;
     for child in child_nodes(node) {
         match child.name().value() {
             "frame-rate" => set_once(input, child, &mut frame_rate, scalar_u32(input, child))?,
@@ -259,6 +260,12 @@ fn parse_ui(node: &KdlNode, input: &str) -> Result<UiPrefs> {
             }
             "theme" => set_once(input, child, &mut theme, parse_theme_pref(input, child))?,
             "title" => set_once(input, child, &mut title, parse_title(child, input))?,
+            "image" => set_once(
+                input,
+                child,
+                &mut image,
+                parse_image(child, input).map(Some),
+            )?,
             _ => {}
         }
     }
@@ -274,7 +281,52 @@ fn parse_ui(node: &KdlNode, input: &str) -> Result<UiPrefs> {
     }
     prefs.theme = theme;
     prefs.title = title.unwrap_or_default();
+    prefs.image = image.unwrap_or_default();
     Ok(prefs)
+}
+
+/// `image { … }` — how the chat pane renders attached images. The optional
+/// `cell-size w h` spellings the terminal's font cell in pixels (the ratio
+/// drives halfblock row math); without it the TUI derives a size from the
+/// terminal's reported pixel dimensions, falling back to a 1:2 guess.
+fn parse_image(node: &KdlNode, input: &str) -> Result<ImagePrefs> {
+    if node.entries().iter().any(|entry| entry.name().is_none()) {
+        return Err(node_error(
+            input,
+            node,
+            "`image` takes no positional arguments",
+            None,
+        ));
+    }
+    let mut cell_size = None;
+    for child in child_nodes(node) {
+        if child.name().value() == "cell-size" {
+            set_once(input, child, &mut cell_size, cell_size_value(input, child))?;
+        }
+    }
+    Ok(ImagePrefs { cell_size })
+}
+
+fn cell_size_value(input: &str, node: &KdlNode) -> Result<Option<(u16, u16)>> {
+    let mut values = Vec::new();
+    for entry in node.entries().iter().filter(|entry| entry.name().is_none()) {
+        match entry.value() {
+            KdlValue::Integer(value) => values.push(*value),
+            _ => return Err(type_error(input, node, "two pixel sizes (width, height)")),
+        }
+    }
+    let &[width, height] = values.as_slice() else {
+        return Err(node_error(
+            input,
+            node,
+            "`cell-size` takes two values (width, height)",
+            None,
+        ));
+    };
+    match (u16::try_from(width), u16::try_from(height)) {
+        (Ok(w), Ok(h)) if w > 0 && h > 0 => Ok(Some((w, h))),
+        _ => Err(range_error(input, node)),
+    }
 }
 
 /// `title { … }` — how a new session's title is drafted. The optional
@@ -2665,7 +2717,23 @@ fn ui_node(cfg: &UiPrefs) -> Option<KdlNode> {
     if cfg.title != defaults.title {
         children.push(title_node(&cfg.title));
     }
+    if cfg.image != defaults.image {
+        children.push(image_node(&cfg.image));
+    }
     section_node("ui", children)
+}
+
+/// Builds `image { … }`; only called with a non-default config, so it always
+/// has content.
+fn image_node(cfg: &ImagePrefs) -> KdlNode {
+    let mut children = Vec::new();
+    if let Some((width, height)) = cfg.cell_size {
+        let mut node = KdlNode::new("cell-size");
+        node.push(KdlEntry::new(i128::from(width)));
+        node.push(KdlEntry::new(i128::from(height)));
+        children.push(node);
+    }
+    section_node("image", children).expect("image node always has content")
 }
 
 /// Builds `db { … }` — the session-storage settings; omitted entirely when

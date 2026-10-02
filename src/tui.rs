@@ -69,13 +69,28 @@ pub async fn run_tui(
     let theme_choices = theme_set.choices(detected);
     let event_stream = EventStream::new(reader.clone(), |_| true);
 
-    let initial_cols = term.get_dimensions()?.cols;
+    let window = term.get_dimensions()?;
+    let initial_cols = window.cols;
+    let derived_cell_size = match (window.pixel_width, window.pixel_height) {
+        (Some(pixel_width), Some(pixel_height)) => {
+            let width = pixel_width / window.cols.max(1);
+            let height = pixel_height / window.rows.max(1);
+            (width > 0 && height > 0).then_some((width, height))
+        }
+        _ => None,
+    };
     let frame_budget = frame_budget(config.ui.frame_rate);
+    let mut ui = config.ui;
+    if ui.image.cell_size.is_none()
+        && let Some(cell_size) = derived_cell_size
+    {
+        ui.image.cell_size = Some(cell_size);
+    }
     let mut rat = ratatui::Terminal::new(TerminaBackend::new(term))?;
     let connections = Connections::load().map_err(|e| io::Error::other(e.to_string()))?;
     let workspace = workspace::WorkspaceInfo::detect();
     let app = App::new(
-        config.ui,
+        ui,
         theme,
         theme_choices,
         config.registries.clone(),

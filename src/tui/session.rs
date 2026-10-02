@@ -25,6 +25,7 @@ pub mod bash;
 pub mod blocks;
 pub mod chat;
 pub mod md_cache;
+pub mod media;
 pub mod search;
 pub mod segment;
 pub mod tree;
@@ -193,11 +194,12 @@ pub enum SessionMessage {
         models: Vec<shuvarie_core::ModelUsage>,
     },
     /// A user turn started streaming in the core: either an accepted submit
-    /// or a dispatched steered prompt. Renders the user prompt and arms the
-    /// busy indicator; when `steered`, the first queued entry also leaves the
-    /// chat display.
+    /// or a dispatched steered prompt. Renders the user prompt (with its
+    /// attachments) and arms the busy indicator; when `steered`, the first
+    /// queued entry also leaves the chat display.
     TurnStarted {
         content: String,
+        attachments: Vec<shuvarie_llm::Attachment>,
         steered: bool,
     },
     /// Recall a steered prompt into the input area (Alt+Up / Alt+Shift+Up).
@@ -421,11 +423,7 @@ impl SessionScreen {
             return None;
         };
         match command.invocation_content(args.as_deref()) {
-            Ok(content) => Some(SessionEffect::SendMessage {
-                content,
-                attachments: Vec::new(),
-                model: command.model.clone(),
-            }),
+            Ok(content) => Some(send_message_effect(content, command.model.clone())),
             Err(error) => {
                 self.error = Some(format!("failed to read command {name}: {error}"));
                 None
@@ -636,11 +634,7 @@ impl SessionScreen {
                                 Ok(Some((expanded, model))) => {
                                     self.input.remember_sent(&content);
                                     self.sync_slash();
-                                    return Some(SessionEffect::SendMessage {
-                                        content: expanded,
-                                        attachments: Vec::new(),
-                                        model,
-                                    });
+                                    return Some(send_message_effect(expanded, model));
                                 }
                                 Ok(None) => {}
                                 Err(error) => {
@@ -661,11 +655,7 @@ impl SessionScreen {
                             // turn or gets steered behind a busy agent.
                             self.input.remember_sent(&content);
                             self.sync_slash();
-                            return Some(SessionEffect::SendMessage {
-                                content: expanded,
-                                attachments: Vec::new(),
-                                model: None,
-                            });
+                            return Some(send_message_effect(expanded, None));
                         }
                     }
                 }
@@ -675,7 +665,7 @@ impl SessionScreen {
             SessionMessage::Chat(msg) => {
                 self.observe_chat(&msg);
                 self.chat.update(msg);
-                None
+                self.drain_media()
             }
             SessionMessage::Mouse { kind, column, row } => self.handle_mouse(kind, column, row),
             SessionMessage::Wheel { up, column, row } => {
@@ -1013,7 +1003,11 @@ impl SessionScreen {
                 }
                 None
             }
-            SessionMessage::TurnStarted { content, steered } => {
+            SessionMessage::TurnStarted {
+                content,
+                attachments,
+                steered,
+            } => {
                 // The start of a turn re-reads the git branch, so checkouts
                 // made between turns (e.g. in another terminal) update the
                 // sidebar and the collapsed footer.
@@ -1021,13 +1015,19 @@ impl SessionScreen {
                 if steered {
                     self.chat.update(ChatMessage::SteeredDispatched);
                 }
-                self.chat.update(ChatMessage::BeginUserTurn { content });
+                let turn_message = ChatMessage::BeginUserTurn {
+                    content,
+                    attachments: attachments.clone(),
+                };
+                self.observe_chat(&turn_message);
+                self.chat.update(turn_message);
+                let media = self.drain_media();
                 self.busy_kind = BusyKind::Generating;
                 self.status = Some("Thinking...".to_string());
                 self.retry = None;
                 self.last_escape = None;
                 self.sync_slash();
-                None
+                media
             }
             SessionMessage::RecallSteered { stacked } => {
                 Some(SessionEffect::RecallSteered { stacked })
@@ -1402,7 +1402,7 @@ impl SessionScreen {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum SessionEffect {
     /// Send a prompt. `model` is the per-turn streaming override
     /// (`<provider_kind>/<model>` from a custom command's frontmatter);
@@ -1437,6 +1437,12 @@ pub enum SessionEffect {
     },
     RecallSteered {
         stacked: bool,
+    },
+    /// Fetch attachment media for the chat pane's image blocks (reply:
+    /// `Event::AttachmentMedia`). Payload-free hashes render as unloaded
+    /// chips.
+    LoadMedia {
+        hashes: Vec<String>,
     },
     /// Store `text` on the system clipboard (written as OSC 52 by the render
     /// loop).
@@ -1505,6 +1511,76 @@ fn elided_span(text: &str, max_width: usize, color: Color) -> Span<'static> {
 impl Default for SessionScreen {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl SessionScreen {
+    /// Turn the chat's pending media requests into a load effect. Empty →
+    /// `None` so update arms without media keep returning `None`.
+    fn drain_media(&mut self) -> Option<SessionEffect> {
+        let hashes = self.chat.take_media_requests();
+        (!hashes.is_empty()).then_some(SessionEffect::LoadMedia { hashes })
+    }
+}
+
+/// Extract the composer's `@path` attachment directives from a composed
+/// prompt: an `@` opening a token (line start or after whitespace) becomes an
+/// attachment path; the token stays in the prompt text so the model and the
+/// transcript keep seeing it. Heuristics keep prose mentions (like "ping
+/// @bob") from aborting sends: a directive must carry a file-suffix-looking
+/// extension after a final `.` (1-8 alphanumeric characters), and must not
+/// contain `://` (a URL, not a path). Repeated paths dedupe.
+fn at_directives(content: &str) -> Vec<String> {
+    const TRAILING_PUNCTUATION: &[char] = &['.', ',', ':', ';', '!', '?', ')', ']', '"', '\''];
+    let mut directives = Vec::new();
+    for line in content.lines() {
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0usize;
+        while i < chars.len() {
+            let boundary = i == 0 || chars[i - 1].is_whitespace();
+            if boundary && chars[i] == '@' {
+                let start = i + 1;
+                let end = chars[start..]
+                    .iter()
+                    .position(|ch| ch.is_whitespace())
+                    .map_or(chars.len(), |offset| start + offset);
+                if end > start {
+                    let mut path: String = chars[start..end].iter().collect();
+                    while path
+                        .chars()
+                        .next_back()
+                        .is_some_and(|ch| TRAILING_PUNCTUATION.contains(&ch))
+                    {
+                        path.pop();
+                    }
+                    let looks_like_path = !path.starts_with("//")
+                        && !path.contains("://")
+                        && path.rsplit_once('.').is_some_and(|(_, ext)| {
+                            !ext.is_empty()
+                                && ext.len() <= 8
+                                && ext.chars().all(|ch| ch.is_ascii_alphanumeric())
+                        });
+                    if looks_like_path && !directives.contains(&path) {
+                        directives.push(path);
+                    }
+                }
+                i = end.max(start);
+            } else {
+                i += 1;
+            }
+        }
+    }
+    directives
+}
+
+/// The literal-send effect builder: extracts `@path` directives from the
+/// composed text on the way out.
+fn send_message_effect(content: String, model: Option<String>) -> SessionEffect {
+    let attachments = at_directives(&content);
+    SessionEffect::SendMessage {
+        content,
+        attachments,
+        model,
     }
 }
 
@@ -1778,6 +1854,7 @@ mod tests {
         screen.session_title = Some("T".into());
         screen.chat.update(ChatMessage::BeginUserTurn {
             content: "first prompt".into(),
+            attachments: Vec::new(),
         });
         screen.update(todo_finish(
             "Todos (0/1 done)\n  #1 [~] refactor the parser",
@@ -1858,6 +1935,7 @@ mod tests {
         let mut screen = SessionScreen::new();
         screen.chat.update(ChatMessage::BeginUserTurn {
             content: "first prompt".into(),
+            attachments: Vec::new(),
         });
         let buf = draw(&screen, 80, 24);
         assert!(
@@ -2311,6 +2389,7 @@ mod tests {
         let mut screen = SessionScreen::new();
         screen.update(SessionMessage::TurnStarted {
             content: "hello".into(),
+            attachments: Vec::new(),
             steered: false,
         });
         assert!(screen.is_busy());
@@ -2320,12 +2399,76 @@ mod tests {
     }
 
     #[test]
+    fn turn_started_with_attachments_requests_media_and_renders_the_strip() {
+        let attachment = shuvarie_llm::Attachment {
+            kind: shuvarie_llm::AttachmentKind::Image,
+            name: "shot.png".into(),
+            media_type: "image/png".into(),
+            size: 4096,
+            sha256: "sha_turn".into(),
+        };
+        let mut screen = SessionScreen::new();
+        let effect = screen.update(SessionMessage::TurnStarted {
+            content: "what is this".into(),
+            attachments: vec![attachment],
+            steered: false,
+        });
+        assert_eq!(
+            effect,
+            Some(SessionEffect::LoadMedia {
+                hashes: vec!["sha_turn".into()]
+            }),
+            "the turn's image is requested from core"
+        );
+        let render = |screen: &SessionScreen| {
+            super::chat::tests::render_turn_lines(&screen.chat, Some(0), 60).unwrap()
+        };
+        let lines = render(&screen);
+        assert!(lines.contains("shot.png"), "the strip renders: {lines:?}");
+    }
+
+    #[test]
+    fn at_directives_extract_attachment_tokens() {
+        assert_eq!(at_directives("@plan.pdf"), vec!["plan.pdf"]);
+        assert_eq!(
+            at_directives("look at @notes.csv and @shot.png"),
+            vec!["notes.csv", "shot.png"]
+        );
+        assert_eq!(at_directives("check @plan.pdf."), vec!["plan.pdf"]);
+        assert_eq!(at_directives("@~/shots/a.webp"), vec!["~/shots/a.webp"]);
+        assert_eq!(
+            at_directives("same @a.txt twice @a.txt"),
+            vec!["a.txt"],
+            "repeated paths dedupe"
+        );
+    }
+
+    #[test]
+    fn at_directives_leave_prose_mentions_alone() {
+        assert!(
+            at_directives("ping @bob about it").is_empty(),
+            "no extension"
+        );
+        assert!(
+            at_directives("see https://x.com/a.png").is_empty(),
+            "not @-opened"
+        );
+        assert!(at_directives("@https://x.com/a.png").is_empty(), "a url");
+        assert!(at_directives("@").is_empty());
+        assert!(
+            at_directives("email me a@b").is_empty(),
+            "not at a boundary"
+        );
+    }
+
+    #[test]
     fn turn_started_steered_drops_first_queued_entry() {
         let mut screen = SessionScreen::new();
         screen.update(queued("one"));
         screen.update(queued("two"));
         screen.update(SessionMessage::TurnStarted {
             content: "one".into(),
+            attachments: Vec::new(),
             steered: true,
         });
         assert!(screen.chat.has_steered(), "one entry should remain");
@@ -2366,6 +2509,7 @@ mod tests {
         seed_git_repo(dir.path(), "turn-branch");
         screen.update(SessionMessage::TurnStarted {
             content: "hello".into(),
+            attachments: Vec::new(),
             steered: false,
         });
         assert!(
@@ -2389,6 +2533,7 @@ mod tests {
         let mut screen = SessionScreen::new();
         screen.update(SessionMessage::Chat(ChatMessage::BeginUserTurn {
             content: "running task".into(),
+            attachments: Vec::new(),
         }));
         screen.update(SessionMessage::Chat(ChatMessage::SteeredQueued {
             content: "queued prompt".into(),
@@ -2716,6 +2861,7 @@ mod tests {
         let mut screen = SessionScreen::new();
         screen.update(SessionMessage::TurnStarted {
             content: "hi".into(),
+            attachments: Vec::new(),
             steered: false,
         });
         screen.update(SessionMessage::Chat(ChatMessage::TokenReceived {
@@ -2778,6 +2924,7 @@ mod tests {
         screen.update(SessionMessage::Chat(ChatMessage::StreamDone));
         screen.update(SessionMessage::TurnStarted {
             content: "next".into(),
+            attachments: Vec::new(),
             steered: false,
         });
         screen.update(SessionMessage::Chat(ChatMessage::TokenReceived {

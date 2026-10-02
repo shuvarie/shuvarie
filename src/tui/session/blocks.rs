@@ -1,9 +1,11 @@
 mod context;
+mod media;
 mod reasoning;
 mod text;
 mod tool;
 
 pub use context::ContextBlock;
+pub use media::MediaBlock;
 pub use reasoning::{ReasoningBlock, ReasoningMessage};
 pub use text::{SteeredPrompt, SystemText, TextBlock, TextMessage, UserPrompt};
 pub use tool::{ToolBlock, ToolMessage};
@@ -13,6 +15,7 @@ use std::collections::BTreeMap;
 use ratatui::prelude::*;
 use shuvarie_core::DiagnosticInfo;
 
+use super::media::MediaStore;
 use super::segment::Segment;
 use super::virtualizer::TurnEst;
 use crate::tui::{spinner, theme};
@@ -52,6 +55,7 @@ pub enum Block {
     Tool(Box<ToolBlock>),
     Reasoning(ReasoningBlock),
     Context(ContextBlock),
+    Media(Box<MediaBlock>),
     Summary,
     Interrupted,
     Working,
@@ -73,6 +77,9 @@ pub struct ChatEnv<'a> {
     /// Revision of the environment the diagnostics come from, so blocks can
     /// key environment-dependent caches (e.g. cached tool bodies) on it.
     pub rev: u64,
+    /// The chat's received attachment media: image blocks render what has
+    /// arrived and show unloaded chips for the rest.
+    pub media: &'a MediaStore,
 }
 
 impl Block {
@@ -117,6 +124,7 @@ impl Block {
             Block::Tool(block) => block.est(),
             Block::Reasoning(block) => block.est(),
             Block::Context(block) => block.est(),
+            Block::Media(block) => block.est(),
             Block::Summary | Block::Interrupted | Block::Working | Block::ToolOnlyNote => {
                 TurnEst::deco(1)
             }
@@ -134,6 +142,7 @@ impl Block {
             Block::Tool(block) => vec![block.view(width, env)],
             Block::Reasoning(block) => block.view(width),
             Block::Context(block) => block.view(),
+            Block::Media(block) => block.view(width, env.media),
             Block::Summary => vec![Segment::plain(vec![Line::from(
                 Span::raw("◈ summary of earlier conversation")
                     .fg(theme::accent())

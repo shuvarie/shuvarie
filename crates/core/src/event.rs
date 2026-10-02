@@ -1,6 +1,6 @@
 use shuvarie_db::SessionSummary;
 use shuvarie_llm::FileChange;
-use shuvarie_llm::{Model, ShellStreams, TokenUsage};
+use shuvarie_llm::{Attachment, Model, ShellStreams, TokenUsage};
 
 use crate::question::QuestionPrompt;
 
@@ -131,9 +131,18 @@ pub enum Event {
     /// A new user turn started streaming: either an accepted `SendMessage`
     /// (`steered: false`) or a dispatched steered prompt (`steered: true`, in
     /// which case the first queued entry must leave the chat display).
+    /// `attachments` are the turn's attachment metadata (the media lives in
+    /// the blob store; the TUI requests it with `LoadAttachmentMedia`).
     TurnStarted {
         content: String,
+        attachments: Vec<Attachment>,
         steered: bool,
+    },
+    /// Reply to [`Command::LoadAttachmentMedia`]: the requested blobs. An
+    /// absent blob (`bytes: None`) means the store cannot serve it (pruned
+    /// or failed to load) — the TUI keeps its unloaded chip.
+    AttachmentMedia {
+        items: Vec<LoadedAttachment>,
     },
     /// Reply to [`Command::RecallSteered`]: the recalled prompt content, or
     /// `None` when nothing was queued.
@@ -362,4 +371,13 @@ pub enum Event {
         session_id: uuid::Uuid,
         models: Vec<crate::session::ModelUsage>,
     },
+}
+
+/// One blob of a [`Event::AttachmentMedia`] reply.
+#[derive(Debug, Clone)]
+pub struct LoadedAttachment {
+    pub sha256: String,
+    /// The blob's bytes, or `None` when the store cannot serve it (pruned by
+    /// garbage collection, or the read failed).
+    pub bytes: Option<Vec<u8>>,
 }

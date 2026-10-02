@@ -702,6 +702,7 @@ mod tests {
         ChatEnv {
             lsp_diagnostics: &DIAGS,
             rev: 0,
+            media: crate::tui::session::media::shared_test_store(),
         }
     }
 

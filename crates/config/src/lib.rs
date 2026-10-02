@@ -2413,6 +2413,9 @@ pub struct UiPrefs {
     /// How a new session's title is drafted. Defaults to deriving it from
     /// part of the first user prompt; see [`TitleConfig`].
     pub title: TitleConfig,
+
+    /// Attachment-image display prefs for the chat pane.
+    pub image: ImagePrefs,
 }
 
 impl Default for UiPrefs {
@@ -2423,8 +2426,19 @@ impl Default for UiPrefs {
             copy_on_select: false,
             theme: None,
             title: TitleConfig::default(),
+            image: ImagePrefs::default(),
         }
     }
+}
+
+/// How the chat pane renders attached images.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ImagePrefs {
+    /// The terminal's font cell size in pixels: `cell-size <width>
+    /// <height>`. Only the ratio matters (halfblock rows are derived from
+    /// it); set it when your terminal's font is far from the 1:2 default
+    /// guess, or when the terminal does not report its pixel size.
+    pub cell_size: Option<(u16, u16)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3355,6 +3369,37 @@ mod tests {
         assert!(!text.contains("sidebar"), "auto must be omitted: {text}");
         let parsed = config_kdl::from_kdl(&text).unwrap();
         assert_eq!(parsed, config);
+    }
+
+    #[test]
+    fn ui_image_cell_size_round_trips() {
+        let parsed = config_kdl::from_kdl("").unwrap();
+        assert_eq!(parsed.ui.image.cell_size, None);
+        let parsed = config_kdl::from_kdl("ui { image { cell-size 7 15 } }").unwrap();
+        assert_eq!(parsed.ui.image.cell_size, Some((7, 15)));
+
+        let mut config = Config::default();
+        config.ui.image.cell_size = Some((9, 19));
+        let text = config_kdl::to_kdl(&config).unwrap();
+        assert!(text.contains("cell-size 9 19"), "body: {text}");
+        let parsed = config_kdl::from_kdl(&text).unwrap();
+        assert_eq!(parsed, config);
+
+        assert!(
+            !config_kdl::to_kdl(&Config::default())
+                .unwrap()
+                .contains("cell-size")
+        );
+    }
+
+    #[test]
+    fn ui_image_cell_size_rejects_bad_values() {
+        assert!(config_kdl::from_kdl("ui { image { cell-size 8 } }").is_err());
+        assert!(config_kdl::from_kdl("ui { image { cell-size 0 16 } }").is_err());
+        assert!(config_kdl::from_kdl("ui { image { cell-size -8 16 } }").is_err());
+        assert!(config_kdl::from_kdl("ui { image { cell-size 70000 16 } }").is_err());
+        assert!(config_kdl::from_kdl("ui { image { cell-size 8 16.5 } }").is_err());
+        assert!(config_kdl::from_kdl("ui { image { cell-size 8 16 } image { } }").is_err());
     }
 
     #[test]
