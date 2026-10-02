@@ -398,7 +398,7 @@ impl Tool for RunShell {
 
             if let Some(reason) = &run.interrupted {
                 access.trigger_cut();
-                ctx.insert_result(ShellStreams {
+                let _ = ctx.insert_result(ShellStreams {
                     stdout: format!("interrupted: {reason}\n{}", run.out),
                     stderr: run.err,
                 });
@@ -418,7 +418,7 @@ impl Tool for RunShell {
                 message.push_str(&format!(
                     "\n\n<shell_metadata>\nshell tool terminated the command after exceeding the {timeout_secs}s timeout. If this command is expected to take longer and is not waiting for interactive input, retry with a larger timeout_secs value.\n</shell_metadata>"
                 ));
-                ctx.insert_result(ShellStreams {
+                let _ = ctx.insert_result(ShellStreams {
                     stdout: format!("timeout {timeout_secs}s:\n{}", run.out),
                     stderr: run.err,
                 });
@@ -430,7 +430,7 @@ impl Tool for RunShell {
                 Some(code) => format!("exit {code}:"),
                 None => format!("exit {status}:"),
             };
-            ctx.insert_result(ShellStreams {
+            let _ = ctx.insert_result(ShellStreams {
                 stdout: format!("{status_line}\n{}", run.out),
                 stderr: run.err,
             });

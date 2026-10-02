@@ -21,10 +21,12 @@ pub struct Connections {
 pub struct ProviderConfig {
     /// The display name of the provider (e.g. `Ollama Cloud`).
     pub name: String,
-    /// How Shuvarie connects to the API — the rig transport, i.e. a
-    /// `selune::ProviderType` in kebab-case (e.g. `openai`, `openai-compat`,
-    /// `anthropic`, `google`, `ollama`). Older configs may still carry a
-    /// Selune catalog id here; [`Self::catalog_id`] keeps those resolving.
+    /// How Shuvarie connects to the API — a transport: a `selune::ProviderType`
+    /// in kebab-case (e.g. `openai`, `openai-compat`, `anthropic`, `google`,
+    /// `ollama`), an OpenAI-compatible vendor dialect in kebab-case (e.g.
+    /// `deepseek`, `mistral` — Selune 0.4 folds those vendors under
+    /// `openai-compat` + a `dialect`), or a legacy Selune catalog id;
+    /// [`Self::catalog_id`] keeps those resolving.
     pub kind: String,
     /// The Selune catalog id this connection corresponds to (e.g.
     /// `anthropic`, `ollama-cloud`), used for metadata lookups: API-key

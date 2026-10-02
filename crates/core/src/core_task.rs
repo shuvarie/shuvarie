@@ -14,7 +14,9 @@ use crate::command::Command;
 use crate::core_task::steer::SteerSignal;
 use crate::embeddings::{self, EmbeddingSetup};
 use crate::event::Event;
-use crate::permissions::{Access, DenyCut, PermissionAnswer, PermissionGate, PermissionRequest};
+use crate::permissions::{
+    Access, AskScope, DenyCut, PermissionAnswer, PermissionGate, PermissionRequest,
+};
 use crate::question::{AnswerResponse, QuestionGate, QuestionRequest};
 use crate::session::Session;
 use crate::shell::Shell;
@@ -1450,6 +1452,7 @@ pub async fn run(
                         id,
                         description: req.description,
                         allow_session: req.scope.is_some(),
+                        allow_dir: matches!(&req.scope, Some(AskScope::Path(_))),
                     })
                     .await;
             }
@@ -2173,7 +2176,7 @@ impl CoreCtx {
     /// Build a stream for the given user content and spawn the event-forwarding
     /// task. When `push_user` is set, the content is first appended as a user
     /// message (used by `SendMessage`); otherwise it is re-sent as-is (used by
-    /// replay/resume). `model_override` is a per-turn `<provider_type>/<model>`
+    /// replay/resume). `model_override` is a per-turn `<provider_kind>/<model>`
     /// spec (a custom command's `model` frontmatter); `None` streams on the
     /// active provider.
     async fn self_replay_send(
@@ -2522,7 +2525,7 @@ impl CoreCtx {
     }
 }
 
-/// Resolve a custom command's `model` spec (`<provider_type>/<model>`) to the
+/// Resolve a custom command's `model` spec (`<provider_kind>/<model>`) to the
 /// provider connection id + model id to stream on. The provider entry comes
 /// from the `default-providers` config: the last `use` entry whose connection
 /// still exists and whose `kind` resolves to the requested type wins; with no
@@ -2538,7 +2541,7 @@ fn resolve_model_override(
             "invalid model `{spec}` (expected `<provider>/<model>`)"
         ));
     };
-    let Some(target) = crate::catalog::parse_provider_type(type_name) else {
+    let Some(target) = crate::catalog::parse_provider_kind(type_name) else {
         return Err(format!(
             "unknown provider type `{type_name}` in model `{spec}`"
         ));
@@ -2547,13 +2550,13 @@ fn resolve_model_override(
         if connections
             .providers
             .get(id)
-            .is_some_and(|provider| crate::catalog::provider_type(&provider.kind) == target)
+            .is_some_and(|provider| crate::catalog::provider_kind(&provider.kind) == target)
         {
             return Ok((id.clone(), model.to_string()));
         }
     }
     for (id, provider) in &connections.providers {
-        if crate::catalog::provider_type(&provider.kind) == target {
+        if crate::catalog::provider_kind(&provider.kind) == target {
             return Ok((id.clone(), model.to_string()));
         }
     }
@@ -3706,9 +3709,9 @@ async fn export_session(
 }
 
 fn build_client(pc: &ProviderConfig, event_tx: &Sender<Event>) -> Result<ProviderClient, String> {
-    let kind = crate::catalog::provider_type(&pc.kind);
+    let kind = crate::catalog::provider_kind(&pc.kind);
     let base_url = crate::catalog::base_url_for(&pc.kind, pc.base_url.as_deref());
-    let on_device_code = device_code_handler(kind, pc.name.clone(), event_tx);
+    let on_device_code = device_code_handler(kind.r#type, pc.name.clone(), event_tx);
     ProviderClient::build_with_device_code(
         kind,
         pc.api_key.as_deref(),

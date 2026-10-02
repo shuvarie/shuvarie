@@ -65,7 +65,7 @@ impl Tool for DeleteFile {
                 .await
                 .map_err(|e| format!("delete {path}: {e}"))?;
             let summary = format!("deleted {path}");
-            ctx.insert_result(FileChange::Delete { path, original });
+            let _ = ctx.insert_result(FileChange::Delete { path, original });
             Ok(ToolOutput::text(summary))
         }
         .await;
@@ -94,7 +94,7 @@ mod tests {
         assert!(!std::fs::exists("f.txt").unwrap());
         assert!(out.as_text().unwrap().contains("deleted f.txt"));
         assert!(matches!(
-            ctx.result::<FileChange>(),
+            ctx.result::<FileChange>().ok().flatten(),
             Some(FileChange::Delete { path, original: Some(content) })
                 if path == "f.txt" && content == "gone soon"
         ));
@@ -179,7 +179,7 @@ mod tests {
             .call(&mut ctx, json!({ "path": "f.txt" }))
             .await
             .unwrap();
-        let change = ctx.result::<FileChange>().unwrap();
+        let change = ctx.result::<FileChange>().ok().flatten().unwrap();
         assert_eq!(change.new_content(), None);
         assert_eq!(change.original_content().as_deref(), Some("original"));
         assert!(!std::fs::exists("f.txt").unwrap());

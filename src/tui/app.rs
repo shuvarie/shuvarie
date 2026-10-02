@@ -794,10 +794,12 @@ impl App {
                     id,
                     description,
                     allow_session,
+                    allow_dir,
                 } => Some(AppMessage::Session(SessionMessage::PermissionRequested {
                     id,
                     description,
                     allow_session,
+                    allow_dir,
                 })),
                 CoreEvent::LspStatus { servers } => Some(AppMessage::LspStatus { servers }),
                 CoreEvent::LspDiagnostics { path, diagnostics } => {

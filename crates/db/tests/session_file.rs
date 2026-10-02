@@ -41,18 +41,18 @@ async fn build_source_session(store: &mut Store) -> shuvarie_db::StoredSession {
             ],
             false,
             TokenUsage {
-                input_tokens: 12_000,
-                output_tokens: 300,
-                total_tokens: 12_300,
-                cached_input_tokens: 11_000,
+                input_tokens: Some(12_000),
+                output_tokens: Some(300),
+                total_tokens: Some(12_300),
+                cached_input_tokens: Some(11_000),
                 ..TokenUsage::default()
             },
             0.25,
             &TokenUsage {
-                input_tokens: 12_000,
-                output_tokens: 300,
-                total_tokens: 12_300,
-                cached_input_tokens: 11_000,
+                input_tokens: Some(12_000),
+                output_tokens: Some(300),
+                total_tokens: Some(12_300),
+                cached_input_tokens: Some(11_000),
                 ..TokenUsage::default()
             },
             &shuvarie_db::Attribution::default(),

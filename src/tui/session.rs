@@ -57,6 +57,7 @@ pub enum SessionMessage {
         id: u64,
         description: String,
         allow_session: bool,
+        allow_dir: bool,
     },
     Permission(PermissionMessage),
     /// Left-button mouse activity at a terminal cell. Routed by zone: the
@@ -849,8 +850,10 @@ impl SessionScreen {
                 id,
                 description,
                 allow_session,
+                allow_dir,
             } => {
-                self.permission.open(id, description, allow_session);
+                self.permission
+                    .open(id, description, allow_session, allow_dir);
                 self.busy_kind = BusyKind::Waiting;
                 self.status = Some("Waiting for permission...".to_string());
                 None
@@ -1399,7 +1402,7 @@ impl SessionScreen {
 #[derive(Debug)]
 pub enum SessionEffect {
     /// Send a prompt. `model` is the per-turn streaming override
-    /// (`<provider_type>/<model>` from a custom command's frontmatter);
+    /// (`<provider_kind>/<model>` from a custom command's frontmatter);
     /// `None` streams on the active provider.
     SendMessage {
         content: String,
@@ -1608,10 +1611,10 @@ mod tests {
         session.push_user("go");
         session.push_assistant("ok");
         session.last_usage = Some(TokenUsage {
-            input_tokens: 500,
-            output_tokens: 200,
-            total_tokens: 20_200,
-            cached_input_tokens: 19_400,
+            input_tokens: Some(500),
+            output_tokens: Some(200),
+            total_tokens: Some(20_200),
+            cached_input_tokens: Some(19_400),
             ..Default::default()
         });
         screen.update(SessionMessage::Loaded {
@@ -1648,7 +1651,7 @@ mod tests {
         });
         screen.update(SessionMessage::UsageUpdate {
             usage: TokenUsage {
-                total_tokens: 84_000,
+                total_tokens: Some(84_000),
                 ..Default::default()
             },
             cost: 0.0,
@@ -1679,7 +1682,7 @@ mod tests {
         });
         screen.update(SessionMessage::UsageUpdate {
             usage: TokenUsage {
-                total_tokens: 84_000,
+                total_tokens: Some(84_000),
                 ..Default::default()
             },
             cost: 0.0,
@@ -1689,10 +1692,10 @@ mod tests {
         screen.update(SessionMessage::CompactionStarted);
         let mut session = shuvarie_core::Session::new();
         session.last_usage = Some(TokenUsage {
-            input_tokens: 500,
-            output_tokens: 200,
-            total_tokens: 20_200,
-            cached_input_tokens: 19_400,
+            input_tokens: Some(500),
+            output_tokens: Some(200),
+            total_tokens: Some(20_200),
+            cached_input_tokens: Some(19_400),
             ..Default::default()
         });
         screen.update(SessionMessage::SessionCompacted { session });
@@ -2816,8 +2819,8 @@ mod tests {
         });
         screen.sidebar.update(SidebarMessage::UpdateUsage {
             usage: TokenUsage {
-                input_tokens: 10_100,
-                output_tokens: 12_300,
+                input_tokens: Some(10_100),
+                output_tokens: Some(12_300),
                 ..Default::default()
             },
             cost: 0.125,

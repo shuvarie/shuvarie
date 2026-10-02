@@ -260,11 +260,14 @@ pub enum Event {
     /// answers; the TUI shows the `description` (the action plus the matched
     /// rule) and replies with [`Command::PermissionDecide`]. `allow_session`
     /// marks asks the user can grant for the rest of the session (paths and
-    /// commands; scene confirmations are one-shot).
+    /// commands; scene confirmations are one-shot), and `allow_dir` marks
+    /// path asks the user can additionally widen to everything in the asked
+    /// file's folder for the session.
     PermissionRequested {
         id: u64,
         description: String,
         allow_session: bool,
+        allow_dir: bool,
     },
     LspStatus {
         servers: Vec<shuvarie_lsp::LspStatus>,

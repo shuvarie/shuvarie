@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,7 +17,10 @@ use crate::tool::{Tool, ToolContext, ToolExecutionError, ToolOutput};
 /// run's activity items ([`StreamItem::ToolStart`] and
 /// [`StreamItem::ToolResult`], tagged with the same id) onto the right spawn
 /// when one worker is spawned several times in a batch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// A [`ContextValue`] keyed by the type name, traveling as host-only result
+/// metadata on the [`ToolContext`], which the hooks read at tool-result time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, rig_core::ContextValue)]
 pub struct SpawnTag(pub u64);
 
 /// The process-wide spawn id counter: every worker run mints one id, unique
@@ -173,7 +177,11 @@ impl Tool for WorkerAgent {
         // metadata the main agent's hook reads at result time (so the surfaced
         // worker result carries it too).
         let spawn = next_spawn_id();
-        ctx.insert_result(SpawnTag(spawn));
+        if ctx.insert_result(SpawnTag(spawn)).is_err() {
+            return Err(ToolExecutionError::other(
+                "worker spawn could not be recorded",
+            ));
+        }
         let request = WorkerRequest {
             client: self.client.clone(),
             name: self.name.clone(),

@@ -58,10 +58,18 @@ impl ContextDisplay {
     /// footprint) leaves the anchor — and the latest-request read/cache-hit
     /// metrics — untouched.
     pub fn add_usage(&mut self, usage: &TokenUsage, cost: f64, context_tokens: Option<u64>) {
-        self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens);
-        self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
-        self.reasoning_tokens = self.reasoning_tokens.saturating_add(usage.reasoning_tokens);
-        self.cached_tokens = self.cached_tokens.saturating_add(usage.cached_input_tokens);
+        self.input_tokens = self
+            .input_tokens
+            .saturating_add(usage.input_tokens.unwrap_or(0));
+        self.output_tokens = self
+            .output_tokens
+            .saturating_add(usage.output_tokens.unwrap_or(0));
+        self.reasoning_tokens = self
+            .reasoning_tokens
+            .saturating_add(usage.reasoning_tokens.unwrap_or(0));
+        self.cached_tokens = self
+            .cached_tokens
+            .saturating_add(usage.cached_input_tokens.unwrap_or(0));
         self.cost += cost;
         if context_tokens.is_some_and(|t| t > 0) {
             self.context_tokens = context_tokens.map(|n| n.into());
@@ -70,10 +78,10 @@ impl ContextDisplay {
     }
 
     pub fn set_usage(&mut self, usage: &TokenUsage, cost: f64) {
-        self.input_tokens = usage.input_tokens.into();
-        self.output_tokens = usage.output_tokens.into();
-        self.reasoning_tokens = usage.reasoning_tokens.into();
-        self.cached_tokens = usage.cached_input_tokens.into();
+        self.input_tokens = usage.input_tokens.unwrap_or(0).into();
+        self.output_tokens = usage.output_tokens.unwrap_or(0).into();
+        self.reasoning_tokens = usage.reasoning_tokens.unwrap_or(0).into();
+        self.cached_tokens = usage.cached_input_tokens.unwrap_or(0).into();
         self.cost = cost;
     }
 
@@ -104,7 +112,7 @@ impl ContextDisplay {
         let read = shuvarie_llm::read_tokens(usage);
         self.read_tokens = (read > 0).then(|| read.into());
         self.cached_pct = match usage.cached_input_tokens {
-            cached if cached > 0 && read > 0 => {
+            Some(cached) if cached > 0 && read > 0 => {
                 Some((cached as f64 / read as f64 * 100.0).round().min(100.0) as u64)
             }
             _ => None,

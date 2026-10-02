@@ -34,13 +34,13 @@ pub fn setup(
         .clone()
         .or_else(|| connections.active.as_ref().map(|a| a.provider.clone()))?;
     let pc = connections.providers.get(&provider_name)?;
-    let kind = crate::catalog::provider_type(&pc.kind);
+    let kind = crate::catalog::provider_kind(&pc.kind);
     let client = match clients.get(&provider_name) {
         Some(c) => c.clone(),
         None => {
             let base_url = crate::catalog::base_url_for(&pc.kind, pc.base_url.as_deref());
             let on_device_code =
-                crate::core_task::device_code_handler(kind, pc.name.clone(), event_tx);
+                crate::core_task::device_code_handler(kind.r#type, pc.name.clone(), event_tx);
             let c = ProviderClient::build_with_device_code(
                 kind,
                 pc.api_key.as_deref(),
@@ -72,24 +72,26 @@ pub fn setup(
     })
 }
 
-pub fn default_model(kind: selune::ProviderType) -> String {
-    match kind {
-        selune::ProviderType::Ollama => "nomic-embed-text".to_string(),
-        selune::ProviderType::Google => "gemini-embedding-001".to_string(),
-        selune::ProviderType::Cohere => "embed-english-v4.0".to_string(),
-        selune::ProviderType::Mistral => "mistral-embed".to_string(),
-        selune::ProviderType::Voyageai => "voyage-3.5".to_string(),
-        selune::ProviderType::Llamafile => "LLaMA_CPP".to_string(),
+pub fn default_model(kind: shuvarie_llm::ProviderKind) -> String {
+    use selune::ProviderType;
+    match (kind.r#type, kind.dialect) {
+        (ProviderType::Ollama, _) => "nomic-embed-text".to_string(),
+        (ProviderType::Google, _) => "gemini-embedding-001".to_string(),
+        (ProviderType::Cohere, _) => "embed-english-v4.0".to_string(),
+        (ProviderType::OpenaiCompat, Some(selune::Dialect::Mistral)) => "mistral-embed".to_string(),
+        (ProviderType::Voyageai, _) => "voyage-3.5".to_string(),
+        (ProviderType::Llamafile, _) => "LLaMA_CPP".to_string(),
         _ => "text-embedding-3-small".to_string(),
     }
 }
 
-pub fn default_dims(kind: selune::ProviderType) -> usize {
-    match kind {
-        selune::ProviderType::Ollama => 768,
-        selune::ProviderType::Cohere => 1536,
-        selune::ProviderType::Mistral => 1024,
-        selune::ProviderType::Voyageai => 1024,
+pub fn default_dims(kind: shuvarie_llm::ProviderKind) -> usize {
+    use selune::ProviderType;
+    match (kind.r#type, kind.dialect) {
+        (ProviderType::Ollama, _) => 768,
+        (ProviderType::Cohere, _) => 1536,
+        (ProviderType::OpenaiCompat, Some(selune::Dialect::Mistral)) => 1024,
+        (ProviderType::Voyageai, _) => 1024,
         _ => 1536,
     }
 }
@@ -228,9 +230,25 @@ mod tests {
 
     #[test]
     fn defaults_per_provider() {
-        use selune::ProviderType::*;
-        assert_eq!(default_model(Ollama), "nomic-embed-text");
-        assert_eq!(default_model(OpenaiCompat), "text-embedding-3-small");
-        assert_eq!(default_dims(Ollama), 768);
+        use selune::{Dialect, ProviderType};
+        let kind = |t, d| shuvarie_llm::ProviderKind::new(t, d);
+        assert_eq!(
+            default_model(kind(ProviderType::Ollama, None)),
+            "nomic-embed-text"
+        );
+        assert_eq!(
+            default_model(kind(ProviderType::OpenaiCompat, None)),
+            "text-embedding-3-small"
+        );
+        assert_eq!(
+            default_model(kind(ProviderType::OpenaiCompat, Some(Dialect::Mistral))),
+            "mistral-embed",
+            "the Mistral vendor dialect defaults to its own embedding model"
+        );
+        assert_eq!(default_dims(kind(ProviderType::Ollama, None)), 768);
+        assert_eq!(
+            default_dims(kind(ProviderType::OpenaiCompat, Some(Dialect::Mistral))),
+            1024
+        );
     }
 }

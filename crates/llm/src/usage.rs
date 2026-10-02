@@ -11,14 +11,17 @@ pub use rig_core::completion::Usage as TokenUsage;
 /// into `input_tokens` — a conservative (over-)estimate for a pressure
 /// display.
 pub fn context_footprint(usage: &TokenUsage) -> u64 {
-    if usage.total_tokens > 0 {
-        usage.total_tokens
+    // A reported total wins; unreported (None) falls back to the component
+    // sum, treating every unreported counter as zero.
+    if let Some(total) = usage.total_tokens.filter(|&total| total > 0) {
+        total
     } else {
         usage
             .input_tokens
-            .saturating_add(usage.output_tokens)
-            .saturating_add(usage.cached_input_tokens)
-            .saturating_add(usage.cache_creation_input_tokens)
+            .unwrap_or(0)
+            .saturating_add(usage.output_tokens.unwrap_or(0))
+            .saturating_add(usage.cached_input_tokens.unwrap_or(0))
+            .saturating_add(usage.cache_creation_input_tokens.unwrap_or(0))
     }
 }
 
@@ -28,7 +31,7 @@ pub fn context_footprint(usage: &TokenUsage) -> u64 {
 /// `context_footprint` covers both, so a request's cache-hit ratio is its
 /// `cached_input_tokens` over this value.
 pub fn read_tokens(usage: &TokenUsage) -> u64 {
-    context_footprint(usage).saturating_sub(usage.output_tokens)
+    context_footprint(usage).saturating_sub(usage.output_tokens.unwrap_or(0))
 }
 
 #[cfg(test)]
@@ -38,11 +41,11 @@ mod tests {
     #[test]
     fn footprint_prefers_reported_total() {
         let usage = TokenUsage {
-            input_tokens: 1_000,
-            output_tokens: 200,
-            total_tokens: 1_500,
-            cached_input_tokens: 300,
-            cache_creation_input_tokens: 0,
+            input_tokens: Some(1_000),
+            output_tokens: Some(200),
+            total_tokens: Some(1_500),
+            cached_input_tokens: Some(300),
+            cache_creation_input_tokens: Some(0),
             ..TokenUsage::default()
         };
         assert_eq!(context_footprint(&usage), 1_500);
@@ -51,11 +54,11 @@ mod tests {
     #[test]
     fn footprint_sums_components_without_total() {
         let usage = TokenUsage {
-            input_tokens: 1_000,
-            output_tokens: 200,
-            total_tokens: 0,
-            cached_input_tokens: 300,
-            cache_creation_input_tokens: 50,
+            input_tokens: Some(1_000),
+            output_tokens: Some(200),
+            total_tokens: None,
+            cached_input_tokens: Some(300),
+            cache_creation_input_tokens: Some(50),
             ..TokenUsage::default()
         };
         assert_eq!(context_footprint(&usage), 1_550);
@@ -69,10 +72,10 @@ mod tests {
     #[test]
     fn read_tokens_excludes_the_completion() {
         let usage = TokenUsage {
-            input_tokens: 1_000,
-            output_tokens: 200,
-            total_tokens: 1_500,
-            cached_input_tokens: 300,
+            input_tokens: Some(1_000),
+            output_tokens: Some(200),
+            total_tokens: Some(1_500),
+            cached_input_tokens: Some(300),
             ..TokenUsage::default()
         };
         assert_eq!(read_tokens(&usage), 1_300);
@@ -81,10 +84,10 @@ mod tests {
     #[test]
     fn read_tokens_sums_split_cache_without_total() {
         let usage = TokenUsage {
-            input_tokens: 1_000,
-            output_tokens: 200,
-            cached_input_tokens: 300,
-            cache_creation_input_tokens: 50,
+            input_tokens: Some(1_000),
+            output_tokens: Some(200),
+            cached_input_tokens: Some(300),
+            cache_creation_input_tokens: Some(50),
             ..TokenUsage::default()
         };
         assert_eq!(read_tokens(&usage), 1_350);

@@ -23,11 +23,11 @@ pub use file_change::{
 };
 pub use message::{ChatMsg, Role};
 pub use model::Model;
-pub use provider::ProviderClient;
+pub use provider::{ProviderClient, ProviderKind};
 pub use retry::{ConnectionFailure, classify_connection_error};
 pub use stream::{StreamItem, StreamStream};
 pub use tool::{
-    DynamicTool, FileChangeHook, PortableDynamicTool, Tool, ToolContext, ToolDefinition,
-    ToolErrorKind, ToolExecutionError, ToolOutput, ToolResult, ToolSet, into_dynamic,
+    DynamicTool, FileChangeHook, Tool, ToolContext, ToolDefinition, ToolErrorKind,
+    ToolExecutionError, ToolOutput, ToolResult, ToolSet, into_dynamic,
 };
 pub use usage::{TokenUsage, context_footprint, read_tokens};
