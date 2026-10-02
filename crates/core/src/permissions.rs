@@ -117,6 +117,10 @@ pub enum PermissionAnswer {
     Allow,
     /// Allow and remember the ask's scope for the rest of the session.
     AllowSession,
+    /// Allow and widen the grant to the asked file's directory tree for
+    /// the rest of the session (path asks only; on other asks the dialog
+    /// never offers it, so a stray answer stays a one-shot allow).
+    AllowDirSession,
     /// Deny: cuts the turn like any other denial.
     Deny,
 }
@@ -133,6 +137,10 @@ pub enum AskScope {
     /// The agent-facing tool name (e.g. `fetch-json`, `mcp__server__tool`);
     /// covers every later call of that tool.
     Tool(String),
+    /// Everything under this directory — the asked file's folder and its
+    /// whole subtree (prefix match, like non-exact path rules); remembered
+    /// by an "allow all in the same folder" answer.
+    Dir(PathBuf),
 }
 
 /// Session-scoped memory behind the "allow for this session" answer: the
@@ -156,6 +164,22 @@ impl SessionGrants {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .contains(scope)
+    }
+
+    /// Whether a pending ask for `scope` is already granted: the exact
+    /// scope, or a remembered directory grant covering the ask's path (the
+    /// path being a directory itself, its folder, and every ancestor). A
+    /// directory grant only ever widens an `ask`, never a `deny` verdict.
+    fn granted(&self, scope: &AskScope) -> bool {
+        if self.contains(scope) {
+            return true;
+        }
+        match scope {
+            AskScope::Path(path) => path
+                .ancestors()
+                .any(|dir| self.contains(&AskScope::Dir(dir.to_path_buf()))),
+            _ => false,
+        }
     }
 }
 
@@ -214,8 +238,10 @@ impl PermissionGate {
     }
 
     /// Blocks until the user allows or denies. A remembered grant for
-    /// `scope` resolves without asking; an "allow for this session" answer
-    /// records `scope`. `Ok(false)` is a user denial; a closed channel or a
+    /// `scope` — the exact scope, or a directory grant covering a path
+    /// scope — resolves without asking; an "allow for this session" answer
+    /// records `scope`, and "allow all in the same folder" records the
+    /// path's directory. `Ok(false)` is a user denial; a closed channel or a
     /// dropped responder is an error (the turn is being torn down already).
     pub async fn request(
         &self,
@@ -224,7 +250,7 @@ impl PermissionGate {
     ) -> Result<bool, String> {
         if scope
             .as_ref()
-            .is_some_and(|scope| self.grants.contains(scope))
+            .is_some_and(|scope| self.grants.granted(scope))
         {
             return Ok(true);
         }
@@ -240,7 +266,16 @@ impl PermissionGate {
         let answer = rx
             .await
             .map_err(|_| "permission responder dropped".to_string())?;
-        if let (PermissionAnswer::AllowSession, Some(scope)) = (answer, scope) {
+        let remembered = match (answer, scope) {
+            (PermissionAnswer::AllowSession, Some(scope)) => Some(scope),
+            // Widen a path ask to its folder for the rest of the session;
+            // other asks cannot be widened (see [`PermissionAnswer`]).
+            (PermissionAnswer::AllowDirSession, Some(AskScope::Path(path))) => {
+                path.parent().map(|dir| AskScope::Dir(dir.to_path_buf()))
+            }
+            _ => None,
+        };
+        if let Some(scope) = remembered {
             self.grants.remember(scope);
         }
         Ok(!matches!(answer, PermissionAnswer::Deny))
@@ -1446,6 +1481,176 @@ mod tests {
         ));
         request.respond.send(PermissionAnswer::Allow).ok();
         assert!(other.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn dir_session_grant_covers_the_folder_tree() {
+        let (tx, mut rx) = mpsc::channel::<PermissionRequest>(8);
+        let gate = PermissionGate::new(tx);
+        let cut = DenyCut::default();
+        // A deny rule inside the requested folder stays binding: grants only
+        // widen `ask` verdicts.
+        let perms = std::sync::Arc::new(config_scoped(
+            Some(Verb::Allow),
+            Some(Verb::Ask),
+            vec![path_rule(Verb::Deny, "/etc/net/hosts.deny")],
+            None,
+            vec![],
+        ));
+
+        let first = {
+            let perms = perms.clone();
+            let gate = gate.clone();
+            let cut = cut.clone();
+            tokio::spawn(async move {
+                perms
+                    .authorize_path(
+                        &gate,
+                        &cut,
+                        PathKind::Read,
+                        Path::new("/etc/net/hosts"),
+                        "/etc/net/hosts",
+                        None,
+                    )
+                    .await
+            })
+        };
+        let request = rx.recv().await.unwrap();
+        assert!(matches!(
+            request.scope,
+            Some(AskScope::Path(ref path)) if path == Path::new("/etc/net/hosts")
+        ));
+        request.respond.send(PermissionAnswer::AllowDirSession).ok();
+        assert!(first.await.unwrap().is_ok());
+
+        // Siblings, deeper descendants, and the asked folder itself stop
+        // pausing, reads and writes alike.
+        perms
+            .authorize_path(
+                &gate,
+                &cut,
+                PathKind::Read,
+                Path::new("/etc/net/hosts.allow"),
+                "/etc/net/hosts.allow",
+                None,
+            )
+            .await
+            .unwrap();
+        perms
+            .authorize_path(
+                &gate,
+                &cut,
+                PathKind::Write,
+                Path::new("/etc/net/conf.d/base"),
+                "/etc/net/conf.d/base",
+                None,
+            )
+            .await
+            .unwrap();
+        perms
+            .authorize_path(
+                &gate,
+                &cut,
+                PathKind::Read,
+                Path::new("/etc/net"),
+                "/etc/net",
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "a folder grant must keep covering the folder"
+        );
+
+        // A deny rule inside the granted folder still denies.
+        let deny = {
+            let perms = perms.clone();
+            let gate = gate.clone();
+            let cut = cut.clone();
+            tokio::spawn(async move {
+                perms
+                    .authorize_path(
+                        &gate,
+                        &cut,
+                        PathKind::Read,
+                        Path::new("/etc/net/hosts.deny"),
+                        "/etc/net/hosts.deny",
+                        None,
+                    )
+                    .await
+            })
+        };
+        let err = deny.await.unwrap().unwrap_err();
+        assert!(err.contains("paths: deny"), "{err}");
+        assert!(cut.is_set(), "the denied call still cuts the turn");
+        assert!(cut.take());
+
+        // Another folder still asks.
+        let other = {
+            let perms = perms.clone();
+            let gate = gate.clone();
+            let cut = cut.clone();
+            tokio::spawn(async move {
+                perms
+                    .authorize_path(
+                        &gate,
+                        &cut,
+                        PathKind::Read,
+                        Path::new("/etc/passwd"),
+                        "/etc/passwd",
+                        None,
+                    )
+                    .await
+            })
+        };
+        let request = rx.recv().await.unwrap();
+        assert!(matches!(
+            request.scope,
+            Some(AskScope::Path(ref path)) if path == Path::new("/etc/passwd")
+        ));
+        request.respond.send(PermissionAnswer::Allow).ok();
+        assert!(other.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn dir_answer_on_non_path_asks_stays_one_shot() {
+        let (tx, mut rx) = mpsc::channel::<PermissionRequest>(8);
+        let gate = PermissionGate::new(tx);
+        let cut = DenyCut::default();
+        let perms = std::sync::Arc::new(config_scoped(
+            Some(Verb::Allow),
+            None,
+            vec![],
+            Some(Verb::Ask),
+            vec![],
+        ));
+
+        let first = {
+            let perms = perms.clone();
+            let gate = gate.clone();
+            let cut = cut.clone();
+            tokio::spawn(
+                async move { perms.authorize_shell(&gate, &cut, "cargo test", None).await },
+            )
+        };
+        let request = rx.recv().await.unwrap();
+        request.respond.send(PermissionAnswer::AllowDirSession).ok();
+        assert!(first.await.unwrap().is_ok());
+
+        // Without a path scope there is nothing to widen: the same command
+        // asks again.
+        let second = {
+            let perms = perms.clone();
+            let gate = gate.clone();
+            let cut = cut.clone();
+            tokio::spawn(
+                async move { perms.authorize_shell(&gate, &cut, "cargo test", None).await },
+            )
+        };
+        let request = rx.recv().await.unwrap();
+        request.respond.send(PermissionAnswer::Allow).ok();
+        assert!(second.await.unwrap().is_ok());
     }
 
     #[tokio::test]

@@ -57,6 +57,7 @@ pub enum SessionMessage {
         id: u64,
         description: String,
         allow_session: bool,
+        allow_dir: bool,
     },
     Permission(PermissionMessage),
     /// Left-button mouse activity at a terminal cell. Routed by zone: the
@@ -849,8 +850,10 @@ impl SessionScreen {
                 id,
                 description,
                 allow_session,
+                allow_dir,
             } => {
-                self.permission.open(id, description, allow_session);
+                self.permission
+                    .open(id, description, allow_session, allow_dir);
                 self.busy_kind = BusyKind::Waiting;
                 self.status = Some("Waiting for permission...".to_string());
                 None

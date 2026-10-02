@@ -14,7 +14,9 @@ use crate::command::Command;
 use crate::core_task::steer::SteerSignal;
 use crate::embeddings::{self, EmbeddingSetup};
 use crate::event::Event;
-use crate::permissions::{Access, DenyCut, PermissionAnswer, PermissionGate, PermissionRequest};
+use crate::permissions::{
+    Access, AskScope, DenyCut, PermissionAnswer, PermissionGate, PermissionRequest,
+};
 use crate::question::{AnswerResponse, QuestionGate, QuestionRequest};
 use crate::session::Session;
 use crate::shell::Shell;
@@ -1450,6 +1452,7 @@ pub async fn run(
                         id,
                         description: req.description,
                         allow_session: req.scope.is_some(),
+                        allow_dir: matches!(&req.scope, Some(AskScope::Path(_))),
                     })
                     .await;
             }

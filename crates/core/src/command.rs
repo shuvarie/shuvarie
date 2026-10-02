@@ -103,7 +103,8 @@ pub enum Command {
     /// The user's answer to a pending `ask` permission prompt (`id` from
     /// [`crate::Event::PermissionRequested`]). `Allow` grants one call,
     /// `AllowSession` also remembers the ask's scope for the rest of the
-    /// run, and `Deny` cuts the turn. A missing id is a no-op.
+    /// run, `AllowDirSession` remembers the path's whole directory tree
+    /// (path asks), and `Deny` cuts the turn. A missing id is a no-op.
     PermissionDecide {
         id: u64,
         decision: crate::permissions::PermissionAnswer,

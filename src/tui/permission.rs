@@ -11,6 +11,7 @@ use super::utils::text::wrap_text;
 pub enum PermissionMessage {
     Allow,
     AllowSession,
+    AllowDirSession,
     Deny,
 }
 
@@ -21,7 +22,9 @@ pub enum PermissionEffect {
 
 /// The permission prompt floating above the input while a tool call is
 /// paused on an `ask` verdict: Enter (or `y`) allows, Escape (or `n`) denies,
-/// and `s` grants the ask for the rest of the session when it is rememberable.
+/// `s` grants the ask for the rest of the session when it is rememberable,
+/// and `f` grants everything in the asked file's folder for the session when
+/// the ask is about a file path.
 pub struct PermissionUI {
     pub id: u64,
     pub open: bool,
@@ -29,6 +32,9 @@ pub struct PermissionUI {
     /// Whether the ask can be granted for the whole session (paths and
     /// commands; scene confirmations are one-shot).
     pub allow_session: bool,
+    /// Whether the ask is about a file path, so the grant can be widened to
+    /// everything in the asked file's folder for the session.
+    pub allow_dir: bool,
 }
 
 const MAX_VIEW_ROWS: usize = 10;
@@ -40,14 +46,16 @@ impl PermissionUI {
             open: false,
             description: String::new(),
             allow_session: false,
+            allow_dir: false,
         }
     }
 
-    pub fn open(&mut self, id: u64, description: String, allow_session: bool) {
+    pub fn open(&mut self, id: u64, description: String, allow_session: bool, allow_dir: bool) {
         self.id = id;
         self.open = true;
         self.description = description;
         self.allow_session = allow_session;
+        self.allow_dir = allow_dir;
     }
 
     pub fn close(&mut self) {
@@ -64,6 +72,7 @@ impl PermissionUI {
             KeyCode::Escape => Some(PermissionMessage::Deny),
             KeyCode::Char('y') | KeyCode::Char('a') => Some(PermissionMessage::Allow),
             KeyCode::Char('s') if self.allow_session => Some(PermissionMessage::AllowSession),
+            KeyCode::Char('f') if self.allow_dir => Some(PermissionMessage::AllowDirSession),
             KeyCode::Char('n') | KeyCode::Char('d') => Some(PermissionMessage::Deny),
             _ => None,
         }
@@ -87,6 +96,13 @@ impl PermissionUI {
                 Some(PermissionEffect::Decide {
                     id,
                     decision: PermissionAnswer::AllowSession,
+                })
+            }
+            PermissionMessage::AllowDirSession => {
+                self.close();
+                Some(PermissionEffect::Decide {
+                    id,
+                    decision: PermissionAnswer::AllowDirSession,
                 })
             }
             PermissionMessage::Deny => {
@@ -155,6 +171,9 @@ impl PermissionUI {
         if self.allow_session {
             help.push(("s", "this session"));
         }
+        if self.allow_dir {
+            help.push(("f", "all in folder"));
+        }
         help.push(("Esc/n", "deny"));
         lines.push(theme::help_line(&help));
         lines
@@ -168,14 +187,14 @@ mod tests {
     #[test]
     fn wraps_description_rows() {
         let mut ui = PermissionUI::new();
-        ui.open(1, "a short note".to_string(), false);
+        ui.open(1, "a short note".to_string(), false, false);
         assert_eq!(ui.build_lines(40, usize::MAX).len(), 4);
     }
 
     #[test]
     fn session_key_only_when_rememberable() {
         let mut ui = PermissionUI::new();
-        ui.open(1, "desc".to_string(), true);
+        ui.open(1, "desc".to_string(), true, false);
         assert_eq!(
             ui.map_event(&key(KeyCode::Char('s'))),
             Some(PermissionMessage::AllowSession)
@@ -187,12 +206,38 @@ mod tests {
                 decision: PermissionAnswer::AllowSession,
             })
         );
-        ui.open(2, "desc".to_string(), false);
+        ui.open(2, "desc".to_string(), false, false);
         assert_eq!(ui.map_event(&key(KeyCode::Char('s'))), None);
         assert_eq!(
             ui.map_event(&key(KeyCode::Enter)),
             Some(PermissionMessage::Allow)
         );
+    }
+
+    #[test]
+    fn folder_key_only_for_path_asks() {
+        let mut ui = PermissionUI::new();
+        ui.open(1, "desc".to_string(), true, true);
+        assert_eq!(
+            ui.map_event(&key(KeyCode::Char('f'))),
+            Some(PermissionMessage::AllowDirSession)
+        );
+        assert_eq!(
+            ui.update(PermissionMessage::AllowDirSession),
+            Some(PermissionEffect::Decide {
+                id: 1,
+                decision: PermissionAnswer::AllowDirSession,
+            })
+        );
+        // Non-path asks (commands, tools, scene confirms) hide the option.
+        ui.open(2, "desc".to_string(), true, false);
+        assert_eq!(ui.map_event(&key(KeyCode::Char('f'))), None);
+        assert_eq!(
+            ui.map_event(&key(KeyCode::Char('s'))),
+            Some(PermissionMessage::AllowSession)
+        );
+        ui.open(3, "desc".to_string(), false, false);
+        assert_eq!(ui.map_event(&key(KeyCode::Char('f'))), None);
     }
 
     fn key(code: KeyCode) -> KeyEvent {
