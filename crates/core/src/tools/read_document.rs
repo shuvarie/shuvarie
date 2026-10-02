@@ -363,11 +363,7 @@ mod tests {
                 .call(&mut new_ctx(), json!({ "path": case }))
                 .await
                 .unwrap_err();
-            assert!(
-                err.to_string().contains(case),
-                "case {case}: {}",
-                err.to_string()
-            );
+            assert!(err.to_string().contains(case), "case {case}: {err}");
         }
         drop(dir);
     }

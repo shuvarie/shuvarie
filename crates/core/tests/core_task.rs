@@ -791,12 +791,9 @@ async fn next_session_error(event_rx: &mut tokio::sync::mpsc::Receiver<Event>, e
             .await
             .expect("timed out waiting for the gen-title error")
             .expect("core task ended");
-        match ev {
-            Event::SessionError { error } => {
-                assert_eq!(error, expected, "unexpected session error");
-                return;
-            }
-            _ => {}
+        if let Event::SessionError { error } = ev {
+            assert_eq!(error, expected, "unexpected session error");
+            return;
         }
     }
 }
@@ -2198,13 +2195,15 @@ async fn the_interlude_announces_a_mid_session_switch_once() {
         .await
         .unwrap();
     settle(&mut event_rx).await;
-    let bodies = bodies.lock().unwrap();
-    let chat = chat_bodies(&bodies);
-    assert_eq!(chat.len(), 3);
-    assert!(
-        !chat[2].contains("we are in Plan mode"),
-        "the interlude is a one-shot announce, not a per-request wrap"
-    );
+    {
+        let bodies = bodies.lock().unwrap();
+        let chat = chat_bodies(&bodies);
+        assert_eq!(chat.len(), 3);
+        assert!(
+            !chat[2].contains("we are in Plan mode"),
+            "the interlude is a one-shot announce, not a per-request wrap"
+        );
+    }
 
     drop(cmd_tx);
     let _ = handle.await;
@@ -2638,7 +2637,7 @@ async fn remote_first_custom_registry_fetches_at_startup() {
         Some(1),
         "the remote-first fetch ran before the startup events"
     );
-    assert!(requests.lock().unwrap().len() >= 1, "one fetch");
+    assert!(!requests.lock().unwrap().is_empty(), "one fetch");
 
     drop(cmd_tx);
     let _ = handle.await;

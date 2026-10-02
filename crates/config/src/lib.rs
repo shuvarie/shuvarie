@@ -6839,10 +6839,9 @@ Now we're in Plan mode: plan first, no edits.
         );
         // An unknown theme still warns and falls back to Faerun.
         assert!(
-            set.resolve(Some("Tokyp"), ThemeVariant::Dark)
+            !set.resolve(Some("Tokyp"), ThemeVariant::Dark)
                 .warnings
                 .is_empty()
-                == false
         );
     }
 

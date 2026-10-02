@@ -16,6 +16,8 @@ async fn main() -> anyhow::Result<()> {
         shuvarie_db::Session,
         shuvarie_db::Message,
         shuvarie_db::MessageEmbedding,
+        shuvarie_db::MessageAttachment,
+        shuvarie_db::AttachmentBlob,
         shuvarie_db::ToolCall
     ));
     let db = builder

@@ -129,6 +129,11 @@ pub fn serialize_head(
         if !content.ends_with('\n') {
             out.push('\n');
         }
+        // Attachment notes: the transcript is text-only, so each attachment
+        // becomes a one-line marker the summary can reference by name.
+        for attachment in &m.attachments {
+            out.push_str(&format!("[attachment: {}]\n", attachment.describe()));
+        }
         if m.role == MsgRole::Assistant {
             for record in tool_records.iter().filter(|r| {
                 r.message_seq as usize == base_seq + idx || r.message_id == messages[idx].id
@@ -310,6 +315,7 @@ mod tests {
             request: TokenUsage::default(),
             model_code: None,
             scene: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -317,6 +323,39 @@ mod tests {
         let mut m = msg(MsgRole::Assistant, content);
         m.summary = true;
         m
+    }
+
+    #[test]
+    fn serialize_head_notes_attachments_after_the_content() {
+        let mut user = msg(MsgRole::User, "what's in these?");
+        user.attachments = vec![
+            shuvarie_llm::Attachment {
+                kind: shuvarie_llm::AttachmentKind::Image,
+                name: "screenshot.png".into(),
+                media_type: "image/png".into(),
+                size: 2_000,
+                sha256: "a2".repeat(32),
+            },
+            shuvarie_llm::Attachment {
+                kind: shuvarie_llm::AttachmentKind::Document,
+                name: "report.docx".into(),
+                media_type:
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document".into(),
+                size: 512,
+                sha256: "b3".repeat(32),
+            },
+        ];
+
+        let out = serialize_head(&[user], &[], 0);
+        assert!(
+            out.contains(
+                "### User\nwhat's in these?\n\
+                 [attachment: image \"screenshot.png\" (image/png, 2.0 KiB)]\n\
+                 [attachment: document \"report.docx\" \
+                 (application/vnd.openxmlformats-officedocument.wordprocessingml.document, 512 B)]\n"
+            ),
+            "notes missing: {out}"
+        );
     }
 
     fn record(name: &str, path: &str, message_seq: u64) -> ToolRecord {

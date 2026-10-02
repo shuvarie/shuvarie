@@ -211,6 +211,7 @@ async fn import_of_a_file_without_a_leaf_falls_back_to_none() {
             cost: 0.0,
             summary: false,
             request: TokenUsage::default(),
+            attachments: Vec::new(),
         }],
         tool_calls: Vec::new(),
         scroll: StoredScroll::default(),

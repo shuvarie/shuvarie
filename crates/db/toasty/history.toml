@@ -9,3 +9,8 @@ snapshot_name = "0000_snapshot.toml"
 id = 7931380858330968442
 name = "20260924_071435_message_attribution.sql"
 snapshot_name = "20260924_071435_snapshot.toml"
+
+[[migrations]]
+id = 2629918063807711886
+name = "20261002_084046_message_attachments.sql"
+snapshot_name = "20261002_084046_snapshot.toml"

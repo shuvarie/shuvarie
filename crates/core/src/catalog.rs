@@ -1480,7 +1480,7 @@ mod tests {
         let _guard = global_lock();
         reset_catalog();
         let custom = custom_registry("acme", Some("https://example.test/x.json"), None);
-        init(&config_with(&[custom.clone()]));
+        init(&config_with(std::slice::from_ref(&custom)));
         store_remote("acme", vec![test_provider("acme-entry", [])]);
         let mut changed = custom.clone();
         changed.remote_first = true;
@@ -1594,7 +1594,7 @@ mod tests {
         let first = registry_catalog("acme");
         assert_eq!(first.local.len(), 1, "the path file loads on first access");
         assert_eq!(first.local_error, None);
-        assert_eq!(first.remote_configured, false, "path-only registry");
+        assert!(!first.remote_configured, "path-only registry");
         assert_eq!(first.effective().len(), 1);
 
         std::fs::write(&path, "<html>").unwrap();

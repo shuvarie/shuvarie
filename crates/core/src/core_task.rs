@@ -3702,7 +3702,8 @@ async fn export_session(
     path: Option<&std::path::Path>,
 ) -> shuvarie_db::Result<std::path::PathBuf> {
     let stored = store.load_session(session_id).await?;
-    let file = shuvarie_db::SessionFile::from_stored(&stored);
+    let mut file = shuvarie_db::SessionFile::from_stored(&stored);
+    store.hydrate_attachment_blobs(&mut file).await?;
     let path = shuvarie_db::session_file::resolve_export_path(path, session_id);
     file.write_json(&path)?;
     Ok(path)

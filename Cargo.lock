@@ -6063,11 +6063,13 @@ name = "shuvarie-db"
 version = "0.2.2"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
  "jiff",
  "kdl",
  "selune",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "shuvarie-config",
  "shuvarie-llm",
  "tempfile",

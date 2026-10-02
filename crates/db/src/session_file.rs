@@ -14,6 +14,24 @@ use crate::store::{StoredMessage, StoredScroll, StoredSession, StoredToolCall};
 
 pub const FILE_FORMAT: u32 = 1;
 
+/// One attachment's interchange record: the metadata plus, when the exporter
+/// had the blob, the base64 content. Metadata-only (`content_base64: None`)
+/// imports attach without bytes — display falls back to the `[attachment]`
+/// placeholder. Old-format files (no `attachments` keys) import unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FileAttachment {
+    pub seq: u64,
+    pub kind: shuvarie_llm::AttachmentKind,
+    pub name: String,
+    pub media_type: String,
+    pub size: u64,
+    /// SHA-256 of the content, lowercase hex — the blob lookup key.
+    pub sha256: String,
+    /// Base64 of the blob content; `None` = metadata only.
+    #[serde(default)]
+    pub content_base64: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionFile {
     pub format: u32,
@@ -81,6 +99,10 @@ pub struct FileMessage {
     /// Usage of the turn's last main-stream request.
     #[serde(default)]
     pub request: TokenUsage,
+    /// The message's attachment metadata (+ exported blob bytes when the
+    /// exporter hydrated them), in attachment order.
+    #[serde(default)]
+    pub attachments: Vec<FileAttachment>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -194,6 +216,20 @@ impl From<&StoredMessage> for FileMessage {
             cost: m.cost,
             summary: m.summary,
             request: m.request,
+            attachments: m
+                .attachments
+                .iter()
+                .enumerate()
+                .map(|(seq, a)| FileAttachment {
+                    seq: seq as u64,
+                    kind: a.kind,
+                    name: a.name.clone(),
+                    media_type: a.media_type.clone(),
+                    size: a.size,
+                    sha256: a.sha256.clone(),
+                    content_base64: None,
+                })
+                .collect(),
         }
     }
 }

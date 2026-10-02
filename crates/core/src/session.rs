@@ -57,6 +57,9 @@ pub struct TreeNode {
     pub summary: bool,
     pub interrupted: bool,
     pub tools: Vec<TreeNodeTool>,
+    /// Attachment metadata carried by the message (images, documents); the
+    /// blob bytes load separately from the store.
+    pub attachments: Vec<shuvarie_llm::Attachment>,
     /// The node lies on the active path (the conversation currently shown).
     pub on_path: bool,
 }
@@ -133,6 +136,7 @@ impl Session {
                 summary: m.summary,
                 interrupted: m.interrupted,
                 tools: Vec::new(),
+                attachments: m.attachments.clone(),
                 on_path: false,
             })
             .collect();
@@ -229,6 +233,7 @@ impl Session {
             s.messages.push(ChatMsg {
                 role: m.role.into(),
                 content: m.content.clone(),
+                attachments: m.attachments.clone(),
             });
             let idx = idx as u64;
             if !m.reasoning.is_empty() {
@@ -423,6 +428,7 @@ mod tests {
             request: TokenUsage::default(),
             model_code: None,
             scene: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -644,6 +650,29 @@ mod tests {
         let session = Session::from_stored(stored);
         assert_eq!(session.messages.len(), 2);
         assert_eq!(session.messages[1].content, "r1");
+    }
+
+    #[test]
+    fn from_stored_maps_attachments_to_the_path_messages_and_nodes() {
+        let mut stored = stored_session(vec![stored_message(0, MsgRole::User, "see")]);
+        stored.messages[0].attachments = vec![shuvarie_llm::Attachment {
+            kind: shuvarie_llm::AttachmentKind::Image,
+            name: "photo.png".into(),
+            media_type: "image/png".into(),
+            size: 2_000,
+            sha256: "a2".repeat(32),
+        }];
+
+        let session = Session::from_stored(stored);
+        assert_eq!(session.messages[0].attachments.len(), 1);
+        assert_eq!(session.messages[0].attachments[0].name, "photo.png");
+        assert_eq!(session.nodes[0].attachments.len(), 1);
+        assert_eq!(session.nodes[0].attachments[0].sha256, "a2".repeat(32));
+        // The node's copy is independent of the message's (no shared mutation).
+        assert_ne!(
+            session.nodes[0].attachments.as_ptr(),
+            session.messages[0].attachments.as_ptr()
+        );
     }
 
     #[test]

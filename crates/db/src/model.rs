@@ -318,3 +318,96 @@ pub struct MessageEmbedding {
     pub content: String,
     pub vec: Vec<u8>,
 }
+
+/// Storage-level attachment media category (a `message_attachments.kind`
+/// column value); mirrored from [`shuvarie_llm::AttachmentKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, toasty::Embed)]
+#[column(rename_all = "snake_case")]
+pub enum StoredAttachmentKind {
+    Image,
+    Document,
+}
+
+impl From<shuvarie_llm::AttachmentKind> for StoredAttachmentKind {
+    fn from(kind: shuvarie_llm::AttachmentKind) -> Self {
+        match kind {
+            shuvarie_llm::AttachmentKind::Image => Self::Image,
+            shuvarie_llm::AttachmentKind::Document => Self::Document,
+        }
+    }
+}
+
+impl From<StoredAttachmentKind> for shuvarie_llm::AttachmentKind {
+    fn from(kind: StoredAttachmentKind) -> Self {
+        match kind {
+            StoredAttachmentKind::Image => shuvarie_llm::AttachmentKind::Image,
+            StoredAttachmentKind::Document => shuvarie_llm::AttachmentKind::Document,
+        }
+    }
+}
+
+/// One attachment's metadata, tied to the message that carries it and to the
+/// content-addressed blob (`attachment_blobs.sha256`) holding its bytes.
+/// Rows are `seq`-ordered within a message; the shared table lets the same
+/// content be attached to several messages without duplication.
+#[derive(Debug, toasty::Model)]
+pub struct MessageAttachment {
+    #[key]
+    #[auto]
+    pub id: u64,
+    #[index]
+    pub message_id: u64,
+    #[belongs_to(key = message_id, references = id)]
+    pub message: toasty::Deferred<Message>,
+    #[index]
+    pub session_id: uuid::Uuid,
+    /// Position of the attachment within its message, 0-based.
+    pub seq: u64,
+    pub kind: StoredAttachmentKind,
+    /// Display file name (a basename, not a filesystem path).
+    pub name: String,
+    /// IANA media type (`image/png`, `application/pdf`, …).
+    pub media_type: String,
+    /// Original content size in bytes.
+    pub size: u64,
+    /// SHA-256 of the content, lowercase hex — the blob lookup key.
+    pub sha256: String,
+}
+
+/// Content-addressed attachment bytes, shared by every
+/// [`MessageAttachment`] row whose `sha256` matches. Grew out of the rule
+/// "never store the same bytes twice": the row is written once per unique
+/// content and garbage-collected when no metadata row references it anymore.
+#[derive(Debug, toasty::Model)]
+pub struct AttachmentBlob {
+    #[key]
+    pub sha256: String,
+    /// Content length in bytes (`content.len()`).
+    pub size: u64,
+    /// Raw attachment bytes.
+    pub content: Vec<u8>,
+}
+
+impl From<MessageAttachment> for shuvarie_llm::Attachment {
+    fn from(a: MessageAttachment) -> Self {
+        Self {
+            kind: a.kind.into(),
+            name: a.name,
+            media_type: a.media_type,
+            size: a.size,
+            sha256: a.sha256,
+        }
+    }
+}
+
+/// SHA-256 of `content` as lowercase hex — the format of the blob address
+/// ([`AttachmentBlob::sha256`] / [`shuvarie_llm::Attachment::sha256`]).
+pub fn sha256_hex(content: &[u8]) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(content);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
