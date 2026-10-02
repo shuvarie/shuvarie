@@ -662,7 +662,7 @@ impl Tool for ApplyPatch {
                 "Success. Updated the following files:\n{}",
                 summary_lines.join("\n")
             );
-            ctx.insert_result(FileChange::Patch { files: changes });
+            let _ = ctx.insert_result(FileChange::Patch { files: changes });
             Ok(ToolOutput::text(output))
         }
         .await;
@@ -796,7 +796,7 @@ mod tests {
         );
         assert!(!std::path::Path::new("obsolete.txt").exists());
 
-        let change = ctx.result::<FileChange>().unwrap();
+        let change = ctx.result::<FileChange>().ok().flatten().unwrap();
         let FileChange::Patch { files } = change else {
             panic!("expected patch change");
         };
@@ -914,7 +914,7 @@ mod tests {
             std::fs::read_to_string("new/nested.txt").unwrap(),
             "data\nmoved\n"
         );
-        let FileChange::Patch { files } = ctx.result::<FileChange>().unwrap() else {
+        let FileChange::Patch { files } = ctx.result::<FileChange>().ok().flatten().unwrap() else {
             panic!("expected patch change");
         };
         assert_eq!(files[0].path, "old.txt");
@@ -941,7 +941,7 @@ mod tests {
             .to_string();
         assert!(err.contains("Failed to find expected lines"), "{err}");
         assert_eq!(std::fs::read_to_string("a.txt").unwrap(), "one\ntwo\n");
-        assert!(ctx.result::<FileChange>().is_none());
+        assert!(ctx.result::<FileChange>().ok().flatten().is_none());
     }
 
     #[test]

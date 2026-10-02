@@ -189,19 +189,19 @@ async fn append_and_load_messages_in_order() {
             &[],
             false,
             TokenUsage {
-                input_tokens: 10,
-                output_tokens: 20,
-                total_tokens: 30,
-                cached_input_tokens: 4,
-                reasoning_tokens: 5,
+                input_tokens: Some(10),
+                output_tokens: Some(20),
+                total_tokens: Some(30),
+                cached_input_tokens: Some(4),
+                reasoning_tokens: Some(5),
                 ..Default::default()
             },
             0.0012,
             &TokenUsage {
-                input_tokens: 12_000,
-                output_tokens: 20,
-                total_tokens: 12_020,
-                cached_input_tokens: 11_500,
+                input_tokens: Some(12_000),
+                output_tokens: Some(20),
+                total_tokens: Some(12_020),
+                cached_input_tokens: Some(11_500),
                 ..Default::default()
             },
             &shuvarie_db::Attribution::default(),
@@ -225,9 +225,9 @@ async fn append_and_load_messages_in_order() {
     assert_eq!(loaded.messages[1].cached_input_tokens, 4);
     assert_eq!(loaded.messages[1].reasoning_tokens, 5);
     assert_eq!(loaded.messages[1].cost, 0.0012);
-    assert_eq!(loaded.messages[1].request.input_tokens, 12_000);
-    assert_eq!(loaded.messages[1].request.total_tokens, 12_020);
-    assert_eq!(loaded.messages[1].request.cached_input_tokens, 11_500);
+    assert_eq!(loaded.messages[1].request.input_tokens, Some(12_000));
+    assert_eq!(loaded.messages[1].request.total_tokens, Some(12_020));
+    assert_eq!(loaded.messages[1].request.cached_input_tokens, Some(11_500));
     assert_eq!(loaded.messages[2].content, "again");
     assert_eq!(loaded.messages[2].seq, 2);
 }

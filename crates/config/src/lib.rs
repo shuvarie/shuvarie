@@ -374,7 +374,7 @@ pub struct Config {
     pub skills: SkillsConfig,
 
     /// `default-providers { … }` — per-connection-type provider preference
-    /// for `<provider_type>/<model>` overrides (see [`DefaultProvidersConfig`]).
+    /// for `<provider_kind>/<model>` overrides (see [`DefaultProvidersConfig`]).
     pub default_providers: DefaultProvidersConfig,
 
     pub context: ContextConfig,
@@ -2319,7 +2319,7 @@ pub struct SkillsConfig {
 
 /// `default-providers { use id="<provider id>" … }` — the provider connection
 /// preferred per connection type when a prompt names a model as
-/// `<provider_type>/<model>` (a custom command's `model` frontmatter). The
+/// `<provider_kind>/<model>` (a custom command's `model` frontmatter). The
 /// targeted connection type is read from the connection's own `kind` in
 /// `connections.kdl`, so an entry keeps pointing at the right type as the
 /// connection is edited. When unset (or no entry matches the type), the first

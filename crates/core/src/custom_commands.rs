@@ -11,7 +11,7 @@ const ARGUMENTS_PLACEHOLDER: &str = "{{arguments}}";
 /// A custom command: a prompt template living in
 /// `<workspace .shuvarie(-dev) dir or config_dir>/commands/<name>/command.md`.
 /// The frontmatter records `title` (display fallback: the directory name) and
-/// an optional `model` override (`<provider_type>/<model>`) the turn streams
+/// an optional `model` override (`<provider_kind>/<model>`) the turn streams
 /// on.
 #[derive(Debug, Clone)]
 pub struct CustomCommand {
@@ -19,7 +19,7 @@ pub struct CustomCommand {
     pub name: String,
     /// The frontmatter `title`, falling back to [`Self::name`].
     pub title: String,
-    /// The frontmatter `model` override: `<provider_type>/<model>`.
+    /// The frontmatter `model` override: `<provider_kind>/<model>`.
     pub model: Option<String>,
     /// The command directory (holding `command.md`).
     pub path: PathBuf,
@@ -179,7 +179,7 @@ impl CustomCommand {
     }
 }
 
-/// Split a `model` spec (`<provider_type>/<model>`) at its first `/`; the
+/// Split a `model` spec (`<provider_kind>/<model>`) at its first `/`; the
 /// model id itself may contain further slashes.
 pub fn parse_model_spec(spec: &str) -> Option<(&str, &str)> {
     let (type_name, model) = spec.split_once('/')?;

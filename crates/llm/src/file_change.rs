@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A [`ContextValue`] keyed by the type name: files tools attach the change
+/// they made as host-only result metadata, which the [`FileChangeHook`](crate::FileChangeHook)
+/// captures at tool-result time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, rig_core::ContextValue)]
 #[serde(tag = "type")]
 pub enum FileChange {
     Edit {
@@ -147,7 +150,8 @@ pub struct DiffLine {
 /// Display-only stdout/stderr split for a `run_shell` call, attached to the
 /// tool result via `ToolContext::insert_result` and captured alongside
 /// [`FileChange`] by the same hook. The model-facing output stays combined.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// A [`ContextValue`] keyed by the type name.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, rig_core::ContextValue)]
 pub struct ShellStreams {
     pub stdout: String,
     pub stderr: String,

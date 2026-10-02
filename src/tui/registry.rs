@@ -485,6 +485,7 @@ mod tests {
             api_endpoint: None,
             doc: None,
             r#type: None,
+            dialect: None,
             default_large_model_id: None,
             default_small_model_id: None,
             models: Vec::new(),

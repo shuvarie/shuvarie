@@ -1,110 +1,66 @@
 # Completions
 
-Completions are the layer beneath agents: traits and types for sending a single request to a language model and handling what comes back. Rig layers the API so you can work at whatever altitude the task needs — one-line prompting at the top, full request control at the bottom — and every layer speaks the same `Message` and response types.
+Completions are the layer beneath agents: the call to send a single request to a language model and handle what comes back. In 0.43 there are no completion *traits* — a model is a concrete `Model<Wire, Transport>` value and the response types are portable. One-line prompting lives on the **agent** (`agent.prompt(..)`); full request control is building a `CompletionRequest` and calling the model.
 
-Official docs: https://rig.rs/docs/concepts/completion · API: https://docs.rs/rig/latest/rig/completion/index.html
+Official docs: https://rig.rs/docs/concepts/completion · API: https://docs.rs/rig-core/latest/rig_core/completion/index.html (0.43: `rig-core-0.43.0/src/completion/`)
 
 ## Choosing an interface
 
 | You want… | Use |
 |-----------|-----|
-| a text answer to a one-off prompt | `Prompt` (`.prompt(...)`) |
-| a conversation that carries history | `Chat` (`.chat(prompt, &mut history)`) |
-| a typed struct instead of a string | `TypedPrompt` (`.prompt_typed(...)`) |
-| tokens as they arrive | `StreamingPrompt`/`StreamingChat` (see `streaming.md`) |
-| to configure the request before dispatch | `CompletionRequestBuilder` (via `model.completion_request(...)`) |
-| to bypass the agent loop entirely | `CompletionModel` directly (`.completion_request(...).send()`) |
+| a text answer through the agent loop | `agent.prompt("...").await` → `PromptResponse` (`rig_agent`) |
+| a conversation that carries caller-owned history | `agent.chat(prompt, &mut history)` (appends committed turns) or `.prompt(..).history(h)` + `PromptResponse.messages` |
+| a typed struct instead of a string | `agent.prompt_typed::<T>(..)` or `ExtractorBuilder` (see `structured-output.md`) |
+| tokens as they arrive | `agent.prompt(..).stream()` (see `streaming.md`) |
+| to configure and send one request yourself | `CompletionRequest::new(..)` + setters → `model.call(req)` / `model.stream(req)` |
 
-Most apps reach for an **Agent**, which implements the high-level traits *and* runs the agent loop. Drop to a bare `CompletionModel` when you need control over individual requests.
+> The 0.42 `Prompt`/`Chat`/`TypedPrompt` traits and the `CompletionModel`/`CompletionRequestBuilder` surface were removed in 0.43 together with the client traits. Agents and bare `Model`s cover both altitudes.
 
-> The `Completion` and `StreamingCompletion` high-level traits were **removed in 0.42**. Configure a single request through `CompletionModel::completion_request(prompt)` → `CompletionRequestBuilder` (a type alias for `CompletionRequestBuilder::builder(model, prompt)`), or build a `CompletionRequest` directly and call `CompletionModel::completion(req)` / `CompletionModel::stream(req)`.
-
-## High-level traits
-
-`Prompt` — one prompt in, one `String` out:
+## The model layer
 
 ```rust
-async fn prompt(&self, prompt: &str) -> Result<String, PromptError>;
-```
+use rig_core::completion::{CompletionRequest, Message};
+use rig_core::providers::openai::{self, OpenAI};
 
-`Chat` — conversation-aware; takes prior messages and **appends** the new turn (including tool calls/results) to the history you pass:
-
-```rust
-async fn chat(&self, prompt: impl Into<Message>, chat_history: &mut Vec<Message>)
-    -> Result<String, PromptError>;
-```
-
-> Do not push the user message / assistant reply yourself after `chat` — it already did. (`with_history` on `prompt` does NOT append — see `memory.md`.)
-
-`TypedPrompt` — returns deserialized structured data. Target type derives `serde::Deserialize` + `schemars::JsonSchema`:
-
-```rust
-use rig::schemars::JsonSchema;
-use serde::Deserialize;
-
-#[derive(Deserialize, JsonSchema)]
-struct SentimentAnalysis {
-    /// Sentiment score from -1.0 to 1.0
-    score: f64,
-    label: String,
-}
-
-let result: SentimentAnalysis = agent
-    .prompt_typed("Analyze: 'I love this product!'")
-    .await?;
-```
-
-For whole-job structured extraction prefer an `Extractor` (see `structured-output.md`).
-
-## Low-level control
-
-### Calling a `CompletionModel` directly
-
-`CompletionModel` is the provider interface — the trait each LLM backend implements with `completion` (and `stream`). Calling it directly is how you take full control of one request:
-
-```rust
-use rig::client::{CompletionClient, ProviderClient};
-use rig::providers::openai::Client;
-
-let client = Client::from_env()?;
-let model = client.completion_model("gpt-5.5");
+let openai = OpenAI::from_env()?;
+let model = openai.completion(openai::GPT_5_2);   // dialect's default route
 
 let response = model
-    .completion_request("What is Rust?")
-    .preamble("You are a helpful assistant.".to_string())
-    .temperature(0.7)
-    .max_tokens(1000)
-    .send()
+    .call(CompletionRequest::new("What is Rust?"))  // prompt; last message is the request
     .await?;
+println!("{:?}", response.choice);
+
+// Full control: build the request from messages directly.
+let request = CompletionRequest::new("What is Rust?")
+    .preamble("You are a helpful assistant.")
+    .temperature(0.7)
+    .max_tokens(1000);
+let response = model.call(request).await?;
+
+// One-model streaming (part events):
+let streamed = model.stream(CompletionRequest::new("Hello")).unwrap(); // Streamed<Completion>
 ```
 
-The builder also accepts `documents(...)` (context) and `tools(...)`. Call `.build()` to get a `CompletionRequest` and pass it to `CompletionModel::completion()` yourself; `.send()` is just those two steps fused.
+`CompletionRequest` fields: `model: Option<String>` (override), `chat_history: Vec<Message>` (the last message is the prompt; non-empty text required), `documents`, `tools`, `temperature`, `max_tokens`, `tool_choice`, `additional_params`, `output_schema` (structured output), `record_telemetry_content`. `CompletionRequest::new(prompt)` starts from one user message; builder-style setters (`with_*`) adjust it. The wire decodes the provider reply and folds it into a portable `CompletionResponse`.
 
-## Responses
+`CompletionResponse`:
 
 ```rust
-pub struct CompletionResponse<T> {
-    pub choice: Vec<AssistantContent>,
-    pub raw_response: T, // raw provider payload for debugging
+pub struct CompletionResponse {
+    pub choice: Vec<AssistantContent>,   // the answer content
+    pub usage: Usage,
+    pub message_id: Option<String>,      // provider assistant-message id (replayable)
+    pub response_id: Option<String>,     // provider response-scoped id
+    pub provider_request_id: Option<String>,
+    pub finish_reason: Option<FinishReason>,    // read via .finish_reason()
+    pub provider: String,                // "openai", "anthropic", ...
+    pub raw_response: Option<serde_json::Value>, // raw provider payload for debugging
 }
 ```
-
-`AssistantContent` — the things a model can answer with:
-
-```rust
-pub enum AssistantContent {
-    Text(Text),
-    ToolCall(ToolCall),     // correlation id + function name + JSON args
-    Reasoning(Reasoning),   // chain-of-thought (models that support it)
-    Image(Image),
-}
-```
-
-With an agent, tool calls are executed for you; at the bare-model layer you decide what to do with them.
 
 ## Messages
 
-In 0.42, message content is a plain `Vec<T>` — the `OneOrMany` container was removed:
+Message content is a plain `Vec<T>` (the `OneOrMany` container was removed in 0.42):
 
 ```rust
 pub enum Message {
@@ -134,60 +90,83 @@ history.push(Message::user("What is Rust?"));
 history.push(Message::assistant("A systems programming language..."));
 ```
 
-`ToolCall` and `ToolResult` carry correlation handles instead of bare string ids:
+`AssistantContent`:
+
+```rust
+pub enum AssistantContent {
+    Text(Text),
+    ToolCall(ToolCall),
+    Reasoning(rig_core::message::Sealed<Reasoning>), // sealed to its issuer (see below)
+    Image(Image),
+}
+```
+
+Reasoning blocks (`Reasoning { id, content: Vec<ReasoningContent> }` — `Text { text, signature }` / `Encrypted` / `Redacted` / `Summary`) are **sealed** — open them with `sealed.open(&issuer)` (`Issuer::accepts`; opening with the value's own `issuer()` always succeeds) and read `display_text()` / `first_text()` / `first_signature()`. Providers replay only reasoning sealed to them.
+
+## Tool calls and results (0.43 identity model)
 
 ```rust
 pub struct ToolCall {
-    pub id: ToolCallId,                        // always present (minted if the provider gave none)
-    pub provider: Option<ProviderCallId>,      // provider-issued id, if any
-    pub function: ToolFunction,                // { name, arguments: serde_json::Value }
+    pub id: CallId,            // THE id: the provider's, or one rig minted (CallId::Local)
+    pub function: ToolFunction,// { name: ToolName, arguments: serde_json::Value }
     pub signature: Option<String>,
     pub additional_params: Option<serde_json::Value>,
 }
 
 pub struct ToolResult {
-    pub call: ToolCallId,                      // echoes the answered ToolCall::id
-    pub provider: Option<ProviderCallId>,
-    pub name: String,                          // executed tool's name
+    pub call: CallId,          // echoes the answered ToolCall::id
+    pub name: ToolName,        // executed tool's name (may differ after hook repair)
     pub content: Vec<ToolResultContent>,
 }
 ```
 
-`ToolCallId`/`ProviderCallId` are `String`-like (`.as_str()`, `Display`). Correlate a result with its call via `call == answered_call.id`. Streaming additionally exposes an `internal_call_id` correlator (see `streaming.md`).
+- `CallId` is an enum `{ Provider(ProviderCallId { call_id, item_id? }), Local(LocalCallId::new() uuid) }` — minted via `CallId::from_wire("..")` / `from_dual_wire(item_id, call_id)` (OpenAI Responses' two handles). `CallId::wire()`/`Display` renders the id string on the wire; `CallId::provider()` tells whether the provider issued it.
+- `ToolName` is a non-empty newtype (`.as_str()`, `Display`, `ToolName::new(..)?`).
+- Correlate a result with its call via `result.call == call.id`, and build the reply with `call.result(content)` (sets both).
+- `ToolResultContent` is `Text(Text) | Image(Image) | Json { value }` with helpers `as_text()` / `as_json()` / `deserialize_json::<T>()`.
 
 ## Token usage
 
-Every completion response carries a `Usage`; the agent loop aggregates across turns. Read aggregated usage with `.extended_details()` on a prompt request (see `agents.md`).
+Every completion response carries a `Usage`; the agent loop aggregates across turns (`PromptResponse.usage`).
 
 ```rust
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub struct Usage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub total_tokens: u64,
-    pub cached_input_tokens: u64,
-    pub cache_creation_input_tokens: u64,
-    pub tool_use_prompt_tokens: u64,
-    pub reasoning_tokens: u64,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,          // input + output; absent unless both reported
+    pub cached_input_tokens: Option<u64>,
+    pub cache_creation_input_tokens: Option<u64>,
+    pub tool_use_prompt_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
 }
 ```
 
-Zero-valued usage means the provider didn't report metrics. (The `GetTokenUsage` trait was removed in 0.42 — providers now surface usage directly on `Usage`.)
+A counter the provider did not send is `None`; a reported zero is `Some(0)`. `Usage::is_reported()` says whether the provider sent anything. `Add`/`AddAssign` sum per counter, treating an unreported side as zero but never "un-reporting" a reported one.
 
 ## Errors
 
 ```rust
-pub enum CompletionError {
-    HttpError(reqwest::Error),
-    JsonError(serde_json::Error),
-    UrlError(url::ParseError),
-    RequestError(Box<dyn Error>),
-    ResponseError(String),
-    ProviderError(String),
+pub enum ProviderError {
+    Http(Arc<http_client::Error>),     // transport failure, no reply
+    Json(Arc<serde_json::Error>),
+    Url(url::ParseError),
+    Request(SharedError),              // request could not be built
+    Response(String),
+    Provider(String),                  // provider reported failure, reply not preserved
+    ProviderResponse(ProviderResponseError), // preserved reply (status, body, headers, request id)
+    InvalidAuthentication(ProviderResponseError), // 401/403
+    CacheExpired { name, response },
+    MismatchedDimensions { provider, requested, returned },
+    MalformedToolInput(..),
+    Relayed(Box<ErrorReport>),         // a relayed report (bus/handler/hook)
+    Truncated,                         // reply ended before the provider ended it
+    DuplicateCallId(CallId),
 }
 ```
 
-Typed-output paths add `StructuredOutputError` wrapping `PromptError` (which carries `CompletionError`, `MaxTurnsError`, `PromptCancelled`, `UnknownToolCall`, or a tool failure) or a deserialization failure. See https://rig.rs/docs/concepts/error_handling for transient-vs-fatal handling and retry.
+Classification helpers: `error.kind() → ErrorKind`, `error.is_retryable()` (transport status/`is_retryable` policy; `Truncated` is retryable), and `ErrorReport` (a serde-able error with `kind`, `retryable`, `message`, `code`, `http_status`) crossing boundaries. Runtime prompt failures wrap into `rig_agent::completion::PromptError` (`CompletionError(ProviderError)`, `Report(ErrorReport)`, `MemoryError`, `MaxTurnsError`, `PromptCancelled`, `UnknownToolCall`); typed-output paths add `StructuredOutputError`. See https://rig.rs/docs/concepts/error_handling for transient-vs-fatal handling and retry.
 
 ## Project boundary (shuvarie)
 
-`shuvarie-llm` should expose its own async completion/streaming API and map `CompletionError`/`PromptError` into `LlmError::Provider`/`LlmError::Model` (thiserror). The root binary never imports `rig::completion::*` directly.
+`shuvarie-llm` exposes its own async completion/streaming API and maps `ProviderError`/`PromptError` into `LlmError::Provider`/`LlmError::Model` (thiserror). The root binary never imports `rig_core`'s completion types directly; the mapping (`classify_connection_error`, `is_context_length_error`) lives in `crates/llm/src/retry.rs`.

@@ -253,6 +253,7 @@ mod tests {
     use crate::scenes::CRITIC_PRELUDE;
     use shuvarie_config::SceneConfig;
     use shuvarie_config::ScenesConfig;
+    use shuvarie_llm::ProviderKind;
 
     fn scene(name: &str, config: SceneConfig) -> Scene {
         let mut scenes = ScenesConfig::default();
@@ -263,7 +264,12 @@ mod tests {
     fn build(scene: &Scene) -> WorkerSet {
         let (tx, _rx) = tokio::sync::mpsc::channel::<crate::tools::ShellChunk>(4);
         build_workers(
-            ProviderClient::build(selune::ProviderType::Ollama, None, None).unwrap(),
+            ProviderClient::build(
+                ProviderKind::new(selune::ProviderType::Ollama, None),
+                None,
+                None,
+            )
+            .unwrap(),
             "test-model",
             std::sync::Arc::new(tokio::sync::Mutex::new(shuvarie_lsp::LspManager::new(
                 std::path::PathBuf::from("."),

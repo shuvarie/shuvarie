@@ -51,7 +51,7 @@ pub enum Command {
     SaveConfig,
     NewSession,
     /// Start a user turn. `model` optionally overrides the streaming target
-    /// for this turn only: a `<provider_type>/<model>` spec resolved to a
+    /// for this turn only: a `<provider_kind>/<model>` spec resolved to a
     /// provider connection through the `default-providers` config (see
     /// `resolve_model_override`); `None` streams on the active provider.
     /// An unresolvable spec reports [`crate::Event::StreamError`]. A prompt

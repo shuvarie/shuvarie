@@ -3,6 +3,7 @@ use crate::core_task::steer::SteerSignal;
 use super::*;
 use futures_util::StreamExt as _;
 use selune::ProviderType;
+use shuvarie_llm::ProviderKind;
 use shuvarie_llm::StreamItem;
 use shuvarie_llm::TokenUsage;
 
@@ -207,7 +208,8 @@ fn next_connection_retry_caps_at_max() {
 
 #[tokio::test]
 async fn stream_events_forward_and_accumulate_usage() {
-    let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
+    let client =
+        ProviderClient::build(ProviderKind::new(ProviderType::Ollama, None), None, None).unwrap();
     let session = Arc::new(Mutex::new(Session::new()));
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(16);
 
@@ -217,9 +219,9 @@ async fn stream_events_forward_and_accumulate_usage() {
         },
         StreamItem::Usage {
             usage: TokenUsage {
-                input_tokens: 10,
-                output_tokens: 20,
-                total_tokens: 30,
+                input_tokens: Some(10),
+                output_tokens: Some(20),
+                total_tokens: Some(30),
                 ..TokenUsage::default()
             },
             worker: None,
@@ -230,9 +232,9 @@ async fn stream_events_forward_and_accumulate_usage() {
         StreamItem::Done {
             text: "hello world".into(),
             usage: TokenUsage {
-                input_tokens: 10,
-                output_tokens: 20,
-                total_tokens: 30,
+                input_tokens: Some(10),
+                output_tokens: Some(20),
+                total_tokens: Some(30),
                 ..TokenUsage::default()
             },
         },
@@ -273,7 +275,11 @@ async fn stream_events_forward_and_accumulate_usage() {
             Some(Event::TokenReceived { content }) => deltas.push_str(&content),
             Some(Event::StreamDone { .. }) => saw_done = true,
             Some(Event::UsageUpdate { usage, .. }) => {
-                assert_eq!(usage.total_tokens, 30, "per-request usage passes through");
+                assert_eq!(
+                    usage.total_tokens,
+                    Some(30),
+                    "per-request usage passes through"
+                );
                 saw_live_usage = true;
             }
             Some(Event::UsageSnapshot { usage, cost }) => {
@@ -292,9 +298,13 @@ async fn stream_events_forward_and_accumulate_usage() {
         "live usage and snapshot both emitted"
     );
     let (snapshot_usage, snapshot_cost) = snapshot.expect("UsageSnapshot after the turn");
-    assert_eq!(snapshot_usage.total_tokens, 30, "snapshot is session-total");
-    assert_eq!(snapshot_usage.input_tokens, 10);
-    assert_eq!(snapshot_usage.output_tokens, 20);
+    assert_eq!(
+        snapshot_usage.total_tokens,
+        Some(30),
+        "snapshot is session-total"
+    );
+    assert_eq!(snapshot_usage.input_tokens, Some(10));
+    assert_eq!(snapshot_usage.output_tokens, Some(20));
     assert_eq!(snapshot_cost, 0.0, "no catalog provider, zero cost");
     let guard = session.lock().await;
     assert_eq!(guard.messages.len(), 1);
@@ -306,7 +316,8 @@ async fn stream_events_forward_and_accumulate_usage() {
 
 #[tokio::test]
 async fn committed_turn_records_model_use_and_broadcasts() {
-    let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
+    let client =
+        ProviderClient::build(ProviderKind::new(ProviderType::Ollama, None), None, None).unwrap();
     let session = Arc::new(Mutex::new(Session::new()));
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(16);
 
@@ -380,7 +391,8 @@ async fn committed_turn_records_model_use_and_broadcasts() {
 
 #[tokio::test]
 async fn stream_error_schedules_turn_retry_and_leaves_session_clean() {
-    let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
+    let client =
+        ProviderClient::build(ProviderKind::new(ProviderType::Ollama, None), None, None).unwrap();
     let session = Arc::new(Mutex::new(Session::new()));
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(16);
 
@@ -448,16 +460,17 @@ async fn stream_done_waits_for_queued_worker_items_to_drain() {
     // first): a worker's `ToolResult` queued behind an immediately-ready
     // main stream must still be delivered before `Event::StreamDone`, so
     // the TUI finishes every tool block before committing the turn.
-    let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
+    let client =
+        ProviderClient::build(ProviderKind::new(ProviderType::Ollama, None), None, None).unwrap();
     let session = Arc::new(Mutex::new(Session::new()));
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(16);
 
     let done = StreamItem::Done {
         text: "final".into(),
         usage: TokenUsage {
-            input_tokens: 10,
-            output_tokens: 20,
-            total_tokens: 30,
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+            total_tokens: Some(30),
             ..TokenUsage::default()
         },
     };
@@ -473,9 +486,9 @@ async fn stream_done_waits_for_queued_worker_items_to_drain() {
     };
     let worker_request_usage = StreamItem::Usage {
         usage: TokenUsage {
-            input_tokens: 5,
-            output_tokens: 7,
-            total_tokens: 12,
+            input_tokens: Some(5),
+            output_tokens: Some(7),
+            total_tokens: Some(12),
             ..TokenUsage::default()
         },
         worker: Some("explore_workspace".into()),
@@ -498,9 +511,9 @@ async fn stream_done_waits_for_queued_worker_items_to_drain() {
     let session_shared = session.clone();
     let store = Store::open_in_memory().await.unwrap();
     let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage {
-        input_tokens: 5,
-        output_tokens: 7,
-        total_tokens: 12,
+        input_tokens: Some(5),
+        output_tokens: Some(7),
+        total_tokens: Some(12),
         ..TokenUsage::default()
     }));
     let turn_state = Arc::new(Mutex::new(TurnState::default()));
@@ -539,13 +552,18 @@ async fn stream_done_waits_for_queued_worker_items_to_drain() {
             Some(Event::StreamDone { .. }) => done_seen = true,
             Some(Event::UsageUpdate { usage, .. }) => {
                 assert_eq!(
-                    usage.total_tokens, 12,
+                    usage.total_tokens,
+                    Some(12),
                     "worker request usage passes through"
                 );
                 saw_live_usage = true;
             }
             Some(Event::UsageSnapshot { usage, .. }) => {
-                assert_eq!(usage.input_tokens, 15, "snapshot combines manager + worker");
+                assert_eq!(
+                    usage.input_tokens,
+                    Some(15),
+                    "snapshot combines manager + worker"
+                );
                 saw_snapshot = true;
             }
             Some(_) => {}
@@ -563,7 +581,8 @@ async fn stream_done_waits_for_queued_worker_items_to_drain() {
 
 #[tokio::test]
 async fn worker_events_forward_and_usage_accumulates() {
-    let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
+    let client =
+        ProviderClient::build(ProviderKind::new(ProviderType::Ollama, None), None, None).unwrap();
     let session = Arc::new(Mutex::new(Session::new()));
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(16);
 
@@ -599,9 +618,9 @@ async fn worker_events_forward_and_usage_accumulates() {
         },
         StreamItem::Usage {
             usage: TokenUsage {
-                input_tokens: 10,
-                output_tokens: 20,
-                total_tokens: 30,
+                input_tokens: Some(10),
+                output_tokens: Some(20),
+                total_tokens: Some(30),
                 ..TokenUsage::default()
             },
             worker: None,
@@ -609,9 +628,9 @@ async fn worker_events_forward_and_usage_accumulates() {
         StreamItem::Done {
             text: "done".into(),
             usage: TokenUsage {
-                input_tokens: 10,
-                output_tokens: 20,
-                total_tokens: 30,
+                input_tokens: Some(10),
+                output_tokens: Some(20),
+                total_tokens: Some(30),
                 ..TokenUsage::default()
             },
         },
@@ -620,9 +639,9 @@ async fn worker_events_forward_and_usage_accumulates() {
     let session_shared = session.clone();
     let store = Store::open_in_memory().await.unwrap();
     let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage {
-        input_tokens: 5,
-        output_tokens: 7,
-        total_tokens: 12,
+        input_tokens: Some(5),
+        output_tokens: Some(7),
+        total_tokens: Some(12),
         ..TokenUsage::default()
     }));
     let turn_state = Arc::new(Mutex::new(TurnState::default()));
@@ -672,7 +691,8 @@ async fn worker_events_forward_and_usage_accumulates() {
                 ..
             }) => {
                 assert_eq!(
-                    usage.total_tokens, 30,
+                    usage.total_tokens,
+                    Some(30),
                     "manager request usage passes through"
                 );
                 assert_eq!(
@@ -683,9 +703,9 @@ async fn worker_events_forward_and_usage_accumulates() {
                 saw_live_usage = true;
             }
             Some(Event::UsageSnapshot { usage, .. }) => {
-                assert_eq!(usage.input_tokens, 15, "manager + worker input");
-                assert_eq!(usage.output_tokens, 27, "manager + worker output");
-                assert_eq!(usage.total_tokens, 42, "manager + worker total");
+                assert_eq!(usage.input_tokens, Some(15), "manager + worker input");
+                assert_eq!(usage.output_tokens, Some(27), "manager + worker output");
+                assert_eq!(usage.total_tokens, Some(42), "manager + worker total");
                 saw_snapshot = true;
             }
             Some(Event::StreamDone { .. }) => {}
@@ -710,7 +730,8 @@ async fn overflow_without_plan_reports_error_without_compaction_events() {
     // path must still emit the budget StreamError and the Overflowed
     // outcome, but no CompactionStarted/Finished pair (there is no
     // summarizer call to bracket).
-    let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
+    let client =
+        ProviderClient::build(ProviderKind::new(ProviderType::Ollama, None), None, None).unwrap();
     let session = Arc::new(Mutex::new(Session::new()));
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(16);
 
@@ -794,7 +815,8 @@ async fn spawn_stream_core(
     tokio::sync::mpsc::Receiver<Event>,
     tokio::sync::mpsc::Receiver<StreamOutcome>,
 ) {
-    let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
+    let client =
+        ProviderClient::build(ProviderKind::new(ProviderType::Ollama, None), None, None).unwrap();
     let session = Arc::new(Mutex::new(Session::new()));
     let (event_tx, event_rx) = tokio::sync::mpsc::channel::<Event>(64);
     let mut store = Store::open_in_memory().await.unwrap();
@@ -1479,7 +1501,8 @@ async fn steered_prompt_cuts_mid_stream_when_armed_between_actions() {
     // the text action started, mirroring a user submitting mid-stream:
     // the cut lands at the next action boundary (before the second tool
     // call executes).
-    let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
+    let client =
+        ProviderClient::build(ProviderKind::new(ProviderType::Ollama, None), None, None).unwrap();
     let session = Arc::new(Mutex::new(Session::new()));
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
     let mut store = Store::open_in_memory().await.unwrap();
@@ -1651,7 +1674,8 @@ async fn interrupted_turn_persists_pending_tools_as_killed() {
 
 #[tokio::test]
 async fn tool_result_clears_the_pending_call() {
-    let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
+    let client =
+        ProviderClient::build(ProviderKind::new(ProviderType::Ollama, None), None, None).unwrap();
     let session = Arc::new(Mutex::new(Session::new()));
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
     let mut store = Store::open_in_memory().await.unwrap();
@@ -1706,7 +1730,8 @@ async fn tool_result_clears_the_pending_call() {
 
 #[tokio::test]
 async fn text_runs_seal_at_tool_gaps() {
-    let client = ProviderClient::build(ProviderType::Ollama, None, None).unwrap();
+    let client =
+        ProviderClient::build(ProviderKind::new(ProviderType::Ollama, None), None, None).unwrap();
     let session = Arc::new(Mutex::new(Session::new()));
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
     let mut store = Store::open_in_memory().await.unwrap();

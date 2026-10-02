@@ -107,7 +107,7 @@ impl Tool for EditFile {
                 1 => format!("edited {path}: 1 edit applied"),
                 n => format!("edited {path}: {n} edits applied"),
             };
-            ctx.insert_result(FileChange::Edit {
+            let _ = ctx.insert_result(FileChange::Edit {
                 path,
                 diff,
                 original: raw,
@@ -631,7 +631,7 @@ mod tests {
             "ALPHA beta\ngamma delta epsilon\n"
         );
         assert!(matches!(
-            ctx.result::<FileChange>(),
+            ctx.result::<FileChange>().ok().flatten(),
             Some(FileChange::Edit { diff, .. }) if !diff.is_empty()
         ));
         drop(dir);

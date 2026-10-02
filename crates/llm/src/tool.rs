@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use rig_agent::agent::hook::{HookContext, ToolResultEvent};
-use rig_agent::agent::{AgentHook, ToolResultAction};
+use rig_agent::agent::hook::{HookContext, OutcomeEvent};
+use rig_agent::agent::{AgentHook, OutcomeAction};
+use rig_core::message::CallId;
 use tokio::sync::mpsc::Sender;
 
 use crate::agent::SpawnTag;
@@ -11,9 +12,7 @@ use crate::stream::StreamItem;
 
 pub use rig_agent::tool::{DynamicTool, Tool, ToolContext, ToolSet};
 pub use rig_core::completion::ToolDefinition;
-pub use rig_core::tool::{
-    PortableDynamicTool, ToolErrorKind, ToolExecutionError, ToolOutput, ToolResult,
-};
+pub use rig_core::tool::{ToolErrorKind, ToolExecutionError, ToolOutput, ToolResult};
 
 /// Wrap a typed [`Tool`] as a [`DynamicTool`]. The tool reports host-only
 /// [`FileChange`]s via [`ToolContext::insert_result`]; a [`FileChangeHook`]
@@ -24,7 +23,7 @@ where
     T: Tool<Args = serde_json::Value, Output = ToolOutput, Error = ToolExecutionError> + 'static,
 {
     let tool = Arc::new(tool);
-    DynamicTool::new(
+    DynamicTool::new_with_context(
         name,
         tool.description(),
         tool.parameters(),
@@ -56,8 +55,8 @@ pub struct FileChangeHook {
 
 #[derive(Default)]
 struct HookState {
-    changes: HashMap<String, CapturedResult>,
-    surfaced: HashSet<String>,
+    changes: HashMap<CallId, CapturedResult>,
+    surfaced: HashSet<CallId>,
     finish: Option<EarlyFinish>,
 }
 
@@ -92,7 +91,7 @@ impl FileChangeHook {
     }
 
     /// Take the result metadata recorded for a tool call, if any.
-    pub fn take(&self, internal_call_id: &str) -> CapturedResult {
+    pub fn take(&self, internal_call_id: &CallId) -> CapturedResult {
         self.inner
             .lock()
             .unwrap()
@@ -129,7 +128,7 @@ impl FileChangeHook {
     }
 
     /// Whether a call already surfaced through the early-finish channel.
-    pub fn surfaced_early(&self, internal_call_id: &str) -> bool {
+    pub fn surfaced_early(&self, internal_call_id: &CallId) -> bool {
         self.inner
             .lock()
             .unwrap()
@@ -143,11 +142,13 @@ impl FileChangeHook {
 /// and late surfacing agree byte for byte.
 fn early_stream_item(
     finish: &EarlyFinish,
-    event: &ToolResultEvent<'_>,
+    tool_name: &str,
+    call_id: &CallId,
+    result: &ToolResult,
     captured: &CapturedResult,
 ) -> StreamItem {
     let mut output = String::new();
-    for content in event.presentation.as_content() {
+    for content in result.output().as_content() {
         if let Some(text) = content.as_text() {
             if !output.is_empty() {
                 output.push('\n');
@@ -160,8 +161,8 @@ fn early_stream_item(
         ok = false;
         output = String::from("(no output)");
     }
-    let name = event.tool_name.to_string();
-    let call_id = event.internal_call_id.to_string();
+    let name = tool_name.to_string();
+    let call_id = call_id.to_string();
     match &finish.worker {
         Some(worker) => StreamItem::ToolResult {
             name,
@@ -173,7 +174,7 @@ fn early_stream_item(
             streams: captured.shell.clone(),
             call_id,
         },
-        None if finish.worker_names.contains(event.tool_name) => StreamItem::WorkerResult {
+        None if finish.worker_names.contains(tool_name) => StreamItem::WorkerResult {
             name,
             output,
             ok,
@@ -194,50 +195,60 @@ fn early_stream_item(
 }
 
 impl AgentHook for FileChangeHook {
-    fn on_tool_result(
+    fn on_outcome(
         &self,
         _ctx: &HookContext,
-        event: ToolResultEvent<'_>,
-    ) -> impl futures_util::Future<Output = ToolResultAction> + Send {
-        let mut captured = CapturedResult {
-            failed: event.raw_result.is_error(),
-            ..CapturedResult::default()
-        };
-        if let Some(change) = event.tool_context.result::<FileChange>() {
-            captured.file_change = Some(change.clone());
-        }
-        if let Some(shell) = event.tool_context.result::<ShellStreams>() {
-            captured.shell = Some(shell.clone());
-        }
-        if let Some(SpawnTag(spawn)) = event.tool_context.result::<SpawnTag>() {
-            captured.spawn = Some(*spawn);
-        }
-        let mut inner = self.inner.lock().unwrap();
-        let (tx, item) = match inner.finish.clone() {
-            Some(finish) => {
-                let item = early_stream_item(&finish, &event, &captured);
-                inner.surfaced.insert(event.internal_call_id.to_string());
-                (Some(finish.tx), Some(item))
-            }
-            None => {
-                if captured.file_change.is_some()
-                    || captured.shell.is_some()
-                    || captured.failed
-                    || captured.spawn.is_some()
+        event: OutcomeEvent<'_>,
+    ) -> impl futures_util::Future<Output = OutcomeAction> + Send {
+        let (tx, item) = match (event.tool_result(), event.call_id, event.tool_name()) {
+            (Some(result), Some(call_id), Some(tool_name)) => {
+                let context = event.tool_context();
+                let mut captured = CapturedResult {
+                    failed: result.is_error(),
+                    ..CapturedResult::default()
+                };
+                if let Some(change) =
+                    context.and_then(|context| context.result::<FileChange>().ok().flatten())
                 {
-                    inner
-                        .changes
-                        .insert(event.internal_call_id.to_string(), captured);
+                    captured.file_change = Some(change);
                 }
-                (None, None)
+                if let Some(shell) =
+                    context.and_then(|context| context.result::<ShellStreams>().ok().flatten())
+                {
+                    captured.shell = Some(shell);
+                }
+                if let Some(SpawnTag(spawn)) =
+                    context.and_then(|context| context.result::<SpawnTag>().ok().flatten())
+                {
+                    captured.spawn = Some(spawn);
+                }
+                let mut inner = self.inner.lock().unwrap();
+                match inner.finish.clone() {
+                    Some(finish) => {
+                        let item =
+                            early_stream_item(&finish, tool_name, call_id, result, &captured);
+                        inner.surfaced.insert(call_id.clone());
+                        (Some(finish.tx), Some(item))
+                    }
+                    None => {
+                        if captured.file_change.is_some()
+                            || captured.shell.is_some()
+                            || captured.failed
+                            || captured.spawn.is_some()
+                        {
+                            inner.changes.insert(call_id.clone(), captured);
+                        }
+                        (None, None)
+                    }
+                }
             }
+            _ => (None, None),
         };
-        drop(inner);
         async move {
             if let (Some(tx), Some(item)) = (tx, item) {
                 let _ = tx.send(item).await;
             }
-            ToolResultAction::Keep
+            OutcomeAction::Proceed
         }
     }
 }

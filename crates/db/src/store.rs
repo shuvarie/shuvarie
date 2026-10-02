@@ -665,11 +665,11 @@ impl Store {
             reasoning: encode_reasoning(reasoning),
             text_segments: encode_text_segments(text_segments),
             interrupted,
-            input_tokens: usage.input_tokens,
-            output_tokens: usage.output_tokens,
-            total_tokens: usage.total_tokens,
-            cached_input_tokens: usage.cached_input_tokens,
-            reasoning_tokens: usage.reasoning_tokens,
+            input_tokens: usage.input_tokens.unwrap_or(0),
+            output_tokens: usage.output_tokens.unwrap_or(0),
+            total_tokens: usage.total_tokens.unwrap_or(0),
+            cached_input_tokens: usage.cached_input_tokens.unwrap_or(0),
+            reasoning_tokens: usage.reasoning_tokens.unwrap_or(0),
             cost,
             summary: false,
             request_json: serde_json::to_string(request).unwrap_or_default(),
@@ -702,11 +702,11 @@ impl Store {
             .reasoning(encode_reasoning(reasoning))
             .text_segments(encode_text_segments(text_segments))
             .interrupted(interrupted)
-            .input_tokens(usage.input_tokens)
-            .output_tokens(usage.output_tokens)
-            .total_tokens(usage.total_tokens)
-            .cached_input_tokens(usage.cached_input_tokens)
-            .reasoning_tokens(usage.reasoning_tokens)
+            .input_tokens(usage.input_tokens.unwrap_or(0))
+            .output_tokens(usage.output_tokens.unwrap_or(0))
+            .total_tokens(usage.total_tokens.unwrap_or(0))
+            .cached_input_tokens(usage.cached_input_tokens.unwrap_or(0))
+            .reasoning_tokens(usage.reasoning_tokens.unwrap_or(0))
             .cost(cost)
             .request_json(serde_json::to_string(request).unwrap_or_default())
             .model_code(attribution.model_code.clone())

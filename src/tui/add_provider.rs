@@ -82,41 +82,66 @@ pub enum AddProviderOutcome {
     },
 }
 
+/// A transport kind: the protocol type plus its optional vendor dialect.
+const fn k(
+    r#type: selune::ProviderType,
+    dialect: Option<selune::Dialect>,
+) -> shuvarie_llm::ProviderKind {
+    shuvarie_llm::ProviderKind::new(r#type, dialect)
+}
+
+/// A vendor dialect of the openai-compat protocol.
+const fn v(dialect: selune::Dialect) -> shuvarie_llm::ProviderKind {
+    k(selune::ProviderType::OpenaiCompat, Some(dialect))
+}
+
 /// The rig transports a connection can use, in picker order.
-const TRANSPORTS: [(selune::ProviderType, &str); 30] = [
-    (selune::ProviderType::Openai, "OpenAI"),
+const TRANSPORTS: [(shuvarie_llm::ProviderKind, &str); 30] = [
+    (k(selune::ProviderType::Openai, None), "OpenAI"),
     (
-        selune::ProviderType::OpenaiCompat,
+        k(selune::ProviderType::OpenaiCompat, None),
         "OpenAI-compatible endpoint",
     ),
-    (selune::ProviderType::Openrouter, "OpenRouter"),
-    (selune::ProviderType::Vercel, "Vercel AI Gateway"),
-    (selune::ProviderType::Anthropic, "Anthropic"),
-    (selune::ProviderType::Google, "Google Gemini"),
-    (selune::ProviderType::Azure, "Azure OpenAI"),
-    (selune::ProviderType::Bedrock, "AWS Bedrock"),
-    (selune::ProviderType::GoogleVertex, "Google Vertex AI"),
-    (selune::ProviderType::Ollama, "Ollama (local)"),
-    (selune::ProviderType::Llamafile, "Llamafile (local)"),
-    (selune::ProviderType::Chatgpt, "ChatGPT (subscription)"),
-    (selune::ProviderType::Copilot, "GitHub Copilot"),
-    (selune::ProviderType::Cohere, "Cohere"),
-    (selune::ProviderType::Deepseek, "DeepSeek"),
-    (selune::ProviderType::Doubleword, "Doubleword"),
-    (selune::ProviderType::Groq, "Groq"),
-    (selune::ProviderType::Huggingface, "Hugging Face Router"),
-    (selune::ProviderType::Hyperbolic, "Hyperbolic"),
-    (selune::ProviderType::Minimax, "MiniMax (OpenAI surface)"),
-    (selune::ProviderType::Mira, "Mira"),
-    (selune::ProviderType::Mistral, "Mistral AI"),
-    (selune::ProviderType::Moonshot, "Moonshot AI"),
-    (selune::ProviderType::Perplexity, "Perplexity"),
-    (selune::ProviderType::Together, "Together AI"),
-    (selune::ProviderType::Venice, "Venice AI"),
-    (selune::ProviderType::Voyageai, "Voyage AI (embeddings)"),
-    (selune::ProviderType::Xai, "xAI"),
-    (selune::ProviderType::Xiaomimimo, "Xiaomi MiMo"),
-    (selune::ProviderType::Zai, "Z.ai"),
+    (k(selune::ProviderType::Openrouter, None), "OpenRouter"),
+    (k(selune::ProviderType::Vercel, None), "Vercel AI Gateway"),
+    (k(selune::ProviderType::Anthropic, None), "Anthropic"),
+    (k(selune::ProviderType::Google, None), "Google Gemini"),
+    (k(selune::ProviderType::Azure, None), "Azure OpenAI"),
+    (k(selune::ProviderType::Bedrock, None), "AWS Bedrock"),
+    (
+        k(selune::ProviderType::GoogleVertex, None),
+        "Google Vertex AI",
+    ),
+    (k(selune::ProviderType::Ollama, None), "Ollama (local)"),
+    (
+        k(selune::ProviderType::Llamafile, None),
+        "Llamafile (local)",
+    ),
+    (
+        k(selune::ProviderType::Chatgpt, None),
+        "ChatGPT (subscription)",
+    ),
+    (k(selune::ProviderType::Copilot, None), "GitHub Copilot"),
+    (k(selune::ProviderType::Cohere, None), "Cohere"),
+    (v(selune::Dialect::Deepseek), "DeepSeek"),
+    (v(selune::Dialect::Doubleword), "Doubleword"),
+    (v(selune::Dialect::Groq), "Groq"),
+    (v(selune::Dialect::Huggingface), "Hugging Face Router"),
+    (v(selune::Dialect::Hyperbolic), "Hyperbolic"),
+    (v(selune::Dialect::Minimax), "MiniMax (OpenAI surface)"),
+    (v(selune::Dialect::Mira), "Mira"),
+    (v(selune::Dialect::Mistral), "Mistral AI"),
+    (v(selune::Dialect::Moonshot), "Moonshot AI"),
+    (v(selune::Dialect::Perplexity), "Perplexity"),
+    (v(selune::Dialect::Together), "Together AI"),
+    (v(selune::Dialect::Venice), "Venice AI"),
+    (
+        k(selune::ProviderType::Voyageai, None),
+        "Voyage AI (embeddings)",
+    ),
+    (v(selune::Dialect::Xai), "xAI"),
+    (v(selune::Dialect::Xiaomimimo), "Xiaomi MiMo"),
+    (v(selune::Dialect::Zai), "Z.ai"),
 ];
 
 /// One select-stage row: a registry's group header (rendered live from the
@@ -310,7 +335,12 @@ impl AddProviderForm {
                 self.name.set(&self.compute_default_name(&provider.name));
                 let transport = provider
                     .r#type
-                    .map(|t| shuvarie_core::catalog::provider_type_name(t).to_string())
+                    .map(|t| {
+                        shuvarie_core::catalog::provider_kind_name(shuvarie_llm::ProviderKind::new(
+                            t,
+                            provider.dialect,
+                        ))
+                    })
                     .unwrap_or_else(|| provider.id.0.clone());
                 self.kind.set(&transport);
                 self.catalog.set(&provider.id.0);
@@ -521,9 +551,9 @@ impl AddProviderForm {
             },
             AddProviderMessage::Select => match self.stage {
                 AddProviderStage::KindList => {
-                    let (ptype, _) = TRANSPORTS[self.kind_selected];
+                    let (transport, _) = TRANSPORTS[self.kind_selected];
                     self.kind
-                        .set(shuvarie_core::catalog::provider_type_name(ptype));
+                        .set(&shuvarie_core::catalog::provider_kind_name(transport));
                     self.stage = AddProviderStage::Details;
                     AddProviderOutcome::None
                 }
@@ -645,7 +675,7 @@ impl AddProviderForm {
             return AddProviderOutcome::None;
         }
         let kind = self.kind.value.trim().to_string();
-        if shuvarie_core::catalog::parse_provider_type(&kind).is_none() {
+        if shuvarie_core::catalog::parse_provider_kind(&kind).is_none() {
             self.error = Some(format!(
                 "Unknown provider type '{kind}' — press Enter to pick one"
             ));
@@ -721,7 +751,7 @@ impl AddProviderForm {
                     }
                 }
                 !matches!(
-                    shuvarie_core::catalog::parse_provider_type(kind),
+                    shuvarie_core::catalog::parse_provider_kind(kind).map(|k| k.r#type),
                     Some(selune::ProviderType::Ollama | selune::ProviderType::Llamafile)
                 )
             }
@@ -872,9 +902,9 @@ impl AddProviderForm {
         let visible_len = list_area.height as usize;
         let items: Vec<ListItem> = (offset..TRANSPORTS.len().min(offset + visible_len))
             .map(|i| {
-                let (ptype, description) = TRANSPORTS[i];
+                let (transport, description) = TRANSPORTS[i];
                 let line = Line::from(vec![
-                    Span::raw(shuvarie_core::catalog::provider_type_name(ptype).to_string())
+                    Span::raw(shuvarie_core::catalog::provider_kind_name(transport))
                         .fg(theme::text()),
                     Span::raw(format!("  — {description}")).fg(theme::text_muted()),
                 ]);
@@ -976,6 +1006,7 @@ mod tests {
             api_endpoint: Some("https://api.example.com/v1".into()),
             doc: None,
             r#type: Some(ptype),
+            dialect: None,
             default_large_model_id: None,
             default_small_model_id: None,
             models: vec![SeluneModel {
@@ -1070,19 +1101,19 @@ mod tests {
     }
 
     #[test]
-    fn transports_cover_every_provider_type_and_parse() {
-        let seen: std::collections::HashSet<selune::ProviderType> =
+    fn transports_cover_every_protocol_kind_and_dialect_and_parse() {
+        let seen: std::collections::HashSet<shuvarie_llm::ProviderKind> =
             TRANSPORTS.iter().map(|(t, _)| *t).collect();
-        for (ptype, _) in TRANSPORTS {
-            let name = shuvarie_core::catalog::provider_type_name(ptype);
+        for (kind, _) in TRANSPORTS {
+            let name = shuvarie_core::catalog::provider_kind_name(kind);
             assert_eq!(
-                shuvarie_core::catalog::parse_provider_type(name),
-                Some(ptype),
+                shuvarie_core::catalog::parse_provider_kind(&name),
+                Some(kind),
                 "{name} should parse"
             );
         }
-        // Every variant must be pickable in the form.
-        let all = [
+        // Every protocol kind must be pickable in the form.
+        for t in [
             selune::ProviderType::Openai,
             selune::ProviderType::OpenaiCompat,
             selune::ProviderType::Openrouter,
@@ -1093,29 +1124,35 @@ mod tests {
             selune::ProviderType::Bedrock,
             selune::ProviderType::GoogleVertex,
             selune::ProviderType::Ollama,
+            selune::ProviderType::Llamafile,
             selune::ProviderType::Chatgpt,
             selune::ProviderType::Copilot,
             selune::ProviderType::Cohere,
-            selune::ProviderType::Deepseek,
-            selune::ProviderType::Doubleword,
-            selune::ProviderType::Groq,
-            selune::ProviderType::Huggingface,
-            selune::ProviderType::Hyperbolic,
-            selune::ProviderType::Llamafile,
-            selune::ProviderType::Minimax,
-            selune::ProviderType::Mira,
-            selune::ProviderType::Mistral,
-            selune::ProviderType::Moonshot,
-            selune::ProviderType::Perplexity,
-            selune::ProviderType::Together,
-            selune::ProviderType::Venice,
             selune::ProviderType::Voyageai,
-            selune::ProviderType::Xai,
-            selune::ProviderType::Xiaomimimo,
-            selune::ProviderType::Zai,
-        ];
-        for ptype in all {
-            assert!(seen.contains(&ptype), "{ptype:?} missing from TRANSPORTS");
+        ] {
+            let kind = shuvarie_llm::ProviderKind::new(t, None);
+            assert!(seen.contains(&kind), "{t:?} missing from TRANSPORTS");
+        }
+        // And every openai-compat vendor dialect.
+        for t in [
+            selune::Dialect::Deepseek,
+            selune::Dialect::Doubleword,
+            selune::Dialect::Groq,
+            selune::Dialect::Huggingface,
+            selune::Dialect::Hyperbolic,
+            selune::Dialect::Minimax,
+            selune::Dialect::Mira,
+            selune::Dialect::Mistral,
+            selune::Dialect::Moonshot,
+            selune::Dialect::Perplexity,
+            selune::Dialect::Together,
+            selune::Dialect::Venice,
+            selune::Dialect::Xai,
+            selune::Dialect::Xiaomimimo,
+            selune::Dialect::Zai,
+        ] {
+            let kind = shuvarie_llm::ProviderKind::new(selune::ProviderType::OpenaiCompat, Some(t));
+            assert!(seen.contains(&kind), "{t:?} missing from TRANSPORTS");
         }
         assert_eq!(seen.len(), TRANSPORTS.len(), "duplicates in TRANSPORTS");
     }

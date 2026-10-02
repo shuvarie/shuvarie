@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use selune::{Client, Provider};
 use shuvarie_config::{Connections, CustomRegistry, ProviderConfig, RegistriesConfig};
-use shuvarie_llm::TokenUsage;
+use shuvarie_llm::{ProviderKind, TokenUsage};
 
 const CACHE_READ_FACTOR: f64 = 0.1;
 const REASONING_FACTOR: f64 = 0.6;
@@ -532,10 +532,12 @@ pub fn estimate_cost(provider: &Provider, model_id: &str, usage: &TokenUsage) ->
             )
         })
         .unwrap_or_else(|| default_rates(provider));
-    let input = usage.input_tokens as f64 / 1e6 * input_rate;
-    let cached = usage.cached_input_tokens as f64 / 1e6 * cache_read_rate * CACHE_READ_FACTOR;
-    let output = usage.output_tokens as f64 / 1e6 * output_rate;
-    let reasoning = usage.reasoning_tokens as f64 / 1e6 * output_rate * REASONING_FACTOR;
+    let input = usage.input_tokens.unwrap_or(0) as f64 / 1e6 * input_rate;
+    let cached =
+        usage.cached_input_tokens.unwrap_or(0) as f64 / 1e6 * cache_read_rate * CACHE_READ_FACTOR;
+    let output = usage.output_tokens.unwrap_or(0) as f64 / 1e6 * output_rate;
+    let reasoning =
+        usage.reasoning_tokens.unwrap_or(0) as f64 / 1e6 * output_rate * REASONING_FACTOR;
     input + cached + output + reasoning
 }
 
@@ -587,7 +589,7 @@ pub fn oauth_device_login_kind(kind: &str, catalog: Option<&str>) -> bool {
 fn oauth_device_login_kind_in(providers: &[Provider], kind: &str, catalog: Option<&str>) -> bool {
     match find_provider(providers, catalog.unwrap_or(kind)) {
         Some(entry) => entry.oauth_device_login(),
-        None => parse_provider_type(kind).is_some_and(supports_device_flow),
+        None => parse_provider_kind(kind).is_some_and(|k| supports_device_flow(k.r#type)),
     }
 }
 
@@ -605,8 +607,15 @@ pub fn is_connectable(provider: &ProviderConfig) -> bool {
     if let Some(catalog) = &provider.catalog {
         return catalog_requires_key(catalog, has_key);
     }
-    match parse_provider_type(&provider.kind) {
-        Some(selune::ProviderType::Ollama | selune::ProviderType::Llamafile) => true,
+    match parse_provider_kind(&provider.kind) {
+        Some(k)
+            if matches!(
+                k.r#type,
+                selune::ProviderType::Ollama | selune::ProviderType::Llamafile
+            ) =>
+        {
+            true
+        }
         // OAuth-backed subscription providers: connectable without a pasted
         // API key; sign-in resolves lazily through rig's device-flow cache.
         Some(_) if oauth_device_login(provider) => true,
@@ -697,61 +706,54 @@ pub fn effective_base_url(provider: &Provider, override_url: Option<&str>) -> Op
     }
 }
 
-/// Parse a connection `kind` as a rig transport ([`selune::ProviderType`] in
-/// kebab-case, e.g. `openai`, `openai-compat`, `google-vertex`).
-pub fn parse_provider_type(kind: &str) -> Option<selune::ProviderType> {
-    serde_json::from_value(serde_json::Value::String(kind.to_string())).ok()
-}
-
-/// The kebab-case name of a provider type, as accepted by
-/// [`parse_provider_type`].
-pub fn provider_type_name(kind: selune::ProviderType) -> &'static str {
-    match kind {
-        selune::ProviderType::Openai => "openai",
-        selune::ProviderType::OpenaiCompat => "openai-compat",
-        selune::ProviderType::Openrouter => "openrouter",
-        selune::ProviderType::Vercel => "vercel",
-        selune::ProviderType::Anthropic => "anthropic",
-        selune::ProviderType::Google => "google",
-        selune::ProviderType::Azure => "azure",
-        selune::ProviderType::Bedrock => "bedrock",
-        selune::ProviderType::GoogleVertex => "google-vertex",
-        selune::ProviderType::Ollama => "ollama",
-        selune::ProviderType::Chatgpt => "chatgpt",
-        selune::ProviderType::Copilot => "copilot",
-        selune::ProviderType::Cohere => "cohere",
-        selune::ProviderType::Deepseek => "deepseek",
-        selune::ProviderType::Doubleword => "doubleword",
-        selune::ProviderType::Groq => "groq",
-        selune::ProviderType::Huggingface => "huggingface",
-        selune::ProviderType::Hyperbolic => "hyperbolic",
-        selune::ProviderType::Llamafile => "llamafile",
-        selune::ProviderType::Minimax => "minimax",
-        selune::ProviderType::Mira => "mira",
-        selune::ProviderType::Mistral => "mistral",
-        selune::ProviderType::Moonshot => "moonshot",
-        selune::ProviderType::Perplexity => "perplexity",
-        selune::ProviderType::Together => "together",
-        selune::ProviderType::Venice => "venice",
-        selune::ProviderType::Voyageai => "voyageai",
-        selune::ProviderType::Xai => "xai",
-        selune::ProviderType::Xiaomimimo => "xiaomimimo",
-        selune::ProviderType::Zai => "zai",
+/// Parse a connection `kind` as a transport: a [`selune::ProviderType`] in
+/// kebab-case (e.g. `openai`, `openai-compat`, `google-vertex`) or — for
+/// Selune 0.4 — one of the [`selune::Dialect`] vendor names (e.g. `deepseek`,
+/// `mistral`) that fold under `openai-compat`; those parse as the
+/// `openai-compat` kind carrying that dialect.
+pub fn parse_provider_kind(kind: &str) -> Option<ProviderKind> {
+    let value = serde_json::to_value(kind).ok()?;
+    if let Ok(r#type) = serde_json::from_value::<selune::ProviderType>(value.clone()) {
+        return Some(ProviderKind::new(r#type, None));
     }
+    let dialect: selune::Dialect = serde_json::from_value(value).ok()?;
+    Some(ProviderKind::new(
+        selune::ProviderType::OpenaiCompat,
+        Some(dialect),
+    ))
 }
 
-/// Resolve a provider config's `kind` to its [`selune::ProviderType`]. The
-/// `kind` is the rig transport (e.g. `openai`, `ollama`); as a fallback for
-/// older configs it may also be a Selune catalog id, resolved through the
-/// catalog. Defaults to [`selune::ProviderType::OpenaiCompat`].
-pub fn provider_type(kind: &str) -> selune::ProviderType {
-    provider_type_in(&providers(), kind)
+/// The kebab-case `kind` string of a transport, as accepted by
+/// [`parse_provider_kind`]: the vendor dialect name when the kind rides one,
+/// else the protocol kind's name.
+pub fn provider_kind_name(kind: ProviderKind) -> String {
+    let value = match kind.dialect {
+        Some(dialect) => serde_json::to_value(dialect),
+        None => serde_json::to_value(kind.r#type),
+    }
+    .expect("provider kinds serialize to their kebab names");
+    value.as_str().expect("a kebab name").to_string()
 }
 
-fn provider_type_in(providers: &[Provider], kind: &str) -> selune::ProviderType {
-    parse_provider_type(kind)
-        .or_else(|| find_provider(providers, kind).and_then(|p| p.r#type))
-        .unwrap_or(selune::ProviderType::OpenaiCompat)
+/// Resolve a provider config's `kind` to its transport. The `kind` is a
+/// type/dialect name (see [`parse_provider_kind`]); as a fallback for older
+/// configs it may also be a Selune catalog id, resolved through the catalog's
+/// `type` + `dialect` fields. Defaults to the generic `openai-compat` kind.
+pub fn provider_kind(kind: &str) -> ProviderKind {
+    provider_kind_in(&providers(), kind)
+}
+
+fn provider_kind_in(providers: &[Provider], kind: &str) -> ProviderKind {
+    parse_provider_kind(kind)
+        .or_else(|| {
+            find_provider(providers, kind).map(|p| {
+                ProviderKind::new(
+                    p.r#type.unwrap_or(selune::ProviderType::OpenaiCompat),
+                    p.dialect,
+                )
+            })
+        })
+        .unwrap_or(ProviderKind::new(selune::ProviderType::OpenaiCompat, None))
 }
 
 /// The effective base URL for a provider config's `kind`, using an explicit
@@ -770,8 +772,10 @@ fn base_url_for_in(
     if let Some(u) = override_url.filter(|u| !u.trim().is_empty()) {
         return Some(u.to_string());
     }
-    match parse_provider_type(kind) {
-        Some(selune::ProviderType::Ollama) => return Some("http://localhost:11434".to_string()),
+    match parse_provider_kind(kind) {
+        Some(k) if k.r#type == selune::ProviderType::Ollama => {
+            return Some("http://localhost:11434".to_string());
+        }
         Some(_) => return None,
         None => {}
     }
@@ -796,6 +800,7 @@ mod tests {
             auth: None,
             api_endpoint: endpoint.map(str::to_string),
             r#type,
+            dialect: None,
             doc: None,
             default_large_model_id: None,
             default_small_model_id: None,
@@ -1072,47 +1077,71 @@ mod tests {
             ("chatgpt", ProviderType::Chatgpt),
             ("copilot", ProviderType::Copilot),
             ("cohere", ProviderType::Cohere),
-            ("deepseek", ProviderType::Deepseek),
-            ("doubleword", ProviderType::Doubleword),
-            ("groq", ProviderType::Groq),
-            ("huggingface", ProviderType::Huggingface),
-            ("hyperbolic", ProviderType::Hyperbolic),
             ("llamafile", ProviderType::Llamafile),
-            ("minimax", ProviderType::Minimax),
-            ("mira", ProviderType::Mira),
-            ("mistral", ProviderType::Mistral),
-            ("moonshot", ProviderType::Moonshot),
-            ("perplexity", ProviderType::Perplexity),
-            ("together", ProviderType::Together),
-            ("venice", ProviderType::Venice),
             ("voyageai", ProviderType::Voyageai),
-            ("xai", ProviderType::Xai),
-            ("xiaomimimo", ProviderType::Xiaomimimo),
-            ("zai", ProviderType::Zai),
         ] {
-            assert_eq!(parse_provider_type(name), Some(expected), "{name}");
-            assert_eq!(provider_type_name(expected), name);
+            let kind = ProviderKind::new(expected, None);
+            assert_eq!(parse_provider_kind(name), Some(kind), "{name}");
+            assert_eq!(provider_kind_name(kind), name);
         }
-        assert_eq!(parse_provider_type("ollama-cloud"), None);
-        assert_eq!(parse_provider_type(""), None);
+        // The OpenAI-compatible vendor flavors are dialects of openai-compat:
+        // their kebab names parse as compat kinds carrying the dialect, and
+        // still round-trip (the same strings legacy configs carry).
+        for (name, expected) in [
+            ("deepseek", selune::Dialect::Deepseek),
+            ("doubleword", selune::Dialect::Doubleword),
+            ("groq", selune::Dialect::Groq),
+            ("huggingface", selune::Dialect::Huggingface),
+            ("hyperbolic", selune::Dialect::Hyperbolic),
+            ("minimax", selune::Dialect::Minimax),
+            ("mira", selune::Dialect::Mira),
+            ("mistral", selune::Dialect::Mistral),
+            ("moonshot", selune::Dialect::Moonshot),
+            ("perplexity", selune::Dialect::Perplexity),
+            ("together", selune::Dialect::Together),
+            ("venice", selune::Dialect::Venice),
+            ("xai", selune::Dialect::Xai),
+            ("xiaomimimo", selune::Dialect::Xiaomimimo),
+            ("zai", selune::Dialect::Zai),
+        ] {
+            let kind = ProviderKind::new(ProviderType::OpenaiCompat, Some(expected));
+            assert_eq!(parse_provider_kind(name), Some(kind), "{name}");
+            assert_eq!(provider_kind_name(kind), name);
+        }
+        assert_eq!(parse_provider_kind("ollama-cloud"), None);
+        assert_eq!(parse_provider_kind(""), None);
     }
 
     #[test]
-    fn provider_type_prefers_transport_then_legacy_catalog_id() {
-        let providers = vec![catalog_provider(
-            "ollama-cloud",
-            Some(ProviderType::Ollama),
-            None,
-        )];
-        assert_eq!(provider_type_in(&providers, "ollama"), ProviderType::Ollama);
+    fn provider_kind_prefers_transport_then_legacy_catalog_id() {
+        let together = Provider {
+            r#type: Some(ProviderType::OpenaiCompat),
+            dialect: Some(selune::Dialect::Together),
+            ..catalog_provider("togetherai", None, None)
+        };
+        let providers = vec![
+            together,
+            catalog_provider("ollama-cloud", Some(ProviderType::Ollama), None),
+        ];
+        let compat = ProviderKind::new(ProviderType::OpenaiCompat, None);
+        let ollama = ProviderKind::new(ProviderType::Ollama, None);
+        assert_eq!(provider_kind_in(&providers, "ollama"), ollama);
         assert_eq!(
-            provider_type_in(&providers, "ollama-cloud"),
-            ProviderType::Ollama
+            provider_kind_in(&providers, "ollama-cloud"),
+            ollama,
+            "legacy catalog id resolves through the entry"
         );
         assert_eq!(
-            provider_type_in(&providers, "gemini"),
-            ProviderType::OpenaiCompat
+            provider_kind_in(&providers, "together"),
+            ProviderKind::new(ProviderType::OpenaiCompat, Some(selune::Dialect::Together)),
+            "a dialect name parses without the catalog"
         );
+        assert_eq!(
+            provider_kind_in(&providers, "togetherai"),
+            ProviderKind::new(ProviderType::OpenaiCompat, Some(selune::Dialect::Together)),
+            "a legacy catalog id picks up the entry's type + dialect"
+        );
+        assert_eq!(provider_kind_in(&providers, "gemini"), compat);
     }
 
     #[test]

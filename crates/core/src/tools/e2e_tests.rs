@@ -72,7 +72,7 @@ fn roster(
 }
 
 fn definition(set: &ToolSet, name: &str) -> shuvarie_llm::ToolDefinition {
-    set.get_tool_definitions()
+    set.tool_definitions()
         .into_iter()
         .find(|d| d.name == name)
         .unwrap_or_else(|| panic!("no definition for {name}"))

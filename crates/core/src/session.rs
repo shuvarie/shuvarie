@@ -21,18 +21,18 @@ pub struct ModelUsage {
 /// redone turns persisted only the combined per-row totals). Rows without any
 /// reported usage yield `None`.
 fn request_usage_of(m: &StoredMessage) -> Option<TokenUsage> {
-    if m.request.total_tokens > 0 {
+    if m.request.total_tokens.unwrap_or(0) > 0 {
         return Some(m.request);
     }
     let usage = TokenUsage {
-        input_tokens: m.input_tokens,
-        output_tokens: m.output_tokens,
-        total_tokens: m.total_tokens,
-        cached_input_tokens: m.cached_input_tokens,
-        reasoning_tokens: m.reasoning_tokens,
+        input_tokens: Some(m.input_tokens),
+        output_tokens: Some(m.output_tokens),
+        total_tokens: Some(m.total_tokens),
+        cached_input_tokens: Some(m.cached_input_tokens),
+        reasoning_tokens: Some(m.reasoning_tokens),
         ..TokenUsage::default()
     };
-    (usage.total_tokens > 0).then_some(usage)
+    (usage.total_tokens.unwrap_or(0) > 0).then_some(usage)
 }
 
 /// One tool call attached to a tree node (popup display).
@@ -350,22 +350,30 @@ impl Session {
     }
 
     pub fn add_usage(&mut self, usage: TokenUsage, cost: f64) {
-        self.tokens = self.tokens.saturating_add(usage.total_tokens);
+        self.tokens = self.tokens.saturating_add(usage.total_tokens.unwrap_or(0));
         self.cost += cost;
-        self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens);
-        self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
-        self.reasoning_tokens = self.reasoning_tokens.saturating_add(usage.reasoning_tokens);
-        self.cached_tokens = self.cached_tokens.saturating_add(usage.cached_input_tokens);
+        self.input_tokens = self
+            .input_tokens
+            .saturating_add(usage.input_tokens.unwrap_or(0));
+        self.output_tokens = self
+            .output_tokens
+            .saturating_add(usage.output_tokens.unwrap_or(0));
+        self.reasoning_tokens = self
+            .reasoning_tokens
+            .saturating_add(usage.reasoning_tokens.unwrap_or(0));
+        self.cached_tokens = self
+            .cached_tokens
+            .saturating_add(usage.cached_input_tokens.unwrap_or(0));
     }
 
     /// The session's cumulative usage as a [`TokenUsage`], for usage snapshots.
     pub fn usage(&self) -> TokenUsage {
         TokenUsage {
-            total_tokens: self.tokens,
-            input_tokens: self.input_tokens,
-            output_tokens: self.output_tokens,
-            cached_input_tokens: self.cached_tokens,
-            reasoning_tokens: self.reasoning_tokens,
+            total_tokens: Some(self.tokens),
+            input_tokens: Some(self.input_tokens),
+            output_tokens: Some(self.output_tokens),
+            cached_input_tokens: Some(self.cached_tokens),
+            reasoning_tokens: Some(self.reasoning_tokens),
             ..TokenUsage::default()
         }
     }
@@ -445,17 +453,17 @@ mod tests {
         stored.messages[1].total_tokens = 12_200;
         stored.messages[1].cached_input_tokens = 11_000;
         stored.messages[1].request = TokenUsage {
-            input_tokens: 20_000,
-            output_tokens: 200,
-            total_tokens: 20_200,
-            cached_input_tokens: 19_400,
+            input_tokens: Some(20_000),
+            output_tokens: Some(200),
+            total_tokens: Some(20_200),
+            cached_input_tokens: Some(19_400),
             ..TokenUsage::default()
         };
 
         let session = Session::from_stored(stored);
         let last = session.last_usage.expect("request usage restored");
-        assert_eq!(last.total_tokens, 20_200);
-        assert_eq!(last.cached_input_tokens, 19_400);
+        assert_eq!(last.total_tokens, Some(20_200));
+        assert_eq!(last.cached_input_tokens, Some(19_400));
     }
 
     #[test]
@@ -467,7 +475,7 @@ mod tests {
 
         let session = Session::from_stored(stored);
         let last = session.last_usage.expect("row usage restored");
-        assert_eq!(last.total_tokens, 600);
+        assert_eq!(last.total_tokens, Some(600));
     }
 
     #[test]
@@ -481,13 +489,13 @@ mod tests {
         stored.leaf_id = Some(stored.messages[2].id);
         stored.messages[0].total_tokens = 30;
         stored.messages[0].request = TokenUsage {
-            total_tokens: 30,
+            total_tokens: Some(30),
             ..TokenUsage::default()
         };
         stored.messages[1].summary = true;
         stored.messages[1].total_tokens = 9_999;
         stored.messages[1].request = TokenUsage {
-            total_tokens: 9_999,
+            total_tokens: Some(9_999),
             ..TokenUsage::default()
         };
 
@@ -508,18 +516,22 @@ mod tests {
         chain(&mut stored.messages);
         stored.leaf_id = Some(stored.messages[2].id);
         stored.messages[0].request = TokenUsage {
-            total_tokens: 99_000,
+            total_tokens: Some(99_000),
             ..TokenUsage::default()
         };
         stored.messages[1].summary = true;
         stored.messages[2].request = TokenUsage {
-            total_tokens: 3_000,
+            total_tokens: Some(3_000),
             ..TokenUsage::default()
         };
 
         let session = Session::from_stored(stored);
         let last = session.last_usage.expect("post-summary request restored");
-        assert_eq!(last.total_tokens, 3_000, "pre-summary usage is ignored");
+        assert_eq!(
+            last.total_tokens,
+            Some(3_000),
+            "pre-summary usage is ignored"
+        );
     }
 
     /// Post-`/compact` layout: the summary is spliced mid-path and the kept
@@ -537,18 +549,18 @@ mod tests {
         chain(&mut stored.messages);
         stored.leaf_id = Some(stored.messages[4].id);
         stored.messages[1].request = TokenUsage {
-            total_tokens: 30_000,
+            total_tokens: Some(30_000),
             ..TokenUsage::default()
         };
         stored.messages[2].summary = true;
         stored.messages[4].request = TokenUsage {
-            total_tokens: 32_000,
+            total_tokens: Some(32_000),
             ..TokenUsage::default()
         };
 
         let session = Session::from_stored(stored);
         let last = session.last_usage.expect("kept-tail request restored");
-        assert_eq!(last.total_tokens, 32_000);
+        assert_eq!(last.total_tokens, Some(32_000));
     }
 
     #[test]

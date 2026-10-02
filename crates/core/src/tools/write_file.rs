@@ -130,7 +130,7 @@ impl Tool for WriteFile {
                     .await;
             }
             let summary = format!("wrote {} bytes to {path}", content.len());
-            ctx.insert_result(FileChange::Write {
+            let _ = ctx.insert_result(FileChange::Write {
                 path,
                 content,
                 original: original_text,
@@ -170,7 +170,7 @@ mod tests {
             .unwrap();
         assert_eq!(std::fs::read_to_string("sub/deep/f.txt").unwrap(), "hello");
         assert!(matches!(
-            ctx.result::<FileChange>(),
+            ctx.result::<FileChange>().ok().flatten(),
             Some(FileChange::Write { path, .. }) if path == "sub/deep/f.txt"
         ));
         drop(dir);

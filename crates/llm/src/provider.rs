@@ -1,5 +1,11 @@
 use futures_util::StreamExt;
-use selune::ProviderType;
+use selune::{Dialect, ProviderType};
+use std::sync::Arc;
+
+use rig_core::driver::DynModel;
+use rig_core::message::CallId;
+use rig_core::operation::{Completion, Embedding};
+use rig_core::providers::{anthropic, chatgpt, cohere, copilot, gemini, ollama, openai, voyageai};
 
 use crate::auth::DeviceCodeHandler;
 use crate::message::ChatMsg;
@@ -7,11 +13,136 @@ use crate::stream::{StreamItem, StreamStream};
 use crate::tool::{DynamicTool, FileChangeHook};
 use crate::{LlmError, Result};
 
+/// The transport a provider connection streams on: the protocol kind plus the
+/// optional vendor dialect. Selune 0.4 folds the OpenAI-compatible vendors
+/// (`deepseek`, `groq`, `mistral`, …) under `ProviderType::OpenaiCompat`, with
+/// `dialect` selecting the vendor flavor; a missing dialect is the generic
+/// OpenAI-compatible surface. Config `kind` strings stay one-level: every
+/// dialect name parses as this kind too (see the catalog's
+/// `parse_provider_kind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProviderKind {
+    pub r#type: ProviderType,
+    pub dialect: Option<Dialect>,
+}
+
+impl ProviderKind {
+    pub const fn new(r#type: ProviderType, dialect: Option<Dialect>) -> Self {
+        Self { r#type, dialect }
+    }
+}
+
+/// The rig wire dialect for a Selune vendor dialect: identical vendor names,
+/// one-to-one (xAI's dialect lives in its own module). Vendor kinds that are
+/// not `openai-compat` variants never reach here.
+fn wire_dialect(dialect: Dialect) -> &'static openai::wire::Dialect {
+    match dialect {
+        Dialect::Deepseek => &openai::wire::DEEPSEEK,
+        Dialect::Doubleword => &openai::wire::DOUBLEWORD,
+        Dialect::Groq => &openai::wire::GROQ,
+        Dialect::Huggingface => &openai::wire::HUGGINGFACE,
+        Dialect::Hyperbolic => &openai::wire::HYPERBOLIC,
+        Dialect::Minimax => &openai::wire::MINIMAX,
+        Dialect::Mira => &openai::wire::MIRA,
+        Dialect::Mistral => &openai::wire::MISTRAL,
+        Dialect::Moonshot => &openai::wire::MOONSHOT,
+        Dialect::Perplexity => &openai::wire::PERPLEXITY,
+        Dialect::Together => &openai::wire::TOGETHER,
+        Dialect::Venice => &openai::wire::VENICE,
+        Dialect::Xai => &rig_core::providers::xai::DIALECT,
+        Dialect::Xiaomimimo => &openai::wire::XIAOMIMIMO,
+        Dialect::Zai => &openai::wire::ZAI,
+    }
+}
+
+/// Whether a kind's surface serves embeddings. Protocol capabilities are the
+/// transport's own; the `openai-compat` vendor dialects vary, with only the
+/// vendors that actually wire `/embeddings` counted (the dialect only matters
+/// on `openai-compat`, where it rides).
+fn has_embeddings(kind: ProviderKind) -> bool {
+    match (kind.r#type, kind.dialect) {
+        (
+            ProviderType::OpenaiCompat,
+            Some(Dialect::Doubleword | Dialect::Mistral | Dialect::Together | Dialect::Venice),
+        ) => true,
+        (ProviderType::OpenaiCompat, Some(_)) => false,
+        (
+            ProviderType::Openai
+            | ProviderType::OpenaiCompat
+            | ProviderType::Openrouter
+            | ProviderType::Google
+            | ProviderType::Ollama
+            | ProviderType::Vercel
+            | ProviderType::Copilot
+            | ProviderType::Azure
+            | ProviderType::Cohere
+            | ProviderType::Llamafile
+            | ProviderType::Voyageai,
+            _,
+        ) => true,
+        _ => false,
+    }
+}
+
+/// Whether a kind's surface serves a model listing. As with embeddings, the
+/// listed `openai-compat` vendor dialects wire a `/models` endpoint, and the
+/// dialect only matters where it rides.
+fn has_model_listing(kind: ProviderKind) -> bool {
+    match (kind.r#type, kind.dialect) {
+        (
+            ProviderType::OpenaiCompat,
+            Some(
+                Dialect::Deepseek
+                | Dialect::Groq
+                | Dialect::Minimax
+                | Dialect::Mira
+                | Dialect::Mistral
+                | Dialect::Moonshot
+                | Dialect::Venice
+                | Dialect::Xiaomimimo,
+            ),
+        ) => true,
+        (ProviderType::OpenaiCompat, Some(_)) => false,
+        (
+            ProviderType::Openai
+            | ProviderType::OpenaiCompat
+            | ProviderType::Openrouter
+            | ProviderType::Vercel
+            | ProviderType::Google
+            | ProviderType::Ollama
+            | ProviderType::Copilot,
+            _,
+        ) => true,
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProviderClient {
-    kind: ProviderType,
+    kind: ProviderKind,
     base_url: Option<String>,
     list: ListImpl,
+    /// One-time sign-in gate for the OAuth-backed transports (`chatgpt`,
+    /// `copilot` without a credential): `list` is [`ListImpl::Pending`] until
+    /// the first use resolves the signed-in client into the gate.
+    oauth: Option<OAuthGate>,
+}
+
+/// The transports this client dispatches onto, by client type. OpenAI-shaped
+/// providers (including every OpenAI-compatible vendor) share one client
+/// type; the dialect inside its configuration picks the endpoints.
+#[derive(Debug, Clone)]
+enum ListImpl {
+    OpenAi(Box<openai::OpenAI>),
+    Anthropic(anthropic::Anthropic),
+    Gemini(gemini::Gemini),
+    Ollama(ollama::Ollama),
+    Copilot(copilot::Copilot),
+    Cohere(cohere::Cohere),
+    Voyageai(voyageai::VoyageAi),
+    /// Awaiting first-use sign-in; the gate builds and authenticates the
+    /// client, and every operation reads the resolved transport from there.
+    Pending,
 }
 
 /// Fused text of a multi-turn agent stream. A paragraph break is inserted
@@ -55,13 +186,18 @@ impl TurnText {
     }
 }
 
-fn openai_builder(key: &str, base_url: Option<&str>) -> rig_core::providers::openai::ClientBuilder {
-    let builder = rig_core::providers::openai::Client::builder().api_key(key);
+/// An OpenAI-shaped client for `dialect` with `key`, on the shared reqwest
+/// transport, honoring the endpoint override.
+fn openai_client(
+    dialect: &openai::wire::Dialect,
+    key: &str,
+    base_url: Option<&str>,
+) -> openai::OpenAI {
+    let mut config = openai::OpenAIConfig::with_key(dialect, key);
     if let Some(url) = base_url {
-        builder.base_url(url)
-    } else {
-        builder
+        config = config.with_base_url(url);
     }
+    config.client()
 }
 
 /// GitHub token formats (`gho_`, `ghp_`, `ghu_`, `ghs_`, `ghr_`, fine-grained
@@ -73,13 +209,13 @@ fn is_github_token(token: &str) -> bool {
         .any(|prefix| token.starts_with(prefix))
 }
 
-/// The ChatGPT subscription backend has no model-listing endpoint; rig's
-/// known model constants stand in (the caller enriches them with catalog
-/// metadata by id).
+/// The ChatGPT subscription backend has no model-listing endpoint; these
+/// known models stand in (the caller enriches them with catalog metadata by
+/// id).
 fn chatgpt_builtin_models() -> Vec<crate::Model> {
     // ChatGPT's Codex surface has no model-listing endpoint; these are the
     // models OpenAI recommends for subscription sign-in per the official
-    // Codex models page (the API-facing rig constants lag behind).
+    // Codex models page.
     [
         ("gpt-6-astra", "GPT-6 Astra"),
         ("gpt-5.6-sol", "GPT-5.6 Sol"),
@@ -87,64 +223,120 @@ fn chatgpt_builtin_models() -> Vec<crate::Model> {
         ("gpt-5.6-luna", "GPT-5.6 Luna"),
     ]
     .into_iter()
-    .map(|(id, name)| rig_core::model::Model::new(id, name))
+    .map(|(id, name)| rig_core::model::ModelInfo::new(id, name))
     .collect()
 }
 
+/// An OAuth-backed transport awaiting its first-use sign-in: the resolved
+/// configuration plus the authenticator that builds the signed-in client.
 #[derive(Debug, Clone)]
-enum ListImpl {
-    OpenAi(rig_core::providers::openai::Client),
-    OpenRouter(rig_core::providers::openrouter::Client),
-    Anthropic(rig_core::providers::anthropic::Client),
-    Gemini(rig_core::providers::gemini::Client),
-    Ollama(rig_core::providers::ollama::Client),
-    ChatGpt(rig_core::providers::chatgpt::Client),
-    Copilot(rig_core::providers::copilot::Client),
-    Azure(rig_core::providers::azure::Client),
-    Cohere(rig_core::providers::cohere::Client),
-    Deepseek(rig_core::providers::deepseek::Client),
-    Doubleword(rig_core::providers::doubleword::Client),
-    Groq(rig_core::providers::groq::Client),
-    Huggingface(rig_core::providers::huggingface::Client),
-    Hyperbolic(rig_core::providers::hyperbolic::Client),
-    Llamafile(rig_core::providers::llamafile::Client),
-    Minimax(rig_core::providers::minimax::Client),
-    Mira(rig_core::providers::mira::Client),
-    Mistral(rig_core::providers::mistral::Client),
-    Moonshot(rig_core::providers::moonshot::Client),
-    Perplexity(rig_core::providers::perplexity::Client),
-    Together(rig_core::providers::together::Client),
-    Venice(rig_core::providers::venice::Client),
-    Voyageai(rig_core::providers::voyageai::Client),
-    Xai(rig_core::providers::xai::Client),
-    Xiaomimimo(rig_core::providers::xiaomimimo::Client),
-    Zai(rig_core::providers::zai::Client),
+enum Pending {
+    ChatGpt {
+        config: Box<openai::OpenAIConfig>,
+        authenticator: chatgpt::auth::Authenticator,
+    },
+    Copilot {
+        config: copilot::CopilotConfig,
+        authenticator: copilot::auth::Authenticator,
+    },
 }
 
-/// Build a dedicated rig client for a key-transport provider: `builder()` →
-/// `.api_key(key)`, optional `.base_url(url)`, then `build()`. Shared by every
-/// provider whose rig module only needs a key and an optional endpoint
-/// override; the module path supplies provider-specific defaults and request
-/// quirks.
-macro_rules! keyed_client {
-    ($provider:ident, $variant:ident, $api_key:expr, $base_url:expr) => {{
-        let key = $api_key.ok_or(LlmError::Provider("API key required".into()))?;
-        let client = rig_core::providers::$provider::Client::builder().api_key(key);
-        let client = match $base_url.as_deref() {
-            Some(url) => client.base_url(url),
-            None => client,
-        };
-        ListImpl::$variant(
-            client
-                .build()
-                .map_err(|e| LlmError::Provider(e.to_string()))?,
-        )
-    }};
+impl Pending {
+    async fn resolve(&self) -> Result<ListImpl> {
+        match self {
+            Pending::ChatGpt {
+                config,
+                authenticator,
+            } => {
+                let client = (**config)
+                    .clone()
+                    .client()
+                    .authenticate(authenticator)
+                    .await
+                    .map_err(|error| LlmError::Provider(error.to_string()))?;
+                Ok(ListImpl::OpenAi(Box::new(client)))
+            }
+            Pending::Copilot {
+                config,
+                authenticator,
+            } => {
+                let client = config
+                    .clone()
+                    .client()
+                    .authenticate(authenticator)
+                    .await
+                    .map_err(|error| LlmError::Provider(error.to_string()))?;
+                Ok(ListImpl::Copilot(client))
+            }
+        }
+    }
+}
+
+/// One-time OAuth sign-in gate. Resolution reuses a cached credential when
+/// present and valid, refreshes an expired one, and otherwise runs the
+/// interactive device flow — firing the device-code callback supplied at
+/// build time, which surfaces the verification URL + user code to the user.
+/// A resolved transport is shared by every concurrent caller (clones share
+/// the gate), so concurrent sign-ins serialize into one flow.
+#[derive(Debug, Clone)]
+struct OAuthGate {
+    pending: Pending,
+    resolved: tokio::sync::OnceCell<ListImpl>,
+}
+
+impl OAuthGate {
+    fn new(pending: Pending) -> Self {
+        Self {
+            pending,
+            resolved: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    async fn resolved(&self) -> Result<&ListImpl> {
+        self.resolved
+            .get_or_try_init(|| async { self.pending.resolve().await })
+            .await
+    }
+}
+
+/// The device-code callback wiring rig needs: shuvarie's handler wrapped in
+/// rig's `DeviceCodeHandler`, and whether the interactive flow is allowed at
+/// all (without a handler the sign-in fails fast with an actionable error
+/// instead of blocking on an unattended flow).
+fn device_code(handler: Option<&DeviceCodeHandler>) -> (chatgpt::auth::DeviceCodeHandler, bool) {
+    match handler {
+        Some(handler) => {
+            let handler = Arc::clone(handler);
+            (
+                chatgpt::auth::DeviceCodeHandler::new(move |prompt| {
+                    handler(crate::auth::DeviceCodePrompt {
+                        verification_uri: prompt.verification_uri,
+                        user_code: prompt.user_code,
+                    });
+                }),
+                true,
+            )
+        }
+        None => (chatgpt::auth::DeviceCodeHandler::default(), false),
+    }
+}
+
+fn chatgpt_authenticator(handler: Option<&DeviceCodeHandler>) -> chatgpt::auth::Authenticator {
+    let (device, allow_flow) = device_code(handler);
+    chatgpt::auth::Authenticator::new(chatgpt::auth::AuthSource::OAuth, None, device, allow_flow)
+}
+
+fn copilot_authenticator(
+    source: copilot::auth::AuthSource,
+    handler: Option<&DeviceCodeHandler>,
+) -> copilot::auth::Authenticator {
+    let (device, allow_flow) = device_code(handler);
+    copilot::auth::Authenticator::new(source, None, None, device, allow_flow)
 }
 
 impl ProviderClient {
     pub fn build(
-        kind: ProviderType,
+        kind: ProviderKind,
         api_key: Option<&str>,
         base_url: Option<&str>,
     ) -> Result<Self> {
@@ -157,7 +349,7 @@ impl ProviderClient {
     /// surfaces the prompt; without one, a missing token fails fast with an
     /// actionable sign-in error instead of blocking on an unattended flow.
     pub fn build_with_device_code(
-        kind: ProviderType,
+        kind: ProviderKind,
         api_key: Option<&str>,
         base_url: Option<&str>,
         on_device_code: Option<DeviceCodeHandler>,
@@ -166,219 +358,187 @@ impl ProviderClient {
             .map(str::trim)
             .filter(|u| !u.is_empty())
             .map(str::to_string);
-        let list = match kind {
-            ProviderType::Openai | ProviderType::OpenaiCompat | ProviderType::Vercel => {
+
+        // Build the OpenAi arm for one of the OpenAI-shaped vendor dialects:
+        // the key is required, the endpoint override optional, and the
+        // dialect supplies provider-specific defaults and request quirks.
+        macro_rules! openai_vendor_client {
+            ($dialect:expr) => {{
                 let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
-                let client = openai_builder(key, base_url.as_deref())
-                    .build()
-                    .map_err(|e| LlmError::Provider(e.to_string()))?;
-                ListImpl::OpenAi(client)
-            }
-            ProviderType::Openrouter => {
-                let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
-                let client = rig_core::providers::openrouter::Client::builder().api_key(key);
-                let client = if let Some(url) = base_url.as_deref() {
-                    client.base_url(url)
-                } else {
-                    client
-                };
-                ListImpl::OpenRouter(
-                    client
-                        .build()
-                        .map_err(|e| LlmError::Provider(e.to_string()))?,
+                (
+                    ListImpl::OpenAi(Box::new(openai_client(&$dialect, key, base_url.as_deref()))),
+                    None,
                 )
+            }};
+        }
+
+        let (list, oauth) = match kind.r#type {
+            ProviderType::Openai | ProviderType::Vercel => {
+                openai_vendor_client!(openai::wire::OPENAI)
             }
+            ProviderType::OpenaiCompat => {
+                // The vendor dialect selects the wire (endpoints, quirks); a
+                // missing dialect is the generic OpenAI-compatible surface.
+                let dialect = kind
+                    .dialect
+                    .map(wire_dialect)
+                    .unwrap_or(&openai::wire::OPENAI);
+                openai_vendor_client!(*dialect)
+            }
+            ProviderType::Openrouter => openai_vendor_client!(openai::wire::OPENROUTER),
             ProviderType::Anthropic => {
                 let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
-                let client = rig_core::providers::anthropic::Client::builder().api_key(key);
-                let client = if let Some(url) = base_url.as_deref() {
-                    client.base_url(url)
-                } else {
-                    client
-                };
-                ListImpl::Anthropic(
-                    client
-                        .build()
-                        .map_err(|e| LlmError::Provider(e.to_string()))?,
-                )
+                let mut config = anthropic::AnthropicConfig::new(key);
+                if let Some(url) = base_url.as_deref() {
+                    config = config.with_base_url(url);
+                }
+                (ListImpl::Anthropic(config.client()), None)
             }
             ProviderType::Google => {
                 let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
-                let client = rig_core::providers::gemini::Client::builder().api_key(key);
-                let client = if let Some(url) = base_url.as_deref() {
-                    client.base_url(url)
-                } else {
-                    client
-                };
-                ListImpl::Gemini(
-                    client
-                        .build()
-                        .map_err(|e| LlmError::Provider(e.to_string()))?,
-                )
+                let mut config = gemini::GeminiConfig::new(key);
+                if let Some(url) = base_url.as_deref() {
+                    config = config.with_base_url(url);
+                }
+                (ListImpl::Gemini(config.client()), None)
             }
             ProviderType::Ollama => {
-                let client =
-                    rig_core::providers::ollama::Client::builder().api_key(api_key.unwrap_or(""));
-                let client = if let Some(url) = base_url.as_deref() {
-                    client.base_url(url)
-                } else {
-                    client
-                };
-                ListImpl::Ollama(
-                    client
-                        .build()
-                        .map_err(|e| LlmError::Provider(e.to_string()))?,
-                )
+                let mut config = ollama::OllamaConfig::new().with_api_key(api_key.unwrap_or(""));
+                if let Some(url) = base_url.as_deref() {
+                    config = config.with_base_url(url);
+                }
+                (ListImpl::Ollama(config.client()), None)
             }
             ProviderType::Bedrock | ProviderType::GoogleVertex => {
-                // These providers have no rig client (rig 0.42 does not ship
+                // These providers have no rig client (rig does not ship
                 // bedrock or vertexai transports); fall back to an
                 // OpenAI-compatible client at the configured URL.
-                let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
-                let client = openai_builder(key, base_url.as_deref())
-                    .build()
-                    .map_err(|e| LlmError::Provider(e.to_string()))?;
-                ListImpl::OpenAi(client)
+                openai_vendor_client!(openai::wire::OPENAI)
             }
             ProviderType::Chatgpt => {
-                let mut builder = rig_core::providers::chatgpt::Client::builder();
-                if let Some(url) = base_url.as_deref() {
-                    builder = builder.base_url(url);
+                let token = api_key.map(str::trim).filter(|k| !k.is_empty());
+                // rig merges a generic assistant preamble into every request;
+                // shuvarie always supplies its own preamble, so drop it and
+                // tag the backend's telemetry with this app.
+                let mut config =
+                    openai::OpenAIConfig::with_key(&chatgpt::DIALECT, token.unwrap_or(""));
+                config = config.with_instructions("");
+                if let Some(identity) = config.identity.as_mut() {
+                    identity.originator = "shuvarie".to_owned();
                 }
-                let builder = match api_key.map(str::trim).filter(|k| !k.is_empty()) {
-                    Some(token) => builder.api_key(token),
-                    None => builder.oauth(),
-                };
-                // rig's default merges a generic assistant preamble into every
-                // request; shuvarie always supplies its own preamble, so drop
-                // it and tag the backend's telemetry with this app.
-                let builder = builder.default_instructions("").originator("shuvarie");
-                let builder = match on_device_code {
-                    Some(handler) => {
-                        builder
-                            .allow_device_flow(true)
-                            .on_device_code(move |prompt| {
-                                handler(crate::auth::DeviceCodePrompt {
-                                    verification_uri: prompt.verification_uri,
-                                    user_code: prompt.user_code,
-                                });
-                            })
+                if let Some(url) = base_url.as_deref() {
+                    config = config.with_base_url(url);
+                }
+                match token {
+                    Some(_) => (ListImpl::OpenAi(Box::new(config.client())), None),
+                    None => {
+                        let gate = OAuthGate::new(Pending::ChatGpt {
+                            config: Box::new(config),
+                            authenticator: chatgpt_authenticator(on_device_code.as_ref()),
+                        });
+                        (ListImpl::Pending, Some(gate))
                     }
-                    None => builder.allow_device_flow(false),
-                };
-                ListImpl::ChatGpt(
-                    builder
-                        .build()
-                        .map_err(|e| LlmError::Provider(e.to_string()))?,
-                )
+                }
             }
             ProviderType::Copilot => {
-                let mut builder = rig_core::providers::copilot::Client::builder();
+                let token = api_key.map(str::trim).filter(|k| !k.is_empty());
+                let mut config = copilot::CopilotConfig::new(token.unwrap_or(""));
                 if let Some(url) = base_url.as_deref() {
-                    builder = builder.base_url(url);
+                    config = config.with_base_url(url);
                 }
-                let builder = match api_key.map(str::trim).filter(|k| !k.is_empty()) {
-                    Some(token) if is_github_token(token) => builder.github_access_token(token),
-                    Some(key) => builder.api_key(key),
-                    None => builder.oauth(),
-                };
-                let builder = match on_device_code {
-                    Some(handler) => {
-                        builder
-                            .allow_device_flow(true)
-                            .on_device_code(move |prompt| {
-                                handler(crate::auth::DeviceCodePrompt {
-                                    verification_uri: prompt.verification_uri,
-                                    user_code: prompt.user_code,
-                                });
-                            })
+                match token {
+                    // A pasted GitHub token exchanges for a Copilot session at
+                    // first use; a plain Copilot key is the session itself.
+                    Some(token) if !is_github_token(token) => {
+                        (ListImpl::Copilot(config.client()), None)
                     }
-                    None => builder.allow_device_flow(false),
-                };
-                ListImpl::Copilot(
-                    builder
-                        .build()
-                        .map_err(|e| LlmError::Provider(e.to_string()))?,
-                )
+                    Some(token) => {
+                        let authenticator = copilot_authenticator(
+                            copilot::auth::AuthSource::GitHubAccessToken(token.to_owned()),
+                            on_device_code.as_ref(),
+                        );
+                        (
+                            ListImpl::Pending,
+                            Some(OAuthGate::new(Pending::Copilot {
+                                config,
+                                authenticator,
+                            })),
+                        )
+                    }
+                    None => {
+                        let authenticator = copilot_authenticator(
+                            copilot::auth::AuthSource::OAuth,
+                            on_device_code.as_ref(),
+                        );
+                        (
+                            ListImpl::Pending,
+                            Some(OAuthGate::new(Pending::Copilot {
+                                config,
+                                authenticator,
+                            })),
+                        )
+                    }
+                }
             }
             ProviderType::Azure => {
                 let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
-                // rig's Azure extension carries an empty default base URL:
-                // the resource endpoint (https://{name}.openai.azure.com) is
+                // rig's Azure dialect carries no default endpoint: the
+                // resource endpoint (https://{name}.openai.azure.com) is
                 // required on the connection.
                 let endpoint = base_url
                     .as_deref()
                     .map(str::trim)
                     .filter(|u| !u.is_empty())
                     .ok_or(LlmError::Provider("Azure endpoint required".into()))?;
-                ListImpl::Azure(
-                    rig_core::providers::azure::Client::builder()
-                        .api_key(key)
-                        .azure_endpoint(endpoint.to_string())
-                        .build()
-                        .map_err(|e| LlmError::Provider(e.to_string()))?,
+                (
+                    ListImpl::OpenAi(Box::new(
+                        openai::OpenAIConfig::with_key(&openai::wire::AZURE, key)
+                            .with_base_url(endpoint)
+                            .client(),
+                    )),
+                    None,
                 )
             }
             ProviderType::Llamafile => {
-                let client = rig_core::providers::llamafile::Client::builder();
-                let client = if let Some(url) = base_url.as_deref() {
-                    client.base_url(url)
-                } else {
-                    client
-                };
-                ListImpl::Llamafile(
-                    client
-                        .api_key(rig_core::client::Nothing)
-                        .build()
-                        .map_err(|e| LlmError::Provider(e.to_string()))?,
-                )
+                // llama.cpp's `--api-key` is optional: an empty credential
+                // sends no Authorization header at all.
+                openai_vendor_client!(openai::wire::LLAMACPP)
             }
-            ProviderType::Cohere => keyed_client!(cohere, Cohere, api_key, base_url),
-            ProviderType::Deepseek => keyed_client!(deepseek, Deepseek, api_key, base_url),
-            ProviderType::Doubleword => {
-                keyed_client!(doubleword, Doubleword, api_key, base_url)
+            ProviderType::Cohere => {
+                let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
+                let mut config = cohere::CohereConfig::new(key);
+                if let Some(url) = base_url.as_deref() {
+                    config = config.with_base_url(url);
+                }
+                (ListImpl::Cohere(config.client()), None)
             }
-            ProviderType::Groq => keyed_client!(groq, Groq, api_key, base_url),
-            ProviderType::Huggingface => {
-                keyed_client!(huggingface, Huggingface, api_key, base_url)
-            }
-            ProviderType::Hyperbolic => {
-                keyed_client!(hyperbolic, Hyperbolic, api_key, base_url)
-            }
-            ProviderType::Minimax => keyed_client!(minimax, Minimax, api_key, base_url),
-            ProviderType::Mira => keyed_client!(mira, Mira, api_key, base_url),
-            ProviderType::Mistral => keyed_client!(mistral, Mistral, api_key, base_url),
-            ProviderType::Moonshot => keyed_client!(moonshot, Moonshot, api_key, base_url),
-            ProviderType::Perplexity => {
-                keyed_client!(perplexity, Perplexity, api_key, base_url)
-            }
-            ProviderType::Together => keyed_client!(together, Together, api_key, base_url),
-            ProviderType::Venice => keyed_client!(venice, Venice, api_key, base_url),
-            ProviderType::Xai => keyed_client!(xai, Xai, api_key, base_url),
-            ProviderType::Xiaomimimo => {
-                keyed_client!(xiaomimimo, Xiaomimimo, api_key, base_url)
-            }
-            ProviderType::Zai => keyed_client!(zai, Zai, api_key, base_url),
             ProviderType::Voyageai => {
                 let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
-                let client = rig_core::providers::voyageai::Client::builder().api_key(key);
-                let client = if let Some(url) = base_url.as_deref() {
-                    client.base_url(url)
-                } else {
-                    client
-                };
-                ListImpl::Voyageai(
-                    client
-                        .build()
-                        .map_err(|e| LlmError::Provider(e.to_string()))?,
-                )
+                let mut config = voyageai::VoyageAiConfig::new(key);
+                if let Some(url) = base_url.as_deref() {
+                    config = config.with_base_url(url);
+                }
+                (ListImpl::Voyageai(config.client()), None)
             }
         };
         Ok(Self {
             kind,
             base_url,
             list,
+            oauth,
         })
+    }
+
+    /// The transport to operate on, resolving one-time OAuth sign-in when an
+    /// OAuth-backed transport is pending (`chatgpt`, `copilot` without a
+    /// credential). A cached credential opens without network, an expired one
+    /// refreshes, and a missing one runs the interactive device flow through
+    /// the device-code callback supplied at build time.
+    async fn resolved_list(&self) -> Result<&ListImpl> {
+        match &self.oauth {
+            Some(gate) => gate.resolved().await,
+            None => Ok(&self.list),
+        }
     }
 
     /// Run OAuth sign-in to completion for an OAuth-backed provider (`chatgpt`,
@@ -389,15 +549,12 @@ impl ProviderClient {
     /// a usable token, so it can be awaited off the update loop. Providers
     /// without OAuth sign-in return an error instead of blocking.
     pub async fn authorize(&self) -> Result<()> {
-        match &self.list {
-            ListImpl::ChatGpt(client) => client
-                .authorize()
-                .await
-                .map_err(|e| LlmError::Provider(e.to_string())),
-            ListImpl::Copilot(client) => client
-                .authorize()
-                .await
-                .map_err(|e| LlmError::Provider(e.to_string())),
+        if let Some(gate) = &self.oauth {
+            return gate.resolved().await.map(|_| ());
+        }
+        match self.kind.r#type {
+            // Already usable: the credential is on the client itself.
+            ProviderType::Chatgpt | ProviderType::Copilot => Ok(()),
             _ => Err(LlmError::Provider(format!(
                 "{} does not use OAuth sign-in; configure an API key instead",
                 self.kind_name()
@@ -407,14 +564,14 @@ impl ProviderClient {
 
     /// Lowercase kebab-case transport name for user-facing messages.
     fn kind_name(&self) -> &'static str {
-        match self.kind {
+        match self.kind.r#type {
             ProviderType::Chatgpt => "chatgpt",
             ProviderType::Copilot => "copilot",
             _ => "this provider",
         }
     }
 
-    pub fn kind(&self) -> ProviderType {
+    pub fn kind(&self) -> ProviderKind {
         self.kind
     }
 
@@ -423,90 +580,45 @@ impl ProviderClient {
     }
 
     pub fn supports_embeddings(&self) -> bool {
-        matches!(
-            self.kind,
-            ProviderType::Openai
-                | ProviderType::OpenaiCompat
-                | ProviderType::Openrouter
-                | ProviderType::Google
-                | ProviderType::Ollama
-                | ProviderType::Vercel
-                | ProviderType::Copilot
-                | ProviderType::Azure
-                | ProviderType::Cohere
-                | ProviderType::Doubleword
-                | ProviderType::Llamafile
-                | ProviderType::Mistral
-                | ProviderType::Together
-                | ProviderType::Venice
-                | ProviderType::Voyageai
-        )
+        has_embeddings(self.kind)
     }
 
     pub async fn embed(&self, model: &str, dims: usize, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-
-        match &self.list {
-            ListImpl::OpenAi(c) => embed_via(c, model, None, texts.to_vec()).await,
-            ListImpl::OpenRouter(c) => embed_via(c, model, None, texts.to_vec()).await,
-            ListImpl::Gemini(c) => embed_via(c, model, None, texts.to_vec()).await,
-            ListImpl::Ollama(c) => embed_via(c, model, Some(dims), texts.to_vec()).await,
-            ListImpl::Copilot(c) => embed_via(c, model, None, texts.to_vec()).await,
-            ListImpl::Azure(c) => embed_via(c, model, None, texts.to_vec()).await,
-            ListImpl::Cohere(c) => embed_via(c, model, None, texts.to_vec()).await,
-            ListImpl::Doubleword(c) => embed_via(c, model, None, texts.to_vec()).await,
-            ListImpl::Llamafile(c) => embed_via(c, model, None, texts.to_vec()).await,
-            ListImpl::Mistral(c) => embed_via(c, model, None, texts.to_vec()).await,
-            ListImpl::Together(c) => embed_via(c, model, None, texts.to_vec()).await,
-            ListImpl::Venice(c) => embed_via(c, model, None, texts.to_vec()).await,
-            ListImpl::Voyageai(c) => embed_via(c, model, None, texts.to_vec()).await,
-            _ => Err(LlmError::Embedding(
+        if !self.supports_embeddings() {
+            return Err(LlmError::Embedding(
                 "provider does not support embeddings".into(),
-            )),
+            ));
         }
+        let list = self.resolved_list().await?;
+        // Ollama's embedding width is chosen per request; every other
+        // provider sizes from the model.
+        let ndims = if matches!(self.kind.r#type, ProviderType::Ollama) {
+            Some(dims)
+        } else {
+            None
+        };
+        let Some(model) = list.embedding_model(model, ndims) else {
+            return Err(LlmError::Embedding(
+                "provider does not support embeddings".into(),
+            ));
+        };
+        embed_via(model, texts.to_vec()).await
     }
 
     pub async fn list_models(&self) -> Result<Vec<crate::Model>> {
-        use rig_core::client::ModelListingClient;
-
-        let models = match &self.list {
-            ListImpl::OpenAi(c) => c.list_models().await,
-            ListImpl::OpenRouter(c) => c.list_models().await,
-            ListImpl::Anthropic(c) => c.list_models().await,
-            ListImpl::Gemini(c) => c.list_models().await,
-            ListImpl::Ollama(c) => c.list_models().await,
-            ListImpl::ChatGpt(_) => {
-                return Ok(chatgpt_builtin_models());
-            }
-            ListImpl::Copilot(c) => c.list_models().await,
-            ListImpl::Deepseek(c) => c.list_models().await,
-            ListImpl::Groq(c) => c.list_models().await,
-            ListImpl::Minimax(c) => c.list_models().await,
-            ListImpl::Mira(c) => c.list_models().await,
-            ListImpl::Mistral(c) => c.list_models().await,
-            ListImpl::Moonshot(c) => c.list_models().await,
-            ListImpl::Venice(c) => c.list_models().await,
-            ListImpl::Xiaomimimo(c) => c.list_models().await,
-            ListImpl::Azure(_)
-            | ListImpl::Cohere(_)
-            | ListImpl::Doubleword(_)
-            | ListImpl::Huggingface(_)
-            | ListImpl::Hyperbolic(_)
-            | ListImpl::Llamafile(_)
-            | ListImpl::Perplexity(_)
-            | ListImpl::Together(_)
-            | ListImpl::Voyageai(_)
-            | ListImpl::Xai(_)
-            | ListImpl::Zai(_) => {
-                return Err(LlmError::Model(
-                    "provider does not support model listing".into(),
-                ));
-            }
+        if matches!(self.kind.r#type, ProviderType::Chatgpt) {
+            return Ok(chatgpt_builtin_models());
         }
-        .map_err(|e| LlmError::Model(e.to_string()))?;
-
+        if !has_model_listing(self.kind) {
+            return Err(LlmError::Model(
+                "provider does not support model listing".into(),
+            ));
+        }
+        let list = self.resolved_list().await?;
+        let models = list.list_models().await?;
         Ok(models.data)
     }
 
@@ -514,36 +626,11 @@ impl ProviderClient {
         &self,
         req: &crate::agent::WorkerRequest,
     ) -> std::result::Result<String, String> {
-        match &self.list {
-            ListImpl::OpenAi(c) => worker_via(c, req).await,
-            ListImpl::OpenRouter(c) => worker_via(c, req).await,
-            ListImpl::Anthropic(c) => worker_via(c, req).await,
-            ListImpl::Gemini(c) => worker_via(c, req).await,
-            ListImpl::Ollama(c) => worker_via(c, req).await,
-            ListImpl::ChatGpt(c) => worker_via(c, req).await,
-            ListImpl::Copilot(c) => worker_via(c, req).await,
-            ListImpl::Azure(c) => worker_via(c, req).await,
-            ListImpl::Cohere(c) => worker_via(c, req).await,
-            ListImpl::Deepseek(c) => worker_via(c, req).await,
-            ListImpl::Doubleword(c) => worker_via(c, req).await,
-            ListImpl::Groq(c) => worker_via(c, req).await,
-            ListImpl::Huggingface(c) => worker_via(c, req).await,
-            ListImpl::Hyperbolic(c) => worker_via(c, req).await,
-            ListImpl::Llamafile(c) => worker_via(c, req).await,
-            ListImpl::Minimax(c) => worker_via(c, req).await,
-            ListImpl::Mira(c) => worker_via(c, req).await,
-            ListImpl::Mistral(c) => worker_via(c, req).await,
-            ListImpl::Moonshot(c) => worker_via(c, req).await,
-            ListImpl::Perplexity(c) => worker_via(c, req).await,
-            ListImpl::Together(c) => worker_via(c, req).await,
-            ListImpl::Venice(c) => worker_via(c, req).await,
-            ListImpl::Xai(c) => worker_via(c, req).await,
-            ListImpl::Xiaomimimo(c) => worker_via(c, req).await,
-            ListImpl::Zai(c) => worker_via(c, req).await,
-            ListImpl::Voyageai(_) => {
-                Err("voyageai supports embeddings only, not completions".to_string())
-            }
-        }
+        let list = self.resolved_list().await.map_err(|e| e.to_string())?;
+        let Some(model) = list.completion_model(&req.model) else {
+            return Err("voyageai supports embeddings only, not completions".to_string());
+        };
+        worker_via(model, req).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -560,6 +647,21 @@ impl ProviderClient {
         context_budget: Option<crate::context_hook::ContextBudget>,
         seed_usage: Option<crate::TokenUsage>,
     ) -> StreamStream {
+        let list = match self.resolved_list().await {
+            Ok(list) => list,
+            Err(error) => {
+                return Box::pin(futures_util::stream::iter([StreamItem::Error {
+                    message: error.to_string(),
+                    reason: "Sign-in required".into(),
+                }]));
+            }
+        };
+        let Some(model) = list.completion_model(model) else {
+            return Box::pin(futures_util::stream::iter([StreamItem::Error {
+                message: "voyageai supports embeddings only, not completions".into(),
+                reason: "Turn error".into(),
+            }]));
+        };
         let tracker = crate::context_hook::UsageTracker::new();
         // Seed the measured compaction trigger with the previous turn's last
         // main request, so the first call of this run is anchored on real
@@ -591,511 +693,93 @@ impl ProviderClient {
             FileChangeHook::new().with_early_finish(worker_names.clone(), None, None, early_tx);
         receivers.push(early_rx);
 
-        match &self.list {
-            ListImpl::OpenAi(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
+        stream_via(
+            model,
+            preamble,
+            dynamic,
+            context_budget,
+            tracker_for_hook,
+            file_hook,
+            user_msg,
+            rig_history,
+            receivers,
+            worker_names,
+            max_turns,
+            tool_concurrency,
+            tracker,
+        )
+        .await
+    }
+}
+
+impl ListImpl {
+    /// The completion model `id` addresses, erased to the operation the agent
+    /// runtime consumes. Each dialect's default completion route applies: the
+    /// Responses endpoint for OpenAI and the ChatGPT subscription backend,
+    /// chat completions for the OpenAI-compatible vendors and Azure's
+    /// deployment routing.
+    fn completion_model(&self, id: &str) -> Option<DynModel<Completion>> {
+        match self {
+            ListImpl::OpenAi(c) => Some(c.completion(id).erase()),
+            ListImpl::Anthropic(c) => Some(c.completion(id).erase()),
+            ListImpl::Gemini(c) => Some(c.completion(id).erase()),
+            ListImpl::Ollama(c) => Some(c.completion(id).erase()),
+            ListImpl::Copilot(c) => Some(c.completion(id).erase()),
+            ListImpl::Cohere(c) => Some(c.completion(id).erase()),
+            ListImpl::Voyageai(_) | ListImpl::Pending => None,
+        }
+    }
+
+    /// The embedding model `id` addresses, `ndims` wide when the provider
+    /// sizes embeddings per request.
+    fn embedding_model(&self, id: &str, ndims: Option<usize>) -> Option<DynModel<Embedding>> {
+        match self {
+            ListImpl::OpenAi(c) => Some(c.embedding(id, ndims).erase()),
+            ListImpl::Gemini(c) => Some(c.embedding(id, ndims).erase()),
+            ListImpl::Ollama(c) => Some(c.embedding(id, ndims).erase()),
+            ListImpl::Copilot(c) => Some(c.embedding(id, ndims).erase()),
+            ListImpl::Cohere(c) => Some(c.embedding(id, ndims).erase()),
+            ListImpl::Voyageai(c) => Some(c.embedding(id, ndims).erase()),
+            ListImpl::Anthropic(_) | ListImpl::Pending => None,
+        }
+    }
+
+    /// The models this transport serves, every page followed.
+    async fn list_models(&self) -> std::result::Result<rig_core::model::ModelList, LlmError> {
+        match self {
+            ListImpl::OpenAi(c) => c
+                .list_models()
                 .await
-            }
-            ListImpl::OpenRouter(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
+                .map_err(|e| LlmError::Model(e.to_string())),
+            ListImpl::Anthropic(c) => c
+                .list_models()
                 .await
-            }
-            ListImpl::Anthropic(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
+                .map_err(|e| LlmError::Model(e.to_string())),
+            ListImpl::Gemini(c) => c
+                .list_models()
                 .await
-            }
-            ListImpl::Gemini(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
+                .map_err(|e| LlmError::Model(e.to_string())),
+            ListImpl::Ollama(c) => c
+                .list_models()
                 .await
-            }
-            ListImpl::Ollama(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
+                .map_err(|e| LlmError::Model(e.to_string())),
+            ListImpl::Copilot(c) => c
+                .list_models()
                 .await
-            }
-            ListImpl::ChatGpt(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
-                .await
-            }
-            ListImpl::Copilot(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
-                .await
-            }
-            ListImpl::Azure(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
-                .await
-            }
-            ListImpl::Cohere(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
-                .await
-            }
-            ListImpl::Deepseek(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
-                .await
-            }
-            ListImpl::Doubleword(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
-                .await
-            }
-            ListImpl::Groq(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
-                .await
-            }
-            ListImpl::Huggingface(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
-                .await
-            }
-            ListImpl::Hyperbolic(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
-                .await
-            }
-            ListImpl::Llamafile(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
-                .await
-            }
-            ListImpl::Minimax(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
-                .await
-            }
-            ListImpl::Mira(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
-                .await
-            }
-            ListImpl::Mistral(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
-                .await
-            }
-            ListImpl::Moonshot(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
-                .await
-            }
-            ListImpl::Perplexity(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
-                .await
-            }
-            ListImpl::Together(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
-                .await
-            }
-            ListImpl::Venice(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
-                .await
-            }
-            ListImpl::Xai(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
-                .await
-            }
-            ListImpl::Xiaomimimo(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
-                .await
-            }
-            ListImpl::Zai(c) => {
-                stream_via(
-                    c,
-                    model,
-                    preamble,
-                    dynamic,
-                    context_budget,
-                    tracker_for_hook,
-                    file_hook,
-                    user_msg,
-                    rig_history,
-                    receivers,
-                    worker_names,
-                    max_turns,
-                    tool_concurrency,
-                    tracker,
-                )
-                .await
-            }
-            ListImpl::Voyageai(_) => Box::pin(futures_util::stream::iter([StreamItem::Error {
-                message: "voyageai supports embeddings only, not completions".into(),
-                reason: "Turn error".into(),
-            }])),
+                .map_err(|e| LlmError::Model(e.to_string())),
+            ListImpl::Cohere(_) | ListImpl::Voyageai(_) | ListImpl::Pending => Err(
+                LlmError::Model("provider does not support model listing".into()),
+            ),
         }
     }
 }
 
-/// Embed `texts` through any rig [`EmbeddingsClient`], converting to `f32`
-/// vectors. `ndims` targets providers whose embedding dimension is chosen
-/// per request (e.g. Ollama).
-async fn embed_via<C>(
-    client: &C,
-    model: &str,
-    ndims: Option<usize>,
-    texts: Vec<String>,
-) -> Result<Vec<Vec<f32>>>
-where
-    C: rig_core::client::EmbeddingsClient,
-    C::EmbeddingModel: rig_core::embeddings::EmbeddingModel,
-{
+/// Embed `texts` through a rig embedding model, converting to `f32` vectors.
+async fn embed_via(model: DynModel<Embedding>, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
     use rig_core::embeddings::EmbeddingsBuilder;
 
-    let model = match ndims {
-        Some(dims) => client.embedding_model_with_ndims(model, dims),
-        None => client.embedding_model(model),
-    };
     let embeddings = EmbeddingsBuilder::new(model)
-        .documents(texts)
+        .documents(texts.to_vec())
         .map_err(|e| LlmError::Embedding(e.to_string()))?
         .build()
         .await
@@ -1107,15 +791,11 @@ where
         .collect())
 }
 
-/// Run a worker-agent request against any completion-capable rig client.
-async fn worker_via<C>(
-    client: &C,
+/// Run a worker-agent request against an erased completion model.
+async fn worker_via(
+    model: DynModel<Completion>,
     req: &crate::agent::WorkerRequest,
-) -> std::result::Result<String, String>
-where
-    C: rig_core::client::CompletionClient + rig_agent::client::AgentClientExt,
-    C::CompletionModel: 'static,
-{
+) -> std::result::Result<String, String> {
     let user_msg = rig_core::message::Message::user(req.task.clone());
     let activity_tx = req.activity_tx.clone();
     let usage = std::sync::Arc::clone(&req.usage);
@@ -1127,8 +807,7 @@ where
         activity_tx.clone(),
     );
     let agent = agent_with_tools(
-        client,
-        &req.model,
+        model,
         Some(&req.preamble),
         req.tools.clone(),
         req.context_budget.clone(),
@@ -1148,11 +827,10 @@ where
     .await
 }
 
-/// Stream a chat turn through any completion-capable rig client.
+/// Stream a chat turn through an erased completion model.
 #[allow(clippy::too_many_arguments)]
-async fn stream_via<C>(
-    client: &C,
-    model: &str,
+async fn stream_via(
+    model: DynModel<Completion>,
     preamble: Option<&str>,
     dynamic: Vec<DynamicTool>,
     context_budget: Option<crate::context_hook::ContextBudget>,
@@ -1165,15 +843,8 @@ async fn stream_via<C>(
     max_turns: usize,
     tool_concurrency: usize,
     tracker: std::sync::Arc<crate::context_hook::UsageTracker>,
-) -> StreamStream
-where
-    C: rig_core::client::CompletionClient + rig_agent::client::AgentClientExt,
-    C::CompletionModel: 'static,
-{
-    use rig_agent::streaming::StreamingChat;
-
+) -> StreamStream {
     let agent = agent_with_tools(
-        client,
         model,
         preamble,
         dynamic,
@@ -1186,30 +857,27 @@ where
     // parallel; sequential (`1`) stays the unset default. Streamed output
     // ordering is preserved either way.
     let stream = agent
-        .stream_chat(user_msg, rig_history)
+        .prompt(user_msg)
+        .history(rig_history)
         .max_turns(max_turns)
         .tool_concurrency(tool_concurrency)
-        .await;
+        .stream();
     map_agent_stream(stream, receivers, worker_names, tracker, file_hook)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn agent_with_tools<C>(
-    client: &C,
-    model: &str,
+fn agent_with_tools(
+    model: DynModel<Completion>,
     preamble: Option<&str>,
     dynamic: Vec<DynamicTool>,
     context_budget: Option<crate::context_hook::ContextBudget>,
     tracker: std::sync::Arc<crate::context_hook::UsageTracker>,
     file_hook: FileChangeHook,
-) -> rig_agent::agent::Agent
-where
-    C: rig_core::client::CompletionClient + rig_agent::client::AgentClientExt,
-    C::CompletionModel: 'static,
-{
+) -> rig_agent::agent::Agent {
+    let builder = rig_agent::agent::AgentBuilder::new(model);
     let builder = match preamble {
-        Some(p) => client.agent(model).preamble(p),
-        None => client.agent(model).without_preamble(),
+        Some(p) => builder.preamble(p),
+        None => builder.without_preamble(),
     };
     if let Some(budget) = context_budget {
         builder
@@ -1233,49 +901,40 @@ async fn run_worker_agent(
     max_turns: usize,
     file_hook: FileChangeHook,
 ) -> std::result::Result<String, String> {
-    use rig_agent::streaming::StreamingChat;
-
-    let mut stream = agent
-        .stream_chat(prompt, Vec::<rig_core::message::Message>::new())
-        .max_turns(max_turns)
-        .await;
+    let mut stream = agent.prompt(prompt).max_turns(max_turns).stream();
 
     let mut turn_text = TurnText::default();
     let mut usage_aggregate = crate::TokenUsage::default();
-    let mut tool_names: std::collections::HashMap<String, String> =
+    let mut tool_names: std::collections::HashMap<CallId, String> =
         std::collections::HashMap::new();
     while let Some(item) = stream.next().await {
         match item {
             Ok(rig_agent::agent::MultiTurnStreamItem::StreamAssistantItem(
-                rig_core::streaming::StreamedAssistantContent::Text(t),
+                rig_core::streaming::Item::Event(rig_core::streaming::StreamEvent::Text {
+                    text,
+                    ..
+                }),
             )) => {
-                turn_text.push(t.text);
+                turn_text.push(text);
             }
-            Ok(rig_agent::agent::MultiTurnStreamItem::StreamAssistantItem(
-                rig_core::streaming::StreamedAssistantContent::ToolCall {
-                    tool_call,
-                    internal_call_id,
-                },
-            )) => {
-                tool_names.insert(internal_call_id.clone(), tool_call.function.name.clone());
+            Ok(rig_agent::agent::MultiTurnStreamItem::ToolCall { tool_call }) => {
+                tool_names.insert(tool_call.id.clone(), tool_call.function.name.to_string());
                 let _ = activity_tx
                     .send(StreamItem::ToolStart {
-                        name: tool_call.function.name,
+                        name: tool_call.function.name.to_string(),
                         args: tool_call.function.arguments,
                         worker: Some(name.to_string()),
                         spawn: Some(spawn),
-                        call_id: internal_call_id,
+                        call_id: tool_call.id.to_string(),
                     })
                     .await;
             }
             Ok(rig_agent::agent::MultiTurnStreamItem::StreamUserItem(
-                rig_core::streaming::StreamedUserContent::ToolResult {
-                    tool_result,
-                    internal_call_id,
-                },
-            )) if !file_hook.surfaced_early(&internal_call_id) => {
-                let tool_name = tool_names.remove(&internal_call_id).unwrap_or_default();
-                let captured = file_hook.take(&internal_call_id);
+                rig_core::streaming::StreamedUserContent::ToolResult { tool_result },
+            )) if !file_hook.surfaced_early(&tool_result.call) => {
+                let call_id = tool_result.call.clone();
+                let tool_name = tool_names.remove(&call_id).unwrap_or_default();
+                let captured = file_hook.take(&call_id);
                 let mut output = String::new();
                 for content in tool_result.content.iter() {
                     if let Some(text) = content.as_text() {
@@ -1299,7 +958,7 @@ async fn run_worker_agent(
                         spawn: Some(spawn),
                         file_change: captured.file_change,
                         streams: captured.shell,
-                        call_id: internal_call_id,
+                        call_id: call_id.to_string(),
                     })
                     .await;
             }
@@ -1329,11 +988,7 @@ async fn run_worker_agent(
     }
     {
         let mut guard = usage.lock().unwrap();
-        guard.input_tokens += usage_aggregate.input_tokens;
-        guard.output_tokens += usage_aggregate.output_tokens;
-        guard.total_tokens += usage_aggregate.total_tokens;
-        guard.cached_input_tokens += usage_aggregate.cached_input_tokens;
-        guard.reasoning_tokens += usage_aggregate.reasoning_tokens;
+        *guard += usage_aggregate;
     }
     Ok(turn_text.take())
 }
@@ -1351,20 +1006,24 @@ fn map_agent_stream(
 ) -> StreamStream {
     let mut tool_called = false;
     let mut turn_text = TurnText::default();
-    let mut tool_names: std::collections::HashMap<String, String> =
+    let mut tool_names: std::collections::HashMap<CallId, String> =
         std::collections::HashMap::new();
     let mut pending_workers: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     let tracker_clone = tracker.clone();
     let main = stream.map(move |item| match item {
         Ok(rig_agent::agent::MultiTurnStreamItem::StreamAssistantItem(
-            rig_core::streaming::StreamedAssistantContent::Text(t),
+            rig_core::streaming::Item::Event(rig_core::streaming::StreamEvent::Text {
+                text, ..
+            }),
         )) => StreamItem::Delta {
-            text: turn_text.push(t.text),
+            text: turn_text.push(text),
         },
         Ok(rig_agent::agent::MultiTurnStreamItem::StreamAssistantItem(
-            rig_core::streaming::StreamedAssistantContent::Reasoning { reasoning, .. },
+            rig_core::streaming::Item::Event(rig_core::streaming::StreamEvent::Reasoning {
+                text,
+                ..
+            }),
         )) => {
-            let text = reasoning.display_text();
             if text.is_empty() {
                 StreamItem::Delta {
                     text: String::new(),
@@ -1373,58 +1032,38 @@ fn map_agent_stream(
                 StreamItem::Reasoning { text }
             }
         }
-        Ok(rig_agent::agent::MultiTurnStreamItem::StreamAssistantItem(
-            rig_core::streaming::StreamedAssistantContent::ReasoningDelta { reasoning, .. },
-        )) => {
-            if reasoning.is_empty() {
-                StreamItem::Delta {
-                    text: String::new(),
-                }
-            } else {
-                StreamItem::Reasoning { text: reasoning }
-            }
-        }
-        Ok(rig_agent::agent::MultiTurnStreamItem::StreamAssistantItem(
-            rig_core::streaming::StreamedAssistantContent::ToolCall {
-                tool_call,
-                internal_call_id,
-            },
-        )) => {
+        Ok(rig_agent::agent::MultiTurnStreamItem::ToolCall { tool_call }) => {
             tool_called = true;
             turn_text.tool_called();
-            let name = tool_call.function.name.clone();
+            let name = tool_call.function.name.to_string();
+            let call_id = tool_call.id.clone();
             if worker_names.contains(&name) {
                 pending_workers.push_back(name.clone());
                 StreamItem::WorkerStart {
                     name,
                     args: tool_call.function.arguments,
-                    call_id: internal_call_id,
+                    call_id: call_id.to_string(),
                 }
             } else {
-                tool_names.insert(internal_call_id.clone(), name.clone());
+                tool_names.insert(call_id.clone(), name.clone());
                 StreamItem::ToolStart {
                     name,
                     args: tool_call.function.arguments,
                     worker: None,
                     spawn: None,
-                    call_id: internal_call_id,
+                    call_id: call_id.to_string(),
                 }
             }
         }
         Ok(rig_agent::agent::MultiTurnStreamItem::StreamUserItem(
-            rig_core::streaming::StreamedUserContent::ToolResult {
-                tool_result: _,
-                internal_call_id,
-            },
-        )) if file_hook.surfaced_early(&internal_call_id) => StreamItem::Delta {
+            rig_core::streaming::StreamedUserContent::ToolResult { tool_result },
+        )) if file_hook.surfaced_early(&tool_result.call) => StreamItem::Delta {
             text: String::new(),
         },
         Ok(rig_agent::agent::MultiTurnStreamItem::StreamUserItem(
-            rig_core::streaming::StreamedUserContent::ToolResult {
-                tool_result,
-                internal_call_id,
-            },
+            rig_core::streaming::StreamedUserContent::ToolResult { tool_result },
         )) => {
+            let call_id = tool_result.call.clone();
             let mut output = String::new();
             for content in tool_result.content.iter() {
                 if let Some(text) = content.as_text() {
@@ -1434,13 +1073,13 @@ fn map_agent_stream(
                     output.push_str(text);
                 }
             }
-            let captured = file_hook.take(&internal_call_id);
+            let captured = file_hook.take(&call_id);
             let mut ok = !captured.failed;
             if output.is_empty() {
                 ok = false;
                 output = String::from("(no output)");
             }
-            let name = tool_names.remove(&internal_call_id);
+            let name = tool_names.remove(&call_id);
             match name {
                 Some(name) => StreamItem::ToolResult {
                     name,
@@ -1450,14 +1089,14 @@ fn map_agent_stream(
                     spawn: captured.spawn,
                     file_change: captured.file_change,
                     streams: captured.shell,
-                    call_id: internal_call_id,
+                    call_id: call_id.to_string(),
                 },
                 None => StreamItem::WorkerResult {
                     name: pending_workers.pop_front().unwrap_or_default(),
                     output,
                     ok,
                     spawn: captured.spawn,
-                    call_id: internal_call_id,
+                    call_id: call_id.to_string(),
                 },
             }
         }
@@ -1537,6 +1176,16 @@ mod tests {
     use futures_util::StreamExt;
     use serde_json::json;
 
+    /// A provider kind without a vendor dialect (the tests' common shape).
+    fn kind(t: selune::ProviderType) -> ProviderKind {
+        ProviderKind::new(t, None)
+    }
+
+    /// A provider kind riding one of Selune's openai-compat vendor dialects.
+    fn vendor(d: selune::Dialect) -> ProviderKind {
+        ProviderKind::new(selune::ProviderType::OpenaiCompat, Some(d))
+    }
+
     fn pending_stream() -> impl futures_core::Stream<Item = StreamItem> + Send + 'static {
         futures_util::stream::pending::<StreamItem>()
     }
@@ -1563,6 +1212,7 @@ mod tests {
         let mut turn = TurnText::default();
         turn.tool_called();
         assert_eq!(turn.push("First text.".into()), "First text.");
+        turn.tool_called();
         turn.tool_called();
         assert_eq!(turn.push("Second text.".into()), "\n\nSecond text.");
         assert_eq!(turn.take(), "First text.\n\nSecond text.");
@@ -1678,7 +1328,7 @@ mod tests {
 
     #[tokio::test]
     async fn worker_missing_task_returns_error() {
-        let client = ProviderClient::build(selune::ProviderType::Ollama, None, None).unwrap();
+        let client = ProviderClient::build(kind(selune::ProviderType::Ollama), None, None).unwrap();
         let (_activity_tx, _activity_rx) = tokio::sync::mpsc::channel::<StreamItem>(8);
         let usage = std::sync::Arc::new(std::sync::Mutex::new(crate::TokenUsage::default()));
         let worker = crate::agent::WorkerAgent::new(
@@ -1705,7 +1355,7 @@ mod tests {
     #[test]
     fn supports_embeddings_by_provider() {
         use selune::ProviderType::*;
-        let ok = [
+        for p in [
             Openai,
             OpenaiCompat,
             Openrouter,
@@ -1713,31 +1363,58 @@ mod tests {
             Ollama,
             Vercel,
             Copilot,
-        ];
-        let no = [Anthropic, Bedrock, GoogleVertex, Chatgpt];
-        for p in ok {
-            let client = ProviderClient::build(p, Some("k"), None).unwrap();
+        ] {
+            let client = ProviderClient::build(kind(p), Some("k"), None).unwrap();
             assert!(
                 client.supports_embeddings(),
                 "{p:?} should support embeddings"
             );
         }
+        let no = [Anthropic, Bedrock, GoogleVertex, Chatgpt];
         for p in no {
-            let client = ProviderClient::build(p, Some("k"), None).unwrap();
+            let client = ProviderClient::build(kind(p), Some("k"), None).unwrap();
             assert!(!client.supports_embeddings(), "{p:?} should not");
         }
-        // Azure and the embeddings-capable transports from the rig survey;
-        // Azure's resource endpoint is required at build time.
+        // The remaining embeddings-capable transports; Azure's resource
+        // endpoint is required at build time.
         let azure =
-            ProviderClient::build(Azure, Some("k"), Some("https://res.openai.azure.com")).unwrap();
+            ProviderClient::build(kind(Azure), Some("k"), Some("https://res.openai.azure.com"))
+                .unwrap();
         assert!(azure.supports_embeddings());
-        for p in [
-            Cohere, Doubleword, Llamafile, Mistral, Together, Venice, Voyageai,
-        ] {
-            let client = ProviderClient::build(p, Some("k"), None).unwrap();
+        for p in [Cohere, Llamafile, Voyageai] {
+            let client = ProviderClient::build(kind(p), Some("k"), None).unwrap();
             assert!(
                 client.supports_embeddings(),
                 "{p:?} should support embeddings"
+            );
+        }
+        // Openai-compat vendor dialects: every dialect builds, and the vendor
+        // flavor decides whether embeddings exist — these wire `/embeddings`,
+        // the rest do not.
+        use selune::Dialect::*;
+        for d in [
+            Deepseek,
+            Doubleword,
+            Groq,
+            Huggingface,
+            Hyperbolic,
+            Minimax,
+            Mira,
+            Mistral,
+            Moonshot,
+            Perplexity,
+            Together,
+            Venice,
+            Xai,
+            Xiaomimimo,
+            Zai,
+        ] {
+            let supported = matches!(d, Doubleword | Mistral | Together | Venice);
+            let client = ProviderClient::build(vendor(d), Some("k"), None).unwrap();
+            assert_eq!(
+                client.supports_embeddings(),
+                supported,
+                "{d:?} embedding support"
             );
         }
     }
@@ -1745,15 +1422,15 @@ mod tests {
     #[test]
     fn auth_backed_clients_build_with_and_without_a_key() {
         use selune::ProviderType::*;
-        for kind in [Chatgpt, Copilot] {
-            let keyed = ProviderClient::build(kind, Some("tok"), None).unwrap();
-            assert_eq!(keyed.kind(), kind);
-            let oauth = ProviderClient::build(kind, None, None).unwrap();
-            assert_eq!(oauth.kind(), kind);
+        for t in [Chatgpt, Copilot] {
+            let keyed = ProviderClient::build(kind(t), Some("tok"), None).unwrap();
+            assert_eq!(keyed.kind(), kind(t));
+            let oauth = ProviderClient::build(kind(t), None, None).unwrap();
+            assert_eq!(oauth.kind(), kind(t));
             let handler: crate::auth::DeviceCodeHandler = std::sync::Arc::new(|_| {});
             let prompted =
-                ProviderClient::build_with_device_code(kind, None, None, Some(handler)).unwrap();
-            assert_eq!(prompted.kind(), kind);
+                ProviderClient::build_with_device_code(kind(t), None, None, Some(handler)).unwrap();
+            assert_eq!(prompted.kind(), kind(t));
         }
     }
 
@@ -1770,14 +1447,11 @@ mod tests {
     #[tokio::test]
     async fn authorize_with_a_static_key_resolves_without_network() {
         use selune::ProviderType::*;
-        // ChatGPT's AccessToken source and Copilot's plain API-key source both
-        // answer auth_context() directly — no HTTP, no cache files touched.
-        let chatgpt = ProviderClient::build(Chatgpt, Some("tok"), None).unwrap();
-        chatgpt
-            .authorize()
-            .await
-            .expect("static access token authorizes");
-        let copilot = ProviderClient::build(Copilot, Some("copilot-key"), None).unwrap();
+        // A pasted session/access token answers directly — no HTTP, no cache
+        // files touched, no sign-in gate.
+        let chatgpt = ProviderClient::build(kind(Chatgpt), Some("tok"), None).unwrap();
+        chatgpt.authorize().await.expect("static token authorizes");
+        let copilot = ProviderClient::build(kind(Copilot), Some("copilot-key"), None).unwrap();
         copilot
             .authorize()
             .await
@@ -1786,7 +1460,8 @@ mod tests {
 
     #[tokio::test]
     async fn authorize_rejects_non_oauth_kinds() {
-        let client = ProviderClient::build(selune::ProviderType::Openai, Some("k"), None).unwrap();
+        let client =
+            ProviderClient::build(kind(selune::ProviderType::Openai), Some("k"), None).unwrap();
         let err = client.authorize().await.expect_err("no OAuth for openai");
         assert!(
             err.to_string().contains("OAuth sign-in"),
@@ -1805,7 +1480,8 @@ mod tests {
 
     #[tokio::test]
     async fn chatgpt_list_models_returns_builtin_constants() {
-        let client = ProviderClient::build(selune::ProviderType::Chatgpt, None, None).unwrap();
+        let client =
+            ProviderClient::build(kind(selune::ProviderType::Chatgpt), None, None).unwrap();
         let models = client.list_models().await.unwrap();
         assert!(!models.is_empty());
     }
@@ -1813,7 +1489,7 @@ mod tests {
     #[tokio::test]
     async fn embed_unsupported_provider_errors() {
         let client =
-            ProviderClient::build(selune::ProviderType::Anthropic, Some("k"), None).unwrap();
+            ProviderClient::build(kind(selune::ProviderType::Anthropic), Some("k"), None).unwrap();
         let err = client
             .embed("some-model", 768, &["hello".to_string()])
             .await
@@ -1823,15 +1499,15 @@ mod tests {
 
     #[tokio::test]
     async fn embed_empty_input_returns_empty() {
-        let client = ProviderClient::build(selune::ProviderType::Ollama, None, None).unwrap();
+        let client = ProviderClient::build(kind(selune::ProviderType::Ollama), None, None).unwrap();
         let out = client.embed("m", 384, &[]).await.unwrap();
         assert!(out.is_empty());
     }
+
     mod early_tool_results {
         use super::*;
         use crate::tool::{ToolContext, ToolExecutionError, ToolOutput, into_dynamic};
         use rig_agent::agent::AgentBuilder;
-        use rig_agent::streaming::StreamingChat;
         use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
         use std::collections::HashSet;
 
@@ -1926,12 +1602,9 @@ mod tests {
                 .add_hook(file_hook.clone())
                 .build();
             let stream = agent
-                .stream_chat(
-                    rig_core::message::Message::user("go"),
-                    Vec::<rig_core::message::Message>::new(),
-                )
+                .prompt(rig_core::message::Message::user("go"))
                 .max_turns(2)
-                .await;
+                .stream();
             map_agent_stream(
                 stream,
                 vec![early_rx],

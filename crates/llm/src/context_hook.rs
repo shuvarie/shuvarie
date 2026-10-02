@@ -30,13 +30,13 @@
 //! replaces the history for this call only — patches are non-sticky, so the
 //! next call re-expands to the full history and the hook re-trims).
 
-use rig_agent::agent::hook::{CompletionCall, ToolResultEvent};
+use rig_agent::agent::hook::{CompletionCallEvent, OutcomeEvent};
 use rig_agent::agent::{
-    AgentHook, CompletionCallAction, HookContext, RequestPatch, StepEventKind, ToolResultAction,
+    AgentHook, CompletionCallAction, HookContext, OutcomeAction, RequestPatch, StepEventKind,
 };
 use rig_core::completion::Usage;
 use rig_core::completion::message::{
-    AssistantContent, Message, Text, ToolResult, ToolResultContent,
+    AssistantContent, Message, Reasoning, ReasoningContent, Text, ToolResult, ToolResultContent,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -58,13 +58,14 @@ pub fn estimate_text_tokens(text: &str) -> u64 {
 /// in context when generating (prompt tokens, including or plus whatever the
 /// provider reports about cached prefixes), excluding the generated output.
 fn request_tokens(usage: &Usage) -> u64 {
-    if usage.total_tokens > 0 {
-        usage.total_tokens.saturating_sub(usage.output_tokens)
+    if let Some(total) = usage.total_tokens.filter(|&total| total > 0) {
+        total.saturating_sub(usage.output_tokens.unwrap_or(0))
     } else {
         usage
             .input_tokens
-            .saturating_add(usage.cached_input_tokens)
-            .saturating_add(usage.cache_creation_input_tokens)
+            .unwrap_or(0)
+            .saturating_add(usage.cached_input_tokens.unwrap_or(0))
+            .saturating_add(usage.cache_creation_input_tokens.unwrap_or(0))
     }
 }
 
@@ -84,25 +85,36 @@ fn message_text_len(msg: &Message) -> usize {
             .map(|c| match c {
                 AssistantContent::Text(t) => t.text.chars().count(),
                 AssistantContent::ToolCall(tc) => {
-                    tc.function.name.len() + tc.function.arguments.to_string().len()
+                    tc.function.name.as_str().len() + tc.function.arguments.to_string().len()
                 }
-                AssistantContent::Reasoning(r) => r
-                    .content
-                    .iter()
-                    .map(|c| match c {
-                        rig_core::completion::message::ReasoningContent::Text { text, .. } => {
-                            text.chars().count()
-                        }
-                        rig_core::completion::message::ReasoningContent::Summary(s) => {
-                            s.chars().count()
-                        }
-                        _ => 0,
-                    })
-                    .sum(),
+                AssistantContent::Reasoning(reasoning) => reasoning_len(reasoning),
                 _ => 0,
             })
             .sum(),
     }
+}
+
+fn reason_content_len(content: &[ReasoningContent]) -> usize {
+    content
+        .iter()
+        .map(|c| match c {
+            ReasoningContent::Text { text, .. } => text.chars().count(),
+            ReasoningContent::Summary(s) => s.chars().count(),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Reasoning is sealed to the provider that issued it, so its text is
+/// measured through the serialized flattened content (the same value any
+/// provider replay opens); unknown shapes measure as zero.
+/// Reasoning is sealed to the provider that issued it; a value opened by its
+/// own issuer always succeeds, so the text is measurable directly.
+fn reasoning_len(reasoning: &rig_core::message::Sealed<Reasoning>) -> usize {
+    reasoning
+        .open(reasoning.issuer())
+        .map(|reasoning| reason_content_len(&reasoning.content))
+        .unwrap_or(0)
 }
 
 fn tool_result_len(tr: &ToolResult) -> usize {
@@ -334,7 +346,7 @@ impl ContextHook {
 /// Recovery-hint stub for an elided tool result: the model knows which tool
 /// ran, how large the result was, and that re-running the tool recovers it.
 fn recovery_hint(tr: &ToolResult) -> String {
-    let name = tr.name.clone();
+    let name = tr.name.as_str();
     let chars = tool_result_len(tr);
     format!("[elided: {name} result ({chars} chars) — re-run {name} if you need it]")
 }
@@ -356,7 +368,6 @@ fn condense_message(msg: &Message) -> Message {
                     rig_core::completion::message::UserContent::ToolResult(tr) => {
                         rig_core::completion::message::UserContent::ToolResult(ToolResult {
                             call: tr.call.clone(),
-                            provider: tr.provider.clone(),
                             name: tr.name.clone(),
                             content: vec![ToolResultContent::Text(Text::new(recovery_hint(tr)))],
                         })
@@ -391,7 +402,7 @@ impl AgentHook for ContextHook {
     fn on_completion_call(
         &self,
         _ctx: &HookContext,
-        event: CompletionCall<'_>,
+        event: CompletionCallEvent<'_>,
     ) -> impl futures_util::Future<Output = CompletionCallAction> + Send {
         let decision = self.decide(event.prompt, event.history);
         async move {
@@ -405,28 +416,31 @@ impl AgentHook for ContextHook {
         }
     }
 
-    fn on_tool_result(
-        &self,
-        _ctx: &HookContext,
-        event: ToolResultEvent<'_>,
-    ) -> impl futures_util::Future<Output = ToolResultAction> + Send {
-        let text = event.presentation.render();
-        let action = match truncate_tool_output(&text, self.budget.tool_output_max_chars) {
-            Some(note) => ToolResultAction::rewrite(note),
-            None => ToolResultAction::Keep,
+    /// Truncate an oversized tool result's model-facing output in place. Runs
+    /// on the tool-dispatch outcome boundary (the one hook rig consults per
+    /// executed call in 0.43), before the file-change hook captures it.
+    async fn on_outcome(&self, _ctx: &HookContext, event: OutcomeEvent<'_>) -> OutcomeAction {
+        let Some(result) = event.tool_result() else {
+            return OutcomeAction::Proceed;
         };
-        async move { action }
+        match truncate_tool_output(&result.output().render(), self.budget.tool_output_max_chars) {
+            Some(note) => OutcomeAction::rewrite_tool_result(&event, note),
+            None => OutcomeAction::Proceed,
+        }
     }
 
-    fn observes(&self, _kind: StepEventKind) -> bool {
-        false
+    /// Only tool-dispatch outcomes are steered here; observing the other
+    /// kinds is noise (the completion call itself is not dispatch-gated).
+    fn observes(&self, kind: StepEventKind) -> bool {
+        matches!(kind, StepEventKind::ToolDispatch)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::completion::message::{Message, Text, ToolCallId, ToolResult, UserContent};
+    use rig_core::completion::message::{Message, Text, ToolResult, UserContent};
+    use rig_core::message::{CallId, LocalCallId};
 
     fn user_msg(text: &str) -> Message {
         Message::User {
@@ -434,22 +448,28 @@ mod tests {
         }
     }
 
+    fn mint_call_id() -> CallId {
+        // A fresh rig-issued (uuid) id per result, like the provider-free
+        // results rig itself answers in a live run.
+        rig_core::message::CallId::from(LocalCallId::new())
+    }
+
     fn tool_result_msg(name: &str, content: &str) -> Message {
         Message::User {
             content: vec![UserContent::ToolResult(ToolResult {
-                call: ToolCallId::mint(),
-                provider: None,
-                name: name.to_string(),
+                call: mint_call_id(),
+                name: rig_core::message::ToolName::new(name).expect("non-empty"),
                 content: vec![ToolResultContent::Text(Text::new(content.to_string()))],
             })],
         }
     }
 
     fn usage_of(total: u64, output: u64) -> Usage {
-        let mut usage = Usage::new();
-        usage.total_tokens = total;
-        usage.output_tokens = output;
-        usage
+        Usage {
+            total_tokens: Some(total),
+            output_tokens: Some(output),
+            ..Usage::default()
+        }
     }
 
     #[test]
@@ -462,7 +482,7 @@ mod tests {
     fn request_tokens_subtracts_output_from_total() {
         let usage = usage_of(10_000, 2_000);
         assert_eq!(request_tokens(&usage), 8_000);
-        assert_eq!(request_tokens(&Usage::new()), 0);
+        assert_eq!(request_tokens(&Usage::default()), 0);
     }
 
     #[test]
@@ -471,7 +491,7 @@ mod tests {
         tracker.record(usage_of(30_000, 2_000));
         tracker.record(usage_of(50_000, 2_000));
         assert_eq!(tracker.input(), 48_000);
-        let zero = Usage::new();
+        let zero = Usage::default();
         tracker.record(zero);
         assert_eq!(tracker.input(), 48_000);
     }

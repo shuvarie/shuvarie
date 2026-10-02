@@ -81,7 +81,7 @@ where
     let tool = build(access.clone());
     if let Some(reason) = ask_reason {
         let tool = Arc::new(tool);
-        Some(DynamicTool::new(
+        Some(DynamicTool::new_with_context(
             name,
             tool.description(),
             tool.parameters(),

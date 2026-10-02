@@ -1,36 +1,35 @@
 # Streaming
 
-Streaming processes an LLM response incrementally as it's generated, essential for responsive UIs and long-form output. Rig mirrors its non-streaming traits with streaming equivalents in `rig::streaming`.
+Streaming processes an LLM response incrementally as it's generated, essential for responsive UIs and long-form output. In 0.43 the streaming surface is a **runner mode**: `agent.prompt(...)` builds an `AgentRunner`; driving it with `.stream()` yields one lazy, `Send` stream of `MultiTurnStreamItem`s (identical loop, hooks and history as `.run()`; only the deltas differ). The 0.42 `Prompt`/`Chat`/`StreamingPrompt`/`StreamingChat` traits are gone.
 
-Official docs: https://rig.rs/docs/concepts/streaming · API: https://docs.rs/rig/latest/rig/streaming/index.html
+Official docs: https://rig.rs/docs/concepts/streaming · API: https://docs.rs/rig-agent/latest/rig_agent/agent/struct.AgentRunner.html (for 0.43 the authoritative reference is `rig-agent-0.43.0/src/agent/streaming.rs` + `rig-core-0.43.0/src/streaming/`).
 
 ## Streaming an agent
 
-`stream_prompt` (from `StreamingPrompt`) returns a stream of `MultiTurnStreamItem` values — match on them to handle text deltas and the final response:
-
 ```rust
 use futures::StreamExt;
-use rig::agent::MultiTurnStreamItem;
-use rig::client::{CompletionClient, ProviderClient};
-use rig::providers::openai;
-use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
+use rig_agent::agent::MultiTurnStreamItem;
+use rig_core::message::Message;
+use rig_core::providers::openai::{self, OpenAI};
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    let openai = openai::Client::from_env()?;
-    let agent = openai
-        .agent("gpt-5.5")
+    let openai = OpenAI::from_env()?;
+    let agent = rig_agent::AgentBuilder::new(openai.completion(openai::GPT_5_2))
         .preamble("You are a storyteller.")
-        .temperature(0.9)
         .build();
 
-    let mut stream = agent.stream_prompt("Tell me a short story about a robot.").await;
+    // Lazy: nothing runs until polled. `.history(..)` seeds chat history.
+    let mut stream = agent.prompt("Tell me a short story about a robot.").stream();
     while let Some(item) = stream.next().await {
         match item? {
-            MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text)) => {
-                print!("{}", text.text);
+            MultiTurnStreamItem::StreamAssistantItem(item) => {
+                use rig_core::streaming::{Item, StreamEvent};
+                if let Item::Event(StreamEvent::Text { text, .. }) = item {
+                    print!("{text}");
+                }
             }
-            MultiTurnStreamItem::FinalResponse(_) => println!(),
+            MultiTurnStreamItem::FinalResponse(res) => println!("{}", res.output),
             _ => {}
         }
     }
@@ -38,102 +37,101 @@ async fn main() -> Result<(), anyhow::Error> {
 }
 ```
 
-## Core traits
+The stream's item type is `Result<MultiTurnStreamItem, StreamingError>`; the last item is the `FinalResponse` (or an `Err`). It runs under the span it was *built* in (whatever ambient span the builder saw, else a fresh `invoke_agent`).
 
-| Non-streaming | Streaming | Description |
-|---------------|-----------|-------------|
-| `Prompt` | `StreamingPrompt` | One-shot streaming prompt |
-| `Chat` | `StreamingChat` | Streaming chat with history |
-
-> The `StreamingCompletion` low-level trait was **removed in 0.42**. To stream a bare model request, call `CompletionModel::stream(req)` or `model.completion_request(...).stream()`.
-
-### `StreamingChat`
-
-Same `MultiTurnStreamItem` stream as `stream_prompt`, plus chat history:
-
-```rust
-use rig::streaming::StreamingChat;
-let mut stream = agent.stream_chat("Continue the story", chat_history).await;
-```
-
-## Response types
-
-**`MultiTurnStreamItem`** (`rig::agent`) — what an agent's `stream_prompt`/`stream_chat` yields across the multi-turn loop. Match:
+## The run stream: `MultiTurnStreamItem` (`rig_agent::agent`)
 
 ```rust
 pub enum MultiTurnStreamItem {
-    StreamAssistantItem(StreamedAssistantContent),       // model-emitted content
-    StreamUserItem(StreamedUserContent),                // tool results
-    ToolExecutionCommitted { tool_call, internal_call_id }, // tool body ran (batched)
-    CompletionCall(CompletionCall),                     // one finished completion request + usage
-    ModelTurnRetried { turn },                          // hook rejected a turn for retry
-    FinalResponse(PromptResponse),                      // the completed run
+    /// A provider stream item: part starts/ends, text and reasoning
+    /// fragments, tool-call parts (arguments + the validated call's end),
+    /// and unmodeled passthrough payloads.
+    StreamAssistantItem(rig_core::streaming::Item<StreamEvent>),
+    /// A tool call the model emitted, reported when the turn commits, for
+    /// each call Rig routes to execution (hook-skipped calls still report).
+    ToolCall { tool_call: rig_core::message::ToolCall },
+    /// Rig executed and committed a tool call (with hook patches applied);
+    /// surfaced together with its result after the whole batch settles.
+    ToolExecutionCommitted { tool_call: rig_core::message::ToolCall },
+    /// The result of an executed (or hook-skipped) tool call.
+    StreamUserItem(rig_core::streaming::StreamedUserContent),
+    /// One finished completion request: `call_index`, `usage`, ids,
+    /// `finish_reason`, `raw`.
+    CompletionCall(CompletionCall),
+    /// A hook rejected the completed turn for retry; discard the provisional
+    /// text/reasoning you rendered for `turn`.
+    ModelTurnRetried { turn: usize },
+    /// The run's final response (shared type with the blocking surface).
+    FinalResponse(PromptResponse),
 }
 ```
 
-- `CompletionCall` items carry per-request `usage` — forward these to a usage tracker as they arrive.
-- `ToolExecutionCommitted` confirms a tool actually ran (as opposed to being hook-skipped); correlate with its `ToolResult` via `internal_call_id`.
-- `ModelTurnRetried` means a hook rejected the turn; discard any provisional text/reasoning deltas you rendered for `turn`.
+- `CompletionCall` items carry per-request `usage` — forward these to a usage tracker as they arrive; they also let you anchor context-occupancy displays mid-run.
+- `ToolExecutionCommitted` confirms a tool actually ran (as opposed to being hook-skipped or resolved by invalid-call recovery); correlate with its result via `tool_call.id`.
+- `FinalResponse` is the stream-side counterpart of the `on_run_settled` hook's success outcome; errors surface as the stream's `Err` item instead.
 
-**`StreamedAssistantContent`** (`rig::streaming`) — a single piece of streamed assistant output:
+## Assistant part events (`rig_core::streaming`)
 
-- `Text(text)` — text delta; read via `text.text`.
-- `ToolCall { tool_call, internal_call_id }` — a **complete** tool call to execute; correlate its result back through `internal_call_id`.
-- `ToolCallDelta { internal_call_id, content }` — partial tool name/arguments, streamed piece by piece. **Buffer until the complete `ToolCall` arrives** before executing.
-- `Reasoning { reasoning, id }` — a complete reasoning block (struct variant in 0.42). Supersedes prior `ReasoningDelta`s with the same `id`; read text via `reasoning.display_text()`.
-- `ReasoningDelta { id, provider_id, reasoning }` — partial reasoning text.
-- `Final(StreamFinal)` — the provider's terminal record.
+`StreamAssistantItem` unfolds as `Item::Event(StreamEvent)`:
 
-**`StreamedUserContent`** (`rig::streaming`):
+```rust
+pub enum StreamEvent {
+    Start  { part: Part, kind: PartKind },           // PartKind::{Text, Reasoning, ToolCall, Image}
+    Text       { part: Part, text: String },         // text fragment
+    Reasoning  { part: Part, text: String },         // reasoning fragment
+    Arguments  { part: Part, json: String },         // a tool call's raw arguments
+    End        { part: Part, content: AssistantContent }, // the finalized content
+}
+pub enum Item<E> { Event(E), Unknown(UnknownPayload) } // Unknown: provider-native passthrough
+```
 
-- `ToolResult { tool_result, internal_call_id }` — a tool result; `internal_call_id` correlates with the originating `StreamedAssistantContent::ToolCall`.
+- Parts are identified by position (`Part::index()`); each starts once, grows (own fragment kind) and ends once. `Item::Unknown` payloads always reach the consumer.
+- **Text fragments** render as deltas; the `End` text part duplicates the fragments (aggregation belongs to the consumer — rig's own `stream_to_stdout` prints fragments and only the final reasoning `End`).
+- **Tool-call parts**: the `End { content: ToolCall }` event is what the agent holds until the call is validated/patched, re-emitting it with the *effective* (patch-repaired) call; `MultiTurnStreamItem::ToolCall` reports the same calls at commit. Match the `ToolCall` item for tool-start UI; treat part `Arguments`/`End` as transcript-level detail (shuvarie's mapper ignores them to avoid double-counting).
+- **Reasoning**: fragments stream on `Reasoning` events; a final `End { content: AssistantContent::Reasoning(sealed) }` carries the complete block, sealed to its issuer. Open it for display with `sealed.open(sealed.issuer())` — a value opened by its own issuer always succeeds — and read `display_text()`.
 
-> **Per-batch buffering**: rig surfaces the batch's `ToolExecutionCommitted` + `ToolResult` items only after **every** tool call of the batch settles (in call order), so a fast call's result is not surfaced while a slow sibling still runs. Shuvarie works around this per-call: the `FileChangeHook`'s early-finish channel (`shuvarie-llm`'s `with_early_finish`) surfaces each result the moment its call completes, and `provider.rs::map_agent_stream` drops the later buffered duplicates via `FileChangeHook::surfaced_early`.
+## Results and correlation
 
-> **Correlating tool calls and results**: use `internal_call_id` (a per-run rig correlator on `StreamedAssistantContent::ToolCall`, `StreamedUserContent::ToolResult`, and `MultiTurnStreamItem::ToolExecutionCommitted`). The durable provider handles live on `ToolCall::id` / `ToolResult::call` (see `completions.md`). A `ToolResult`'s `name` field is the *executed* tool's name — which can differ from the model's call when a hook repaired it.
+**`StreamedUserContent`** (`rig_core::streaming`) — `ToolResult { tool_result: ToolResult }`, the only variant. Correlate everything through **`CallId`**:
+
+- `MultiTurnStreamItem::ToolCall { tool_call }` → `tool_call.id: CallId`
+- `StreamedUserContent::ToolResult { tool_result }` → `tool_result.call: CallId` (the answered call's id)
+- `MultiTurnStreamItem::ToolExecutionCommitted { tool_call }` → same id
+- hooks: `OutcomeEvent.call_id` → the same id
+
+`CallId::wire()` / `Display` renders the provider's id (or the rig-issued UUID when the provider sent none); tool-call ids hash/compare by value, so they key correlation maps directly. A `ToolResult`'s `name` is the *executed* tool's name — which can differ from the model's call when a hook repaired it.
+
+> **Per-batch buffering**: rig surfaces the batch's `ToolExecutionCommitted` + `StreamUserItem` results only after **every** tool call of the batch settles (in call order), so a fast call's result is not surfaced while a slow sibling still runs. Shuvarie works around this per-call: the `FileChangeHook`'s early-finish channel (`shuvarie-llm`'s `with_early_finish`) surfaces each result the moment its call resolves (via the `on_outcome` hook), and `provider.rs::map_agent_stream` drops the later buffered duplicates via `FileChangeHook::surfaced_early`.
+
+## Errors
+
+```rust
+pub enum StreamingError {
+    Completion(ProviderError),    // the provider stream failed
+    Report(ErrorReport),          // structured failure from the bus/handler/hook/stream item
+    Prompt(PromptError),          // same failure shape as the blocking surface (MaxTurnsError, PromptCancelled { chat_history, reason }, ...)
+}
+```
+
+A memory-load failure is the stream's first (and only) item; a hook stop yields `Prompt(PromptError::PromptCancelled { .. })` whose display carries the stop reason. Dropping the unpolled stream runs nothing ([`must_use`]).
 
 ## Streaming to stdout
 
 ```rust
-use rig::agent::stream_to_stdout;
-let mut stream = agent.stream_prompt("Hello!").await;
-stream_to_stdout(&mut stream).await?;
+use rig_agent::agent::stream_to_stdout;
+let mut stream = agent.prompt("Hello!").stream();
+let response = stream_to_stdout(&mut stream).await?;
 ```
 
-`stream_to_stdout` prints text chunks as they arrive and ignores tool-call deltas (not meaningful to display directly).
-
-## Streaming to stdout
-
-```rust
-use rig::agent::stream_to_stdout;
-let mut stream = agent.stream_prompt("Hello!").await;
-stream_to_stdout(&mut stream).await?;
-```
-
-`stream_to_stdout` prints text chunks as they arrive and ignores tool-call deltas (not meaningful to display directly).
-
-## Pause control
-
-`PauseControl` pauses/resumes a stream — user-controlled streaming in interactive apps:
-
-```rust
-use rig::streaming::PauseControl;
-use std::sync::Arc;
-
-let pause = Arc::new(PauseControl::new());
-let pause_clone = Arc::clone(&pause);
-// In another task:
-pause_clone.pause();
-// ...
-pause_clone.resume();
-```
+`stream_to_stdout` prints text fragments as they arrive, prints a reasoning part when its `End` arrives (via the issuer self-open), prints a visible boundary for retried model turns, returns the final `PromptResponse`, and maps `StreamingError` to `std::io::Error`.
 
 ## Practical notes
 
-- **Handle errors per item.** Starting a stream (`stream_prompt(...).await`) always succeeds, but each item is a `Result` that can fail independently — match on `item?` rather than assuming atomic success/failure.
+- **Handle errors per item.** Building the stream always succeeds; each item is a `Result` — match on `item?` rather than assuming atomic success/failure.
 - **Apply backpressure** with standard stream backpressure when the consumer can't keep up.
-- **Read usage at the end** — `FinalResponse.usage` aggregates across the whole run; `CompletionCall.usage` is per model request. Zero-valued usage means the provider reported no metrics.
+- **Read usage at the end** — `FinalResponse.usage` aggregates across the run (`Option<u64>` counters; an unreported counter is `None`); `CompletionCall.usage` is per model request.
+- **Bounded event feeds** — for hosts with their own executor, `agent.prompt(..).run_channel()` splits the run into a future plus a bounded `RunEvents` feed instead of an unbounded stream.
 
 ## Project boundary (shuvarie)
 
-Run `stream_prompt`/`stream_chat` on the **core task**, not the TUI thread. Forward `MultiTurnStreamItem` / `StreamedAssistantContent` events to the TUI via the existing `tokio::sync::mpsc` channel as `AppMessage` variants; the TUI's `update` consumes them and `view` renders current state. Never pull a stream from `handle_event`/`view` — those must not `await` (see `AGENTS.md` and the `ratatui` skill).
+Run `.stream()` on the **core task**, not the TUI thread. Forward mapped items (`shuvarie-llm::StreamItem`) to the TUI via the existing `tokio::sync::mpsc` channel; the TUI's `update` consumes them and `view` renders current state. Never pull a stream from `handle_event`/`view` — those must not `await` (see `AGENTS.md` and the `ratatui` skill). The mapping lives in `crates/llm/src/provider.rs` (`map_agent_stream`): text/reasoning fragments, `MultiTurnStreamItem::ToolCall` → tool/worker starts (worker names pre-queued for result correlation), `StreamUserItem` results (skipping early-surfaced ones), `CompletionCall` → usage, `FinalResponse` → `Done`, and error classification (`retry.rs`) mapping overflow/connection failures onto shuvarie's retry flow.

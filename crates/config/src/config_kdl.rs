@@ -582,7 +582,7 @@ fn parse_skills(node: &KdlNode, input: &str) -> Result<SkillsConfig> {
 
 /// `default-providers { use id="<provider id>" … }` — the provider connection
 /// preferred per connection type when a prompt names a model as
-/// `<provider_type>/<model>`. Each `use` entry carries an `id` property; the
+/// `<provider_kind>/<model>`. Each `use` entry carries an `id` property; the
 /// connection type is read from the connection's own `kind` at use time.
 fn parse_default_providers(node: &KdlNode, input: &str) -> Result<DefaultProvidersConfig> {
     let mut use_ids = Vec::new();

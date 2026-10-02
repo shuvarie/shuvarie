@@ -2,7 +2,7 @@
 
 Retrieval-Augmented Generation (RAG) retrieves relevant documents from a store based on a query and includes them in an LLM prompt, grounding responses in factual information. It reduces hallucinations and lets a model use data not in its training set. Rig provides RAG building blocks — embeddings, vector stores, and RAG-enabled agents — out of the box.
 
-Official docs: https://rig.rs/docs/concepts/rag · API: https://docs.rs/rig/latest/rig/vector_store/index.html · Guide: https://rig.rs/docs/guides/rag/rag_system
+Official docs: https://rig.rs/docs/concepts/rag · API: https://docs.rs/rig-core/latest/rig_core/vector_store/index.html · Guide: https://rig.rs/docs/guides/rag/rag_system (0.43: `rig-core-0.43.0/src/vector_store/`)
 
 ## How RAG works
 
@@ -21,24 +21,23 @@ Essential for support bots / chatbots grounded in docs you own. Probably unneces
 ## RAG in Rig
 
 Two traits:
-- **`VectorStoreIndex`** — search a store for documents relevant to a query.
-- **`InsertDocuments`** — insert embedded documents into a store.
+- **`VectorStoreIndex`** — search a store for documents relevant to a query: `top_n::<T>(req)` (scored `(f64, String, T)` tuples) / `top_n_ids(req)` (`(f64, String)`); each index carries an associated `Filter: SearchFilter` type (in-memory: `Filter` over serde values — `.filter(json!({...}))` on the request).
+- **`InsertDocuments`** — insert computed embeddings: `insert_documents::<Doc>(documents: Vec<(Doc, Vec<Embedding>)>)`.
 
-Rig primarily uses cosine similarity. An in-memory store ships by default (dev + small apps, no external deps); durable stores (LanceDB, MongoDB, Neo4j, PostgreSQL, Qdrant, SurrealDB, Milvus, ScyllaDB, SQLite, S3 Vectors, Cloudflare Vectorize, HelixDB) are available via companion features.
+Rig primarily uses cosine similarity. An in-memory store ships by default (dev + small apps, no external deps), plus an approximate LSH index (`vector_store::lsh`). Durable stores (LanceDB, MongoDB, Neo4j, PostgreSQL, Qdrant, SurrealDB, Milvus, SQLite, …) are companion crates — **not republished for 0.43 at the time of writing**; their contracts (`VectorStoreIndex`/`InsertDocuments`/`SearchFilter`) live in `rig-core`, so implement the traits over your own store when needed.
 
 ## Minimal RAG agent
 
 ```rust
-use rig::client::{CompletionClient, EmbeddingsClient, ProviderClient};
-use rig::completion::Prompt;
-use rig::embeddings::EmbeddingsBuilder;
-use rig::providers::openai::Client;
-use rig::vector_store::in_memory_store::InMemoryVectorStore;
+use rig_agent::AgentBuilder;
+use rig_core::embeddings::EmbeddingsBuilder;
+use rig_core::providers::openai::{self, OpenAI};
+use rig_core::vector_store::in_memory_store::InMemoryVectorStore;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let openai_client = Client::from_env()?;
-    let embed_model = openai_client.embedding_model("text-embedding-3-small");
+    let openai = OpenAI::from_env()?;
+    let embed_model = openai.embedding("text-embedding-3-small", None); // Model<Embeddings>
 
     let embeddings = EmbeddingsBuilder::new(embed_model.clone())
         .documents(vec![
@@ -49,12 +48,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .await?;
 
-    let mut vector_store = InMemoryVectorStore::default();
-    vector_store.add_documents(embeddings);
-    let index = vector_store.index(embed_model);
+    let vector_store = InMemoryVectorStore::from_documents(embeddings); // Vec<(doc, Vec<Embedding>)>
+    let index = vector_store.index(embed_model.clone());                // needs DynModel<Embedding>
 
-    let agent = openai_client
-        .agent("gpt-5.5")
+    let agent = AgentBuilder::new(openai.completion(openai::GPT_5_2))
         .preamble("You answer questions using the provided context.")
         .dynamic_context(2, index) // top 2 relevant docs per query
         .build();
@@ -62,19 +59,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let response = agent
         .prompt("What is Rig and how does it help with LLM applications?")
         .await?;
-    println!("{response}");
+    println!("{}", response.output);
     Ok(())
 }
 ```
 
-`dynamic_context(n, index)` retrieves `n` relevant documents per query and injects them into the model's context.
+`dynamic_context(n, index)` retrieves `n` relevant documents per query and injects them into the model's context (implemented as a generated retrieval handler on the agent's bus + a completion-call hook — see `hooks.md` for the boundary it runs at). `AgentBuilder::dynamic_context_handler(n, handler)` swaps in a custom retrieval-family handler (e.g. a replay adapter).
 
 ## Retrieving documents directly
 
 Query the index with a `VectorSearchRequest` when you want the docs yourself rather than letting an agent inject them:
 
 ```rust
-use rig::vector_store::{VectorSearchRequest, VectorStoreIndex};
+use rig_core::vector_store::request::VectorSearchRequest;
+use rig_core::vector_store::VectorStoreIndex;
 
 let req = VectorSearchRequest::builder()
     .query("What is Rig?")
@@ -96,10 +94,12 @@ Modern agents can carry large tool lists, which wastes context and degrades outp
 Tools that should be retrievable implement `ToolEmbedding` (in addition to `Tool`) and are registered as retrievable tools in a `ToolSet`:
 
 ```rust
-use rig::tool::{ToolSet, ToolEmbedding};
+use rig_agent::tool::{ToolSet, ToolEmbedding};
+use rig_core::embeddings::EmbeddingsBuilder;
+use rig_core::vector_store::in_memory_store::InMemoryVectorStore;
 
 let mut toolset = ToolSet::default();
-toolset.add_retrieved_tool(Adder);
+let _ = toolset.add_retrieved_tool(Adder);
 let embeddings = EmbeddingsBuilder::new(embed_model.clone())
     .documents(toolset.schemas()?)?
     .build()
@@ -109,20 +109,19 @@ let vector_store =
     InMemoryVectorStore::from_documents_with_id_f(embeddings, |tool| tool.name.clone());
 let index = vector_store.index(embed_model);
 
-let agent = openai_client
-    .agent("gpt-5.5")
+let agent = rig_agent::AgentBuilder::new(completion_model)
     .preamble("You are a calculator. Use the tools provided.")
     .retrieved_tools(2, index, toolset)
     .build();
 ```
 
-`retrieved_tools(sample, index, toolset)` (the 0.42 name) takes max tools to retrieve, the index, and the toolset. At context-assembly time the agent uses RAG to fetch relevant tool definitions to send to the model; called tools are executed from the toolset. See `tools.md` for `ToolEmbedding`. (The old `dynamic_tools(n, index, toolset)` was renamed; `dynamic_tool`/`dynamic_tools` now attach `DynamicTool` values directly.)
+`retrieved_tools(sample, index, toolset)` takes the max tools to retrieve, the index, and the toolset. At context-assembly time the agent uses RAG to fetch relevant tool definitions to send to the model; called tools are executed from the toolset. See `tools.md` for `ToolEmbedding` and `ToolSchema` (`ToolSet::schemas()` embeddable forms). `dynamic_tool`/`dynamic_tools` attach `DynamicTool` values directly (no index).
 
 ## Modern RAG patterns
 
 ### Re-ranking
 
-Re-rank initial search results for better relevance. Dedicated re-ranking models score results more deeply than vector search alone. The `fastembed` crate provides a `TextRerank` type (enable the `fastembed` feature).
+Re-rank initial search results for better relevance. Dedicated re-ranking models score results more deeply than vector search alone (e.g. Cohere's `Rerank` operation, VoyageAI's `rerank` model — `client.rerank(id)` wires in 0.43; rerank is an `Operation` with its own request folding).
 
 ### Hybrid search
 
@@ -138,22 +137,12 @@ RAG is a useful basis for agentic memory — store conversation summaries, user/
 - **Contradictory data** — filter by metadata, apply recency-based weighting, weight by source authority.
 - **Stale data** — track `created_at`/`last_updated`, use versioning + TTL, monitor source data to trigger re-embedding.
 
-## Supported stores (companion features)
+## Stores
 
-| Feature | Module | Store |
-|---------|--------|-------|
-| (default) | `rig::vector_store::in_memory_store` | `InMemoryVectorStore` |
-| `lancedb` | `rig::lancedb` | LanceDB |
-| `mongodb` | `rig::mongodb` | MongoDB |
-| `neo4j` | `rig::neo4j` | Neo4j |
-| `postgres` | `rig::postgres` | PostgreSQL (pgvector) |
-| `qdrant` | `rig::qdrant` | Qdrant |
-| `surrealdb` | `rig::surrealdb` | SurrealDB |
-| `sqlite` | `rig::sqlite` | SQLite |
-| `milvus` | `rig::milvus` | Milvus |
-| `scylladb` | `rig::scylladb` | ScyllaDB |
-| `s3vectors` | `rig::s3vectors` | AWS S3 Vectors |
-| `vectorize` | `rig::vectorize` | Cloudflare Vectorize |
-| `helixdb` | `rig::helixdb` | HelixDB |
+| Module | Store | 0.43 status |
+|--------|-------|-------------|
+| `rig_core::vector_store::in_memory_store` | `InMemoryVectorStore` | ships in core |
+| `rig_core::vector_store::lsh` | LSH approximate index | ships in core |
+| companions (`rig-lancedb`, `rig-qdrant`, `rig-mongodb`, `rig-neo4j`, `rig-postgres`, `rig-surrealdb`, `rig-sqlite`, `rig-milvus`, `rig-scylladb`, `rig-s3vectors`, `rig-vectorize`, `rig-helixdb`) | LanceDB, Qdrant, MongoDB, Neo4j, PostgreSQL (pgvector), SurrealDB, SQLite, Milvus, ScyllaDB, S3 Vectors, Cloudflare Vectorize, HelixDB | not published for 0.43 yet — implement `VectorStoreIndex`/`InsertDocuments` over your own store meanwhile |
 
 Setup per store: https://rig.rs/docs/integrations/vector_stores

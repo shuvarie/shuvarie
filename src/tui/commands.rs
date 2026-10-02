@@ -110,7 +110,7 @@ pub enum CommandRef {
         /// The command directory name (its slash alias).
         name: String,
         /// The command's `model` frontmatter override
-        /// (`<provider_type>/<model>`), passed through to the core for the
+        /// (`<provider_kind>/<model>`), passed through to the core for the
         /// turn.
         model: Option<String>,
     },
