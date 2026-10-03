@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 
 use ratatui::prelude::*;
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Clear, Paragraph};
 use termina::event::{KeyCode, KeyEvent};
 
 use crate::tui::session::media::{
@@ -159,6 +159,8 @@ impl MediaViewer {
         let Some(item) = self.items.get(self.selected) else {
             return;
         };
+        frame.render_widget(Clear, area);
+
         let banner = format!(
             "Media · {}/{} — {}",
             self.selected + 1,
