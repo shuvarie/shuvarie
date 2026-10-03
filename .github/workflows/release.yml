@@ -460,3 +460,18 @@ jobs:
             --title "${GITHUB_REF_NAME}" \
             --notes-file "${{ steps.git-cliff.outputs.changelog }}" \
             dist/*
+
+  cargo-publish:
+    name: Publish to crates.io
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --workspace
