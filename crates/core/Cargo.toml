@@ -30,6 +30,7 @@ shuvarie-llm.workspace = true
 shuvarie-lsp.workspace = true
 shuvarie-mcp.workspace = true
 similar = { version = "3", features = ["inline", "unicode"] }
+tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "process", "time"] }
 uuid.workspace = true
@@ -45,5 +46,4 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 jiff.workspace = true
 shuvarie-lsp.workspace = true
 shuvarie-mcp = { workspace = true, features = ["test-util"] }
-tempfile.workspace = true
 tokio.workspace = true

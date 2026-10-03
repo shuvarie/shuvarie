@@ -80,6 +80,7 @@ pub fn build_workers(
     access: crate::permissions::Access,
     scene: &Scene,
     web_search: Option<&WebSearchConfig>,
+    office_converter: Option<&str>,
     skills: &Skills,
 ) -> WorkerSet {
     let usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
@@ -110,6 +111,7 @@ pub fn build_workers(
                 access.clone(),
                 &tool_scene,
                 web_search,
+                office_converter,
                 skills,
                 shell_tx.tagged(spec.name),
                 shell.clone(),
@@ -157,6 +159,7 @@ pub fn build_workers(
                     access.clone(),
                     &tool_scene,
                     web_search,
+                    office_converter,
                     skills,
                     shell_tx.tagged(name),
                     shell.clone(),
@@ -193,6 +196,7 @@ fn worker_tools(
     access: crate::permissions::Access,
     tool_scene: &ToolScene,
     web_search: Option<&WebSearchConfig>,
+    office_converter: Option<&str>,
     skills: &Skills,
     shell_tx: ShellOutputTx,
     shell: Shell,
@@ -206,6 +210,7 @@ fn worker_tools(
             access,
             tool_scene,
             web_search,
+            office_converter,
             skills,
         ),
         SubagentToolset::Command => tools::command_tools(shell_tx, shell, access, tool_scene),
@@ -217,6 +222,7 @@ fn worker_tools(
             max_output_bytes,
             access,
             tool_scene,
+            office_converter,
         ),
         SubagentToolset::None => Vec::new(),
     }
@@ -285,6 +291,7 @@ mod tests {
             crate::shell::resolve(None).shell,
             crate::test_util::access(),
             scene,
+            None,
             None,
             &Skills::default(),
         )
@@ -468,6 +475,7 @@ mod tests {
                 100,
                 crate::test_util::access(),
                 &ToolScene::default(),
+                None,
                 None,
                 &Skills::default(),
                 shell_tx.clone(),

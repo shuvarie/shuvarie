@@ -218,6 +218,14 @@ fn blank_behind(head: &str) -> bool {
     false
 }
 
+/// An in-flight `![alt](url)`: the alt text is buffered (its events arrive
+/// between the image tag's start and end), and the URL is the fallback when
+/// the alt is empty.
+struct ImageChip {
+    buf: String,
+    url: String,
+}
+
 #[derive(Clone)]
 enum ItemKind {
     Bullet,
@@ -249,6 +257,7 @@ struct Ctx {
     strike: u32,
     link: u32,
     skip: u32,
+    image: Option<ImageChip>,
     code: Option<CodeCtx>,
     item_marker: Option<(String, Style)>,
     lists: Vec<ItemKind>,
@@ -335,10 +344,13 @@ impl Ctx {
             Tag::Strong => self.strong += 1,
             Tag::Strikethrough => self.strike += 1,
             Tag::Link { .. } => self.link += 1,
-            Tag::Image { .. }
-            | Tag::HtmlBlock
-            | Tag::FootnoteDefinition(_)
-            | Tag::MetadataBlock(_) => {
+            Tag::Image { dest_url, .. } => {
+                self.image = Some(ImageChip {
+                    buf: String::new(),
+                    url: dest_url.as_ref().to_string(),
+                });
+            }
+            Tag::HtmlBlock | Tag::FootnoteDefinition(_) | Tag::MetadataBlock(_) => {
                 self.skip = 1;
             }
             Tag::Paragraph
@@ -408,10 +420,16 @@ impl Ctx {
             TagEnd::Strong => self.strong = self.strong.saturating_sub(1),
             TagEnd::Strikethrough => self.strike = self.strike.saturating_sub(1),
             TagEnd::Link => self.link = self.link.saturating_sub(1),
-            TagEnd::Image
-            | TagEnd::HtmlBlock
-            | TagEnd::FootnoteDefinition
-            | TagEnd::MetadataBlock(_) => {
+            TagEnd::Image => {
+                if self.skip > 0 {
+                    self.skip = self.skip.saturating_sub(1);
+                    return;
+                }
+                if let Some(chip) = self.image.take() {
+                    self.image_chip(chip);
+                }
+            }
+            TagEnd::HtmlBlock | TagEnd::FootnoteDefinition | TagEnd::MetadataBlock(_) => {
                 self.skip = self.skip.saturating_sub(1);
             }
             TagEnd::DefinitionList
@@ -430,11 +448,19 @@ impl Ctx {
             code.buf.push_str(&text);
             return;
         }
+        if let Some(chip) = &mut self.image {
+            chip.buf.push_str(&text);
+            return;
+        }
         self.spans.push(Span::raw(text).style(self.inline_style()));
     }
 
     fn inline_code(&mut self, code: String) {
         if self.skip > 0 {
+            return;
+        }
+        if let Some(chip) = &mut self.image {
+            chip.buf.push_str(&code);
             return;
         }
         let style = if self.dim {
@@ -453,7 +479,11 @@ impl Ctx {
     }
 
     fn soft_break(&mut self) {
-        if self.skip > 0 || self.code.is_some() {
+        if self.skip > 0 {
+            return;
+        }
+        if let Some(chip) = &mut self.image {
+            chip.buf.push(' ');
             return;
         }
         self.flush_line(false);
@@ -461,6 +491,10 @@ impl Ctx {
 
     fn hard_break(&mut self) {
         if self.skip > 0 {
+            return;
+        }
+        if let Some(chip) = &mut self.image {
+            chip.buf.push(' ');
             return;
         }
         self.flush_line(false);
@@ -527,6 +561,25 @@ impl Ctx {
             style = style.add_modifier(Modifier::CROSSED_OUT);
         }
         style
+    }
+
+    /// Renders the buffered `![alt](url)` as a chip: a muted glyph, then the
+    /// alt text — or, when the alt is empty, the URL. A linked image keeps
+    /// the link styling and dim prose keeps the reasoning style via
+    /// [`Self::inline_style`]; the glyph itself stays muted in both.
+    fn image_chip(&mut self, chip: ImageChip) {
+        self.spans.push(Span::raw("🖼 ").fg(theme::text_muted()));
+        let alt = chip.buf.trim();
+        if !alt.is_empty() {
+            self.spans
+                .push(Span::raw(alt.to_string()).style(self.inline_style()));
+            return;
+        }
+        let url = chip.url.trim();
+        if !url.is_empty() {
+            self.spans
+                .push(Span::raw(url.to_string()).fg(theme::text_muted()));
+        }
     }
 
     fn flush_line(&mut self, blank_after: bool) {

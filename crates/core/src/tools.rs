@@ -256,6 +256,7 @@ pub fn all_tools(
     todo_state: todos::TodoState,
     scene: &ToolScene,
     web_search: Option<&WebSearchConfig>,
+    office_converter: Option<&str>,
     skills: &Skills,
     stdio_tools: &std::collections::BTreeMap<String, shuvarie_config::StdioToolConfig>,
     mcp_manager: Option<&shuvarie_mcp::SharedMcpManager>,
@@ -281,6 +282,7 @@ pub fn all_tools(
                 max_output_chars,
                 max_output_bytes,
                 access,
+                office_converter.map(str::to_string),
             )
         },
     ));
@@ -380,6 +382,7 @@ pub fn read_tools(
     access: Access,
     scene: &ToolScene,
     web_search: Option<&WebSearchConfig>,
+    office_converter: Option<&str>,
     skills: &Skills,
 ) -> Vec<DynamicTool> {
     let mut tools = Vec::new();
@@ -402,6 +405,7 @@ pub fn read_tools(
                 max_output_chars,
                 max_output_bytes,
                 access,
+                office_converter.map(str::to_string),
             )
         },
     ));
@@ -454,6 +458,7 @@ pub fn command_tools(
     .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn edit_tools(
     lsp: SharedManager,
     locks: FileLocks,
@@ -462,6 +467,7 @@ pub fn edit_tools(
     max_output_bytes: usize,
     access: Access,
     scene: &ToolScene,
+    office_converter: Option<&str>,
 ) -> Vec<DynamicTool> {
     let mut tools = Vec::new();
     tools.extend(scene_tool("read_file", scene, &access, true, |access| {
@@ -483,6 +489,7 @@ pub fn edit_tools(
                 max_output_chars,
                 max_output_bytes,
                 access,
+                office_converter.map(str::to_string),
             )
         },
     ));
@@ -533,6 +540,7 @@ mod tests {
             crate::shell::resolve(None).shell,
             todos::TodoState::from_records(&[]),
             scene,
+            None,
             None,
             skills,
             &Default::default(),

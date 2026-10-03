@@ -260,7 +260,7 @@ pub fn to_markdown(format: SourceFormat, bytes: &[u8]) -> Result<String, Convert
         SourceFormat::LegacyDoc => legacy_message(format),
         SourceFormat::LegacyPpt => legacy_message(format),
     });
-    result.map(&normalize)
+    result.map(normalize)
 }
 
 /// The legacy binary formats have no maintained pure-Rust reader; point the

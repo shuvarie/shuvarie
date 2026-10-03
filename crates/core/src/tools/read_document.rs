@@ -16,6 +16,7 @@ pub(crate) struct ReadDocument {
     max_output_chars: usize,
     max_output_bytes: usize,
     access: Access,
+    office_converter: Option<String>,
 }
 
 impl ReadDocument {
@@ -24,12 +25,14 @@ impl ReadDocument {
         max_output_chars: usize,
         max_output_bytes: usize,
         access: Access,
+        office_converter: Option<String>,
     ) -> Self {
         Self {
             read_cache,
             max_output_chars,
             max_output_bytes,
             access,
+            office_converter,
         }
     }
 }
@@ -42,8 +45,12 @@ impl Tool for ReadDocument {
     type Error = ToolExecutionError;
 
     fn description(&self) -> String {
-        "Read a document file (docx, pdf, pptx, xls/xlsx/xlsm/xlsb, odt/ods/odp, rtf, epub, csv) and return its content converted to GitHub-Flavored Markdown. Use read_file for plain text files and code; scanned or image-only pages cannot be read (no OCR). Legacy binary .doc/.ppt are not readable; ask the user to convert them first (e.g. `soffice --convert-to docx file.doc`)."
-            .to_string()
+        if self.office_converter.is_some() {
+            "Read a document file (docx, pdf, pptx, xls/xlsx/xlsm/xlsb, odt/ods/odp, rtf, epub, csv, doc) and return its content converted to GitHub-Flavored Markdown. Legacy binary .doc/.ppt go through the configured external converter and may take a while. Use read_file for plain text files and code; scanned or image-only pages cannot be read (no OCR)."
+        } else {
+            "Read a document file (docx, pdf, pptx, xls/xlsx/xlsm/xlsb, odt/ods/odp, rtf, epub, csv) and return its content converted to GitHub-Flavored Markdown. Use read_file for plain text files and code; scanned or image-only pages cannot be read (no OCR). Legacy binary .doc/.ppt are not readable; ask the user to convert them first (e.g. `soffice --convert-to docx file.doc`)."
+        }
+        .to_string()
     }
 
     fn parameters(&self) -> Value {
@@ -90,12 +97,33 @@ impl Tool for ReadDocument {
             // signature-less formats (csv) and mislabeled files.
             let extension =
                 std::path::Path::new(&path).extension().and_then(std::ffi::OsStr::to_str);
-            let format = shuvarie_doc::detect(&data, extension)
-                .ok_or_else(|| {
-                    format!(
-                        "'{path}' is not a recognized document; read_document supports {SUPPORTED_EXTENSIONS}. Plain text and code belong to read_file."
-                    )
-                })?;
+            let format = shuvarie_doc::detect(&data, extension).ok_or_else(|| {
+                format!(
+                    "'{path}' is not a recognized document; read_document supports {SUPPORTED_EXTENSIONS}. Plain text and code belong to read_file."
+                )
+            })?;
+            // The legacy binary formats convert through the configured
+            // external converter; the converted container re-enters the facade.
+            let (format, data) = match format {
+                shuvarie_doc::SourceFormat::LegacyDoc | shuvarie_doc::SourceFormat::LegacyPpt
+                    if self.office_converter.is_some() =>
+                {
+                    let program =
+                        self.office_converter.as_deref().unwrap_or_default().to_string();
+                    let legacy = format;
+                    let converted = tokio::task::spawn_blocking(move || {
+                        crate::office_convert::convert_container(&program, legacy, &data)
+                    })
+                    .await
+                    .map_err(|error| format!("read {path}: conversion failed: {error}"))??;
+                    let format = shuvarie_doc::detect(&converted, None)
+                        .ok_or_else(|| {
+                            format!("read {path}: the converter produced an unrecognized file")
+                        })?;
+                    (format, converted)
+                }
+                other => (other, data),
+            };
             let markdown =
                 tokio::task::spawn_blocking(move || shuvarie_doc::to_markdown(format, &data))
                     .await
@@ -204,7 +232,7 @@ mod tests {
     use crate::test_util::{new_ctx, tempdir};
 
     fn tool() -> ReadDocument {
-        ReadDocument::new(ReadCache::new(), 0, 0, crate::test_util::access())
+        ReadDocument::new(ReadCache::new(), 0, 0, crate::test_util::access(), None)
     }
 
     fn fixture(name: &str) -> String {
@@ -387,6 +415,40 @@ mod tests {
         drop(dir);
     }
 
+    /// A configured legacy-converter converts the .doc through it: a fake
+    /// converter script (unix) copies a real docx fixture as its output.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_doc_converts_through_the_configured_program() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, _guard) = tempdir();
+        std::fs::write("legacy.doc", b"legacy binary container").unwrap();
+        let script = dir.path().join("fake-convert.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n# $6 is the --outdir argument\ncp '{}' \"$6/document.docx\"\n",
+                fixture("report.docx")
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let tool = ReadDocument::new(
+            ReadCache::new(),
+            0,
+            0,
+            crate::test_util::access(),
+            Some(script.to_string_lossy().into_owned()),
+        );
+        let out = tool
+            .call(&mut new_ctx(), json!({ "path": "legacy.doc" }))
+            .await
+            .unwrap();
+        let text = out.as_text().unwrap();
+        assert!(text.contains("Quarterly Report"), "{text}");
+        drop(dir);
+    }
+
     #[tokio::test]
     async fn denied_by_rule_errors() {
         let (dir, _guard) = tempdir();
@@ -400,6 +462,7 @@ mod tests {
                 paths: shuvarie_config::RuleSet::default(),
                 ..shuvarie_config::PermissionsConfig::builtin()
             }),
+            None,
         );
         let err = tool
             .call(&mut new_ctx(), json!({ "path": "a.docx" }))

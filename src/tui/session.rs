@@ -1628,8 +1628,16 @@ impl PendingChip {
             ]);
         }
         let (icon, color, kind) = match self.probe.kind {
-            Some(AttachmentKind::Image) => ("🖼", theme::accent(), "image"),
-            Some(AttachmentKind::Document) => ("▤", theme::text(), "document"),
+            Some(AttachmentKind::Image) => (
+                crate::tui::session::media::CHIP_ICON_IMAGE,
+                theme::accent(),
+                "image",
+            ),
+            Some(AttachmentKind::Document) => (
+                crate::tui::session::media::CHIP_ICON_DOC,
+                theme::text(),
+                "document",
+            ),
             None => ("▪", theme::text_dim(), "file"),
         };
         let size = match self.probe.size {

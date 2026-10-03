@@ -30,6 +30,11 @@ const MAX_MEDIA_BYTES: usize = 48 * 1024 * 1024;
 /// replaces the estimate once the turn materializes with media present.
 pub const CHIP_ROWS: u32 = 1;
 
+/// The attachment chip glyphs, shared by the pending strip, the media
+/// block, the mention popup, and the viewer.
+pub(crate) const CHIP_ICON_DOC: &str = "▤";
+pub(crate) const CHIP_ICON_IMAGE: &str = "🖼";
+
 /// Debug-friendly byte payload (a raw `Vec<u8>` would blow up event traces).
 pub struct MediaBytes(pub Arc<[u8]>);
 

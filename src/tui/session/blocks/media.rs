@@ -9,7 +9,7 @@ use ratatui::prelude::*;
 use shuvarie_llm::{Attachment, AttachmentKind};
 
 use super::super::media;
-use super::super::media::MediaStore;
+use super::super::media::{CHIP_ICON_DOC, CHIP_ICON_IMAGE, MediaStore};
 use super::super::segment::{BLOCK_PADDING, BodyChunk, MediaHit, Segment};
 use super::super::virtualizer::TurnEst;
 use crate::tui::theme;
@@ -18,9 +18,6 @@ use crate::tui::theme;
 /// chip row (the unloaded state). Images replace it with their aspect-derived
 /// height on the first materialized paint.
 const IMAGE_EST_ROWS: u32 = media::CHIP_ROWS;
-
-const CHIP_ICON_DOC: &str = "▤";
-const CHIP_ICON_IMAGE: &str = "🖼";
 
 /// One attachment slot: metadata only. Content lives in the chat's media
 /// store (documents were converted at attach time; images are the media

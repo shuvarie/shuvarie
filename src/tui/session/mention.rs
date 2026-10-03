@@ -130,16 +130,10 @@ impl MentionMenu {
         self.open = true;
         let dir = dir_part(&tail);
         self.token = range;
-        if self.dir == dir
-            && let Some(cached) = self.cache.get(dir.as_str()).cloned()
-        {
-            self.query = tail.clone();
-            self.refilter(&cached);
-            return None;
-        }
-        // A new directory: request its listing (or reuse an inflight reply).
         self.dir = dir.clone();
         self.query = tail.clone();
+        // A cached listing (the same dir or one revisited) filters locally;
+        // otherwise an inflight request for this dir waits for its reply.
         if let Some(cached) = self.cache.get(dir.as_str()).cloned() {
             self.refilter(&cached);
             return None;

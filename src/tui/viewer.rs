@@ -14,7 +14,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 use termina::event::{KeyCode, KeyEvent};
 
-use crate::tui::session::media::{MediaBytes, MediaStore};
+use crate::tui::session::media::{CHIP_ICON_IMAGE, MediaBytes, MediaStore};
 use crate::tui::theme;
 
 pub enum MediaViewerMessage {
@@ -165,7 +165,8 @@ impl MediaViewer {
             frame.render_widget(Paragraph::new(owned), inner);
         } else {
             frame.render_widget(
-                Paragraph::new(format!("🖼 {} — not loaded", item.name)).fg(theme::text_muted()),
+                Paragraph::new(format!("{CHIP_ICON_IMAGE} {} — not loaded", item.name))
+                    .fg(theme::text_muted()),
                 inner,
             );
         }

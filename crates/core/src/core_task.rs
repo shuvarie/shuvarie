@@ -696,6 +696,9 @@ pub async fn run(
                             crate::attachments::resolve_directives(
                                 &ctx.workspace_root,
                                 attachments,
+                                crate::attachments::AttachmentSettings::from(
+                                    &ctx.config.attachments,
+                                ),
                             )
                             .await
                         {
@@ -2531,6 +2534,7 @@ impl CoreCtx {
             todo_state,
             &tool_scene,
             web_search,
+            self.config.attachments.office_converter.as_deref(),
             &self.skills,
             &self.config.tools.tools,
             Some(&self.mcp),
@@ -2570,6 +2574,7 @@ impl CoreCtx {
                 &prompt_attachments,
                 &model,
                 accepts_images,
+                &crate::attachments::AttachmentSettings::from(&self.config.attachments),
             ) {
                 Ok(report) => report,
                 Err(error) => {
@@ -2602,6 +2607,7 @@ impl CoreCtx {
             self.access.clone(),
             &scene,
             web_search,
+            self.config.attachments.office_converter.as_deref(),
             &self.skills,
         );
         let prior = crate::scenes::inject_history(&scene, &prior, Some(&content), announce);

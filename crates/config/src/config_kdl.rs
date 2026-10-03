@@ -24,6 +24,7 @@ pub(crate) fn from_kdl_with_sections(contents: &str) -> Result<(Config, Vec<Stri
             "db" => config.db = parse_db(node, contents)?,
             "embedding" => config.embedding = parse_embedding(node, contents)?,
             "agent" => config.agent = parse_agent(node, contents)?,
+            "attachments" => config.attachments = parse_attachments(node, contents)?,
             "lsp" => config.lsp = parse_lsp(node, contents)?,
             "skills" => config.skills = parse_skills(node, contents)?,
             "default-providers" => {
@@ -559,6 +560,81 @@ fn parse_agent(node: &KdlNode, input: &str) -> Result<AgentConfig> {
     }
     if let Some(value) = worker_max_turns {
         config.worker_max_turns = value;
+    }
+    Ok(config)
+}
+
+/// `attachments { … }` — what the composer's `@path` attachments allow:
+/// the per-message image count, the per-request image byte/edge budgets,
+/// and the optional external converter program for legacy Office formats.
+fn parse_attachments(node: &KdlNode, input: &str) -> Result<AttachmentsConfig> {
+    if node.entries().iter().any(|entry| entry.name().is_none()) {
+        return Err(node_error(
+            input,
+            node,
+            "`attachments` takes no positional arguments",
+            None,
+        ));
+    }
+    let mut max_images = None;
+    let mut image_budget = None;
+    let mut image_edge = None;
+    let mut office_converter = None;
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "max-images" => set_once(input, child, &mut max_images, scalar_usize(input, child))?,
+            "image-budget" => {
+                set_once(input, child, &mut image_budget, scalar_usize(input, child))?
+            }
+            "image-edge" => set_once(input, child, &mut image_edge, scalar_u32(input, child))?,
+            "office-converter" => set_once(
+                input,
+                child,
+                &mut office_converter,
+                scalar_string(input, child),
+            )?,
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!(
+                        "unknown node `{other}` in `attachments` (expected `max-images`, \
+                         `image-budget`, `image-edge`, or `office-converter`)"
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    let mut config = AttachmentsConfig::default();
+    if let Some(value) = max_images {
+        if value == 0 || value > 128 {
+            return Err(range_error(input, node));
+        }
+        config.max_images = value;
+    }
+    if let Some(value) = image_budget {
+        if value == 0 || value > 4096 {
+            return Err(range_error(input, node));
+        }
+        config.image_budget = value;
+    }
+    if let Some(value) = image_edge {
+        if !(32..=8000).contains(&value) {
+            return Err(range_error(input, node));
+        }
+        config.image_edge = value;
+    }
+    if let Some(value) = office_converter {
+        if value.trim().is_empty() {
+            return Err(node_error(
+                input,
+                node,
+                "`office-converter` takes a program name or path",
+                None,
+            ));
+        }
+        config.office_converter = Some(value);
     }
     Ok(config)
 }
@@ -2670,6 +2746,7 @@ pub(crate) fn to_kdl(config: &Config) -> Result<String> {
         db_node(&config.db),
         embedding_node(&config.embedding),
         agent_node(&config.agent),
+        attachments_node(&config.attachments),
         lsp_node(&config.lsp),
         skills_node(&config.skills),
         default_providers_node(&config.default_providers),
@@ -2767,6 +2844,26 @@ fn image_node(cfg: &ImagePrefs) -> KdlNode {
         children.push(value_node("protocol", protocol.as_str()));
     }
     section_node("image", children).expect("image node always has content")
+}
+
+/// Builds `attachments { … }`; omitted entirely when every field is at
+/// its default.
+fn attachments_node(cfg: &AttachmentsConfig) -> Option<KdlNode> {
+    let defaults = AttachmentsConfig::default();
+    let mut children = Vec::new();
+    if cfg.max_images != defaults.max_images {
+        children.push(int_node("max-images", cfg.max_images as i128));
+    }
+    if cfg.image_budget != defaults.image_budget {
+        children.push(int_node("image-budget", cfg.image_budget as i128));
+    }
+    if cfg.image_edge != defaults.image_edge {
+        children.push(int_node("image-edge", cfg.image_edge as i128));
+    }
+    if let Some(program) = &cfg.office_converter {
+        children.push(value_node("office-converter", program.as_str()));
+    }
+    section_node("attachments", children)
 }
 
 /// Builds `db { … }` — the session-storage settings; omitted entirely when

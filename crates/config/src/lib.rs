@@ -98,6 +98,7 @@ fn merge_layer(config: &mut Config, layer: &ConfigLayer) {
             "db" => config.db = layer.config.db.clone(),
             "embedding" => config.embedding = layer.config.embedding.clone(),
             "agent" => config.agent = layer.config.agent.clone(),
+            "attachments" => config.attachments = layer.config.attachments.clone(),
             "skills" => config.skills = layer.config.skills.clone(),
             "default-providers" => {
                 config.default_providers = layer.config.default_providers.clone();
@@ -368,6 +369,10 @@ pub struct Config {
     pub embedding: EmbeddingConfig,
 
     pub agent: AgentConfig,
+
+    /// `attachments { … }` — what composing `@path` attachments allows and
+    /// its external legacy-converter escape hatch (see [`AttachmentsConfig`]).
+    pub attachments: AttachmentsConfig,
 
     pub lsp: LspConfigRepr,
 
@@ -2490,6 +2495,40 @@ impl std::fmt::Display for ImageProtocol {
     }
 }
 
+/// `attachments { … }` — limits for the composer's `@path` attachments and
+/// the optional external converter for legacy Office formats.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentsConfig {
+    /// `max-images` — how many images one user message may carry.
+    pub max_images: usize,
+
+    /// `image-budget` — MiB of image payload one streaming request may
+    /// carry across the prompt and history (oldest images trim first).
+    pub image_budget: usize,
+
+    /// `image-edge` — px the images' long edge is capped to (larger
+    /// images are downscaled before sending).
+    pub image_edge: u32,
+
+    /// `office-converter` — program (name or path) that converts legacy
+    /// `.doc`/`.ppt` files, called with
+    /// `--headless --convert-to <docx|pptx> --outdir <dir> <file>` (the
+    /// LibreOffice/soffice CLI). Unset, the legacy formats are rejected
+    /// with a conversion hint.
+    pub office_converter: Option<String>,
+}
+
+impl Default for AttachmentsConfig {
+    fn default() -> Self {
+        Self {
+            max_images: 8,
+            image_budget: 16,
+            image_edge: 1568,
+            office_converter: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentConfig {
     /// `0` = unlimited.
@@ -3506,6 +3545,61 @@ mod tests {
                 .unwrap()
                 .contains("copy-on-select")
         );
+    }
+
+    #[test]
+    fn attachments_section_round_trips() {
+        for text in ["attachments { }", ""] {
+            let parsed = config_kdl::from_kdl(text).unwrap();
+            assert_eq!(parsed.attachments, AttachmentsConfig::default());
+        }
+        let parsed = config_kdl::from_kdl(
+            "attachments {\n max-images 4\n image-budget 8\n image-edge 1024\n \
+             office-converter \"soffice\"\n}",
+        )
+        .unwrap();
+        assert_eq!(parsed.attachments.max_images, 4);
+        assert_eq!(parsed.attachments.image_budget, 8);
+        assert_eq!(parsed.attachments.image_edge, 1024);
+        assert_eq!(
+            parsed.attachments.office_converter.as_deref(),
+            Some("soffice")
+        );
+
+        let mut config = Config::default();
+        config.attachments.image_budget = 32;
+        config.attachments.office_converter = Some("/usr/bin/soffice".into());
+        let text = config_kdl::to_kdl(&config).unwrap();
+        assert!(text.contains("image-budget 32"), "body: {text}");
+        assert!(
+            text.contains("office-converter \"/usr/bin/soffice\""),
+            "body: {text}"
+        );
+        // an all-default settings section serializes to nothing
+        assert!(
+            !config_kdl::to_kdl(&Config::default())
+                .unwrap()
+                .contains("attachments")
+        );
+    }
+
+    #[test]
+    fn attachments_section_rejects_bad_values() {
+        for text in [
+            "attachments { max-images 0 }",
+            "attachments { max-images 129 }",
+            "attachments { max-images -1 }",
+            "attachments { image-budget 0 }",
+            "attachments { image-budget 4097 }",
+            "attachments { image-edge 31 }",
+            "attachments { image-edge 8001 }",
+            "attachments { office-converter \" \" }",
+            "attachments { nope 3 }",
+            "attachments { max-images 2 max-images 3 }",
+            "attachments \"soffice\"",
+        ] {
+            assert!(config_kdl::from_kdl(text).is_err(), "text: {text}");
+        }
     }
 
     #[test]

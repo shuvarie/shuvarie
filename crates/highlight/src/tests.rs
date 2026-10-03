@@ -594,3 +594,47 @@ fn dim_streaming_reparse_stable() {
     assert_eq!(texts(&a[0]), ["thinking"]);
     assert_eq!(texts(&b[0]), ["thinking"]);
 }
+
+#[test]
+fn image_with_alt_renders_a_chip() {
+    let lines = render("see ![dashboard view](https://example.com/x.png) below");
+    assert_eq!(lines.len(), 1);
+    assert_eq!(texts(&lines[0]), ["see ", "🖼 ", "dashboard view", " below"]);
+    // The URL is not rendered when the alt text carries the description.
+    assert!(!joined(&lines[0]).contains("example.com"));
+}
+
+#[test]
+fn image_without_alt_shows_the_url() {
+    let lines = render("![](https://example.com/pic.png)");
+    assert_eq!(rows(&lines), ["🖼 https://example.com/pic.png"]);
+    assert_eq!(lines[0].spans[0].style.fg, Some(theme::text_muted()));
+}
+
+#[test]
+fn image_alt_keeps_the_active_inline_style() {
+    // A linked image renders with the link underline: the image tag nests
+    // inside the link tag, so the link counter is still open at image end.
+    let lines = render("[![dashboard view](img.png)](https://example.com)");
+    assert_eq!(lines.len(), 1);
+    assert_eq!(texts(&lines[0]), ["🖼 ", "dashboard view"]);
+    assert!(
+        lines[0].spans[1]
+            .style
+            .add_modifier
+            .contains(Modifier::UNDERLINED)
+    );
+}
+
+#[test]
+fn image_rendering_in_dim_thinking() {
+    let lines = render_dim("looking at ![the failing chart](x.png) next");
+    assert_eq!(joined(&lines[0]), "looking at 🖼 the failing chart next");
+}
+
+#[test]
+fn image_chip_in_table_cell_flow() {
+    let lines = render("| a | b |\n|---|---|\n| ![x](u.png) | y |");
+    assert!(rows(&lines).len() > 2, "table renders");
+    assert!(rows(&lines).join("\n").contains("🖼 x"));
+}
