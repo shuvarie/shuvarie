@@ -24,7 +24,7 @@ The root `App` composes submodels (session screen, chat pane, overlays), each wi
 - `update` — mutates the model and may return an effect; **all side effects happen here** (send core commands via `ctx.send(...)`; `UpdateCtx` carries `Connections` + the `Command` sender).
 - `view` — draws state, `&self`, no side effects; may compose multiple widgets (a model need not implement `ratatui::Widget`).
 
-When handling mutable logic, prioritize calling them from `update`. Resort to `RefCell` only if there is no other way to implement the `update` logic unless doing mutation in `view` logic.
+When handling mutation logic, prioritize calling the logic from `update`. Resort to `RefCell` only if there is no other way to implement the `update` logic unless doing mutation directly in `view` logic.
 
 ## Rendering & UI
 
