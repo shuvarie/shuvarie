@@ -222,13 +222,20 @@ impl MentionMenu {
         self.offset = scroll_offset_for(self.selected, self.offset, vh, len);
     }
 
-    /// The candidate to splice on accept: the full candidate name (with the
-    /// trailing `/` for directories), `None` with no selection.
+    /// The text to splice for the selected candidate: the typed directory
+    /// part (which may be a subpath, absolute, or `~`-prefixed) plus the
+    /// entry name. `None` with no selection.
     pub fn accept(&self) -> Option<String> {
         let idx = self.filtered.get(self.selected)?;
-        self.cached_candidates()?
+        let name = self
+            .cached_candidates()?
             .get(*idx)
-            .map(|candidate| candidate.name.clone())
+            .map(|candidate| candidate.name.clone())?;
+        Some(if self.dir.is_empty() {
+            name
+        } else {
+            format!("{}/{name}", self.dir)
+        })
     }
 
     fn cached_candidates(&self) -> Option<&Rc<[PathCandidate]>> {
@@ -292,7 +299,14 @@ impl MentionMenu {
             .take(inner.height as usize)
             .map(|(idx, &i)| {
                 let candidate = &candidates[i];
-                let name = format!("@{}", candidate.name);
+                // Display the composed token so the accept outcome is what
+                // the user sees (the dir part + entry leaf).
+                let candidate_name = &candidate.name;
+                let name = if self.dir.is_empty() {
+                    format!("@{candidate_name}")
+                } else {
+                    format!("@{}/{candidate_name}", self.dir)
+                };
                 let line = if candidate.is_dir {
                     Line::from(name).fg(theme::text_dim())
                 } else {
@@ -331,8 +345,9 @@ fn trailing_mention(buffer: &str) -> Option<(usize, &str)> {
     None
 }
 
-/// The directory part of a mention tail (`""` = workspace root; absolute
-/// paths keep their absolute directory).
+/// The directory part of a mention tail (without the trailing slash; `""`
+/// = the workspace root; absolute and `~`-prefixed directories keep their
+/// prefix). Accept-composition re-attaches the slash.
 fn dir_part(tail: &str) -> String {
     match tail.rsplit_once('/') {
         Some((dir, _)) => dir.to_string(),
@@ -425,12 +440,38 @@ mod tests {
     }
 
     #[test]
-    fn accept_returns_the_selected_candidate() {
+    fn accept_composes_the_typed_directory_part_with_the_entry() {
+        // Root-level: the bare entry name is the whole token.
         let mut menu = MentionMenu::new();
         assert_eq!(menu.sync("@s"), Some((0, "s".to_string())));
         menu.set_candidates(0, vec![candidate("src/"), candidate("sql.rs")]);
         assert_eq!(menu.accept().as_deref(), Some("src/"));
         menu.next();
         assert_eq!(menu.accept().as_deref(), Some("sql.rs"));
+
+        // A subdirectory query keeps its prefix: `@src/mai` completes to
+        // `@src/main.rs`, not `@main.rs`.
+        let mut menu = MentionMenu::new();
+        assert_eq!(menu.sync("@src/mai"), Some((0, "src/mai".to_string())));
+        menu.set_candidates(0, vec![candidate("main.rs"), candidate("lib.rs")]);
+        assert_eq!(menu.accept().as_deref(), Some("src/main.rs"));
+
+        // Absolute and `~`-prefixed queries compose the same way.
+        let mut menu = MentionMenu::new();
+        assert_eq!(menu.sync("@/etc/ap"), Some((0, "/etc/ap".to_string())));
+        menu.set_candidates(0, vec![candidate("apache2/")]);
+        assert_eq!(menu.accept().as_deref(), Some("/etc/apache2/"));
+
+        let mut menu = MentionMenu::new();
+        assert_eq!(menu.sync("@~/docs/pl"), Some((0, "~/docs/pl".to_string())));
+        menu.set_candidates(0, vec![candidate("plans.md")]);
+        assert_eq!(menu.accept().as_deref(), Some("~/docs/plans.md"));
+    }
+
+    #[test]
+    fn trailing_mention_accepts_tilde_tokens() {
+        assert_eq!(trailing_mention("attach @~/notes"), Some((7, "~/notes")));
+        assert_eq!(trailing_mention("check @~"), Some((6, "~")));
+        assert_eq!(trailing_mention("@/var/lo"), Some((0, "/var/lo")));
     }
 }

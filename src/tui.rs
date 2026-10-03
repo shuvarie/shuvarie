@@ -5,7 +5,7 @@ use futures_util::StreamExt;
 use ratatui::prelude::*;
 use termina::{
     EventReader, EventStream, PlatformTerminal, Terminal,
-    escape::csi::{Csi, Keyboard},
+    escape::csi::{Csi, Keyboard, Window},
     event::Event as TerminalEvent,
 };
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -86,6 +86,27 @@ pub async fn run_tui(
         && let Some(cell_size) = derived_cell_size
     {
         ui.image.cell_size = Some(cell_size);
+    }
+    // Graphical protocols need honest cell metrics to place images: when
+    // the window ioctl report had no pixel dimensions, ask the terminal
+    // directly (`CSI 16 t`) — kitty, Ghostty, foot, iTerm2, WezTerm and
+    // Konsole all answer, and they are exactly the terminals whose graphic
+    // protocol the auto-detection below selects.
+    // Auto (`protocol` unset) detects from the terminal environment and
+    // writes the choice back into the prefs — the App maps the resolved
+    // value into both the chat pane's and the viewer's render path, so the
+    // detection governs rendering, not only the probe below.
+    let effective_image_protocol = *ui
+        .image
+        .protocol
+        .get_or_insert_with(shuvarie_core::ImageProtocol::detect);
+    if ui.image.cell_size.is_none()
+        && !matches!(
+            effective_image_protocol,
+            shuvarie_core::ImageProtocol::Halfblocks
+        )
+    {
+        ui.image.cell_size = probe_cell_size(&mut term, &reader)?;
     }
     let mut rat = ratatui::Terminal::new(TerminaBackend::new(term))?;
     let connections = Connections::load().map_err(|e| io::Error::other(e.to_string()))?;
@@ -402,6 +423,52 @@ fn kitty_flags_report(event: &TerminalEvent) -> bool {
     )
 }
 
+/// Ask the terminal for its cell size in pixels (`CSI 16 t`) and return the
+/// report — the image renderers' font metrics. `None` when the terminal
+/// stays silent (or reports unusable values): rendering then keeps the
+/// 8×16 fallback. Answered by the kitty-graphics-family terminals, exactly
+/// the ones the auto-detected protocols select.
+fn probe_cell_size(
+    term: &mut PlatformTerminal,
+    reader: &EventReader,
+) -> io::Result<Option<(u16, u16)>> {
+    write!(term, "{}", escape::QUERY_CELL_SIZE_PX)?;
+    term.flush()?;
+    if let Ok(true) = reader.poll(Some(PROBE_TIMEOUT), cell_size_report) {
+        // Consume the report so it never surfaces as a stray CSI event.
+        return Ok(match reader.read(cell_size_report)? {
+            TerminalEvent::Csi(Csi::Window(window)) => match window.as_ref() {
+                Window::ReportCellSizePixelsResponse {
+                    width: Some(width),
+                    height: Some(height),
+                } if *width > 0
+                    && *height > 0
+                    && *width <= u16::MAX as i64
+                    && *height <= u16::MAX as i64 =>
+                {
+                    Some((*width as u16, *height as u16))
+                }
+                _ => None,
+            },
+            _ => None,
+        });
+    }
+    Ok(None)
+}
+
+/// Matches the cell-size report (`CSI 6 ; height ; width t`). Non-matching
+/// events are retained by the reader for later consumers.
+fn cell_size_report(event: &TerminalEvent) -> bool {
+    matches!(
+        event,
+        TerminalEvent::Csi(Csi::Window(window))
+            if matches!(
+                **window,
+                Window::ReportCellSizePixelsResponse { .. }
+            )
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,5 +496,19 @@ mod tests {
         assert_eq!(escape::QUERY_KITTY_FLAGS.to_string(), "\x1b[?u");
         assert_eq!(escape::REQUEST_MODIFY_OTHER_KEYS, "\x1b[>4;1m");
         assert_eq!(escape::RESET_MODIFY_OTHER_KEYS, "\x1b[>4n");
+        assert_eq!(escape::QUERY_CELL_SIZE_PX.to_string(), "\x1b[16t");
+    }
+
+    #[test]
+    fn cell_size_report_matches_only_the_cell_size_response() {
+        let report = TerminalEvent::Csi(Csi::Window(Box::new(
+            Window::ReportCellSizePixelsResponse {
+                width: Some(9),
+                height: Some(18),
+            },
+        )));
+        assert!(cell_size_report(&report));
+        let other = TerminalEvent::Csi(Csi::Window(Box::new(Window::ReportWindowState)));
+        assert!(!cell_size_report(&other));
     }
 }

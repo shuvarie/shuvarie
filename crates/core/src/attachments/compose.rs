@@ -80,7 +80,26 @@ const MAX_COMPLETIONS: usize = 40;
 /// sort first, both groups alphabetically; hidden entries appear only when
 /// the prefix starts with a dot.
 pub fn path_candidates(workspace_root: &Path, query: &str) -> Vec<PathCandidate> {
+    path_candidates_in(workspace_root, dirs::home_dir().as_deref(), query)
+}
+
+/// [`path_candidates`] with an explicit home directory (for `~`-relative
+/// queries), so tests can exercise tilde expansion without mutating the
+/// process environment.
+pub fn path_candidates_in(
+    workspace_root: &Path,
+    home: Option<&Path>,
+    query: &str,
+) -> Vec<PathCandidate> {
     let query = query.trim().strip_prefix('@').unwrap_or(query.trim());
+    // A bare `~` lists nothing — the meaningful completion is a `~/`
+    // fragment, which the next step expands into a home-relative directory.
+    if query == "~" {
+        return vec![PathCandidate {
+            name: "~/".to_string(),
+            is_dir: true,
+        }];
+    }
     let (dir_raw, prefix) = match query.strip_suffix('/') {
         // A trailing slash completes INTO the directory: list its contents.
         Some(dir) => (dir, ""),
@@ -89,10 +108,11 @@ pub fn path_candidates(workspace_root: &Path, query: &str) -> Vec<PathCandidate>
             None => ("", query),
         },
     };
-    let dir = if Path::new(dir_raw).is_absolute() {
-        std::path::PathBuf::from(dir_raw)
-    } else {
-        workspace_root.join(dir_raw)
+    let dir = match resolve_query_dir(workspace_root, dir_raw, home) {
+        Some(dir) => dir,
+        // An unresolvable `~user`-style directory stays listless; candidate
+        // names are bare entries, so nothing to offer either way.
+        None => return Vec::new(),
     };
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
@@ -124,6 +144,25 @@ pub fn path_candidates(workspace_root: &Path, query: &str) -> Vec<PathCandidate>
     });
     out.truncate(MAX_COMPLETIONS);
     out
+}
+
+/// The directory a mention query lists: absolute paths and `~`-prefixed
+/// ones resolve on their own (`~/sub` against the home directory), anything
+/// else against the workspace root. `None` marks an unresolvable form.
+fn resolve_query_dir(
+    workspace_root: &Path,
+    dir_raw: &str,
+    home: Option<&Path>,
+) -> Option<std::path::PathBuf> {
+    if Path::new(dir_raw).is_absolute() {
+        return Some(std::path::PathBuf::from(dir_raw));
+    }
+    if dir_raw == "~" || dir_raw.starts_with("~/") {
+        let home = home?;
+        let rest = dir_raw.strip_prefix("~/").unwrap_or("");
+        return Some(home.join(rest));
+    }
+    Some(workspace_root.join(dir_raw))
 }
 
 #[cfg(test)]
@@ -251,5 +290,38 @@ mod tests {
         );
         // An unreadable dir is an empty list.
         assert!(path_candidates(root, "does-not-exist/").is_empty());
+    }
+
+    #[test]
+    fn completions_resolve_tilde_directories_against_the_home() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs/deep")).unwrap();
+        std::fs::create_dir_all(dir.path().join("docs/tools")).unwrap();
+        std::fs::write(dir.path().join("docs/deep/plan.pdf"), "").unwrap();
+        std::fs::write(dir.path().join("docs/notes.md"), "").unwrap();
+        let home = dir.path();
+        let root = home;
+
+        // A trailing-`/` `~/docs` fragment lists the home-relative directory.
+        let names = |candidates: Vec<PathCandidate>| -> Vec<String> {
+            candidates.into_iter().map(|c| c.name).collect()
+        };
+        assert!(
+            names(path_candidates_in(root, Some(home), "~/docs/")).contains(&"deep/".to_string())
+        );
+        // Prefix filtering composes with the home expansion.
+        assert_eq!(
+            names(path_candidates_in(root, Some(home), "~/docs/de")),
+            vec!["deep/"]
+        );
+        // The bare `~` completes into the `~/` fragment.
+        assert_eq!(names(path_candidates_in(root, Some(home), "~")), vec!["~/"]);
+        // Without a home dir, `~`-queries list nothing (and bare entries
+        // still resolve against the workspace root).
+        assert!(path_candidates_in(root, None, "~/docs/").is_empty());
+        assert_eq!(
+            names(path_candidates_in(root, None, "docs/t")),
+            vec!["tools/"]
+        );
     }
 }

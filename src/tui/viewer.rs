@@ -47,10 +47,7 @@ pub struct MediaViewer {
 type ViewerLines = RefCell<HashMap<(String, u16), Option<Rc<[Line<'static>]>>>>;
 
 impl MediaViewer {
-    pub fn new(
-        cell: ratatui_image::FontSize,
-        protocol: ratatui_image::picker::ProtocolType,
-    ) -> Self {
+    pub fn new(cell: ratatui_image::FontSize, protocol: shuvarie_core::ImageProtocol) -> Self {
         let mut store = MediaStore::new(cell);
         store.set_protocol(protocol);
         Self {
@@ -185,7 +182,6 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratatui_image::picker::ProtocolType;
 
     fn png_bytes(width: u32, height: u32) -> Vec<u8> {
         use image::ImageEncoder;
@@ -211,7 +207,7 @@ mod tests {
     fn open_lands_on_the_selected_or_newest_image() {
         let mut viewer = MediaViewer::new(
             ratatui_image::FontSize::new(8, 16),
-            ProtocolType::Halfblocks,
+            shuvarie_core::ImageProtocol::Halfblocks,
         );
         assert!(!viewer.is_open());
         // Empty gallery stays closed.
@@ -234,7 +230,7 @@ mod tests {
     fn move_clamps_at_the_ends() {
         let mut viewer = MediaViewer::new(
             ratatui_image::FontSize::new(8, 16),
-            ProtocolType::Halfblocks,
+            shuvarie_core::ImageProtocol::Halfblocks,
         );
         viewer.open(vec![item("a", "a.png"), item("b", "b.png")], None);
         viewer.update(MediaViewerMessage::Move(-9));
@@ -265,7 +261,7 @@ mod tests {
     fn receive_feeds_the_store_and_stops_resends() {
         let mut viewer = MediaViewer::new(
             ratatui_image::FontSize::new(8, 16),
-            ProtocolType::Halfblocks,
+            shuvarie_core::ImageProtocol::Halfblocks,
         );
         viewer.open(vec![item("a", "a.png")], None);
         let missing = viewer.missing();
@@ -286,7 +282,7 @@ mod tests {
     fn arrival_invalidates_a_failed_render() {
         let mut viewer = MediaViewer::new(
             ratatui_image::FontSize::new(8, 16),
-            ProtocolType::Halfblocks,
+            shuvarie_core::ImageProtocol::Halfblocks,
         );
         viewer.open(vec![item("sha", "shot.png")], None);
         viewer.receive(&[("sha".into(), Some(MediaBytes(b"broken".to_vec().into())))]);
@@ -306,7 +302,7 @@ mod tests {
         use termina::event::KeyCode;
         let viewer = MediaViewer::new(
             ratatui_image::FontSize::new(8, 16),
-            ProtocolType::Halfblocks,
+            shuvarie_core::ImageProtocol::Halfblocks,
         );
         let key = |code| termina::event::KeyEvent::new(code, termina::event::Modifiers::NONE);
         for (code, step) in [

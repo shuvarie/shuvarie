@@ -2447,17 +2447,29 @@ pub struct ImagePrefs {
     /// The graphics protocol images render through: `protocol
     /// halfblocks|kitty|sixel|iterm2`. `halfblocks` (the default) uses
     /// unicode half blocks — plain text cells, safe everywhere. `kitty`
-    /// renders through ordinary placeholder cells (scroll-safe for the chat
-    /// pane). `sixel` and `iterm2` paint placements that persist at old
-    /// screen rows, so the chat pane clamps them to `halfblocks`; the
+    /// renders through ordinary placeholder cells (scroll-safe for the
+    /// chat pane). `sixel` and `iterm2` paint placements that persist at
+    /// old screen rows, so the chat pane clamps them to `halfblocks`; the
     /// fullscreen image viewer (Tab over an empty composer) honors any
-    /// protocol since nothing scrolls there. Note the TUI does not query
-    /// the terminal for graphics support — pick only what yours truly
-    /// implements (kitty, sixel or iTerm2-capable ones).
+    /// protocol since nothing scrolls there.
+    ///
+    /// Omitted (`auto`) the TUI detects the protocol from the terminal
+    /// environment: Ghostty and kitty prefer the kitty protocol, iTerm2,
+    /// WezTerm, Konsole, foot and Windows Terminal prefer sixel, tmux and
+    /// otherwise halfblocks. When a protocol cannot be used the render
+    /// descends the priority ladder — kitty → sixel → iterm2 → halfblocks
+    /// (the pane: kitty → halfblocks, see [`ImageProtocol`]).
     pub protocol: Option<ImageProtocol>,
 }
 
 /// The `[ui.image] protocol` value.
+///
+/// The render-time priority ladder is `kitty → sixel → iterm2 →
+/// halfblocks`: when the configured (or auto-detected) protocol cannot be
+/// used the next one down is tried before settling on `halfblocks`. The chat
+/// pane only descends kitty → halfblocks (its placement-based alternatives
+/// would paint over old rows on scroll); the fullscreen viewer walks the
+/// whole ladder.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ImageProtocol {
     #[default]
@@ -2479,12 +2491,75 @@ impl ImageProtocol {
         }
     }
 
+    /// Detect the image protocol from the terminal environment — the
+    /// auto-detected default when `protocol` is not configured. Env-var
+    /// identity mirrors ratatui-image's own terminal map: Terminals that
+    /// implement the kitty graphics protocol (kitty itself, Ghostty) are
+    /// matched first; sixel-capable families (iTerm2, WezTerm, Konsole,
+    /// foot, Windows Terminal) second; tmux and everything else fall back
+    /// to halfblocks (tmux swallows raw graphic payloads without its DCS
+    /// passthrough, so it always clamps).
+    pub fn detect() -> Self {
+        Self::detect_in(|name| std::env::var(name).ok())
+    }
+
+    /// [`Self::detect`] over an explicit environment, testable.
+    pub fn detect_in(env: impl Fn(&str) -> Option<String>) -> Self {
+        // The multiplexer clamps first: inner payloads never reach the
+        // outer terminal without the DCS passthrough wrapper.
+        if env("TMUX").is_some() {
+            return Self::Halfblocks;
+        }
+        let term = env("TERM").unwrap_or_default();
+        match env("TERM_PROGRAM").as_deref().map(str::trim) {
+            Some("ghostty") => return Self::Kitty,
+            Some("iTerm.app") => return Self::Sixel,
+            Some("WezTerm") => return Self::Sixel,
+            Some("konsole") => return Self::Sixel,
+            Some("vscode") => return Self::Halfblocks,
+            _ => {}
+        }
+        if term.starts_with("xterm-kitty") || term.starts_with("xterm-ghostty") {
+            return Self::Kitty;
+        }
+        if term.starts_with("foot") {
+            return Self::Sixel;
+        }
+        if env("KITTY_WINDOW_ID").is_some() || env("KITTY_PID").is_some() {
+            return Self::Kitty;
+        }
+        if [
+            "ITERM_SESSION_ID",
+            "WEZTERM_EXECUTABLE",
+            "KONSOLE_VERSION",
+            "WT_SESSION",
+        ]
+        .iter()
+        .any(|key| env(key).is_some())
+        {
+            return Self::Sixel;
+        }
+        Self::Halfblocks
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Halfblocks => "halfblocks",
             Self::Sixel => "sixel",
             Self::Kitty => "kitty",
             Self::Iterm2 => "iterm2",
+        }
+    }
+
+    /// The next protocol down the priority ladder: `kitty → sixel →
+    /// iterm2 → halfblocks`. `None` at the bottom — `halfblocks` paints
+    /// ordinary text cells and is always constructible.
+    pub fn degrade(self) -> Option<Self> {
+        match self {
+            Self::Kitty => Some(Self::Sixel),
+            Self::Sixel => Some(Self::Iterm2),
+            Self::Iterm2 => Some(Self::Halfblocks),
+            Self::Halfblocks => None,
         }
     }
 }
@@ -3525,6 +3600,71 @@ mod tests {
         assert!(config_kdl::from_kdl("ui { image { cell-size 70000 16 } }").is_err());
         assert!(config_kdl::from_kdl("ui { image { cell-size 8 16.5 } }").is_err());
         assert!(config_kdl::from_kdl("ui { image { cell-size 8 16 } image { } }").is_err());
+    }
+
+    #[test]
+    fn image_protocol_detects_the_terminal_environment() {
+        // Ghostty and kitty implement the kitty graphics protocol — the
+        // preferred (higher-resolution) renderer on them.
+        assert_eq!(
+            ImageProtocol::detect_in(|name| match name {
+                "TERM_PROGRAM" => Some("ghostty".into()),
+                "TERM" => Some("xterm-ghostty".into()),
+                _ => None,
+            }),
+            ImageProtocol::Kitty
+        );
+        assert_eq!(
+            ImageProtocol::detect_in(|name| {
+                (name == "KITTY_WINDOW_ID").then(|| "4".to_string())
+            }),
+            ImageProtocol::Kitty
+        );
+        // Sixel families.
+        for entries in [
+            vec![("TERM_PROGRAM", "iTerm.app")],
+            vec![("TERM_PROGRAM", "WezTerm")],
+            vec![("KONSOLE_VERSION", "2508"), ("TERM", "xterm-256color")],
+            vec![("TERM", "foot")],
+            vec![("WT_SESSION", "x")],
+        ] {
+            let env = |name: &str| -> Option<String> {
+                entries
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_string())
+            };
+            assert_eq!(ImageProtocol::detect_in(env), ImageProtocol::Sixel);
+        }
+        // tmux clamps first, even with a graphical outer terminal.
+        assert_eq!(
+            ImageProtocol::detect_in(|name: &str| match name {
+                "TMUX" => Some("/tmux-0/default,3,7,0".into()),
+                "TERM_PROGRAM" => Some("ghostty".into()),
+                _ => None,
+            }),
+            ImageProtocol::Halfblocks
+        );
+        // No signals at all (and unknown programs) stay conservative.
+        assert_eq!(
+            ImageProtocol::detect_in(|_| None),
+            ImageProtocol::Halfblocks
+        );
+        assert_eq!(
+            ImageProtocol::detect_in(|name| {
+                (name == "TERM_PROGRAM").then(|| "vscode".to_string())
+            }),
+            ImageProtocol::Halfblocks
+        );
+    }
+
+    #[test]
+    fn image_protocol_degrade_walks_the_priority_ladder() {
+        use ImageProtocol as P;
+        assert_eq!(P::Kitty.degrade(), Some(P::Sixel));
+        assert_eq!(P::Sixel.degrade(), Some(P::Iterm2));
+        assert_eq!(P::Iterm2.degrade(), Some(P::Halfblocks));
+        assert_eq!(P::Halfblocks.degrade(), None, "the floor");
     }
 
     #[test]

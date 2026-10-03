@@ -30,6 +30,13 @@ pub const DISABLE_KITTY_KEYBOARD: Csi = Csi::Keyboard(Keyboard::PopFlags(1));
 // the startup probe in `super` uses to detect it.
 pub const QUERY_KITTY_FLAGS: Csi = Csi::Keyboard(Keyboard::QueryFlags);
 
+// Query the cell size in pixels (`CSI 16 t`; xterm window ops). Answered by
+// the kitty-graphics-family terminals (kitty, Ghostty, foot, iTerm2,
+// WezTerm, Konsole) — the image renderers' metrics when the window ioctl
+// report has no pixel dims. The report parses as
+// `Window::ReportCellSizePixelsResponse`.
+pub const QUERY_CELL_SIZE_PX: &str = "\x1b[16t";
+
 // Fallback for terminals without the kitty keyboard protocol (notably tmux,
 // which ignores both the flag push and `CSI ? u`): request xterm
 // `modifyOtherKeys=1` (`CSI > 4;1m`). tmux then tracks the request and starts

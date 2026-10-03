@@ -12,6 +12,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
+use std::iter::successors;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -20,6 +21,7 @@ use ratatui::prelude::*;
 use ratatui_image::FontSize;
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::Protocol;
+use shuvarie_core::ImageProtocol;
 
 /// Total raw media bytes the store keeps. Oldest-inserted items are evicted
 /// first; an evicted image falls back to its unloaded chip until the next
@@ -75,7 +77,7 @@ pub struct MediaStore {
     /// The configured image protocol: the pane clamps placement-based ones
     /// (their placements persist at old rows on scroll); the fullscreen
     /// viewer may use any of them (nothing scrolls there).
-    protocol: ProtocolType,
+    protocol: ImageProtocol,
     /// Bumped whenever the configured cell size or protocol changes: image
     /// caches keyed on it re-render.
     cell_gen: u64,
@@ -88,7 +90,7 @@ impl MediaStore {
     pub fn new(cell: FontSize) -> Self {
         Self {
             cell,
-            protocol: ProtocolType::Halfblocks,
+            protocol: ImageProtocol::Halfblocks,
             cell_gen: 0,
             images: HashMap::new(),
             order: Vec::new(),
@@ -113,7 +115,7 @@ impl MediaStore {
 
     /// Switch the render protocol (from the `[ui.image] protocol` config):
     /// bumps the generation so cached renders rebuild.
-    pub fn set_protocol(&mut self, protocol: ProtocolType) {
+    pub fn set_protocol(&mut self, protocol: ImageProtocol) {
         if protocol != self.protocol {
             self.protocol = protocol;
             self.cell_gen += 1;
@@ -121,7 +123,7 @@ impl MediaStore {
     }
 
     /// The configured protocol (the viewer's unrestricted choice).
-    pub fn protocol(&self) -> ProtocolType {
+    pub fn protocol(&self) -> ImageProtocol {
         self.protocol
     }
 
@@ -129,10 +131,10 @@ impl MediaStore {
     /// plants ordinary placeholder cells (scroll-safe), but placement-based
     /// protocols — sixel, iTerm2 — leave their placements behind at old
     /// rows when the buffer scrolls, so the pane clamps them to halfblocks.
-    pub fn pane_protocol(&self) -> ProtocolType {
+    pub fn pane_protocol(&self) -> ImageProtocol {
         match self.protocol {
-            ProtocolType::Kitty | ProtocolType::Halfblocks => self.protocol,
-            _ => ProtocolType::Halfblocks,
+            ImageProtocol::Kitty | ImageProtocol::Halfblocks => self.protocol,
+            _ => ImageProtocol::Halfblocks,
         }
     }
 
@@ -192,15 +194,44 @@ fn picker_for(cell: FontSize, protocol: ProtocolType) -> Picker {
     picker
 }
 
-/// Render one image attachment into content-width lines through the pane's
-/// (clamped) protocol — ordinary diff-able cells that survive the
-/// virtualizer's clipped paint windows. `None` when the media is
-/// absent/undecodable or the width is degenerate.
-pub fn image_lines(store: &MediaStore, sha256: &str, width: u16) -> Option<Vec<Line<'static>>> {
-    image_lines_with(store.pane_protocol(), store, sha256, width)
+/// The config enum → the picker's protocol type — the single mapping point
+/// (the pane, the viewer and the tests all render through it).
+pub fn protocol_type(protocol: ImageProtocol) -> ProtocolType {
+    match protocol {
+        ImageProtocol::Sixel => ProtocolType::Sixel,
+        ImageProtocol::Kitty => ProtocolType::Kitty,
+        ImageProtocol::Iterm2 => ProtocolType::Iterm2,
+        ImageProtocol::Halfblocks => ProtocolType::Halfblocks,
+    }
 }
 
-/// The same render through the store's configured protocol, unclamped — the
+/// The chat pane's ladder: kitty is the pane's one scroll-safe graphical
+/// protocol (its fixed variant plants ordinary placeholder cells); every
+/// other start clamps to halfblocks.
+fn pane_ladder(protocol: ImageProtocol) -> Vec<ImageProtocol> {
+    match protocol {
+        ImageProtocol::Kitty => vec![ImageProtocol::Kitty, ImageProtocol::Halfblocks],
+        _ => vec![ImageProtocol::Halfblocks],
+    }
+}
+
+/// The fullscreen viewer's ladder: the configured protocol first, then the
+/// priority chain down to halfblocks — kitty → sixel → iterm2 → halfblocks.
+fn viewer_ladder(protocol: ImageProtocol) -> Vec<ImageProtocol> {
+    let mut ladder = vec![protocol];
+    ladder.extend(successors(protocol.degrade(), |p| p.degrade()));
+    ladder
+}
+
+/// Render one image attachment into content-width lines through the pane's
+/// ladder — ordinary diff-able cells that survive the virtualizer's clipped
+/// paint windows. `None` when the media is absent/undecodable or the width
+/// is degenerate.
+pub fn image_lines(store: &MediaStore, sha256: &str, width: u16) -> Option<Vec<Line<'static>>> {
+    image_lines_with(&pane_ladder(store.pane_protocol()), store, sha256, width)
+}
+
+/// The same render through the store's configured ladder, unclamped — the
 /// fullscreen viewer's choice (nothing scrolls there, so placement-based
 /// protocols are acceptable). Prefer [`image_lines`] for pane rendering.
 pub fn image_lines_full(
@@ -208,11 +239,15 @@ pub fn image_lines_full(
     sha256: &str,
     width: u16,
 ) -> Option<Vec<Line<'static>>> {
-    image_lines_with(store.protocol(), store, sha256, width)
+    image_lines_with(&viewer_ladder(store.protocol()), store, sha256, width)
 }
 
+/// Walk `ladder` in priority order, rendering through the first protocol
+/// that constructs. The decoded pixels are cloned per attempt — the store
+/// always holds its own reference, so the first attempt is a copy too (a
+/// one-copy-per-render cost, as before the ladder).
 fn image_lines_with(
-    protocol: ProtocolType,
+    ladder: &[ImageProtocol],
     store: &MediaStore,
     sha256: &str,
     width: u16,
@@ -221,16 +256,21 @@ fn image_lines_with(
         return None;
     }
     let item = store.get(sha256)?;
-    let decoded = Rc::try_unwrap(item.decoded()?).unwrap_or_else(|arc| (*arc).clone());
-    let picker = picker_for(store.cell_size(), protocol);
-    let proto = picker
-        .new_protocol(
-            decoded,
-            Size::new(width, u16::MAX),
-            ratatui_image::Resize::Fit(None),
-        )
-        .ok()?;
-    Some(lift_lines(&proto))
+    let decoded = item.decoded()?;
+    for protocol in ladder {
+        let picker = picker_for(store.cell_size(), protocol_type(*protocol));
+        let proto = picker
+            .new_protocol(
+                (*decoded).clone(),
+                Size::new(width, u16::MAX),
+                ratatui_image::Resize::Fit(None),
+            )
+            .ok();
+        if let Some(proto) = proto {
+            return Some(lift_lines(&proto));
+        }
+    }
+    None
 }
 
 /// Render the protocol into a scratch buffer of exactly its own size and lift
@@ -334,6 +374,75 @@ mod tests {
         store.insert("broken".into(), b"\x89PNG\r\n\x1a\ngarbage".to_vec());
         assert!(image_lines(&store, "broken", 40).is_none());
         assert!(image_lines(&store, "broken", 80).is_none());
+    }
+
+    #[test]
+    fn pane_ladder_kitty_then_halfblocks_others_clamp() {
+        use ImageProtocol as P;
+        assert_eq!(
+            pane_ladder(P::Kitty),
+            vec![P::Kitty, P::Halfblocks],
+            "kitty is the pane's one scroll-safe graphical protocol"
+        );
+        for clamped in [P::Sixel, P::Iterm2, P::Halfblocks] {
+            assert_eq!(
+                pane_ladder(clamped),
+                vec![P::Halfblocks],
+                "placement-based protocols never render in the pane"
+            );
+        }
+    }
+
+    #[test]
+    fn viewer_ladder_descends_the_priority_chain() {
+        use ImageProtocol as P;
+        assert_eq!(
+            viewer_ladder(P::Kitty),
+            vec![P::Kitty, P::Sixel, P::Iterm2, P::Halfblocks]
+        );
+        assert_eq!(
+            viewer_ladder(P::Sixel),
+            vec![P::Sixel, P::Iterm2, P::Halfblocks]
+        );
+        assert_eq!(viewer_ladder(P::Iterm2), vec![P::Iterm2, P::Halfblocks]);
+        assert_eq!(viewer_ladder(P::Halfblocks), vec![P::Halfblocks]);
+    }
+
+    #[test]
+    fn ladder_renders_through_the_first_constructible_protocol() {
+        let mut store = MediaStore::new(FontSize::new(8, 16));
+        store.insert("sha1".into(), gradient_png());
+        let apc = "\x1b_G"; // the kitty transmit prefix
+        let has_kitty = |lines: &[Line<'static>]| {
+            lines
+                .iter()
+                .any(|line| line.spans.iter().any(|span| span.content.contains(apc)))
+        };
+        let has_halfblocks = |lines: &[Line<'static>]| {
+            lines.iter().any(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| matches!(span.style.bg, Some(bg) if bg != Color::Reset))
+            })
+        };
+        // First success wins: kitty ahead of halfblocks yields a kitty
+        // payload; halfblocks ahead of kitty wins there instead.
+        let lines = image_lines_with(
+            &[ImageProtocol::Kitty, ImageProtocol::Halfblocks],
+            &store,
+            "sha1",
+            40,
+        )
+        .expect("kitty constructs");
+        assert!(has_kitty(&lines));
+        let lines = image_lines_with(
+            &[ImageProtocol::Halfblocks, ImageProtocol::Kitty],
+            &store,
+            "sha1",
+            40,
+        )
+        .expect("halfblocks constructs");
+        assert!(has_halfblocks(&lines) && !has_kitty(&lines));
     }
 }
 

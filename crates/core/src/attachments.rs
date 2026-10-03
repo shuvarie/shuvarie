@@ -106,11 +106,19 @@ impl Prepared {
     }
 }
 
-/// A relative directive resolves against the workspace root; an absolute one
-/// is user intent (`@~/screenshot.png`). A leading `@` is the composer's
-/// mention sigil and may slip through.
+/// A relative directive resolves against the workspace root; an absolute
+/// one is user intent. A leading `~` expands against the home directory
+/// first (`@~/screenshot.png`) — a non-expandable `~other` form stays
+/// literal and simply misses. A leading `@` is the composer's mention sigil
+/// and may slip through.
 pub(super) fn normalize_path(workspace_root: &Path, path: &str) -> PathBuf {
+    normalize_path_in(workspace_root, dirs::home_dir().as_deref(), path)
+}
+
+/// [`normalize_path`] with an explicit home directory for tilde expansion.
+pub(super) fn normalize_path_in(workspace_root: &Path, home: Option<&Path>, path: &str) -> PathBuf {
     let path = path.trim().strip_prefix('@').unwrap_or(path.trim());
+    let path = crate::permissions::expand_home_in(path, home);
     let path = PathBuf::from(path);
     if path.is_absolute() {
         path

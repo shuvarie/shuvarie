@@ -232,20 +232,6 @@ pub struct App {
     quit: bool,
 }
 
-/// The configured image protocol → the picker's protocol type
-/// (`halfblocks` unset or set; the other spellings map 1:1).
-fn image_protocol(
-    protocol: Option<shuvarie_core::ImageProtocol>,
-) -> ratatui_image::picker::ProtocolType {
-    use shuvarie_core::ImageProtocol;
-    match protocol {
-        Some(ImageProtocol::Sixel) => ratatui_image::picker::ProtocolType::Sixel,
-        Some(ImageProtocol::Kitty) => ratatui_image::picker::ProtocolType::Kitty,
-        Some(ImageProtocol::Iterm2) => ratatui_image::picker::ProtocolType::Iterm2,
-        Some(ImageProtocol::Halfblocks) | None => ratatui_image::picker::ProtocolType::Halfblocks,
-    }
-}
-
 /// Resolve the active connection's model context window from the Selune
 /// catalog — the same lookup the core task uses for its context budget.
 fn catalog_context_length(connections: &Connections) -> Option<u64> {
@@ -308,6 +294,19 @@ impl App {
             .and_then(|id| connections.providers.get(id).map(|p| p.name.clone()));
         let initial_context_length = catalog_context_length(&connections);
         let current_theme_pref = ui.theme.clone();
+        // One resolution of the image settings for both the chat pane and
+        // the fullscreen viewer. tui.rs resolved auto-detection into
+        // `protocol` before constructing the App; a raw-config construction
+        // (tests) defaults to halfblocks.
+        let image_protocol = ui
+            .image
+            .protocol
+            .unwrap_or(shuvarie_core::ImageProtocol::Halfblocks);
+        let image_cell = ui
+            .image
+            .cell_size
+            .map(|(width, height)| ratatui_image::FontSize::new(width, height))
+            .unwrap_or_else(|| ratatui_image::FontSize::new(8, 16));
         Self {
             ctx: UpdateCtx::new(connections, cmd_tx),
             overlay: if welcome.open {
@@ -334,7 +333,7 @@ impl App {
                 s.sidebar.update(SidebarMessage::SetWorkspace { workspace });
                 s.update(SessionMessage::Chat(ChatMessage::ImageConfig {
                     cell_size: ui.image.cell_size,
-                    protocol: image_protocol(ui.image.protocol).into(),
+                    protocol: Some(image_protocol),
                 }));
                 s
             },
@@ -351,10 +350,7 @@ impl App {
             title_popup: TitlePopup::new(),
             assisted_by: AssistedByPopup::new(),
             theme_picker: ThemePicker::new(),
-            media_view: MediaViewer::new(
-                ratatui_image::FontSize::new(8, 16),
-                ratatui_image::picker::ProtocolType::Halfblocks,
-            ),
+            media_view: MediaViewer::new(image_cell, image_protocol),
             theme_choices,
             current_theme_pref,
             theme_backup: None,

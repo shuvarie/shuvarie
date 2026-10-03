@@ -201,7 +201,7 @@ pub enum ChatMessage {
     /// `None` = derive a 1:2 guess). Sent at startup.
     ImageConfig {
         cell_size: Option<(u16, u16)>,
-        protocol: Option<ratatui_image::picker::ProtocolType>,
+        protocol: Option<shuvarie_core::ImageProtocol>,
     },
     TokenReceived {
         content: String,
