@@ -63,6 +63,7 @@
 
 - *(version)* Update version display for debug build
 - *(nsis)* Make version parameter required
+- *(cliff)* Update changelog generation logic
 ## [0.2.4] - 2026-10-03
 
 ### 🐛 Bug Fixes
