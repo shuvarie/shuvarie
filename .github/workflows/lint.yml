@@ -21,7 +21,7 @@ jobs:
         submodules: true
     - uses: dtolnay/rust-toolchain@stable
     - name: Lint
-      run: cargo clippy
+      run: cargo clippy --workspace
 
     - name: Run tests
       run: cargo test --workspace -q
