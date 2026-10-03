@@ -8,7 +8,7 @@ use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 
 use shuvarie_db::{LockAcquire, SESSION_LOCK_HEARTBEAT_MS, Store};
-use shuvarie_llm::{DeviceCodeHandler, FileChange, ProviderClient, TokenUsage};
+use shuvarie_llm::{ChatMsg, DeviceCodeHandler, FileChange, ProviderClient, TokenUsage};
 
 use crate::command::Command;
 use crate::core_task::steer::SteerSignal;
@@ -1284,7 +1284,7 @@ pub async fn run(
                                     continue;
                                 }
                                 if let Some(content) = last_user_content {
-                                    ctx.self_replay_send(content, true, None).await;
+                                    ctx.self_replay_send(content, true, None, None).await;
                                 }
                             }
                             Err(e) => {
@@ -1940,8 +1940,8 @@ async fn summarizer_for(ctx: &mut CoreCtx) -> Option<(ProviderClient, String)> {
 /// active leaf back at the pre-compaction tip so the compacted history —
 /// summary plus kept tail — stays on the active path (and, for the
 /// auto-resume flow, the tip is the interrupted turn's partial reply:
-/// `resume_last_turn` walks the leaf past it, keeping the partial as an
-/// off-path branch). `events` brackets the summarizer call with
+/// `resume_last_turn` re-streams the turn's prompt from it, keeping the
+/// partial on the active path). `events` brackets the summarizer call with
 /// `CompactionStarted`/`CompactionFinished` when given. `Ok(false)` when
 /// there is no summarizable span.
 async fn compact_active_path(
@@ -2170,20 +2170,24 @@ impl CoreCtx {
                 steered,
             })
             .await;
-        self.self_replay_send(content, false, model).await;
+        self.self_replay_send(content, false, model, None).await;
     }
 
     /// Build a stream for the given user content and spawn the event-forwarding
     /// task. When `push_user` is set, the content is first appended as a user
     /// message (used by `SendMessage`); otherwise it is re-sent as-is (used by
-    /// replay/resume). `model_override` is a per-turn `<provider_kind>/<model>`
-    /// spec (a custom command's `model` frontmatter); `None` streams on the
-    /// active provider.
+    /// replay/resume). A turn resume passes `prior` explicitly — the history
+    /// before the turn's prompt, from [`Session::last_turn_replay`] — while a
+    /// fresh send leaves it `None` and the active path minus its pending
+    /// prompt tip is used. `model_override` is a per-turn
+    /// `<provider_kind>/<model>` spec (a custom command's `model`
+    /// frontmatter); `None` streams on the active provider.
     async fn self_replay_send(
         &mut self,
         content: String,
         push_user: bool,
         model_override: Option<String>,
+        prior: Option<Vec<ChatMsg>>,
     ) {
         let Some(s) = &self.session else {
             return;
@@ -2258,7 +2262,10 @@ impl CoreCtx {
         let (prior, todo_records, stored_scene, announced_scene, session_id, seed_usage) = {
             let guard = s.lock().await;
             (
-                guard.history_for_send(),
+                match prior {
+                    Some(prior) => prior,
+                    None => guard.history_for_send(),
+                },
                 guard.tool_records.clone(),
                 guard.scene.clone(),
                 guard.announced_scene.clone(),
@@ -2482,15 +2489,17 @@ impl CoreCtx {
         );
     }
 
-    /// Walk the active leaf back to the interrupted assistant tip's parent
-    /// (the user prompt) and re-stream from there. The partial reply and its
-    /// tool calls stay in the tree as an off-path branch — a retry must not
-    /// destroy the history after the last user prompt; the session tree can
-    /// still fork back to it or delete it explicitly. The retried attempt
-    /// appends its own sibling branch under the same parent, and off-path
-    /// rows never reach the request (history, tool records, and usage are
-    /// all active-path based). Used by the auto-continue path after a
-    /// context overflow and the turn-retry resume.
+    /// Re-stream the last turn, starting at the final branch node. The leaf
+    /// stays where the failure left it — the interrupted assistant tip when
+    /// the attempt streamed anything, the user prompt when it failed before
+    /// any output — so the partial reply stays on the active path and in the
+    /// chat view (a retry must not hide or destroy the history after the
+    /// last user prompt), and the retried attempt's output continues the
+    /// same branch under it. The retried request replays the turn's user
+    /// prompt with the history that precedes it
+    /// ([`Session::last_turn_replay`]); no prompt node is re-appended. Used
+    /// by the auto-continue path after a context overflow and the turn-retry
+    /// resume.
     async fn resume_last_turn(&mut self) {
         let Some(s) = &self.session else {
             return;
@@ -2498,19 +2507,16 @@ impl CoreCtx {
         let Some(sid) = s.lock().await.id else {
             return;
         };
-        if let Ok(stored) = self.store.load_session(sid).await
-            && let Some(leaf_id) = stored.leaf_id
-            && let Some(leaf) = stored.messages.iter().find(|m| m.id == leaf_id)
-            && leaf.role == shuvarie_db::MsgRole::Assistant
-            && !leaf.summary
-        {
-            let _ = self.store.set_active_leaf(sid, leaf.parent_id).await;
-        }
         let loaded = match self.store.load_session(sid).await {
             Ok(stored) => Session::from_stored(stored),
             Err(_) => return,
         };
-        let content = loaded.messages.last().map(|m| m.content.clone());
+        // The leaf must not move: it is the final branch node the retry
+        // continues from. A path without a user prompt has no turn to
+        // replay.
+        let Some((content, prior)) = loaded.last_turn_replay() else {
+            return;
+        };
         *s.lock().await = loaded.clone();
         let _ = self
             .event_tx
@@ -2519,9 +2525,8 @@ impl CoreCtx {
                 prompt: None,
             })
             .await;
-        if let Some(content) = content {
-            self.self_replay_send(content, false, None).await;
-        }
+        self.self_replay_send(content, false, None, Some(prior))
+            .await;
     }
 }
 
@@ -3241,8 +3246,9 @@ async fn stream_stream_to_events(
                 // point, the first tail message reparented under it, and the
                 // leaf returned to the pre-compaction tip so the resume
                 // below finds the interrupted turn's partial reply as the
-                // active tip and re-winds from it (the partial stays as an
-                // off-path branch instead of being deleted).
+                // active tip: the retry re-streams the turn's prompt and
+                // continues the same branch after it, keeping the partial
+                // on the active path.
                 let mut compacted = false;
                 if let Some(sid) = session.lock().await.id {
                     match compact_active_path(
