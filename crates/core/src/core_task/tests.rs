@@ -2359,9 +2359,10 @@ async fn failed_turn_state() -> (Store, uuid::Uuid, shuvarie_db::StoredMessage) 
 #[tokio::test]
 async fn turn_retry_resume_keeps_the_interrupted_partial_branch() {
     // A connection error mid-turn must not destroy the history after the
-    // last user prompt: the retry walks the leaf back to the prompt but the
-    // partial reply (and its tool call) stays in the tree as an off-path
-    // branch, re-windable from the session tree instead of deleted.
+    // last user prompt: the retry starts at the final branch node — the
+    // leaf stays at the interrupted partial reply — so the partial (and its
+    // tool call) remain on the active path, and the retried attempt
+    // continues the same branch under it instead of forking away.
     let (mut store, sid, partial) = failed_turn_state().await;
     let session = Session::from_stored(store.load_session(sid).await.unwrap());
     assert_eq!(session.messages.len(), 2, "path counts the partial too");
@@ -2370,8 +2371,7 @@ async fn turn_retry_resume_keeps_the_interrupted_partial_branch() {
     ctx.resume_last_turn().await;
 
     let stored = ctx.store.load_session(sid).await.unwrap();
-    // The partial reply and its tool calls survive — off the path, but in
-    // the tree.
+    // The partial reply and its tool calls survive on the active path.
     let kept = stored
         .messages
         .iter()
@@ -2389,13 +2389,14 @@ async fn turn_retry_resume_keeps_the_interrupted_partial_branch() {
             .any(|tc| tc.message_id == partial.id),
         "the tool calls of the partial branch survive"
     );
-    // The active tip is the user prompt again: the retried turn re-appends
-    // its own assistant branch under it.
-    assert_eq!(stored.leaf_id, Some(stored.messages[0].id));
+    // The resume never moves the leaf: the retried attempt attaches its own
+    // output in the same branch, after the partial.
+    assert_eq!(stored.leaf_id, Some(partial.id));
 
-    // The reloaded in-memory path ends at the prompt: the retried request's
-    // history stops there, `last_assistant_interrupted` can't report the
-    // abandoned partial, and the off-path rows don't leak into tool records.
+    // The reloaded in-memory path keeps the partial: the retried request's
+    // history comes from `last_turn_replay` (the turn's prompt plus
+    // everything before it) while the partial stays part of the
+    // conversation.
     let guard = ctx.session.as_ref().unwrap().lock().await;
     assert_eq!(
         guard
@@ -2403,18 +2404,21 @@ async fn turn_retry_resume_keeps_the_interrupted_partial_branch() {
             .iter()
             .map(|m| m.content.as_str())
             .collect::<Vec<_>>(),
-        vec!["hi"],
-        "the retried turn re-streams from the prompt"
+        vec!["hi", "partial"],
+        "the partial stays on the active path for the retry"
     );
-    assert!(!guard.last_assistant_interrupted());
+    assert!(
+        guard.last_assistant_interrupted(),
+        "the partial's interrupted marker survives the reload"
+    );
     assert_eq!(
         guard.tool_records.len(),
-        0,
-        "off-path tool calls are skipped"
+        1,
+        "the partial's tool call is on the active path"
     );
     drop(guard);
 
-    // The TUI reloads the pane off the prompt, and the replay attempt hits
+    // The pane reload keeps the partial bubble, and the replay attempt hits
     // the harness's no-active-provider guard (no network).
     let first = event_rx.recv().await.expect("Forked event");
     match first {
@@ -2426,7 +2430,7 @@ async fn turn_retry_resume_keeps_the_interrupted_partial_branch() {
                     .iter()
                     .map(|m| m.content.as_str())
                     .collect::<Vec<_>>(),
-                vec!["hi"],
+                vec!["hi", "partial"],
             );
         }
         other => panic!("expected Forked first, got: {other:?}"),
@@ -2441,9 +2445,9 @@ async fn turn_retry_resume_keeps_the_interrupted_partial_branch() {
 #[tokio::test]
 async fn turn_retry_resume_does_not_rewind_past_a_user_tip() {
     // When the turn failed before producing any output (no assistant row
-    // exists), the active tip is the user prompt itself: the resume must
-    // leave it there — walking it back would drop the prompt from the path
-    // while the retry re-streams it.
+    // exists), the active tip is the user prompt itself: the resume leaves
+    // it there and replays it as-is — the retried attempt's output appends
+    // under the prompt as the branch's reply.
     let mut store = Store::open_in_memory().await.unwrap();
     let sid = store
         .create_session("retry", None, None, None)
@@ -2454,7 +2458,7 @@ async fn turn_retry_resume_does_not_rewind_past_a_user_tip() {
         .await
         .unwrap();
     let session = Session::from_stored(store.load_session(sid).await.unwrap());
-    let (mut ctx, _event_rx) = resume_ctx(store, session).await;
+    let (mut ctx, mut event_rx) = resume_ctx(store, session).await;
 
     ctx.resume_last_turn().await;
 
@@ -2467,4 +2471,107 @@ async fn turn_retry_resume_does_not_rewind_past_a_user_tip() {
     let guard = ctx.session.as_ref().unwrap().lock().await;
     assert_eq!(guard.messages.len(), 1, "the prompt survives the resume");
     assert_eq!(guard.messages[0].content, "hi");
+    drop(guard);
+    // The pane reload re-derives the same single-message path, and the
+    // replay attempt hits the harness's no-active-provider guard.
+    let first = event_rx.recv().await.expect("Forked event");
+    match first {
+        Event::Forked { session, prompt } => {
+            assert!(prompt.is_none(), "a retry resume recalls nothing");
+            assert_eq!(session.messages.len(), 1);
+            assert_eq!(session.messages[0].content, "hi");
+        }
+        other => panic!("expected Forked first, got: {other:?}"),
+    }
+    let second = event_rx.recv().await.expect("replay guard error");
+    assert!(
+        matches!(second, Event::StreamError { ref error } if error == "no active provider"),
+        "unexpected event: {second:?}"
+    );
+}
+
+#[tokio::test]
+async fn turn_retry_resume_replays_the_last_turn_after_a_partial() {
+    // A failed turn deeper in the session: the retry starts at the final
+    // branch node (the partial tip — the leaf never moves) and replays that
+    // turn's prompt with the history before it, not the first prompt.
+    let mut store = Store::open_in_memory().await.unwrap();
+    let sid = store
+        .create_session("retry", None, None, None)
+        .await
+        .unwrap();
+    let u1 = store
+        .append_message(sid, None, shuvarie_llm::Role::User, "one")
+        .await
+        .unwrap();
+    let a1 = store
+        .append_assistant_message(
+            sid,
+            Some(u1.id),
+            "r1",
+            &[],
+            &[],
+            false,
+            TokenUsage::default(),
+            0.0,
+            &TokenUsage::default(),
+            &shuvarie_db::Attribution::default(),
+        )
+        .await
+        .unwrap();
+    let u2 = store
+        .append_message(sid, Some(a1.id), shuvarie_llm::Role::User, "two")
+        .await
+        .unwrap();
+    let partial = store
+        .append_assistant_message(
+            sid,
+            Some(u2.id),
+            "r2*",
+            &[],
+            &[],
+            true,
+            TokenUsage::default(),
+            0.0,
+            &TokenUsage::default(),
+            &shuvarie_db::Attribution::default(),
+        )
+        .await
+        .unwrap();
+    let session = Session::from_stored(store.load_session(sid).await.unwrap());
+    assert_eq!(session.leaf_id, Some(partial.id));
+    let (mut ctx, mut event_rx) = resume_ctx(store, session).await;
+
+    ctx.resume_last_turn().await;
+
+    let stored = ctx.store.load_session(sid).await.unwrap();
+    assert_eq!(
+        stored.leaf_id,
+        Some(partial.id),
+        "the partial stays the active tip (the retry continues the branch)"
+    );
+    let first = event_rx.recv().await.expect("Forked event");
+    match first {
+        Event::Forked { session, prompt } => {
+            assert!(prompt.is_none(), "a retry resume recalls nothing");
+            let contents: Vec<&str> = session
+                .messages
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect();
+            assert_eq!(contents, vec!["one", "r1", "two", "r2*"]);
+            // The retried request: the failed turn's prompt with the history
+            // before it — the same shape a fresh send of "two" gets.
+            let replayed = session.last_turn_replay().expect("replay request");
+            assert_eq!(replayed.0, "two");
+            let prior: Vec<&str> = replayed.1.iter().map(|m| m.content.as_str()).collect();
+            assert_eq!(prior, vec!["one", "r1"]);
+        }
+        other => panic!("expected Forked first, got: {other:?}"),
+    }
+    let second = event_rx.recv().await.expect("replay guard error");
+    assert!(
+        matches!(second, Event::StreamError { ref error } if error == "no active provider"),
+        "unexpected event: {second:?}"
+    );
 }

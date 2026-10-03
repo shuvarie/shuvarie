@@ -27,8 +27,8 @@ mod pdf;
 mod pptx;
 mod rtf;
 mod sheet;
-mod xml;
 pub mod utils;
+mod xml;
 
 use std::fmt;
 

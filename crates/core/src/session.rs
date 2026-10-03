@@ -343,6 +343,24 @@ impl Session {
             .find(|n| n.on_path && n.role == Role::User)
     }
 
+    /// The prompt and preceding history to re-stream when a failed turn is
+    /// retried: the active path's last user prompt becomes the retried
+    /// request's content, the summary-truncated history before it the prior
+    /// ([`Self::history_for_send_until`]). The assistant tip after it — the
+    /// interrupted partial the retried attempt continues after — is
+    /// deliberately left out of the request. `None` when the active path
+    /// has no user prompt to replay.
+    pub fn last_turn_replay(&self) -> Option<(String, Vec<ChatMsg>)> {
+        let end = self
+            .messages
+            .iter()
+            .rposition(|m| m.role == shuvarie_llm::Role::User)?;
+        Some((
+            self.messages[end].content.clone(),
+            self.history_for_send_until(end),
+        ))
+    }
+
     /// The active path's first user prompt (root → tip): the source for LLM
     /// title drafting. Compaction summaries (assistant role) never match.
     pub fn first_user_prompt(&self) -> Option<&str> {
@@ -399,11 +417,18 @@ impl Session {
     /// before the pending user message (the active path's tip), truncated at
     /// the newest summary node — the summary replaces the history before it.
     pub fn history_for_send(&self) -> Vec<ChatMsg> {
-        let total = self.messages.len();
-        if total <= 1 {
+        self.history_for_send_until(self.messages.len().saturating_sub(1))
+    }
+
+    /// [`Self::history_for_send`] over `messages[..end]` — the history
+    /// preceding message index `end`, truncated at the newest summary inside
+    /// the span. A turn resume passes the index of the turn's pending prompt
+    /// so the partial assistant tip after it stays out of the retried
+    /// request.
+    pub fn history_for_send_until(&self, end: usize) -> Vec<ChatMsg> {
+        if end == 0 {
             return Vec::new();
         }
-        let end = total - 1;
         let begin = self
             .summaries
             .iter()
@@ -803,6 +828,93 @@ mod tests {
             .collect();
         assert_eq!(history, vec!["u1", "a1"]);
         assert!(session.messages[2].content == "pending");
+    }
+
+    #[test]
+    fn history_for_send_until_takes_the_span_end() {
+        let mut stored = stored_session(vec![
+            stored_message(0, MsgRole::User, "u1"),
+            stored_message(1, MsgRole::Assistant, "a1"),
+            stored_message(2, MsgRole::User, "u2"),
+            stored_message(3, MsgRole::Assistant, "a2 partial"),
+        ]);
+        chain(&mut stored.messages);
+        stored.messages[3].interrupted = true;
+        stored.leaf_id = Some(stored.messages[3].id);
+
+        let session = Session::from_stored(stored);
+        let until_two: Vec<String> = session
+            .history_for_send_until(2)
+            .iter()
+            .map(|m| m.content.clone())
+            .collect();
+        assert_eq!(
+            until_two,
+            vec!["u1", "a1"],
+            "history up to the turn's prompt, partial tip excluded"
+        );
+        assert!(session.history_for_send_until(0).is_empty());
+    }
+
+    #[test]
+    fn last_turn_replay_streams_the_turn_prompt_before_a_partial() {
+        let mut stored = stored_session(vec![
+            stored_message(0, MsgRole::User, "u1"),
+            stored_message(1, MsgRole::Assistant, "a1"),
+            stored_message(2, MsgRole::User, "u2"),
+            stored_message(3, MsgRole::Assistant, "a2 partial"),
+        ]);
+        chain(&mut stored.messages);
+        stored.messages[3].interrupted = true;
+        stored.leaf_id = Some(stored.messages[3].id);
+
+        let session = Session::from_stored(stored);
+        let (content, prior) = session
+            .last_turn_replay()
+            .expect("the partial's turn replays from its prompt");
+        assert_eq!(content, "u2");
+        let prior: Vec<String> = prior.iter().map(|m| m.content.clone()).collect();
+        assert_eq!(
+            prior,
+            vec!["u1", "a1"],
+            "the partial tip stays out of the retried request"
+        );
+    }
+
+    #[test]
+    fn last_turn_replay_truncates_at_the_newest_summary() {
+        let mut stored = stored_session(vec![
+            stored_message(0, MsgRole::User, "u1"),
+            stored_message(1, MsgRole::Assistant, "a1"),
+            stored_message(2, MsgRole::User, "u2"),
+            stored_message(3, MsgRole::Assistant, "summary"),
+            stored_message(4, MsgRole::User, "u3"),
+            stored_message(5, MsgRole::Assistant, "a3 partial"),
+        ]);
+        chain(&mut stored.messages);
+        stored.messages[3].summary = true;
+        stored.messages[5].interrupted = true;
+        stored.leaf_id = Some(stored.messages[5].id);
+
+        let session = Session::from_stored(stored);
+        let (content, prior) = session.last_turn_replay().expect("replay request");
+        assert_eq!(content, "u3");
+        let prior: Vec<String> = prior.iter().map(|m| m.content.clone()).collect();
+        assert_eq!(
+            prior,
+            vec!["summary"],
+            "the summary replaces the history before the turn's prompt"
+        );
+    }
+
+    #[test]
+    fn last_turn_replay_without_a_user_prompt_is_none() {
+        let mut stored = stored_session(vec![stored_message(0, MsgRole::Assistant, "orphan")]);
+        chain(&mut stored.messages);
+        stored.leaf_id = Some(stored.messages[0].id);
+
+        let session = Session::from_stored(stored);
+        assert!(session.last_turn_replay().is_none());
     }
 
     #[test]
