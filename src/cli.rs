@@ -113,7 +113,9 @@ pub async fn export_session(
     };
     let explicit = (!dest.is_empty()).then(|| PathBuf::from(dest));
     let path = shuvarie_db::session_file::resolve_export_path(explicit.as_deref(), stored.id);
-    shuvarie_db::SessionFile::from_stored(&stored).write_json(&path)?;
+    let mut file = shuvarie_db::SessionFile::from_stored(&stored);
+    store.hydrate_attachment_blobs(&mut file).await?;
+    file.write_json(&path)?;
     println!(
         "Session \"{}\" exported to {}",
         stored.title,

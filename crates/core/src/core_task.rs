@@ -248,9 +248,9 @@ pub async fn run(
     // completed action boundary of the active stream (after a tool batch
     // settles or after a thinking/text segment — the stream task then cuts
     // the turn), when the turn finishes, or when it is cancelled. The back is
-    // what Alt+Up recalls (its model override is dropped there — the recalled
-    // text is re-submitted by the user).
-    let mut steered: Vec<(String, Option<String>)> = Vec::new();
+    // what Alt+Up recalls (its model override and attachments are dropped
+    // there — the recalled text is re-submitted by the user).
+    let mut steered: Vec<SteeredPrompt> = Vec::new();
     let steer = SteerSignal::default();
 
     let (question_tx, mut question_rx) = tokio::sync::mpsc::channel::<QuestionRequest>(8);
@@ -687,9 +687,32 @@ pub async fn run(
                         ctx.session = Some(Arc::new(Mutex::new(Session::new())));
                         let _ = ctx.event_tx.send(Event::SessionStarted).await;
                     }
-                    Command::SendMessage { content, model } => {
+                    Command::SendMessage {
+                        content,
+                        attachments,
+                        model,
+                    } => {
+                        let attachments = match
+                            crate::attachments::resolve_directives(
+                                &ctx.workspace_root,
+                                attachments,
+                                crate::attachments::AttachmentSettings::from(
+                                    &ctx.config.attachments,
+                                ),
+                            )
+                            .await
+                        {
+                            Ok(prepared) => prepared,
+                            Err(error) => {
+                                let _ = ctx
+                                    .event_tx
+                                    .send(Event::StreamError { error })
+                                    .await;
+                                continue;
+                            }
+                        };
                         if is_busy(&ctx, pending_retry.as_ref()) {
-                            steered.push((content.clone(), model));
+                            steered.push((content.clone(), attachments, model));
                             ctx.steer.arm();
                             let _ = ctx.event_tx.send(Event::PromptSteered { content }).await;
                             continue;
@@ -698,7 +721,7 @@ pub async fn run(
                         pending_retry = None;
                         turn_retries = 0;
                         ctx.active_stream = None;
-                        ctx.start_user_turn(content, false, model).await;
+                        ctx.start_user_turn(content, attachments, false, model).await;
                     }
                     Command::RunBash { command } => {
                         let id = next_bash_id;
@@ -782,9 +805,11 @@ pub async fn run(
                         if aborted {
                             ctx.steer.reset();
                             if !steered.is_empty() {
-                                let (content, model) = steered.remove(0);
+                                let (content, attachments, model) = steered.remove(0);
                                 ctx.active_stream = None;
-                                ctx.start_user_turn(content, true, model).await;
+                                ctx
+                                    .start_user_turn(content, attachments, true, model)
+                                    .await;
                             }
                         }
                     }
@@ -800,6 +825,43 @@ pub async fn run(
                                 .await;
                         }
                     },
+                    Command::LoadAttachmentMedia { hashes } => {
+                        let mut items = Vec::with_capacity(hashes.len());
+                        for hash in hashes {
+                            let bytes = ctx.store.attachment_blob(&hash).await.ok().flatten();
+                            items.push(crate::event::LoadedAttachment {
+                                sha256: hash,
+                                bytes,
+                            });
+                        }
+                        ctx.event_tx
+                            .send(Event::AttachmentMedia { items })
+                            .await
+                            .ok();
+                    }
+                    Command::ProbeDirectives { token, paths } => {
+                        let items = paths
+                            .iter()
+                            .map(|path| {
+                                crate::attachments::run_directive_probe(
+                                    &ctx.workspace_root,
+                                    path,
+                                )
+                            })
+                            .collect();
+                        ctx.event_tx
+                            .send(Event::DirectivesProbed { token, items })
+                            .await
+                            .ok();
+                    }
+                    Command::RequestPathCompletions { token, query } => {
+                        let candidates =
+                            crate::attachments::path_candidates(&ctx.workspace_root, &query);
+                        ctx.event_tx
+                            .send(Event::PathCompletions { token, candidates })
+                            .await
+                            .ok();
+                    }
                     Command::LoadSession { id } => {
                         if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
@@ -1260,8 +1322,8 @@ pub async fn run(
                         let Some(s) = &ctx.session else { continue; };
                         let session_id = s.lock().await.id;
                         let Some(sid) = session_id else { continue; };
-                        let last_user_content = s.lock().await.last_user_node()
-                            .map(|n| n.content.clone());
+                        let last_user = s.lock().await.last_user_node()
+                            .map(|n| (n.content.clone(), n.attachments.clone()));
                         match fork_session(
                             &mut ctx.store,
                             sid,
@@ -1283,8 +1345,22 @@ pub async fn run(
                                         .await;
                                     continue;
                                 }
-                                if let Some(content) = last_user_content {
-                                    ctx.self_replay_send(content, true, None, None).await;
+                                if let Some((content, attachment_metas)) = last_user {
+                                    // Replay re-sends the last stored user
+                                    // turn, attachments included: their
+                                    // persisted content (or metadata-only
+                                    // for pruned blobs) rides along.
+                                    let attachments =
+                                        crate::attachments::resolve_stored_prepared(
+                                            &mut ctx.store,
+                                            attachment_metas,
+                                        )
+                                        .await;
+                                    ctx
+                                        .self_replay_send(
+                                            content, attachments, true, None, None,
+                                        )
+                                        .await;
                                 }
                             }
                             Err(e) => {
@@ -1321,7 +1397,7 @@ pub async fn run(
                             .await;
                     }
                     Command::RecallSteered { stacked } => {
-                        let content = steered.pop().map(|(content, _)| content);
+                        let content = steered.pop().map(|(content, _, _)| content);
                         if steered.is_empty() {
                             ctx.steer.disarm();
                         }
@@ -1474,8 +1550,8 @@ pub async fn run(
                         // the next queued prompt cuts in at its next action
                         // boundary instead of waiting for the whole turn.
                         if !steered.is_empty() {
-                            let (content, model) = steered.remove(0);
-                            ctx.start_user_turn(content, true, model).await;
+                            let (content, attachments, model) = steered.remove(0);
+                            ctx.start_user_turn(content, attachments, true, model).await;
                             if !steered.is_empty() {
                                 ctx.steer.arm();
                             }
@@ -2034,9 +2110,17 @@ impl CoreCtx {
     /// Persist and start streaming a new user turn: an accepted `SendMessage`
     /// or a dispatched steered prompt. Emits [`Event::TurnStarted`] (with the
     /// `steered` flag) before the first stream event so the TUI renders the
-    /// user prompt in order. `model` is the per-turn streaming override (see
-    /// [`Command::SendMessage`]); `None` streams on the active provider.
-    async fn start_user_turn(&mut self, content: String, steered: bool, model: Option<String>) {
+    /// user prompt in order. `attachments` are the turn's prepared
+    /// attachments (resolved at command time); `model` is the per-turn
+    /// streaming override (see [`Command::SendMessage`]); `None` streams on
+    /// the active provider.
+    async fn start_user_turn(
+        &mut self,
+        content: String,
+        attachments: Vec<crate::attachments::Prepared>,
+        steered: bool,
+        model: Option<String>,
+    ) {
         // A new turn always starts with the preemption signal off: dispatched
         // steered prompts only preempt the stream they were queued during,
         // and a fresh turn must not inherit a stale armed signal.
@@ -2046,7 +2130,17 @@ impl CoreCtx {
             let _ = self.event_tx.send(Event::SessionStarted).await;
         }
         let s = self.session.clone().unwrap();
-        s.lock().await.push_user(content.clone());
+        let attachment_items: Vec<(shuvarie_llm::Attachment, Option<Vec<u8>>)> = attachments
+            .into_iter()
+            .map(|prepared| (prepared.meta, prepared.bytes))
+            .collect();
+        s.lock().await.push_user_with(
+            content.clone(),
+            attachment_items
+                .iter()
+                .map(|(meta, _)| meta.clone())
+                .collect(),
+        );
 
         {
             let mut guard = s.lock().await;
@@ -2134,6 +2228,23 @@ impl CoreCtx {
             match msg {
                 Ok(msg) => {
                     guard.leaf_id = Some(msg.id);
+                    if !attachment_items.is_empty() {
+                        // A failed attachment write keeps the turn alive: the
+                        // message and its metadata still exist, and the
+                        // prepared bytes still ride the in-memory history.
+                        if let Err(e) = self
+                            .store
+                            .attach_message_content(msg.id, id, &attachment_items)
+                            .await
+                        {
+                            let _ = self
+                                .event_tx
+                                .send(Event::StreamError {
+                                    error: format!("failed to persist attachments: {e}"),
+                                })
+                                .await;
+                        }
+                    }
                     if let Some(setup) = &self.embedding_setup {
                         let store_idx = self.store.clone();
                         let setup_idx = setup.clone();
@@ -2163,28 +2274,43 @@ impl CoreCtx {
             }
         }
 
+        let attachments = s
+            .lock()
+            .await
+            .messages
+            .last()
+            .map(|message| message.attachments.clone())
+            .unwrap_or_default();
         let _ = self
             .event_tx
             .send(Event::TurnStarted {
                 content: content.clone(),
+                attachments,
                 steered,
             })
             .await;
-        self.self_replay_send(content, false, model, None).await;
+        self.self_replay_send(content, Vec::new(), false, model, None)
+            .await;
     }
 
     /// Build a stream for the given user content and spawn the event-forwarding
     /// task. When `push_user` is set, the content is first appended as a user
-    /// message (used by `SendMessage`); otherwise it is re-sent as-is (used by
-    /// replay/resume). A turn resume passes `prior` explicitly — the history
-    /// before the turn's prompt, from [`Session::last_turn_replay`] — while a
-    /// fresh send leaves it `None` and the active path minus its pending
-    /// prompt tip is used. `model_override` is a per-turn
+    /// message carrying `attachments`' metadata (used by replay of the last
+    /// user turn); otherwise the content is re-sent as-is (used by a steered
+    /// prompt's dispatch and by resume) and the prompt's attachments ride the
+    /// session's newest message. The request's prompt attachments are the
+    /// `attachments` set the caller resolved when present — a replayed turn
+    /// re-sends its prompt's stored attachments — else the session's newest
+    /// message's metadata. A turn resume passes `prior` explicitly — the
+    /// history before the turn's prompt, from [`Session::last_turn_replay`] —
+    /// while a fresh send leaves it `None` and the active path minus its
+    /// pending prompt tip is used. `model_override` is a per-turn
     /// `<provider_kind>/<model>` spec (a custom command's `model`
     /// frontmatter); `None` streams on the active provider.
     async fn self_replay_send(
         &mut self,
         content: String,
+        attachments: Vec<crate::attachments::Prepared>,
         push_user: bool,
         model_override: Option<String>,
         prior: Option<Vec<ChatMsg>>,
@@ -2192,9 +2318,25 @@ impl CoreCtx {
         let Some(s) = &self.session else {
             return;
         };
+        // The prompt's attachment metadata for the request, collected up
+        // front since the push below consumes the prepared attachments.
+        let prompt_metas: Vec<shuvarie_llm::Attachment> = attachments
+            .iter()
+            .map(|prepared| prepared.meta.clone())
+            .collect();
         if push_user {
             let mut guard = s.lock().await;
-            guard.push_user(content.clone());
+            let attachment_items: Vec<(shuvarie_llm::Attachment, Option<Vec<u8>>)> = attachments
+                .into_iter()
+                .map(|prepared| (prepared.meta, prepared.bytes))
+                .collect();
+            guard.push_user_with(
+                content.clone(),
+                attachment_items
+                    .iter()
+                    .map(|(meta, _)| meta.clone())
+                    .collect(),
+            );
             let id = guard.id;
             if let Some(id) = id {
                 let parent = guard.leaf_id;
@@ -2209,6 +2351,19 @@ impl CoreCtx {
                     .await
                 {
                     guard.leaf_id = Some(msg.id);
+                    if !attachment_items.is_empty()
+                        && let Err(e) = self
+                            .store
+                            .attach_message_content(msg.id, id, &attachment_items)
+                            .await
+                    {
+                        let _ = self
+                            .event_tx
+                            .send(Event::StreamError {
+                                error: format!("failed to persist attachments: {e}"),
+                            })
+                            .await;
+                    }
                 }
             }
         }
@@ -2259,7 +2414,15 @@ impl CoreCtx {
                 return;
             }
         };
-        let (prior, todo_records, stored_scene, announced_scene, session_id, seed_usage) = {
+        let (
+            mut prior,
+            todo_records,
+            stored_scene,
+            announced_scene,
+            session_id,
+            seed_usage,
+            prompt_attachments,
+        ) = {
             let guard = s.lock().await;
             (
                 match prior {
@@ -2274,6 +2437,19 @@ impl CoreCtx {
                 // request's real usage so the first call of the turn is
                 // anchored on measurement instead of a chars/4 estimate.
                 guard.last_usage,
+                // The prompt's attachments: the re-sent set the caller
+                // resolved (a replayed turn's stored prompt attachments)
+                // when present, else the newest message's metadata — the
+                // prompt pushed just above or persisted by the caller.
+                if !prompt_metas.is_empty() {
+                    prompt_metas
+                } else {
+                    guard
+                        .messages
+                        .last()
+                        .map(|m| m.attachments.clone())
+                        .unwrap_or_default()
+                },
             )
         };
         let scene = crate::scenes::Scene::resolve(&self.scenes, stored_scene.as_deref());
@@ -2371,6 +2547,22 @@ impl CoreCtx {
                 .await;
             (manager.roster(), errors)
         };
+        // The streaming target's catalog identity decides whether tool
+        // results may carry image content (read_file's image arm) — computed
+        // with the prompt-side attachment gate below.
+        let catalog_provider = crate::catalog::providers();
+        let catalog_provider = self
+            .connections
+            .providers
+            .get(&provider_name)
+            .and_then(|pc| pc.catalog_id())
+            .and_then(|id| crate::catalog::find_provider(&catalog_provider, id))
+            .cloned();
+        let catalog_model = catalog_provider
+            .as_ref()
+            .and_then(|p| crate::catalog::find_model(p, &model));
+        let accepts_tool_images =
+            crate::attachments::supports_images(client.provider_type(), catalog_model);
         let tools = crate::tools::all_tools(
             self.lsp.clone(),
             file_locks.clone(),
@@ -2384,19 +2576,13 @@ impl CoreCtx {
             todo_state,
             &tool_scene,
             web_search,
+            &crate::attachments::AttachmentSettings::from(&self.config.attachments),
+            accepts_tool_images,
             &self.skills,
             &self.config.tools.tools,
             Some(&self.mcp),
             &mcp_roster,
         );
-        let catalog_provider = crate::catalog::providers();
-        let catalog_provider = self
-            .connections
-            .providers
-            .get(&provider_name)
-            .and_then(|pc| pc.catalog_id())
-            .and_then(|id| crate::catalog::find_provider(&catalog_provider, id))
-            .cloned();
         // The turn's attribution: the catalog's model code for the resolved
         // model (absent for providers outside the catalog) plus the scene the
         // request runs under. Persisted with the assistant row and recorded
@@ -2408,6 +2594,32 @@ impl CoreCtx {
                 .map(|m| m.model_code.to_string()),
             scene: stored_scene.clone(),
         };
+        // Fit the request's attachments to the streaming target (capability
+        // gate, text-only degradation, image budget) before any history
+        // injection: see `crate::attachments::prepare_for_send`.
+        let prompt_attachments = if !prompt_attachments.is_empty() {
+            let report = match crate::attachments::prepare_for_send(
+                &mut prior,
+                &prompt_attachments,
+                &model,
+                accepts_tool_images,
+                &crate::attachments::AttachmentSettings::from(&self.config.attachments),
+            ) {
+                Ok(report) => report,
+                Err(error) => {
+                    let _ = self.event_tx.send(Event::StreamError { error }).await;
+                    return;
+                }
+            };
+            if let Some(text) = report.notice_text() {
+                let _ = self.event_tx.send(Event::AttachmentNotice { text }).await;
+            }
+            prompt_attachments
+        } else {
+            prompt_attachments
+        };
+        let blobs =
+            crate::attachments::collect_blobs(&mut self.store, &prior, &prompt_attachments).await;
         let budget = context_budget(&self.config, catalog_provider.as_ref(), &model)
             .map(|b| b.with_preamble_tokens(shuvarie_llm::estimate_text_tokens(&preamble)));
         let mut worker_set = crate::agents::build_workers(
@@ -2424,6 +2636,8 @@ impl CoreCtx {
             self.access.clone(),
             &scene,
             web_search,
+            &crate::attachments::AttachmentSettings::from(&self.config.attachments),
+            accepts_tool_images,
             &self.skills,
         );
         let prior = crate::scenes::inject_history(&scene, &prior, Some(&content), announce);
@@ -2434,6 +2648,8 @@ impl CoreCtx {
                 Some(&preamble),
                 &content,
                 &prior,
+                &prompt_attachments,
+                &blobs,
                 tools,
                 &mut worker_set.workers,
                 self.manager_turns,
@@ -2496,10 +2712,10 @@ impl CoreCtx {
     /// chat view (a retry must not hide or destroy the history after the
     /// last user prompt), and the retried attempt's output continues the
     /// same branch under it. The retried request replays the turn's user
-    /// prompt with the history that precedes it
-    /// ([`Session::last_turn_replay`]); no prompt node is re-appended. Used
-    /// by the auto-continue path after a context overflow and the turn-retry
-    /// resume.
+    /// prompt — its stored attachments included — with the history that
+    /// precedes it ([`Session::last_turn_replay`]); no prompt node is
+    /// re-appended. Used by the auto-continue path after a context overflow
+    /// and the turn-retry resume.
     async fn resume_last_turn(&mut self) {
         let Some(s) = &self.session else {
             return;
@@ -2517,6 +2733,16 @@ impl CoreCtx {
         let Some((content, prior)) = loaded.last_turn_replay() else {
             return;
         };
+        // The retried prompt re-sends its stored attachments: the leaf stays
+        // at the interrupted partial (or at the prompt itself), so the
+        // prompt's attachment metadata must ride the retried request
+        // explicitly — pruned blobs arrive metadata-only.
+        let prompt_metas = loaded
+            .last_user_node()
+            .map(|node| node.attachments.clone())
+            .unwrap_or_default();
+        let attachments =
+            crate::attachments::resolve_stored_prepared(&mut self.store, prompt_metas).await;
         *s.lock().await = loaded.clone();
         let _ = self
             .event_tx
@@ -2525,7 +2751,7 @@ impl CoreCtx {
                 prompt: None,
             })
             .await;
-        self.self_replay_send(content, false, None, Some(prior))
+        self.self_replay_send(content, attachments, false, None, Some(prior))
             .await;
     }
 }
@@ -2676,8 +2902,13 @@ async fn cut_running_stream(
 
 /// Wipe the steered queue (session-level transition) and tell the TUI to drop
 /// its queued-prompt display.
+/// A prompt queued behind a busy agent: the content, its resolved
+/// attachments (prepared at submit time — see
+/// [`crate::attachments::Prepared`]), and the per-turn model override.
+type SteeredPrompt = (String, Vec<crate::attachments::Prepared>, Option<String>);
+
 async fn clear_steered(
-    steered: &mut Vec<(String, Option<String>)>,
+    steered: &mut Vec<SteeredPrompt>,
     steer: &SteerSignal,
     event_tx: &Sender<Event>,
 ) {
@@ -3708,7 +3939,8 @@ async fn export_session(
     path: Option<&std::path::Path>,
 ) -> shuvarie_db::Result<std::path::PathBuf> {
     let stored = store.load_session(session_id).await?;
-    let file = shuvarie_db::SessionFile::from_stored(&stored);
+    let mut file = shuvarie_db::SessionFile::from_stored(&stored);
+    store.hydrate_attachment_blobs(&mut file).await?;
     let path = shuvarie_db::session_file::resolve_export_path(path, session_id);
     file.write_json(&path)?;
     Ok(path)

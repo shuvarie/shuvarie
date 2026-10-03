@@ -1,9 +1,10 @@
 use std::collections::HashMap;
+use std::io::{self, Write};
 
 use ratatui::prelude::*;
 use shuvarie_core::{Connections, Event as CoreEvent, Model, RegistriesConfig, UiPrefs};
-use termina::Event as TermEvent;
 use termina::event::{KeyCode, KeyEventKind, MouseButton, MouseEventKind};
+use termina::{Event as TermEvent, PlatformTerminal};
 use tokio::sync::mpsc::Sender;
 
 use crate::tui::event::Event;
@@ -23,6 +24,7 @@ use super::history_search::{HistorySearch, HistorySearchEffect, HistorySearchMes
 use super::model_picker::{ModelPicker, ModelPickerEffect, ModelPickerMessage};
 use super::scene;
 use super::search::SearchMessage;
+use super::session::media::MediaBytes;
 use super::session::tree::{TreeEffect, TreeMessage, TreePopup};
 use super::session::{
     BashMessage, ChatMessage, MouseKind, SessionEffect, SessionMessage, SessionScreen,
@@ -34,6 +36,7 @@ use super::theme;
 use super::theme_picker::{ThemePicker, ThemePickerEffect, ThemePickerMessage};
 use super::title::{TitleEffect, TitleMessage, TitlePopup};
 use super::variant;
+use super::viewer::{MediaViewer, MediaViewerMessage, ViewerItem};
 use super::warning::{WarningMessage, WarningPopup};
 use super::welcome::{Welcome, WelcomeEffect, WelcomeMessage};
 use super::workspace::WorkspaceInfo;
@@ -54,6 +57,7 @@ pub enum Overlay {
     Variant,
     ThemePicker,
     AssistedBy,
+    MediaViewer,
 }
 
 pub enum AppMessage {
@@ -78,6 +82,12 @@ pub enum AppMessage {
     Variant(variant::VariantMessage),
     Theme(ThemePickerMessage),
     AssistedBy(AssistedByMessage),
+    /// The media viewer overlay: navigation and dismiss.
+    MediaViewer(MediaViewerMessage),
+    /// Attachment blob bytes arrived from core (the chat pane's media and
+    /// the viewer's display cache share this channel). Mapped from
+    /// `CoreEvent::AttachmentMedia`.
+    MediaArrived(Vec<(String, Option<MediaBytes>)>),
     /// The configured scene set (startup), for the switcher; `warnings`
     /// carries one message per same-level scene conflict.
     ScenesLoaded {
@@ -217,6 +227,9 @@ pub struct App {
     current_theme_pref: Option<String>,
     /// The palette painted before the picker opened, restored on cancel.
     theme_backup: Option<shuvarie_core::ThemeColors>,
+    /// The fullscreen media viewer overlay (the `/images` slash command, or
+    /// a click on an image region).
+    pub media_view: MediaViewer,
     quit: bool,
 }
 
@@ -282,6 +295,19 @@ impl App {
             .and_then(|id| connections.providers.get(id).map(|p| p.name.clone()));
         let initial_context_length = catalog_context_length(&connections);
         let current_theme_pref = ui.theme.clone();
+        // One resolution of the image settings for both the chat pane and
+        // the fullscreen viewer. tui.rs resolved auto-detection into
+        // `protocol` before constructing the App; a raw-config construction
+        // (tests) defaults to halfblocks.
+        let image_protocol = ui
+            .image
+            .protocol
+            .unwrap_or(shuvarie_core::ImageProtocol::Halfblocks);
+        let image_cell = ui
+            .image
+            .cell_size
+            .map(|(width, height)| ratatui_image::FontSize::new(width, height))
+            .unwrap_or_else(|| ratatui_image::FontSize::new(8, 16));
         Self {
             ctx: UpdateCtx::new(connections, cmd_tx),
             overlay: if welcome.open {
@@ -306,6 +332,10 @@ impl App {
                     cols: viewport_cols,
                 });
                 s.sidebar.update(SidebarMessage::SetWorkspace { workspace });
+                s.update(SessionMessage::Chat(ChatMessage::ImageConfig {
+                    cell_size: ui.image.cell_size,
+                    protocol: Some(image_protocol),
+                }));
                 s
             },
             command_menu: CommandMenu::new(),
@@ -321,6 +351,7 @@ impl App {
             title_popup: TitlePopup::new(),
             assisted_by: AssistedByPopup::new(),
             theme_picker: ThemePicker::new(),
+            media_view: MediaViewer::new(image_cell, image_protocol),
             theme_choices,
             current_theme_pref,
             theme_backup: None,
@@ -344,6 +375,56 @@ impl App {
     /// Whether the render loop should terminate.
     pub fn quit_requested(&self) -> bool {
         self.quit
+    }
+
+    /// Execute the frame's media renders and deliver the escape payloads
+    /// (kitty transmissions, placed sixel/iTerm2 graphics). Paint is pure:
+    /// this runs between frames, where `&mut` is legitimately held, and
+    /// fills every render entry the pane and viewer paint read. The queued
+    /// payloads reach the terminal outside the cell diff — a megabyte
+    /// payload inside a cell symbol gets wrap-sliced into text by the pane's
+    /// paint — and a draw that delivered one is immediately followed by one
+    /// empty-diff draw (the loop re-draws on `Ok(true)`), letting the
+    /// terminal re-render its grid with the now-transmitted graphic in
+    /// place.
+    pub fn after_frame(
+        &mut self,
+        rat: &mut ratatui::Terminal<TerminaBackend<PlatformTerminal>>,
+    ) -> io::Result<bool> {
+        self.session.chat.ensure_media_renders();
+        if self.media_view.is_open() {
+            let frame_area = rat.get_frame().area();
+            self.media_view.after_frame(frame_area);
+        }
+        let mut writes = self.session.chat.take_media_writes();
+        writes.extend(self.media_view.take_media_writes());
+        if writes.is_empty() {
+            return Ok(false);
+        }
+
+        let terminal = rat.backend_mut().terminal_mut();
+        for write in writes {
+            super::session::media::write_media_write(terminal, write)?;
+        }
+        terminal.flush()?;
+        Ok(true)
+    }
+
+    /// Delete every kitty image the chat pane and viewer transmitted — the
+    /// shutdown hop empties the terminal's image cache.
+    pub fn write_kitty_shutdown_deletes<W: io::Write>(
+        &mut self,
+        terminal: &mut W,
+    ) -> io::Result<()> {
+        let mut writes = self.session.chat.take_kitty_delete_writes();
+        writes.extend(self.media_view.take_kitty_delete_writes());
+        if writes.is_empty() {
+            return Ok(());
+        }
+        for bytes in writes {
+            terminal.write_all(&bytes)?;
+        }
+        terminal.flush()
     }
 
     /// Tab title shown by the terminal emulator: the active session title
@@ -490,6 +571,9 @@ impl App {
                         }
                         Overlay::AssistedBy => {
                             return self.assisted_by.map_event(&key).map(AppMessage::AssistedBy);
+                        }
+                        Overlay::MediaViewer => {
+                            return self.media_view.map_event(&key).map(AppMessage::MediaViewer);
                         }
                         Overlay::None => {}
                     }
@@ -688,10 +772,39 @@ impl App {
                 CoreEvent::PromptSteered { content } => Some(AppMessage::Session(
                     SessionMessage::Chat(ChatMessage::SteeredQueued { content }),
                 )),
-                CoreEvent::TurnStarted { content, steered } => {
-                    Some(AppMessage::Session(SessionMessage::TurnStarted {
-                        content,
-                        steered,
+                CoreEvent::TurnStarted {
+                    content,
+                    attachments,
+                    steered,
+                } => Some(AppMessage::Session(SessionMessage::TurnStarted {
+                    content,
+                    attachments,
+                    steered,
+                })),
+                CoreEvent::AttachmentMedia { items } => Some(AppMessage::MediaArrived(
+                    items
+                        .into_iter()
+                        .map(|item| {
+                            (
+                                item.sha256,
+                                item.bytes.map(|bytes| MediaBytes(bytes.into())),
+                            )
+                        })
+                        .collect(),
+                )),
+                CoreEvent::DirectivesProbed { token, items } => {
+                    Some(AppMessage::Session(SessionMessage::DirectivesValidated {
+                        token,
+                        items,
+                    }))
+                }
+                CoreEvent::PathCompletions { token, candidates } => {
+                    let menu = SessionMessage::PathCompletions { token, candidates };
+                    Some(AppMessage::Session(menu))
+                }
+                CoreEvent::AttachmentNotice { text } => {
+                    Some(AppMessage::Session(SessionMessage::ShowStatus {
+                        status: text,
                     }))
                 }
                 CoreEvent::SteeredRecalled { stacked, content } => {
@@ -870,7 +983,8 @@ impl App {
             | Overlay::Scene
             | Overlay::Variant
             | Overlay::ThemePicker
-            | Overlay::AssistedBy => None,
+            | Overlay::AssistedBy
+            | Overlay::MediaViewer => None,
             Overlay::ModelPicker => {
                 let flat = super::components::flatten_newlines(text);
                 let mut msg = None;
@@ -924,43 +1038,48 @@ impl App {
                 if self.tree_popup.open {
                     self.tree_popup.set_busy(self.session.is_busy());
                 }
-                if let Some(effect) = effect {
-                    match effect {
-                        SessionEffect::SendMessage { content, model } => {
-                            self.ctx
-                                .send(shuvarie_core::Command::SendMessage { content, model });
-                        }
-                        SessionEffect::RunBash { command } => {
-                            self.ctx.send(shuvarie_core::Command::RunBash { command });
-                        }
-                        SessionEffect::CancelStream => {
-                            self.ctx.send(shuvarie_core::Command::CancelStream);
-                        }
-                        SessionEffect::RecallSteered { stacked } => {
-                            self.ctx
-                                .send(shuvarie_core::Command::RecallSteered { stacked });
-                        }
-                        SessionEffect::AnswerQuestion { id, answers } => {
-                            self.ctx
-                                .send(shuvarie_core::Command::AnswerQuestion { id, answers });
-                        }
-                        SessionEffect::PermissionDecide { id, decision } => {
-                            self.ctx
-                                .send(shuvarie_core::Command::PermissionDecide { id, decision });
-                        }
-                        SessionEffect::RunCommand { action, args } => {
-                            // Custom refs never reach the app (the session
-                            // expands them); a defensive no-op otherwise.
-                            if let CommandRef::Builtin(action) = action
-                                && let Some(effect) = self.run_command(action, args)
-                            {
-                                return Some(effect);
-                            }
-                        }
-                        SessionEffect::CopyToClipboard { text } => {
-                            return Some(AppEffect::CopyToClipboard(text));
-                        }
+                // The message's own effect first (it may hop an app-effect —
+                // a clipboard write or a builtin command); the compose-side
+                // sync's queued core requests (attachment probe, mention
+                // completions) drain after — a session update on the very
+                // next message flushes any that collide with an app hop.
+                if let Some(app_effect) =
+                    effect.and_then(|effect| self.handle_session_effect(effect))
+                {
+                    return Some(app_effect);
+                }
+                for deferred in self.session.take_deferred_effects() {
+                    if let Some(app_effect) = self.handle_session_effect(deferred) {
+                        return Some(app_effect);
                     }
+                }
+                return None;
+            }
+            AppMessage::MediaArrived(items) => {
+                // Feed an open viewer from the same content channel the chat
+                // pane consumes, then delegate to the session hop.
+                if self.media_view.is_open() {
+                    self.media_view.receive(&items);
+                    let missing = self.media_view.missing();
+                    if !missing.is_empty() {
+                        self.ctx
+                            .send(shuvarie_core::Command::LoadAttachmentMedia { hashes: missing });
+                    }
+                }
+                return self.update(AppMessage::Session(SessionMessage::Chat(
+                    ChatMessage::MediaArrived { items },
+                )));
+            }
+            AppMessage::MediaViewer(m) => {
+                self.media_view.update(m);
+                if self.media_view.is_open() {
+                    let missing = self.media_view.missing();
+                    if !missing.is_empty() {
+                        self.ctx
+                            .send(shuvarie_core::Command::LoadAttachmentMedia { hashes: missing });
+                    }
+                } else if self.overlay == Overlay::MediaViewer {
+                    self.overlay = Overlay::None;
                 }
             }
             AppMessage::SessionTree { session } => {
@@ -1287,7 +1406,8 @@ impl App {
                     | Overlay::Scene
                     | Overlay::Variant
                     | Overlay::ThemePicker
-                    | Overlay::AssistedBy => {}
+                    | Overlay::AssistedBy
+                    | Overlay::MediaViewer => {}
                 }
             }
             AppMessage::ConfigSaved => {
@@ -1800,6 +1920,8 @@ impl App {
         );
         self.command_menu
             .set_availability(CommandAction::Export, self.session.session_id.is_some());
+        self.command_menu
+            .set_availability(CommandAction::Images, self.session.chat.has_images());
     }
 
     /// Runs a built-in command action (from the Ctrl+M menu or the inline
@@ -1941,6 +2063,12 @@ impl App {
                 self.assisted_by.open(self.session.models_used.clone());
                 self.overlay = Overlay::AssistedBy;
             }
+            CommandAction::Images => {
+                let effect = self
+                    .session
+                    .update(SessionMessage::OpenMediaViewer { sha: None });
+                return effect.and_then(|effect| self.handle_session_effect(effect));
+            }
             CommandAction::Quit => {
                 if self.session.is_streaming() {
                     self.ctx.send(shuvarie_core::Command::CancelStream);
@@ -1956,6 +2084,89 @@ impl App {
     fn open_confirm_quit(&mut self) {
         self.confirm_quit.open();
         self.overlay = Overlay::ConfirmQuit;
+    }
+
+    /// Route a session effect into the core (`ctx.send`) or the app
+    /// (an `AppEffect`). Extracted from the `AppMessage::Session` arm so the
+    /// deferred compose-request effects (attachment probe, mention
+    /// completions) drain through the same routing.
+    fn handle_session_effect(&mut self, effect: SessionEffect) -> Option<AppEffect> {
+        match effect {
+            SessionEffect::SendMessage {
+                content,
+                attachments,
+                model,
+            } => {
+                self.ctx.send(shuvarie_core::Command::SendMessage {
+                    content,
+                    attachments,
+                    model,
+                });
+                None
+            }
+            SessionEffect::LoadMedia { hashes } => {
+                self.ctx
+                    .send(shuvarie_core::Command::LoadAttachmentMedia { hashes });
+                None
+            }
+            SessionEffect::ProbeDirectives { token, paths } => {
+                self.ctx
+                    .send(shuvarie_core::Command::ProbeDirectives { token, paths });
+                None
+            }
+            SessionEffect::PathCompletions { token, query } => {
+                self.ctx
+                    .send(shuvarie_core::Command::RequestPathCompletions { token, query });
+                None
+            }
+            SessionEffect::OpenMediaViewer { items, selected } => {
+                let items = items
+                    .into_iter()
+                    .map(|(sha256, name)| ViewerItem { sha256, name })
+                    .collect();
+                let missing = self.media_view.open(items, selected.as_deref());
+                self.overlay = Overlay::MediaViewer;
+                if !missing.is_empty() {
+                    self.ctx
+                        .send(shuvarie_core::Command::LoadAttachmentMedia { hashes: missing });
+                }
+                None
+            }
+            SessionEffect::RunBash { command } => {
+                self.ctx.send(shuvarie_core::Command::RunBash { command });
+                None
+            }
+            SessionEffect::CancelStream => {
+                self.ctx.send(shuvarie_core::Command::CancelStream);
+                None
+            }
+            SessionEffect::RecallSteered { stacked } => {
+                self.ctx
+                    .send(shuvarie_core::Command::RecallSteered { stacked });
+                None
+            }
+            SessionEffect::AnswerQuestion { id, answers } => {
+                self.ctx
+                    .send(shuvarie_core::Command::AnswerQuestion { id, answers });
+                None
+            }
+            SessionEffect::PermissionDecide { id, decision } => {
+                self.ctx
+                    .send(shuvarie_core::Command::PermissionDecide { id, decision });
+                None
+            }
+            SessionEffect::RunCommand { action, args } => {
+                // Custom refs never reach the app (the session expands
+                // them); a defensive no-op otherwise.
+                if let CommandRef::Builtin(action) = action
+                    && let Some(effect) = self.run_command(action, args)
+                {
+                    return Some(effect);
+                }
+                None
+            }
+            SessionEffect::CopyToClipboard { text } => Some(AppEffect::CopyToClipboard(text)),
+        }
     }
 
     fn close_overlay(&mut self) {
@@ -2048,6 +2259,7 @@ impl App {
         self.scene_picker.view(frame, area);
         self.variant_picker.view(frame, area);
         self.theme_picker.view(frame, area);
+        self.media_view.view(frame, area);
         self.history_search.view(frame, area);
         self.command_menu.view(frame, area);
         self.title_popup.view(frame, area);
@@ -2382,6 +2594,7 @@ mod tests {
         app.overlay = Overlay::None;
         app.session.update(SessionMessage::TurnStarted {
             content: "hi".into(),
+            attachments: Vec::new(),
             steered: false,
         });
         app.session
@@ -2487,6 +2700,40 @@ mod tests {
         assert!(
             !app.session.sidebar.collapsed_at(200),
             "manual override sticks across widths"
+        );
+    }
+
+    #[test]
+    fn images_command_opens_the_media_viewer() {
+        let (mut app, mut rx) = app_with_rx(connected());
+        active_session(&mut app);
+        // No images: the command is a no-op (the session shows a status
+        // notice — covered at the session level).
+        app.run_command(CommandAction::Images, None);
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(rx.try_recv().is_err(), "nothing sent without images");
+        // TurnStarted delivers a turn with an image; the command now opens
+        // the viewer on the session's most recent image.
+        app.session.update(SessionMessage::TurnStarted {
+            content: "hi".into(),
+            attachments: vec![shuvarie_llm::Attachment {
+                kind: shuvarie_llm::AttachmentKind::Image,
+                name: "shot.png".into(),
+                media_type: "image/png".into(),
+                size: 2048,
+                sha256: "sha_x".into(),
+            }],
+            steered: false,
+        });
+        app.run_command(CommandAction::Images, None);
+        assert!(matches!(app.overlay, Overlay::MediaViewer));
+        assert!(app.media_view.is_open());
+        assert!(
+            matches!(
+                rx.try_recv().unwrap(),
+                shuvarie_core::Command::LoadAttachmentMedia { .. }
+            ),
+            "the viewer fetches the image's bytes"
         );
     }
 

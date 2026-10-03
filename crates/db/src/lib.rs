@@ -8,5 +8,5 @@ pub mod store;
 pub use dir_map::{SESSION_DIR_MAP_FILE, SessionDirMap};
 pub use error::{DbError, Result};
 pub use model::*;
-pub use session_file::{FileMessage, FileSession, FileToolCall, SessionFile};
+pub use session_file::{FileAttachment, FileMessage, FileSession, FileToolCall, SessionFile};
 pub use store::*;

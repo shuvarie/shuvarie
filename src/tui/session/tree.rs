@@ -489,6 +489,7 @@ mod tests {
             summary: false,
             interrupted: false,
             tools: Vec::new(),
+            attachments: Vec::new(),
             on_path,
         }
     }

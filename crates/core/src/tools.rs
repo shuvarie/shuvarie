@@ -44,6 +44,8 @@ use run_shell::RunShell;
 use skill::SkillTool;
 use stdio::StdioTool;
 use web_search::WebSearch;
+
+use crate::attachments::AttachmentSettings;
 use webfetch::WebFetch;
 use write_file::WriteFile;
 
@@ -102,8 +104,8 @@ where
     }
 }
 
-/// Per-turn dedupe cache for `read_file`: tracks `(path, offset, limit)` keys
-/// that have already been returned to the model this turn, plus a set of all
+/// Per-turn dedupe cache for `read_file` tracks namespaced
+/// `(path, offset, limit)` keys that have already been returned to the model this turn, plus a set of all
 /// paths read this turn (any range) used by `write_file`'s read-first check
 /// for overwrites. Repeated identical reads get a short note instead of
 /// re-sending file content, which keeps the agent loop from blowing up the
@@ -122,9 +124,20 @@ impl ReadCache {
     /// Returns `true` if this exact `(path, offset, limit)` was already read
     /// this turn, otherwise records it and returns `false`.
     fn mark(&self, path: &str, offset: Option<u64>, limit: Option<u64>) -> bool {
-        let key = (path.to_string(), offset, limit);
+        self.mark_key(format!("file::{path}"), path, offset, limit)
+    }
+
+    /// Rich-content variant (documents converted to markdown, images): keys
+    /// are namespaced so a converted read (e.g. csv) and a plain text read of
+    /// the same path never dedupe against each other, while both count as
+    /// "the path was read" for `write_file`'s read-first check.
+    fn mark_document(&self, path: &str, offset: Option<u64>, limit: Option<u64>) -> bool {
+        self.mark_key(format!("document::{path}"), path, offset, limit)
+    }
+
+    fn mark_key(&self, key: String, path: &str, offset: Option<u64>, limit: Option<u64>) -> bool {
         let mut seen = self.seen.lock().unwrap();
-        let fresh = seen.insert(key);
+        let fresh = seen.insert((key, offset, limit));
         if fresh {
             self.read_paths.lock().unwrap().insert(path.to_string());
         }
@@ -242,6 +255,8 @@ pub fn all_tools(
     todo_state: todos::TodoState,
     scene: &ToolScene,
     web_search: Option<&WebSearchConfig>,
+    settings: &AttachmentSettings,
+    accepts_tool_images: bool,
     skills: &Skills,
     stdio_tools: &std::collections::BTreeMap<String, shuvarie_config::StdioToolConfig>,
     mcp_manager: Option<&shuvarie_mcp::SharedMcpManager>,
@@ -254,6 +269,8 @@ pub fn all_tools(
             max_output_chars,
             max_output_bytes,
             access,
+            settings.clone(),
+            accepts_tool_images,
         )
     }));
     tools.extend(scene_tool("write_file", scene, &access, true, |access| {
@@ -352,6 +369,8 @@ pub fn read_tools(
     access: Access,
     scene: &ToolScene,
     web_search: Option<&WebSearchConfig>,
+    settings: &AttachmentSettings,
+    accepts_tool_images: bool,
     skills: &Skills,
 ) -> Vec<DynamicTool> {
     let mut tools = Vec::new();
@@ -361,6 +380,8 @@ pub fn read_tools(
             max_output_chars,
             max_output_bytes,
             access,
+            settings.clone(),
+            accepts_tool_images,
         )
     }));
     tools.extend(scene_tool("list_dir", scene, &access, true, |access| {
@@ -412,6 +433,7 @@ pub fn command_tools(
     .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn edit_tools(
     lsp: SharedManager,
     locks: FileLocks,
@@ -420,6 +442,8 @@ pub fn edit_tools(
     max_output_bytes: usize,
     access: Access,
     scene: &ToolScene,
+    settings: &AttachmentSettings,
+    accepts_tool_images: bool,
 ) -> Vec<DynamicTool> {
     let mut tools = Vec::new();
     tools.extend(scene_tool("read_file", scene, &access, true, |access| {
@@ -428,6 +452,8 @@ pub fn edit_tools(
             max_output_chars,
             max_output_bytes,
             access,
+            settings.clone(),
+            accepts_tool_images,
         )
     }));
     tools.extend(scene_tool("write_file", scene, &access, true, |access| {
@@ -478,6 +504,8 @@ mod tests {
             todos::TodoState::from_records(&[]),
             scene,
             None,
+            &Default::default(),
+            true,
             skills,
             &Default::default(),
             None,

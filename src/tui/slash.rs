@@ -376,7 +376,7 @@ mod tests {
             menu.prev();
         }
         assert_eq!(menu.selected, 0);
-        for _ in 0..20 {
+        for _ in 0..40 {
             menu.next();
         }
         assert_eq!(menu.selected, menu.filtered.len() - 1);

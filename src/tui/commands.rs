@@ -6,6 +6,7 @@ pub enum CommandAction {
     AddProvider,
     OpenSessionPicker,
     OpenTree,
+    Images,
     OpenScenePicker,
     OpenVariantPicker,
     OpenThemePicker,
@@ -26,11 +27,12 @@ pub enum CommandAction {
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 21] = [
+    pub const ALL: [CommandAction; 22] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::OpenSessionPicker,
         CommandAction::OpenTree,
+        CommandAction::Images,
         CommandAction::OpenScenePicker,
         CommandAction::OpenVariantPicker,
         CommandAction::OpenThemePicker,
@@ -56,6 +58,7 @@ impl CommandAction {
             CommandAction::AddProvider => "provider",
             CommandAction::OpenSessionPicker => "sessions",
             CommandAction::OpenTree => "tree",
+            CommandAction::Images => "images",
             CommandAction::OpenScenePicker => "scene",
             CommandAction::OpenVariantPicker => "variant",
             CommandAction::OpenThemePicker => "theme",
@@ -258,6 +261,11 @@ pub fn default_commands() -> Vec<CommandEntry> {
             "Assisted by",
             "Show the Assisted-By trailer; Enter copies it",
             CommandAction::AssistedBy,
+        ),
+        CommandEntry::builtin(
+            "View images",
+            "Browse the session's attached images in a gallery",
+            CommandAction::Images,
         ),
         CommandEntry::builtin("Quit", "Exit the program", CommandAction::Quit),
     ]

@@ -243,7 +243,14 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string("f.txt").unwrap(), "old");
 
-        let reader = ReadFile::new(cache, 0, 0, crate::test_util::access());
+        let reader = ReadFile::new(
+            cache,
+            0,
+            0,
+            crate::test_util::access(),
+            crate::attachments::AttachmentSettings::default(),
+            false,
+        );
         reader
             .call(&mut new_ctx(), json!({ "path": "f.txt" }))
             .await
@@ -263,7 +270,14 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::write("f.txt", "v1").unwrap();
         let cache = ReadCache::new();
-        let reader = ReadFile::new(cache.clone(), 0, 0, crate::test_util::access());
+        let reader = ReadFile::new(
+            cache.clone(),
+            0,
+            0,
+            crate::test_util::access(),
+            crate::attachments::AttachmentSettings::default(),
+            false,
+        );
         reader
             .call(&mut new_ctx(), json!({ "path": "f.txt" }))
             .await
@@ -292,7 +306,14 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::write("bom.txt", "\u{FEFF}original").unwrap();
         let cache = ReadCache::new();
-        let reader = ReadFile::new(cache.clone(), 0, 0, crate::test_util::access());
+        let reader = ReadFile::new(
+            cache.clone(),
+            0,
+            0,
+            crate::test_util::access(),
+            crate::attachments::AttachmentSettings::default(),
+            false,
+        );
         reader
             .call(&mut new_ctx(), json!({ "path": "bom.txt" }))
             .await

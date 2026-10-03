@@ -1,5 +1,6 @@
 pub mod agents;
 pub mod apply_patch;
+pub mod attachments;
 pub mod catalog;
 pub mod command;
 pub mod compaction;
@@ -10,6 +11,7 @@ pub mod embeddings;
 pub mod event;
 pub mod lsp_manager;
 pub mod mcp_manager;
+pub(crate) mod office_convert;
 pub mod permissions;
 pub mod question;
 pub mod scenes;

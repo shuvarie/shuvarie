@@ -9,11 +9,13 @@ repository.workspace = true
 
 [dependencies]
 anyhow = "1"
+base64.workspace = true
 jiff.workspace = true
 kdl.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 selune.workspace = true
+sha2.workspace = true
 shuvarie-config.workspace = true
 shuvarie-llm.workspace = true
 thiserror.workspace = true

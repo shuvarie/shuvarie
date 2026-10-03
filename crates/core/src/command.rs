@@ -58,6 +58,13 @@ pub enum Command {
     /// queued behind a busy agent (steered) keeps its override.
     SendMessage {
         content: String,
+        /// The composer's `@path` attachment directives for this turn:
+        /// relative paths resolve against the workspace root (`@`-prefix
+        /// stripped), absolute paths are user intent. The core resolves them
+        /// (sniffs, bounds images, converts documents) before the turn
+        /// starts; any failure reports [`crate::Event::StreamError`] and
+        /// aborts the send without persisting anything.
+        attachments: Vec<String>,
         model: Option<String>,
     },
     /// Run a bash-mode (`!`-prefixed) command through the resolved shell.
@@ -67,6 +74,31 @@ pub enum Command {
     },
     CancelStream,
     ListSessions,
+    /// Fetch attachment blob bytes for the TUI's display. The reply is one
+    /// [`crate::Event::AttachmentMedia`] event whose items carry each hash's
+    /// bytes (or `None` when the store cannot serve it). Only sent from the
+    /// TUI; the request itself is read-only.
+    LoadAttachmentMedia {
+        hashes: Vec<String>,
+    },
+    /// Preview the composer's pending `@path` directives for the attach
+    /// strip: per-path existence/size/kind metadata only — no reads or
+    /// conversion (the authoritative preparation runs at send time), so the
+    /// handler answers directly instead of using the blocking pool. Reply:
+    /// [`crate::Event::DirectivesProbed`], matched by `token`. Read-only.
+    ProbeDirectives {
+        token: u64,
+        paths: Vec<String>,
+    },
+    /// Directory entries for the composer's `@` mention completion (reply:
+    /// [`crate::Event::PathCompletions`], matched by `token`). `query` is the
+    /// partial path typed after `@` — an optional directory part plus a name
+    /// prefix, resolved against the workspace root (absolute too). The
+    /// handler answers directly: one `read_dir`, no blocking pool.
+    RequestPathCompletions {
+        token: u64,
+        query: String,
+    },
     LoadSession {
         id: uuid::Uuid,
     },

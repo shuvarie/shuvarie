@@ -5,7 +5,7 @@ use futures_util::StreamExt;
 use ratatui::prelude::*;
 use termina::{
     EventReader, EventStream, PlatformTerminal, Terminal,
-    escape::csi::{Csi, Keyboard},
+    escape::csi::{Csi, Keyboard, Window},
     event::Event as TerminalEvent,
 };
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -46,6 +46,7 @@ mod title;
 pub mod trust;
 mod utils;
 mod variant;
+mod viewer;
 mod warning;
 mod welcome;
 mod workspace;
@@ -69,13 +70,49 @@ pub async fn run_tui(
     let theme_choices = theme_set.choices(detected);
     let event_stream = EventStream::new(reader.clone(), |_| true);
 
-    let initial_cols = term.get_dimensions()?.cols;
+    let window = term.get_dimensions()?;
+    let initial_cols = window.cols;
+    let derived_cell_size = match (window.pixel_width, window.pixel_height) {
+        (Some(pixel_width), Some(pixel_height)) => {
+            let width = pixel_width / window.cols.max(1);
+            let height = pixel_height / window.rows.max(1);
+            (width > 0 && height > 0).then_some((width, height))
+        }
+        _ => None,
+    };
     let frame_budget = frame_budget(config.ui.frame_rate);
+    let mut ui = config.ui;
+    if ui.image.cell_size.is_none()
+        && let Some(cell_size) = derived_cell_size
+    {
+        ui.image.cell_size = Some(cell_size);
+    }
+    // Graphical protocols need honest cell metrics to place images: when
+    // the window ioctl report had no pixel dimensions, ask the terminal
+    // directly (`CSI 16 t`) — kitty, Ghostty, foot, iTerm2, WezTerm and
+    // Konsole all answer, and they are exactly the terminals whose graphic
+    // protocol the auto-detection below selects.
+    // Auto (`protocol` unset) detects from the terminal environment and
+    // writes the choice back into the prefs — the App maps the resolved
+    // value into both the chat pane's and the viewer's render path, so the
+    // detection governs rendering, not only the probe below.
+    let effective_image_protocol = *ui
+        .image
+        .protocol
+        .get_or_insert_with(shuvarie_core::ImageProtocol::detect);
+    if ui.image.cell_size.is_none()
+        && !matches!(
+            effective_image_protocol,
+            shuvarie_core::ImageProtocol::Halfblocks
+        )
+    {
+        ui.image.cell_size = probe_cell_size(&mut term, &reader)?;
+    }
     let mut rat = ratatui::Terminal::new(TerminaBackend::new(term))?;
     let connections = Connections::load().map_err(|e| io::Error::other(e.to_string()))?;
     let workspace = workspace::WorkspaceInfo::detect();
     let app = App::new(
-        config.ui,
+        ui,
         theme,
         theme_choices,
         config.registries.clone(),
@@ -148,7 +185,7 @@ where
     let mut picker_wake;
     const PICKER_REFRESH: Duration = Duration::from_secs(2);
 
-    'render_loop: loop {
+    let session_id = 'render_loop: loop {
         sync_window_title(
             rat.backend_mut().terminal_mut(),
             &mut last_title,
@@ -167,6 +204,17 @@ where
             .session_picker
             .open
             .then(|| tokio::time::Instant::now() + PICKER_REFRESH);
+
+        // Media transmissions (kitty) and placed graphics (sixel/iTerm2 in
+        // the fullscreen viewer) reach the terminal between frames, never
+        // through the cell diff. The pass also fills the render entries
+        // paint reads from (at this frame's width): paint stays pure. A
+        // draw that delivered a payload is immediately followed by one
+        // empty-diff draw: the terminal then re-renders its grid with the
+        // now-transmitted graphic in place.
+        if app.after_frame(rat)? {
+            continue;
+        }
 
         'event_listening: loop {
             let changed = tokio::select! {
@@ -222,20 +270,20 @@ where
                 // events; when idle the budget has already elapsed, so keys
                 // still render immediately.
                 ev = event_stream.next() => {
-                    let Some(ev_result) = ev else { break 'render_loop Ok(app.session.session_id); };
+                    let Some(ev_result) = ev else { break 'render_loop app.session.session_id; };
                     let msg = app.map_event(Event::Terminal(ev_result?));
                     apply_msg(&mut app, rat.backend_mut().terminal_mut(), msg)
                 }
                 // Core event — drain all already-queued core events as one batch.
                 ev = event_rx.recv() => {
-                    let Some(ev) = ev else { break 'render_loop Ok(app.session.session_id); };
+                    let Some(ev) = ev else { break 'render_loop app.session.session_id; };
                     let msg = app.map_event(Event::Core(ev));
                     apply_msg(&mut app, rat.backend_mut().terminal_mut(), msg)
                 }
             };
 
             if app.quit_requested() {
-                break 'render_loop Ok(app.session.session_id);
+                break 'render_loop app.session.session_id;
             }
 
             if !changed {
@@ -264,7 +312,12 @@ where
                 }
             }
         }
-    }
+    };
+
+    // Empty the terminal's kitty image cache: images the session displayed
+    // outlive the process otherwise.
+    app.write_kitty_shutdown_deletes(rat.backend_mut().terminal_mut())?;
+    Ok(session_id)
 }
 
 /// Apply a mapped message, recording a quit request on `AppEffect::Quit`,
@@ -386,6 +439,52 @@ fn kitty_flags_report(event: &TerminalEvent) -> bool {
     )
 }
 
+/// Ask the terminal for its cell size in pixels (`CSI 16 t`) and return the
+/// report — the image renderers' font metrics. `None` when the terminal
+/// stays silent (or reports unusable values): rendering then keeps the
+/// 8×16 fallback. Answered by the kitty-graphics-family terminals, exactly
+/// the ones the auto-detected protocols select.
+fn probe_cell_size(
+    term: &mut PlatformTerminal,
+    reader: &EventReader,
+) -> io::Result<Option<(u16, u16)>> {
+    write!(term, "{}", escape::QUERY_CELL_SIZE_PX)?;
+    term.flush()?;
+    if let Ok(true) = reader.poll(Some(PROBE_TIMEOUT), cell_size_report) {
+        // Consume the report so it never surfaces as a stray CSI event.
+        return Ok(match reader.read(cell_size_report)? {
+            TerminalEvent::Csi(Csi::Window(window)) => match window.as_ref() {
+                Window::ReportCellSizePixelsResponse {
+                    width: Some(width),
+                    height: Some(height),
+                } if *width > 0
+                    && *height > 0
+                    && *width <= u16::MAX as i64
+                    && *height <= u16::MAX as i64 =>
+                {
+                    Some((*width as u16, *height as u16))
+                }
+                _ => None,
+            },
+            _ => None,
+        });
+    }
+    Ok(None)
+}
+
+/// Matches the cell-size report (`CSI 6 ; height ; width t`). Non-matching
+/// events are retained by the reader for later consumers.
+fn cell_size_report(event: &TerminalEvent) -> bool {
+    matches!(
+        event,
+        TerminalEvent::Csi(Csi::Window(window))
+            if matches!(
+                **window,
+                Window::ReportCellSizePixelsResponse { .. }
+            )
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,5 +512,19 @@ mod tests {
         assert_eq!(escape::QUERY_KITTY_FLAGS.to_string(), "\x1b[?u");
         assert_eq!(escape::REQUEST_MODIFY_OTHER_KEYS, "\x1b[>4;1m");
         assert_eq!(escape::RESET_MODIFY_OTHER_KEYS, "\x1b[>4n");
+        assert_eq!(escape::QUERY_CELL_SIZE_PX.to_string(), "\x1b[16t");
+    }
+
+    #[test]
+    fn cell_size_report_matches_only_the_cell_size_response() {
+        let report = TerminalEvent::Csi(Csi::Window(Box::new(
+            Window::ReportCellSizePixelsResponse {
+                width: Some(9),
+                height: Some(18),
+            },
+        )));
+        assert!(cell_size_report(&report));
+        let other = TerminalEvent::Csi(Csi::Window(Box::new(Window::ReportWindowState)));
+        assert!(!cell_size_report(&other));
     }
 }

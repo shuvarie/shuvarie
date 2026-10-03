@@ -174,6 +174,16 @@ impl InputBuffer {
         self.cursor += s.len();
     }
 
+    /// Splice `s` over a byte range of `value`, dropping any selection and
+    /// placing the cursor after the inserted text. `range` must land on
+    /// char boundaries (the completion uses byte offsets it computed from
+    /// the value itself).
+    pub fn replace_range(&mut self, range: Range<usize>, s: &str) {
+        self.sel_anchor.set(None);
+        self.value.replace_range(range, s);
+        self.cursor = self.cursor.min(self.value.len());
+    }
+
     /// Insert pasted text: payloads of more than `COMPACT_PASTE_LINES` lines
     /// collapse into an inline `[pasted N lines]` chip that expands back to
     /// the full text on submit (`expanded`) and is deleted as one unit.
@@ -1393,6 +1403,7 @@ mod tests {
 
     #[test]
     fn paste_label_renders_inline_without_content() {
+        let _guard = crate::tui::theme::lock_for_tests();
         let mut b = InputBuffer::new();
         b.paste("l1\nl2\nl3");
         let lines = b.cursor_lines(

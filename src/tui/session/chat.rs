@@ -3,18 +3,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use ratatui::prelude::*;
+use ratatui_image::FontSize;
 use serde_json::Value;
 use shuvarie_core::tool_record::ToolRecord;
 use shuvarie_core::{DiagnosticInfo, Role};
 use shuvarie_db::{ReasoningSegment, StoredScroll, TextSegment};
-use shuvarie_llm::{FileChange, ShellStreams};
+use shuvarie_llm::{AttachmentKind, FileChange, ShellStreams};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::MouseKind;
 use super::blocks::{
-    Block, BlockMessage, ChatEnv, ContextBlock, ReasoningBlock, SteeredPrompt, SystemText,
-    TextBlock, ToolBlock, ToolMessage, UserPrompt,
+    Block, BlockMessage, ChatEnv, ContextBlock, MediaBlock, ReasoningBlock, SteeredPrompt,
+    SystemText, TextBlock, ToolBlock, ToolMessage, UserPrompt,
 };
+use super::media::{CHIP_ROWS, MediaBytes, MediaStore, MediaWrite};
 use super::segment::{BlockAddr, ResolvedRow, Segment, slice_visual, visual_row_text};
 use super::virtualizer::{TurnData, TurnEst, TurnFlags, locate, paint_turn};
 use crate::tui::theme;
@@ -193,6 +195,13 @@ fn advance(text: &str, bytes: usize) -> (u16, usize) {
 pub enum ChatMessage {
     BeginUserTurn {
         content: String,
+        attachments: Vec<shuvarie_llm::Attachment>,
+    },
+    /// Configure how images render (the terminal's font cell in pixels;
+    /// `None` = derive a 1:2 guess). Sent at startup.
+    ImageConfig {
+        cell_size: Option<(u16, u16)>,
+        protocol: Option<shuvarie_core::ImageProtocol>,
     },
     TokenReceived {
         content: String,
@@ -267,6 +276,13 @@ pub enum ChatMessage {
     /// The active theme palette changed (theme picker preview, a picker or
     /// `/theme` apply, or a restore): cached turn renders carry resolved
     /// theme colors, so they must rebuild with the new palette.
+    /// Received media arrived from core: one entry per requested hash with
+    /// its bytes, or `None` when the store cannot serve it (an evicted or
+    /// pruned blob). Affected turns invalidate their caches and re-render
+    /// with the real images on the next frame.
+    MediaArrived {
+        items: Vec<(String, Option<MediaBytes>)>,
+    },
     ThemeChanged,
     ScrollUp,
     ScrollDown,
@@ -419,9 +435,71 @@ pub struct Chat {
     /// Match tints painted in the last frame's visible window, reported to
     /// the search tooltip.
     pub(crate) search_matches: Cell<usize>,
+    /// Received attachment media for image blocks (LRU-capped). Paint reads
+    /// it through a shared `ChatEnv` borrow; all mutation (inserts, render
+    /// entries, write queues) happens in update arms and the loop's
+    /// between-frames pass, through plain `&mut`.
+    media: MediaStore,
+    /// Image shas materialized turns need that core has not shipped yet.
+    /// Drained by the session screen into a `LoadMedia` effect after every
+    /// chat update.
+    pending_media: RefCell<BTreeSet<String>>,
+    /// A media click waiting for the session to drain: the turn index and
+    /// the image slot — opens the media viewer at that image.
+    pending_media_open: Cell<Option<(usize, u16)>>,
 }
 
 impl Chat {
+    /// Between-frames media writes (kitty transmissions) queued by render
+    /// entries — the render loop delivers them past the cell diff.
+    pub(crate) fn take_media_writes(&mut self) -> Vec<MediaWrite> {
+        self.media.take_writes()
+    }
+
+    /// Delete sequences for every kitty image the pane transmitted — the
+    /// shutdown hop empties the terminal's image cache.
+    pub(crate) fn take_kitty_delete_writes(&mut self) -> Vec<Vec<u8>> {
+        self.media.take_kitty_deletes()
+    }
+
+    /// The between-frames executor pass for pane media: render entries for
+    /// every materialized turn's images at the frame's stored content width
+    /// (set by the last `view`). Paint is pure and reads the entries; this
+    /// runs where `&mut` is legitimately held. `self.width == 0` means no
+    /// frame has painted yet — the first frame paints chips, and this fills
+    /// from the second on.
+    pub(crate) fn ensure_media_renders(&mut self) {
+        let width = self.width.get();
+        if width == 0 {
+            return;
+        }
+        let mut shas = Vec::new();
+        {
+            let turns = self.turns.borrow();
+            for turn in turns.iter() {
+                if let Some(blocks) = turn.blocks.as_deref() {
+                    Self::collect_media_shas(blocks, &mut shas);
+                }
+            }
+        }
+        if let Some(turn) = self.in_flight.borrow().as_ref()
+            && let Some(blocks) = turn.blocks.as_deref()
+        {
+            Self::collect_media_shas(blocks, &mut shas);
+        }
+        {
+            let steered = self.steered.borrow();
+            for turn in steered.iter() {
+                if let Some(blocks) = turn.blocks.as_deref() {
+                    Self::collect_media_shas(blocks, &mut shas);
+                }
+            }
+        }
+        for sha in shas {
+            self.media.ensure_pane(&sha, width);
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             turns: RefCell::new(Vec::new()),
@@ -446,6 +524,9 @@ impl Chat {
             history_rect: Cell::new(Rect::default()),
             search: RefCell::new(None),
             search_matches: Cell::new(0),
+            media: MediaStore::new(FontSize::new(8, 16)),
+            pending_media: RefCell::new(BTreeSet::new()),
+            pending_media_open: Cell::new(None),
         }
     }
 
@@ -472,6 +553,12 @@ impl Chat {
 
     pub fn has_messages(&self) -> bool {
         !self.turns.borrow().is_empty()
+    }
+
+    /// Whether the chat holds any image attachment (the `/images` command's
+    /// availability and the footer hint).
+    pub fn has_images(&self) -> bool {
+        !self.image_scan().is_empty()
     }
 
     /// Whether the visible history contains at least one user prompt: title
@@ -505,13 +592,51 @@ impl Chat {
 
     pub fn update(&mut self, msg: ChatMessage) {
         match msg {
-            ChatMessage::BeginUserTurn { content } => {
+            ChatMessage::BeginUserTurn {
+                content,
+                attachments,
+            } => {
                 if self.in_flight.borrow().is_some() {
                     self.clear_selection_from(self.turns.borrow().len());
                 }
+                let mut blocks = vec![Block::User(UserPrompt::new(content))];
+                if let Some(media_block) = MediaBlock::new(attachments.clone()) {
+                    blocks.push(Block::Media(Box::new(media_block)));
+                }
                 let mut turn = TurnData::new(Role::User);
-                turn.set_blocks(vec![Block::User(UserPrompt::new(content))], false);
+                turn.set_blocks(blocks, false);
                 self.turns.borrow_mut().push(turn);
+                self.request_media(
+                    attachments
+                        .iter()
+                        .filter(|a| a.kind == AttachmentKind::Image)
+                        .map(|a| a.sha256.as_str()),
+                );
+            }
+            ChatMessage::MediaArrived { items } => {
+                let mut arrived: Vec<String> = Vec::new();
+                for (sha256, bytes) in items {
+                    if self.media.has(&sha256) {
+                        continue;
+                    }
+                    if let Some(bytes) = bytes {
+                        self.media.insert(sha256.clone(), bytes.0.to_vec());
+                    }
+                    arrived.push(sha256);
+                }
+                self.refresh_turns_with_media(&arrived);
+            }
+            ChatMessage::ImageConfig {
+                cell_size,
+                protocol,
+            } => {
+                let cell = cell_size.map(|(width, height)| FontSize::new(width, height));
+                if let Some(cell) = cell {
+                    self.media.set_cell_size(cell);
+                }
+                if let Some(protocol) = protocol {
+                    self.media.set_protocol(protocol);
+                }
             }
             ChatMessage::TokenReceived { content } => {
                 self.streaming = true;
@@ -731,6 +856,7 @@ impl Chat {
                 let env = ChatEnv {
                     lsp_diagnostics: &self.lsp_diagnostics,
                     rev: self.env_rev,
+                    media: &self.media,
                 };
                 if let Some(turn) = self.in_flight.get_mut() {
                     turn.refresh_spinners(&env);
@@ -768,6 +894,7 @@ impl Chat {
         let env = ChatEnv {
             lsp_diagnostics: &self.lsp_diagnostics,
             rev: self.env_rev,
+            media: &self.media,
         };
         let env_rev = self.env_rev;
         let streaming = self.streaming;
@@ -1593,8 +1720,151 @@ impl Chat {
                 }
             }
         }
+        drop(scroll_state);
+        self.request_session_media();
     }
 
+    /// Queue media requests for the stored session's image attachments (a
+    /// load-shaped event just replaced it). Documents render chips without
+    /// media, so only their images are requested.
+    fn request_session_media(&mut self) {
+        let borrowed = self.stored.clone();
+        let Some(session) = &borrowed else {
+            return;
+        };
+        let shas = session
+            .messages
+            .iter()
+            .flat_map(|message| &message.attachments)
+            .filter(|a| a.kind == AttachmentKind::Image)
+            .map(|a| a.sha256.as_str());
+        self.request_media(shas);
+    }
+
+    /// Queue media shas the store cannot serve yet; the session screen turns
+    /// the queue into a `LoadMedia` effect.
+    fn request_media<'a, I>(&mut self, shas: I)
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let missing = self.media.missing(shas);
+        if !missing.is_empty() {
+            *self.pending_media.borrow_mut() = missing.into_iter().collect();
+        }
+    }
+
+    /// The pending media shas, draining them.
+    pub fn take_media_requests(&self) -> Vec<String> {
+        std::mem::take(&mut *self.pending_media.borrow_mut())
+            .into_iter()
+            .collect()
+    }
+
+    /// A media click waiting to open the viewer: the turn index and the
+    /// clicked image's slot in that turn's attachment strip.
+    pub fn take_media_open(&self) -> Option<(usize, u16)> {
+        self.pending_media_open.replace(None)
+    }
+
+    /// The session's images in display order (committed turns from the
+    /// stored session — its messages address turns 1:1 — then the live
+    /// pushed turns), as (sha256, name) for the media viewer's gallery.
+    pub fn image_inventory(&self) -> Vec<(String, String)> {
+        self.image_scan()
+            .into_iter()
+            .map(|(item, _, _)| item)
+            .collect()
+    }
+
+    /// A clicked (turn, image slot) resolved into the gallery:
+    /// `(position, (sha, name))`.
+    pub fn image_hit_item(&self, turn: usize, slot: u16) -> Option<(usize, (String, String))> {
+        self.image_scan()
+            .into_iter()
+            .enumerate()
+            .find(|(_, (_, hit_turn, hit_slot))| *hit_turn == turn && *hit_slot == slot)
+            .map(|(pos, (item, _, _))| (pos, item))
+    }
+
+    fn image_scan(&self) -> Vec<((String, String), usize, u16)> {
+        let mut out = Vec::new();
+        // Committed turns read the stored session (lazy turns hold no
+        // blocks); its messages address turns 1:1.
+        if let Some(session) = self.stored.as_ref() {
+            for (turn_idx, message) in session.messages.iter().enumerate() {
+                out.extend(
+                    message
+                        .attachments
+                        .iter()
+                        .filter(|a| a.kind == AttachmentKind::Image)
+                        .enumerate()
+                        .map(|(slot, a)| {
+                            ((a.sha256.clone(), a.name.clone()), turn_idx, slot as u16)
+                        }),
+                );
+            }
+        }
+        // Live pushed turns (begun while streaming) are materialized at
+        // build time: read their media blocks.
+        let turns = self.turns.borrow();
+        for turn_idx in self.stored_len..turns.len() {
+            let Some(blocks) = turns[turn_idx].blocks.as_deref() else {
+                continue;
+            };
+            for block in blocks {
+                let Block::Media(media) = block else {
+                    continue;
+                };
+                for (slot, (sha, name)) in media.image_slots().enumerate() {
+                    out.push(((sha.to_string(), name.to_string()), turn_idx, slot as u16));
+                }
+            }
+        }
+        out
+    }
+
+    /// The image shas a materialized turn's media blocks hold (the
+    /// between-frames render pass's work set).
+    fn collect_media_shas(blocks: &[Block], out: &mut Vec<String>) {
+        for block in blocks {
+            if let Block::Media(media) = block {
+                out.extend(media.image_shas().map(str::to_string));
+            }
+        }
+    }
+
+    /// Bump the revision of every turn holding a media block that gained one
+    /// of the arrived shas: their caches re-render with the real images, and
+    /// the first fresh render re-measures their heights.
+    fn refresh_turns_with_media(&mut self, arrived: &[String]) {
+        if arrived.is_empty() {
+            return;
+        }
+        let gained = |turn: &TurnData| {
+            turn.blocks.as_deref().is_some_and(|blocks| {
+                blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        Block::Media(boxed) => Some(boxed.image_shas()),
+                        _ => None,
+                    })
+                    .any(|mut iter| iter.any(|sha| arrived.iter().any(|a| a == sha)))
+            })
+        };
+        let mut turns = self.turns.borrow_mut();
+        for turn in turns.iter_mut() {
+            if gained(turn) {
+                turn.rev += 1;
+                turn.cache = None;
+            }
+        }
+        if let Some(turn) = self.in_flight.borrow_mut().as_mut()
+            && gained(turn)
+        {
+            turn.rev += 1;
+            turn.cache = None;
+        }
+    }
     /// The scroll position to persist when this session is left: the sticky
     /// bottom flag plus, when released from the bottom, the content anchor
     /// the viewport top was last held at (from the most recent frame).
@@ -1746,7 +2016,7 @@ impl Chat {
         let width = self.width.get();
         let env_rev = self.env_rev;
         let mut start = 0u32;
-        let mut target = None;
+        let mut target: Option<(BlockAddr, Option<u16>)> = None;
         {
             let turns = self.turns.borrow();
             for slot in turns.iter() {
@@ -1758,7 +2028,7 @@ impl Chat {
                             .hits
                             .iter()
                             .find(|region| local >= region.start && local < region.end)
-                            .map(|region| region.addr.clone());
+                            .map(|region| (region.addr.clone(), region.slot));
                     }
                     break;
                 }
@@ -1777,7 +2047,7 @@ impl Chat {
                         .hits
                         .iter()
                         .find(|region| local >= region.start && local < region.end)
-                        .map(|region| region.addr.clone());
+                        .map(|region| (region.addr.clone(), region.slot));
                 }
             }
         }
@@ -1798,15 +2068,22 @@ impl Chat {
                             .hits
                             .iter()
                             .find(|region| local >= region.start && local < region.end)
-                            .map(|region| region.addr.clone());
+                            .map(|region| (region.addr.clone(), region.slot));
                     }
                     break;
                 }
                 start += h;
             }
         }
-        if let Some(addr) = target {
-            self.toggle_block(addr);
+        if let Some((addr, slot)) = target {
+            if let Some(slot) = slot {
+                // A click on an image region opens the media viewer at that
+                // image; the session drains it into the open effect.
+                self.clear_selection();
+                self.pending_media_open.set(Some((addr.turn, slot)));
+            } else {
+                self.toggle_block(addr);
+            }
         }
     }
 
@@ -1973,7 +2250,12 @@ fn materialize_blocks(session: &shuvarie_core::Session, idx: usize) -> Vec<Block
     let message = &session.messages[idx];
     let mut blocks = Vec::new();
     match message.role {
-        Role::User => blocks.push(Block::User(UserPrompt::new(message.content.clone()))),
+        Role::User => {
+            blocks.push(Block::User(UserPrompt::new(message.content.clone())));
+            if let Some(media_block) = MediaBlock::new(message.attachments.clone()) {
+                blocks.push(Block::Media(Box::new(media_block)));
+            }
+        }
         Role::System => blocks.push(Block::System(SystemText::new(message.content.clone()))),
         Role::Assistant => {
             let segments: &[ReasoningSegment] = session
@@ -2056,7 +2338,7 @@ fn build_turn_ests(session: &shuvarie_core::Session, interrupted: bool) -> Vec<T
                 .map(Vec::as_slice)
                 .unwrap_or_default();
             let summary = session.summaries.contains(&(idx as u64));
-            TurnEst::from_session_parts(
+            let mut est = TurnEst::from_session_parts(
                 message.role,
                 &message.content,
                 &tools,
@@ -2064,13 +2346,30 @@ fn build_turn_ests(session: &shuvarie_core::Session, interrupted: bool) -> Vec<T
                 text_runs,
                 summary,
                 interrupted && idx == last && message.role == Role::Assistant,
-            )
+            );
+            add_media_est(&mut est, &message.attachments);
+            est
         })
         .collect()
 }
 
+/// Fold a user message's attachment strip into a lazy turn's estimate,
+/// mirroring [`MediaBlock::est`] (chip rows; the real heights replace them
+/// once the turn materializes and measures).
+fn add_media_est(est: &mut TurnEst, attachments: &[shuvarie_llm::Attachment]) {
+    if attachments.is_empty() {
+        return;
+    }
+    est.padding_rows += 2;
+    for attachment in attachments {
+        est.deco_rows += match attachment.kind {
+            AttachmentKind::Image => CHIP_ROWS,
+            AttachmentKind::Document => 1,
+        };
+    }
+}
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -2128,7 +2427,11 @@ mod tests {
         }
     }
 
-    fn draw(chat: &Chat, width: u16, height: u16) -> ratatui::buffer::Buffer {
+    pub(in crate::tui::session) fn draw(
+        chat: &Chat,
+        width: u16,
+        height: u16,
+    ) -> ratatui::buffer::Buffer {
         draw_at(chat, Rect::new(0, 0, width, height))
     }
 
@@ -2142,11 +2445,16 @@ mod tests {
         terminal.backend().buffer().clone()
     }
 
-    fn render_turn_lines(chat: &Chat, turn_idx: Option<usize>, width: u16) -> Option<String> {
+    pub(in crate::tui::session) fn render_turn_lines(
+        chat: &Chat,
+        turn_idx: Option<usize>,
+        width: u16,
+    ) -> Option<String> {
         let diags = BTreeMap::new();
         let env = ChatEnv {
             lsp_diagnostics: &diags,
             rev: 0,
+            media: &chat.media,
         };
         let cache = match turn_idx {
             Some(idx) => {
@@ -2287,11 +2595,135 @@ mod tests {
         assert!(headers[2].contains("Thinking..."));
     }
 
+    fn media_png(width: u32, height: u32) -> Vec<u8> {
+        use image::ImageEncoder;
+        let img = image::ImageBuffer::from_fn(width, height, |x, y| {
+            image::Rgb([(x * 4) as u8, (y * 4) as u8, 80])
+        });
+        let mut out = Vec::new();
+        image::codecs::png::PngEncoder::new(std::io::Cursor::new(&mut out))
+            .write_image(img.as_raw(), width, height, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        out
+    }
+
+    fn image_attachment(sha: &str) -> shuvarie_llm::Attachment {
+        shuvarie_llm::Attachment {
+            kind: shuvarie_llm::AttachmentKind::Image,
+            name: "shot.png".into(),
+            media_type: "image/png".into(),
+            size: 4096,
+            sha256: sha.into(),
+        }
+    }
+
+    #[test]
+    fn turn_with_attachments_requests_then_paints_media() {
+        let mut chat = Chat::new();
+        let attachment = image_attachment("sha_media");
+        let mut turn = TurnData::new(Role::User);
+        let mut blocks = vec![Block::User(UserPrompt::new("see this"))];
+        if let Some(media_block) = MediaBlock::new(vec![attachment.clone()]) {
+            blocks.push(Block::Media(Box::new(media_block)));
+        }
+        turn.set_blocks(blocks, false);
+        chat.turns.borrow_mut().push(turn);
+        chat.request_media(std::iter::once("sha_media"));
+
+        assert_eq!(
+            chat.take_media_requests(),
+            vec!["sha_media".to_string()],
+            "the unloaded image is requested"
+        );
+        assert_eq!(
+            chat.take_media_requests(),
+            Vec::<String>::new(),
+            "draining empties the queue"
+        );
+
+        let unloaded = render_turn_lines(&chat, Some(0), 60).unwrap();
+        assert!(
+            unloaded.contains("shot.png") && unloaded.contains("not loaded"),
+            "the unloaded chip shows: {unloaded:?}"
+        );
+        let unloaded_rows = unloaded.lines().count();
+
+        chat.update(ChatMessage::MediaArrived {
+            items: vec![(
+                "sha_media".into(),
+                Some(MediaBytes(media_png(48, 24).into())),
+            )],
+        });
+        // The between-frames executor pass fills the entry paint reads; the
+        // helper renders at width 60 without view(), so the key is set here.
+        chat.width.set(60);
+        chat.ensure_media_renders();
+        let loaded = render_turn_lines(&chat, Some(0), 60).unwrap();
+        assert!(
+            loaded.lines().count() > unloaded_rows,
+            "the real image adds rows over the chip"
+        );
+        assert!(
+            !loaded.contains("not loaded"),
+            "the chip is gone: {loaded:?}"
+        );
+    }
+
+    #[test]
+    fn begin_user_turn_carries_attachments_into_blocks() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "describe".into(),
+            attachments: vec![
+                image_attachment("sha_img"),
+                shuvarie_llm::Attachment {
+                    kind: shuvarie_llm::AttachmentKind::Document,
+                    name: "plan.csv".into(),
+                    media_type: "text/csv".into(),
+                    size: 99,
+                    sha256: "sha_doc".into(),
+                },
+            ],
+        });
+        let requests = chat.take_media_requests();
+        assert_eq!(
+            requests,
+            vec!["sha_img".to_string()],
+            "only images request media"
+        );
+        let lines = render_turn_lines(&chat, Some(0), 60).unwrap();
+        assert!(
+            lines.contains("plan.csv"),
+            "document chip renders: {lines:?}"
+        );
+        assert!(
+            lines.contains("shot.png"),
+            "the image slot renders (unloaded chip): {lines:?}"
+        );
+    }
+
+    #[test]
+    fn lazy_user_est_folds_attachment_rows() {
+        let mut session = shuvarie_core::Session::new();
+        session.push_user_with(
+            "describe",
+            vec![image_attachment("a"), image_attachment("b")],
+        );
+        let ests = build_turn_ests(&session, false);
+        assert_eq!(ests.len(), 1);
+        let plain = TurnEst::default();
+        assert!(
+            ests[0].height(80) >= plain.height(80) + 4,
+            "two images est as two chip rows + strip padding"
+        );
+    }
+
     #[test]
     fn commit_done_keeps_running_worker_tool_block() {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "go".into(),
+            attachments: Vec::new(),
         });
         chat.update(ChatMessage::WorkerStarted {
             name: "explore".into(),
@@ -2330,6 +2762,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "go".into(),
+            attachments: Vec::new(),
         });
         chat.update(ChatMessage::StreamDone);
         assert!(chat.in_flight.borrow().is_none());
@@ -2353,6 +2786,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "go".into(),
+            attachments: Vec::new(),
         });
         chat.update(ChatMessage::WorkerStarted {
             name: "explore".into(),
@@ -2408,6 +2842,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "go".into(),
+            attachments: Vec::new(),
         });
         chat.update(ChatMessage::ToolStarted {
             name: "grep".into(),
@@ -2455,6 +2890,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "go".into(),
+            attachments: Vec::new(),
         });
         chat.update(ChatMessage::ToolStarted {
             name: "todo".into(),
@@ -2520,6 +2956,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "go".into(),
+            attachments: Vec::new(),
         });
         chat.update(ChatMessage::WorkerStarted {
             name: "run_tests".into(),
@@ -2580,6 +3017,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "go".into(),
+            attachments: Vec::new(),
         });
         chat.update(ChatMessage::ToolStarted {
             name: "run_shell".into(),
@@ -2751,6 +3189,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "check".into(),
+            attachments: Vec::new(),
         });
         chat.update(ChatMessage::ToolStarted {
             name: "edit_file".into(),
@@ -2773,6 +3212,7 @@ mod tests {
         chat.update(ChatMessage::StreamDone);
         chat.update(ChatMessage::BeginUserTurn {
             content: "plain".into(),
+            attachments: Vec::new(),
         });
         chat.update(ChatMessage::TokenReceived {
             content: "reply".into(),
@@ -2815,6 +3255,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "make it so".into(),
+            attachments: Vec::new(),
         });
         chat.update(ChatMessage::TokenReceived {
             content: "hello".into(),
@@ -3229,6 +3670,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "hi".into(),
+            attachments: Vec::new(),
         });
         for i in 0..40 {
             chat.update(ChatMessage::TokenReceived {
@@ -3254,6 +3696,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "hi".into(),
+            attachments: Vec::new(),
         });
         for i in 0..40 {
             chat.update(ChatMessage::TokenReceived {
@@ -3408,6 +3851,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "check".into(),
+            attachments: Vec::new(),
         });
         chat.update(ChatMessage::ToolStarted {
             name: "read_file".into(),
@@ -3477,6 +3921,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "hello brave world".into(),
+            attachments: Vec::new(),
         });
         let buf = draw(&chat, 80, 20);
         let (col, row) = row_with(&buf, "hello").expect("prompt text on screen");
@@ -3512,6 +3957,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "check".into(),
+            attachments: Vec::new(),
         });
         chat.update(ChatMessage::ToolStarted {
             name: "read_file".into(),
@@ -3571,6 +4017,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "hello brave world".into(),
+            attachments: Vec::new(),
         });
         let buf = draw(&chat, 80, 20);
         let (col, row) = row_with(&buf, "hello").expect("prompt text");
@@ -3597,6 +4044,7 @@ mod tests {
         chat.update(ChatMessage::BeginUserTurn {
             content: "first words here and some more words that wrap the row width\nsecond line"
                 .into(),
+            attachments: Vec::new(),
         });
         let buf = draw(&chat, 50, 20);
         let Some((col, row)) = row_with(&buf, "first words") else {
@@ -3626,6 +4074,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "alpha beta gamma".into(),
+            attachments: Vec::new(),
         });
         let buf = draw(&chat, 80, 20);
         let Some((col, row)) = row_with(&buf, "beta") else {
@@ -3649,6 +4098,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "alpha beta gamma".into(),
+            attachments: Vec::new(),
         });
         let buf = draw(&chat, 80, 20);
         let Some((col, row)) = row_with(&buf, "beta") else {
@@ -3669,6 +4119,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "alpha beta gamma\nsecond row".into(),
+            attachments: Vec::new(),
         });
         let buf = draw(&chat, 80, 20);
         let Some((col, row)) = row_with(&buf, "beta") else {
@@ -3689,6 +4140,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "alpha beta gamma".into(),
+            attachments: Vec::new(),
         });
         let buf = draw(&chat, 80, 20);
         let Some((col, row)) = row_with(&buf, "beta") else {
@@ -3709,6 +4161,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "alpha beta gamma".into(),
+            attachments: Vec::new(),
         });
         let clip = Rect::new(10, 2, 80, 20);
         let buf = draw_at(&chat, clip);
@@ -3742,6 +4195,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "alpha beta gamma\nsecond row here".into(),
+            attachments: Vec::new(),
         });
         let clip = Rect::new(10, 2, 80, 20);
         let buf = draw_at(&chat, clip);
@@ -3783,10 +4237,12 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "first turn".into(),
+            attachments: Vec::new(),
         });
         chat.update(ChatMessage::StreamDone);
         chat.update(ChatMessage::BeginUserTurn {
             content: "second turn".into(),
+            attachments: Vec::new(),
         });
         chat.update(ChatMessage::StreamDone);
         let buf = draw(&chat, 80, 20);
@@ -3821,6 +4277,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "alpha beta gamma".into(),
+            attachments: Vec::new(),
         });
         let buf = draw(&chat, 80, 20);
         let Some((col, row)) = row_with(&buf, "beta") else {
@@ -3901,6 +4358,7 @@ mod tests {
                 &ChatEnv {
                     lsp_diagnostics: &diags,
                     rev: env_rev,
+                    media: crate::tui::session::media::shared_test_store(),
                 },
                 env_rev,
                 TurnFlags {
@@ -3922,6 +4380,7 @@ mod tests {
                 &ChatEnv {
                     lsp_diagnostics: &diags,
                     rev: env_rev,
+                    media: crate::tui::session::media::shared_test_store(),
                 },
                 env_rev,
                 TurnFlags {
@@ -3949,6 +4408,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "start".into(),
+            attachments: Vec::new(),
         });
         chat.update(ChatMessage::TokenReceived {
             content: "Intro paragraph before the long reply.".into(),
@@ -3976,6 +4436,7 @@ mod tests {
                 &ChatEnv {
                     lsp_diagnostics: &diags,
                     rev: env_rev,
+                    media: crate::tui::session::media::shared_test_store(),
                 },
                 env_rev,
                 TurnFlags {
@@ -4010,6 +4471,7 @@ mod tests {
         let env = ChatEnv {
             lsp_diagnostics: &diags,
             rev: 0,
+            media: crate::tui::session::media::shared_test_store(),
         };
         {
             let mut turn = chat.in_flight.borrow_mut();
@@ -4089,6 +4551,7 @@ mod tests {
         let env = ChatEnv {
             lsp_diagnostics: &diags,
             rev: 0,
+            media: crate::tui::session::media::shared_test_store(),
         };
         {
             let mut turn = chat.in_flight.borrow_mut();
@@ -4165,6 +4628,7 @@ mod tests {
             let env = ChatEnv {
                 lsp_diagnostics: &BTreeMap::new(),
                 rev: env_rev,
+                media: crate::tui::session::media::shared_test_store(),
             };
             turns[idx].ensure_cache(
                 idx,
@@ -4277,6 +4741,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "first prompt".into(),
+            attachments: Vec::new(),
         });
         chat.update(ChatMessage::TokenReceived {
             content: "streaming answer".into(),
@@ -4316,6 +4781,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "go".into(),
+            attachments: Vec::new(),
         });
         chat.update(ChatMessage::ToolStarted {
             name: "run_shell".into(),
@@ -4361,6 +4827,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "go".into(),
+            attachments: Vec::new(),
         });
         chat.update(ChatMessage::ReasoningReceived {
             content: "thinking".into(),
@@ -4383,6 +4850,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "go".into(),
+            attachments: Vec::new(),
         });
         chat.update(ChatMessage::ToolStarted {
             name: "run_shell".into(),
@@ -4422,6 +4890,7 @@ mod tests {
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "go".into(),
+            attachments: Vec::new(),
         });
         chat.update(ChatMessage::ToolStarted {
             name: "run_shell".into(),
@@ -4521,5 +4990,199 @@ mod tests {
             "only the viewport's matches are counted: {visible}"
         );
         assert!(visible > 0, "the sticky-bottom viewport shows matches");
+    }
+}
+
+#[cfg(test)]
+mod media_hits_tests {
+    use super::tests::draw;
+    use super::*;
+    use crate::tui::session::segment::HitRegion;
+    use crate::tui::session::virtualizer::render_turn_cache;
+    fn image_attachment(sha: &str) -> shuvarie_llm::Attachment {
+        shuvarie_llm::Attachment {
+            kind: shuvarie_llm::AttachmentKind::Image,
+            name: "shot.png".into(),
+            media_type: "image/png".into(),
+            size: 2048,
+            sha256: sha.into(),
+        }
+    }
+
+    /// A session with one user turn carrying one image, applied as the
+    /// chat's stored state (the committed-turn path of the inventory).
+    fn stored_chat_with_image() -> (Chat, shuvarie_core::Session) {
+        let mut session = shuvarie_core::Session::new();
+        session.push_user_with("look", vec![image_attachment("sha_media")]);
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::Load {
+            session: session.clone(),
+        });
+        (chat, session)
+    }
+
+    /// The turn's hit regions at the given width (mirrors the live env).
+    fn turn_hits(chat: &Chat, idx: Option<usize>, width: u16) -> Vec<HitRegion> {
+        let diags = BTreeMap::new();
+        let env = ChatEnv {
+            lsp_diagnostics: &diags,
+            rev: 0,
+            media: &chat.media,
+        };
+        let turns = chat.turns.borrow();
+        let flight = chat.in_flight.borrow();
+        let (turn, turn_idx) = match idx {
+            Some(i) => (&turns[i], i),
+            None => (
+                flight.as_ref().expect("in-flight turn present"),
+                turns.len(),
+            ),
+        };
+        render_turn_cache(
+            turn,
+            turn_idx,
+            TurnFlags {
+                in_flight: false,
+                interrupted_marker: false,
+            },
+            width,
+            &env,
+            0,
+        )
+        .unwrap()
+        .hits
+    }
+
+    #[test]
+    fn committed_image_inventory_orders_and_addresses() {
+        let (mut chat, _) = stored_chat_with_image();
+        assert!(chat.has_images());
+        assert_eq!(
+            chat.image_inventory(),
+            vec![("sha_media".to_string(), "shot.png".to_string())]
+        );
+        // A committed turn is lazy until materialized; the viewport does it
+        // when visible — the click path works on visible turns. But the
+        // inventory addresses the stored session directly.
+        chat.ensure_materialized(0);
+        // Unloaded media renders the chip only: no image rows, no hits.
+        assert!(
+            turn_hits(&chat, Some(0), 60)
+                .iter()
+                .all(|hit| hit.slot.is_none())
+        );
+        // Loaded, the image rows stamp their hit region. A between-frames
+        // pass fills the render entry after the arrival.
+        chat.update(ChatMessage::MediaArrived {
+            items: vec![(
+                "sha_media".into(),
+                Some(MediaBytes(media_png(48, 24).into())),
+            )],
+        });
+        chat.width.set(60);
+        chat.ensure_media_renders();
+        let hits = turn_hits(&chat, Some(0), 60);
+        let media_hit = hits
+            .iter()
+            .find(|hit| hit.slot.is_some())
+            .expect("the media segment stamps an image hit");
+        assert_eq!(media_hit.slot, Some(0));
+        // The hit's rows sit below the turn's header row(s): non-trivial.
+        assert!(media_hit.end > media_hit.start);
+        assert!(media_hit.start >= 1, "below the prompt text");
+    }
+
+    #[test]
+    fn click_on_an_image_region_opens_the_viewer_at_it() {
+        let (mut chat, _) = stored_chat_with_image();
+        // Materialize, then paint once cold (chip) — that first paint stores
+        // chat.width for the executor pass, exactly as the real loop runs.
+        chat.ensure_materialized(0);
+        draw(&chat, 61, 20);
+        chat.update(ChatMessage::MediaArrived {
+            items: vec![(
+                "sha_media".into(),
+                Some(MediaBytes(media_png(48, 24).into())),
+            )],
+        });
+        // The arrival bumped the materialized turn; the executor pass fills
+        // the render entry, and the next paint rebuilds the cache warm.
+        chat.ensure_media_renders();
+        draw(&chat, 61, 20);
+        let hits = turn_hits(&chat, Some(0), 60);
+        let media_hit = hits
+            .iter()
+            .find(|hit| hit.slot.is_some())
+            .expect("image hit stamped");
+        // The mouse click maps through the painted frame's hit rows using
+        // the pane rect the paint stored.
+        let rect = chat.history_rect.get();
+        let row = rect.y + u16::try_from(media_hit.start).unwrap();
+        chat.update(ChatMessage::Mouse {
+            kind: MouseKind::Down,
+            column: rect.x + 2,
+            row,
+        });
+        chat.update(ChatMessage::Mouse {
+            kind: MouseKind::Up,
+            column: rect.x + 2,
+            row,
+        });
+        assert_eq!(
+            chat.take_media_open(),
+            Some((0, media_hit.slot.unwrap())),
+            "the image click opens the viewer"
+        );
+        assert_eq!(chat.take_media_open(), None, "draining empties the request");
+    }
+
+    #[test]
+    fn live_turns_extend_the_inventory() {
+        let (mut chat, _) = stored_chat_with_image();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "again".into(),
+            attachments: vec![image_attachment("sha_live")],
+        });
+        chat.update(ChatMessage::MediaArrived {
+            items: vec![(
+                "sha_live".into(),
+                Some(MediaBytes(media_png(48, 24).into())),
+            )],
+        });
+        let inventory = chat.image_inventory();
+        assert_eq!(
+            inventory,
+            vec![
+                ("sha_media".to_string(), "shot.png".to_string()),
+                ("sha_live".to_string(), "shot.png".to_string()),
+            ]
+        );
+        // The live turn sits at stored_len; clicking its image maps through.
+        // A between-frames pass fills its entry at the helpers' width first.
+        chat.width.set(60);
+        chat.ensure_media_renders();
+        let hits = turn_hits(&chat, Some(1), 60);
+        let media_hit = hits
+            .iter()
+            .find(|hit| hit.slot.is_some())
+            .expect("live turn stamps an image hit");
+        let (pos, item) = chat
+            .image_hit_item(1, media_hit.slot.unwrap())
+            .expect("the live click maps into the gallery");
+        assert_eq!(pos, 1);
+        assert_eq!(item.0, "sha_live");
+    }
+
+    fn media_png(width: u32, height: u32) -> Vec<u8> {
+        use image::ImageEncoder;
+        use image::codecs::png::PngEncoder;
+        let img = image::ImageBuffer::from_fn(width, height, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 90])
+        });
+        let mut out = Vec::new();
+        PngEncoder::new(std::io::Cursor::new(&mut out))
+            .write_image(img.as_raw(), width, height, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        out
     }
 }

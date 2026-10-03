@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod attachment;
 pub mod auth;
 mod context_hook;
 mod error;
@@ -9,10 +10,12 @@ pub mod provider;
 pub mod retry;
 pub mod stream;
 pub mod tool;
+pub mod tool_image;
 pub mod usage;
 
 pub use agent::WorkerAgent;
 pub use agent::WorkerRequest;
+pub use attachment::{Attachment, AttachmentKind, Blobs, format_size};
 pub use auth::{DeviceCodeHandler, DeviceCodePrompt};
 pub use context_hook::{
     ContextBudget, ContextHook, OVERFLOW_REASON, UsageTracker, estimate_text_tokens,
@@ -21,7 +24,7 @@ pub use error::{LlmError, Result};
 pub use file_change::{
     DiffLine, DiffLineKind, FileChange, PatchFileChange, PatchFileKind, ShellStreams,
 };
-pub use message::{ChatMsg, Role};
+pub use message::{ChatMsg, Role, to_rig_message};
 pub use model::Model;
 pub use provider::{ProviderClient, ProviderKind};
 pub use retry::{ConnectionFailure, classify_connection_error};
@@ -30,4 +33,6 @@ pub use tool::{
     DynamicTool, FileChangeHook, Tool, ToolContext, ToolDefinition, ToolErrorKind,
     ToolExecutionError, ToolOutput, ToolResult, ToolSet, into_dynamic,
 };
+pub use tool_image::DocumentSourceKind;
+pub use tool_image::{ToolResultContentAlias as ToolResultContent, tool_content_with_image};
 pub use usage::{TokenUsage, context_footprint, read_tokens};

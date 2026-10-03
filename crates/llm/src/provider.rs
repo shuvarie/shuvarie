@@ -335,6 +335,12 @@ fn copilot_authenticator(
 }
 
 impl ProviderClient {
+    /// The selune type of this client's transport — the capability basis for
+    /// image attachments (see `shuvarie_llm::Blobs` and the send path).
+    pub const fn provider_type(&self) -> selune::ProviderType {
+        self.kind.r#type
+    }
+
     pub fn build(
         kind: ProviderKind,
         api_key: Option<&str>,
@@ -640,6 +646,11 @@ impl ProviderClient {
         preamble: Option<&str>,
         prompt: &str,
         history: &[ChatMsg],
+        // Attachments of the prompt message itself (the newest user turn).
+        prompt_attachments: &[crate::attachment::Attachment],
+        // Content bytes for every referenced attachment's sha256 — both the
+        // prompt's and history's (see `shuvarie_llm::Blobs`).
+        blobs: &crate::attachment::Blobs,
         tools: Vec<DynamicTool>,
         workers: &mut [crate::agent::WorkerAgent],
         max_turns: usize,
@@ -672,11 +683,13 @@ impl ProviderClient {
             tracker.record(seed);
         }
         let tracker_for_hook = tracker.clone();
-        let user_msg = rig_core::message::Message::user(prompt.to_string());
+        let mut prompt_msg = ChatMsg::user(prompt.to_string());
+        prompt_msg.attachments = prompt_attachments.to_vec();
+        let user_msg = crate::message::to_rig_message(prompt_msg, blobs);
         let rig_history: Vec<rig_core::message::Message> = history
             .iter()
             .cloned()
-            .map(rig_core::message::Message::from)
+            .map(|msg| crate::message::to_rig_message(msg, blobs))
             .collect();
         let mut dynamic = tools;
         for worker in workers.iter() {

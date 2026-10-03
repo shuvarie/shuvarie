@@ -6,7 +6,7 @@ use std::sync::MutexGuard;
 
 use ratatui::style::Color;
 use shuvarie_config::ThemeColors;
-use shuvarie_highlight::theme::{self, Palette};
+use shuvarie_highlight::theme;
 
 /// The process-wide palette, serialized across this binary's tests and
 /// restored on drop (panic included).

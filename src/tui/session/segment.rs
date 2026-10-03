@@ -35,12 +35,14 @@ pub struct BlockAddr {
 
 /// Row range (within a turn) covered by a hit target, with the addressed
 /// block. Recorded at render time; translated by the turn's content offset at
-/// click time.
+/// click time. `slot` addresses one image inside the block's media strip for
+/// media hits (`None` for block-toggle targets).
 #[derive(Debug, Clone)]
 pub struct HitRegion {
     pub start: u32,
     pub end: u32,
     pub addr: BlockAddr,
+    pub slot: Option<u16>,
 }
 
 /// Rows of a `\n`-separated string addressable by index: byte offsets of the
@@ -555,7 +557,20 @@ pub struct Segment {
     pub bg: Option<Color>,
     pub padding: (u16, u16),
     pub hit: Option<BlockAddr>,
+    /// Row ranges (in the segment's body-row space) that address one image
+    /// inside a media block: clicking one opens the media viewer at that
+    /// image. Stamped into `HitRegion`s by the turn renderer like `hit`.
+    pub media_hits: Vec<MediaHit>,
     pub trim: bool,
+}
+
+/// A media block's per-image hit rows: `slot` is the image's index among the
+/// block's image slots (the media viewer's addressing).
+#[derive(Debug, Clone)]
+pub struct MediaHit {
+    pub from: u32,
+    pub to: u32,
+    pub slot: u16,
 }
 
 impl Segment {
@@ -579,6 +594,7 @@ impl Segment {
             bg,
             padding,
             hit: None,
+            media_hits: Vec::new(),
             trim,
         }
     }
@@ -848,6 +864,7 @@ pub(crate) mod tests {
             bg: None,
             padding: (0, 0),
             hit: None,
+            media_hits: Vec::new(),
             trim: false,
         };
         let w = 44;
@@ -989,6 +1006,7 @@ pub(crate) mod tests {
             bg: None,
             padding: (0, 0),
             hit: None,
+            media_hits: Vec::new(),
             trim: false,
         }
     }
@@ -1002,6 +1020,7 @@ pub(crate) mod tests {
             bg: None,
             padding: (0, 0),
             hit: None,
+            media_hits: Vec::new(),
             trim: false,
         };
         assert_eq!(
@@ -1045,6 +1064,7 @@ pub(crate) mod tests {
             bg: Some(theme::success_bg()),
             padding: BLOCK_PADDING,
             hit: None,
+            media_hits: Vec::new(),
             trim: false,
         };
         let mut flat = header.clone();
@@ -1059,6 +1079,7 @@ pub(crate) mod tests {
             bg: Some(theme::success_bg()),
             padding: BLOCK_PADDING,
             hit: None,
+            media_hits: Vec::new(),
             trim: false,
         };
         assert_eq!(seg.measure(width), fixed_equivalent.measure(width));
@@ -1122,6 +1143,7 @@ pub(crate) mod tests {
             bg: Some(theme::prompt_bg()),
             padding: BLOCK_PADDING,
             hit: None,
+            media_hits: Vec::new(),
             trim: true,
         };
         assert_eq!(seg.measure(40), 1 + 2 * u32::from(BLOCK_PADDING.1));

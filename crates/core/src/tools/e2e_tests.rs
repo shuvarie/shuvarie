@@ -63,6 +63,8 @@ fn roster(
         todos::TodoState::from_records(&[]),
         &ToolScene::default(),
         config.tools.web_search.as_ref(),
+        &crate::attachments::AttachmentSettings::default(),
+        false,
         &Skills::default(),
         &config.tools.tools,
         mcp,

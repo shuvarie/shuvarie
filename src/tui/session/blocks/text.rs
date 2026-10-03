@@ -46,6 +46,7 @@ impl UserPrompt {
             bg: Some(theme::prompt_bg()),
             padding: BLOCK_PADDING,
             hit: None,
+            media_hits: Vec::new(),
             trim: true,
         }]
     }
@@ -85,6 +86,7 @@ impl SteeredPrompt {
             bg: Some(theme::prompt_bg()),
             padding: BLOCK_PADDING,
             hit: None,
+            media_hits: Vec::new(),
             trim: true,
         }]
     }
@@ -127,6 +129,7 @@ impl TextBlock {
             bg: None,
             padding: TEXT_PADDING,
             hit: None,
+            media_hits: Vec::new(),
             trim: true,
         }]
     }
@@ -162,6 +165,7 @@ impl SystemText {
             bg: None,
             padding: (0, 0),
             hit: None,
+            media_hits: Vec::new(),
             trim: true,
         }]
     }

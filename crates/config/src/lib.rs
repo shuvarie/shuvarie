@@ -98,6 +98,7 @@ fn merge_layer(config: &mut Config, layer: &ConfigLayer) {
             "db" => config.db = layer.config.db.clone(),
             "embedding" => config.embedding = layer.config.embedding.clone(),
             "agent" => config.agent = layer.config.agent.clone(),
+            "attachments" => config.attachments = layer.config.attachments.clone(),
             "skills" => config.skills = layer.config.skills.clone(),
             "default-providers" => {
                 config.default_providers = layer.config.default_providers.clone();
@@ -368,6 +369,10 @@ pub struct Config {
     pub embedding: EmbeddingConfig,
 
     pub agent: AgentConfig,
+
+    /// `attachments { … }` — what composing `@path` attachments allows and
+    /// its external legacy-converter escape hatch (see [`AttachmentsConfig`]).
+    pub attachments: AttachmentsConfig,
 
     pub lsp: LspConfigRepr,
 
@@ -2413,6 +2418,9 @@ pub struct UiPrefs {
     /// How a new session's title is drafted. Defaults to deriving it from
     /// part of the first user prompt; see [`TitleConfig`].
     pub title: TitleConfig,
+
+    /// Attachment-image display prefs for the chat pane.
+    pub image: ImagePrefs,
 }
 
 impl Default for UiPrefs {
@@ -2423,6 +2431,175 @@ impl Default for UiPrefs {
             copy_on_select: false,
             theme: None,
             title: TitleConfig::default(),
+            image: ImagePrefs::default(),
+        }
+    }
+}
+
+/// How the chat pane renders attached images.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ImagePrefs {
+    /// The terminal's font cell size in pixels: `cell-size <width>
+    /// <height>`. Only the ratio matters (halfblock rows are derived from
+    /// it); set it when your terminal's font is far from the 1:2 default
+    /// guess, or when the terminal does not report its pixel size.
+    pub cell_size: Option<(u16, u16)>,
+    /// The graphics protocol images render through: `protocol
+    /// halfblocks|kitty|sixel|iterm2`. `halfblocks` (the default) uses
+    /// unicode half blocks — plain text cells, safe everywhere. `kitty`
+    /// renders through ordinary placeholder cells (scroll-safe for the
+    /// chat pane). `sixel` and `iterm2` paint placements that persist at
+    /// old screen rows, so the chat pane clamps them to `halfblocks`; the
+    /// fullscreen image viewer (the `/images` command) honors any
+    /// protocol since nothing scrolls there.
+    ///
+    /// Omitted (`auto`) the TUI detects the protocol from the terminal
+    /// environment: Ghostty and kitty prefer the kitty protocol, iTerm2,
+    /// WezTerm, Konsole, foot and Windows Terminal prefer sixel, tmux and
+    /// otherwise halfblocks. When a protocol cannot be used the render
+    /// descends the priority ladder — kitty → sixel → iterm2 → halfblocks
+    /// (the pane: kitty → halfblocks, see [`ImageProtocol`]).
+    pub protocol: Option<ImageProtocol>,
+}
+
+/// The `[ui.image] protocol` value.
+///
+/// The render-time priority ladder is `kitty → sixel → iterm2 →
+/// halfblocks`: when the configured (or auto-detected) protocol cannot be
+/// used the next one down is tried before settling on `halfblocks`. The chat
+/// pane only descends kitty → halfblocks (its placement-based alternatives
+/// would paint over old rows on scroll); the fullscreen viewer walks the
+/// whole ladder.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ImageProtocol {
+    #[default]
+    Halfblocks,
+    Sixel,
+    Kitty,
+    Iterm2,
+}
+
+impl ImageProtocol {
+    /// Parse the config spelling, case-insensitively.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "halfblocks" => Some(Self::Halfblocks),
+            "sixel" => Some(Self::Sixel),
+            "kitty" => Some(Self::Kitty),
+            "iterm2" => Some(Self::Iterm2),
+            _ => None,
+        }
+    }
+
+    /// Detect the image protocol from the terminal environment — the
+    /// auto-detected default when `protocol` is not configured. Env-var
+    /// identity mirrors ratatui-image's own terminal map: Terminals that
+    /// implement the kitty graphics protocol (kitty itself, Ghostty) are
+    /// matched first; sixel-capable families (iTerm2, WezTerm, Konsole,
+    /// foot, Windows Terminal) second; tmux and everything else fall back
+    /// to halfblocks (tmux swallows raw graphic payloads without its DCS
+    /// passthrough, so it always clamps).
+    pub fn detect() -> Self {
+        Self::detect_in(|name| std::env::var(name).ok())
+    }
+
+    /// [`Self::detect`] over an explicit environment, testable.
+    pub fn detect_in(env: impl Fn(&str) -> Option<String>) -> Self {
+        // The multiplexer clamps first: inner payloads never reach the
+        // outer terminal without the DCS passthrough wrapper.
+        if env("TMUX").is_some() {
+            return Self::Halfblocks;
+        }
+        let term = env("TERM").unwrap_or_default();
+        match env("TERM_PROGRAM").as_deref().map(str::trim) {
+            Some("ghostty") => return Self::Kitty,
+            Some("iTerm.app") => return Self::Sixel,
+            Some("WezTerm") => return Self::Sixel,
+            Some("konsole") => return Self::Sixel,
+            Some("vscode") => return Self::Halfblocks,
+            _ => {}
+        }
+        if term.starts_with("xterm-kitty") || term.starts_with("xterm-ghostty") {
+            return Self::Kitty;
+        }
+        if term.starts_with("foot") {
+            return Self::Sixel;
+        }
+        if env("KITTY_WINDOW_ID").is_some() || env("KITTY_PID").is_some() {
+            return Self::Kitty;
+        }
+        if [
+            "ITERM_SESSION_ID",
+            "WEZTERM_EXECUTABLE",
+            "KONSOLE_VERSION",
+            "WT_SESSION",
+        ]
+        .iter()
+        .any(|key| env(key).is_some())
+        {
+            return Self::Sixel;
+        }
+        Self::Halfblocks
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Halfblocks => "halfblocks",
+            Self::Sixel => "sixel",
+            Self::Kitty => "kitty",
+            Self::Iterm2 => "iterm2",
+        }
+    }
+
+    /// The next protocol down the priority ladder: `kitty → sixel →
+    /// iterm2 → halfblocks`. `None` at the bottom — `halfblocks` paints
+    /// ordinary text cells and is always constructible.
+    pub fn degrade(self) -> Option<Self> {
+        match self {
+            Self::Kitty => Some(Self::Sixel),
+            Self::Sixel => Some(Self::Iterm2),
+            Self::Iterm2 => Some(Self::Halfblocks),
+            Self::Halfblocks => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ImageProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// `attachments { … }` — limits for the composer's `@path` attachments and
+/// the optional external converter for legacy Office formats.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentsConfig {
+    /// `max-images` — how many images one user message may carry.
+    pub max_images: usize,
+
+    /// `image-budget` — MiB of image payload one streaming request may
+    /// carry across the prompt and history (oldest images trim first).
+    pub image_budget: usize,
+
+    /// `image-edge` — px the images' long edge is capped to (larger
+    /// images are downscaled before sending).
+    pub image_edge: u32,
+
+    /// `office-converter` — program (name or path) that converts legacy
+    /// `.doc`/`.ppt` files, called with
+    /// `--headless --convert-to <docx|pptx> --outdir <dir> <file>` (the
+    /// LibreOffice/soffice CLI). Unset, the legacy formats are rejected
+    /// with a conversion hint.
+    pub office_converter: Option<String>,
+}
+
+impl Default for AttachmentsConfig {
+    fn default() -> Self {
+        Self {
+            max_images: 8,
+            image_budget: 16,
+            image_edge: 1568,
+            office_converter: None,
         }
     }
 }
@@ -3358,6 +3535,139 @@ mod tests {
     }
 
     #[test]
+    fn ui_image_cell_size_round_trips() {
+        let parsed = config_kdl::from_kdl("").unwrap();
+        assert_eq!(parsed.ui.image.cell_size, None);
+        let parsed = config_kdl::from_kdl("ui { image { cell-size 7 15 } }").unwrap();
+        assert_eq!(parsed.ui.image.cell_size, Some((7, 15)));
+
+        let mut config = Config::default();
+        config.ui.image.cell_size = Some((9, 19));
+        let text = config_kdl::to_kdl(&config).unwrap();
+        assert!(text.contains("cell-size 9 19"), "body: {text}");
+        let parsed = config_kdl::from_kdl(&text).unwrap();
+        assert_eq!(parsed, config);
+
+        assert!(
+            !config_kdl::to_kdl(&Config::default())
+                .unwrap()
+                .contains("cell-size")
+        );
+    }
+
+    #[test]
+    fn ui_image_protocol_round_trips() {
+        let parsed = config_kdl::from_kdl("").unwrap();
+        assert_eq!(parsed.ui.image.protocol, None);
+        for (text, expected) in [
+            (
+                "ui { image { protocol halfblocks } }",
+                ImageProtocol::Halfblocks,
+            ),
+            ("ui { image { protocol kitty } }", ImageProtocol::Kitty),
+            ("ui { image { protocol Sixel } }", ImageProtocol::Sixel),
+            (
+                "ui { image { protocol \"iterm2\" } }",
+                ImageProtocol::Iterm2,
+            ),
+        ] {
+            let parsed = config_kdl::from_kdl(text).unwrap();
+            assert_eq!(parsed.ui.image.protocol, Some(expected), "text: {text:?}");
+        }
+
+        let mut config = Config::default();
+        config.ui.image.protocol = Some(ImageProtocol::Kitty);
+        let text = config_kdl::to_kdl(&config).unwrap();
+        assert!(text.contains("protocol kitty"), "body: {text}");
+        let parsed = config_kdl::from_kdl(&text).unwrap();
+        assert_eq!(parsed, config);
+
+        // Unknown values error; the default never serializes the node.
+        let err = config_kdl::from_kdl("ui { image { protocol chafa } }").unwrap_err();
+        assert!(err.to_string().contains("protocol"), "unknown: {err}");
+        assert!(
+            !config_kdl::to_kdl(&Config::default())
+                .unwrap()
+                .contains("protocol")
+        );
+    }
+
+    #[test]
+    fn ui_image_cell_size_rejects_bad_values() {
+        assert!(config_kdl::from_kdl("ui { image { cell-size 8 } }").is_err());
+        assert!(config_kdl::from_kdl("ui { image { cell-size 0 16 } }").is_err());
+        assert!(config_kdl::from_kdl("ui { image { cell-size -8 16 } }").is_err());
+        assert!(config_kdl::from_kdl("ui { image { cell-size 70000 16 } }").is_err());
+        assert!(config_kdl::from_kdl("ui { image { cell-size 8 16.5 } }").is_err());
+        assert!(config_kdl::from_kdl("ui { image { cell-size 8 16 } image { } }").is_err());
+    }
+
+    #[test]
+    fn image_protocol_detects_the_terminal_environment() {
+        // Ghostty and kitty implement the kitty graphics protocol — the
+        // preferred (higher-resolution) renderer on them.
+        assert_eq!(
+            ImageProtocol::detect_in(|name| match name {
+                "TERM_PROGRAM" => Some("ghostty".into()),
+                "TERM" => Some("xterm-ghostty".into()),
+                _ => None,
+            }),
+            ImageProtocol::Kitty
+        );
+        assert_eq!(
+            ImageProtocol::detect_in(|name| {
+                (name == "KITTY_WINDOW_ID").then(|| "4".to_string())
+            }),
+            ImageProtocol::Kitty
+        );
+        // Sixel families.
+        for entries in [
+            vec![("TERM_PROGRAM", "iTerm.app")],
+            vec![("TERM_PROGRAM", "WezTerm")],
+            vec![("KONSOLE_VERSION", "2508"), ("TERM", "xterm-256color")],
+            vec![("TERM", "foot")],
+            vec![("WT_SESSION", "x")],
+        ] {
+            let env = |name: &str| -> Option<String> {
+                entries
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_string())
+            };
+            assert_eq!(ImageProtocol::detect_in(env), ImageProtocol::Sixel);
+        }
+        // tmux clamps first, even with a graphical outer terminal.
+        assert_eq!(
+            ImageProtocol::detect_in(|name: &str| match name {
+                "TMUX" => Some("/tmux-0/default,3,7,0".into()),
+                "TERM_PROGRAM" => Some("ghostty".into()),
+                _ => None,
+            }),
+            ImageProtocol::Halfblocks
+        );
+        // No signals at all (and unknown programs) stay conservative.
+        assert_eq!(
+            ImageProtocol::detect_in(|_| None),
+            ImageProtocol::Halfblocks
+        );
+        assert_eq!(
+            ImageProtocol::detect_in(|name| {
+                (name == "TERM_PROGRAM").then(|| "vscode".to_string())
+            }),
+            ImageProtocol::Halfblocks
+        );
+    }
+
+    #[test]
+    fn image_protocol_degrade_walks_the_priority_ladder() {
+        use ImageProtocol as P;
+        assert_eq!(P::Kitty.degrade(), Some(P::Sixel));
+        assert_eq!(P::Sixel.degrade(), Some(P::Iterm2));
+        assert_eq!(P::Iterm2.degrade(), Some(P::Halfblocks));
+        assert_eq!(P::Halfblocks.degrade(), None, "the floor");
+    }
+
+    #[test]
     fn ui_copy_on_select_round_trips() {
         let parsed = config_kdl::from_kdl("").unwrap();
         assert!(!parsed.ui.copy_on_select);
@@ -3375,6 +3685,61 @@ mod tests {
                 .unwrap()
                 .contains("copy-on-select")
         );
+    }
+
+    #[test]
+    fn attachments_section_round_trips() {
+        for text in ["attachments { }", ""] {
+            let parsed = config_kdl::from_kdl(text).unwrap();
+            assert_eq!(parsed.attachments, AttachmentsConfig::default());
+        }
+        let parsed = config_kdl::from_kdl(
+            "attachments {\n max-images 4\n image-budget 8\n image-edge 1024\n \
+             office-converter \"soffice\"\n}",
+        )
+        .unwrap();
+        assert_eq!(parsed.attachments.max_images, 4);
+        assert_eq!(parsed.attachments.image_budget, 8);
+        assert_eq!(parsed.attachments.image_edge, 1024);
+        assert_eq!(
+            parsed.attachments.office_converter.as_deref(),
+            Some("soffice")
+        );
+
+        let mut config = Config::default();
+        config.attachments.image_budget = 32;
+        config.attachments.office_converter = Some("/usr/bin/soffice".into());
+        let text = config_kdl::to_kdl(&config).unwrap();
+        assert!(text.contains("image-budget 32"), "body: {text}");
+        assert!(
+            text.contains("office-converter \"/usr/bin/soffice\""),
+            "body: {text}"
+        );
+        // an all-default settings section serializes to nothing
+        assert!(
+            !config_kdl::to_kdl(&Config::default())
+                .unwrap()
+                .contains("attachments")
+        );
+    }
+
+    #[test]
+    fn attachments_section_rejects_bad_values() {
+        for text in [
+            "attachments { max-images 0 }",
+            "attachments { max-images 129 }",
+            "attachments { max-images -1 }",
+            "attachments { image-budget 0 }",
+            "attachments { image-budget 4097 }",
+            "attachments { image-edge 31 }",
+            "attachments { image-edge 8001 }",
+            "attachments { office-converter \" \" }",
+            "attachments { nope 3 }",
+            "attachments { max-images 2 max-images 3 }",
+            "attachments \"soffice\"",
+        ] {
+            assert!(config_kdl::from_kdl(text).is_err(), "text: {text}");
+        }
     }
 
     #[test]
@@ -6839,10 +7204,9 @@ Now we're in Plan mode: plan first, no edits.
         );
         // An unknown theme still warns and falls back to Faerun.
         assert!(
-            set.resolve(Some("Tokyp"), ThemeVariant::Dark)
+            !set.resolve(Some("Tokyp"), ThemeVariant::Dark)
                 .warnings
                 .is_empty()
-                == false
         );
     }
 

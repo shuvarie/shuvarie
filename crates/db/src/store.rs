@@ -9,8 +9,9 @@ use crate::{
     driver::{new_default_driver, new_default_in_memory_driver},
     error::{DbError, Result},
     model::*,
-    session_file::{FileMessage, SessionFile, timestamp_from_millis},
+    session_file::{FileAttachment, FileMessage, SessionFile, timestamp_from_millis},
 };
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use shuvarie_llm::{Role, TokenUsage};
 use toasty::{db::Driver, schema::db, stmt::Type};
 
@@ -122,6 +123,11 @@ pub struct StoredMessage {
     /// Scene name under which the model produced this assistant message;
     /// `None` for the built-in Default scene (and for user rows).
     pub scene: Option<String>,
+    /// Metadata of the message's attachments (images, documents), in
+    /// attachment order; hydrated from `message_attachments` rows when the
+    /// session is loaded, always empty in rows freshly appended by the
+    /// writer methods (`attach_message_content` writes them afterwards).
+    pub attachments: Vec<shuvarie_llm::Attachment>,
 }
 
 /// Which model — and under which scene — produced an assistant message.
@@ -201,6 +207,7 @@ impl From<Message> for StoredMessage {
             request: serde_json::from_str(&m.request_json).unwrap_or_default(),
             model_code: m.model_code,
             scene: m.scene,
+            attachments: Vec::new(),
         }
     }
 }
@@ -310,6 +317,8 @@ impl Store {
                 Session,
                 Message,
                 MessageEmbedding,
+                MessageAttachment,
+                AttachmentBlob,
                 ToolCall
             ))
             .build(driver)
@@ -442,12 +451,13 @@ impl Store {
         tracking.map.prune_missing(&existing)
     }
 
-    /// Removes every row of a purged session (its messages, tool calls and
-    /// embeddings included) — the shared store must not accumulate garbage
-    /// behind deleted session rows.
+    /// Removes every row of a purged session (its messages, tool calls,
+    /// attachments and embeddings included) — the shared store must not
+    /// accumulate garbage behind deleted session rows.
     async fn purge_session_rows(&mut self, id: uuid::Uuid) -> Result<()> {
         for sql in [
             "DELETE FROM tool_calls WHERE session_id = ?1",
+            "DELETE FROM message_attachments WHERE session_id = ?1",
             "DELETE FROM message_embeddings WHERE session_id = ?1",
             "DELETE FROM messages WHERE session_id = ?1",
             "DELETE FROM session_locks WHERE session_id = ?1",
@@ -459,6 +469,7 @@ impl Store {
                 .await
                 .map_err(|e| DbError::Query(e.to_string()))?;
         }
+        self.gc_attachment_blobs().await?;
         Ok(())
     }
 
@@ -802,6 +813,7 @@ impl Store {
     async fn delete_imported_rows(&mut self, session_id: uuid::Uuid) {
         for sql in [
             "DELETE FROM tool_calls WHERE session_id = ?1",
+            "DELETE FROM message_attachments WHERE session_id = ?1",
             "DELETE FROM messages WHERE session_id = ?1",
             "DELETE FROM sessions WHERE id = ?1",
         ] {
@@ -810,6 +822,7 @@ impl Store {
                 .exec(&mut self.db)
                 .await;
         }
+        let _ = self.gc_attachment_blobs().await;
     }
 
     async fn import_messages(&mut self, session_id: uuid::Uuid, file: &SessionFile) -> Result<()> {
@@ -842,6 +855,25 @@ impl Store {
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
             id_map.insert(m.id, msg.id);
+
+            for att in &m.attachments {
+                if let Some(content) = Self::decode_attachment_content(att) {
+                    self.put_blob_once(&att.sha256, &content).await?;
+                }
+                toasty::create!(MessageAttachment {
+                    message_id: msg.id,
+                    session_id,
+                    seq: att.seq,
+                    kind: StoredAttachmentKind::from(att.kind),
+                    name: att.name.clone(),
+                    media_type: att.media_type.clone(),
+                    size: att.size,
+                    sha256: att.sha256.clone(),
+                })
+                .exec(&mut self.db)
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?;
+            }
         }
 
         for tc in &file.tool_calls {
@@ -1036,10 +1068,16 @@ impl Store {
                 .exec(&mut self.db)
                 .await
                 .map_err(|e| DbError::Query(e.to_string()))?;
+            MessageAttachment::filter_by_message_id(*id)
+                .delete()
+                .exec(&mut self.db)
+                .await
+                .map_err(|e| DbError::Query(e.to_string()))?;
             Message::delete_by_id(&mut self.db, *id)
                 .await
                 .map_err(|e| DbError::Query(e.to_string()))?;
         }
+        self.gc_attachment_blobs().await?;
         Ok(subtree)
     }
 
@@ -1291,7 +1329,23 @@ impl Store {
             .exec(&mut self.db)
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
-        Ok(messages.into_iter().map(StoredMessage::from).collect())
+        let mut stored: Vec<StoredMessage> =
+            messages.into_iter().map(StoredMessage::from).collect();
+        let attachments = MessageAttachment::filter_by_session_id(id)
+            .order_by(MessageAttachment::fields().seq().asc())
+            .exec(&mut self.db)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        let mut by_msg: HashMap<u64, Vec<shuvarie_llm::Attachment>> = HashMap::new();
+        for row in attachments {
+            by_msg.entry(row.message_id).or_default().push(row.into());
+        }
+        for message in &mut stored {
+            if let Some(list) = by_msg.remove(&message.id) {
+                message.attachments = list;
+            }
+        }
+        Ok(stored)
     }
 
     async fn message_count(&mut self, session_id: uuid::Uuid) -> Result<u64> {
@@ -1329,9 +1383,133 @@ impl Store {
     }
 
     pub async fn delete_message(&mut self, message_id: u64) -> Result<()> {
+        MessageAttachment::filter_by_message_id(message_id)
+            .delete()
+            .exec(&mut self.db)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
         Message::delete_by_id(&mut self.db, message_id)
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
+        self.gc_attachment_blobs().await?;
+        Ok(())
+    }
+
+    /// Store attachment bytes in the content-addressed blob table (skipping
+    /// blobs already present) and (re)write the metadata rows of `message_id`
+    /// in attachment order. Called by the turn flow right after the user
+    /// message row exists; re-calling for the same message replaces its rows.
+    /// The [`shuvarie_llm::Attachment`] metadata's `size` must match
+    /// `content.len()` — the caller computes both from the same bytes.
+    /// Persist one user message's attachments (a turn or replay): upserting
+    /// each `Some` blob (missing ones keep the already-stored content) and
+    /// replacing the message's metadata rows in `seq` order. A `None` byte
+    /// set attaches metadata only — used when re-sending a stored attachment
+    /// whose blob content could not be loaded.
+    pub async fn attach_message_content(
+        &mut self,
+        message_id: u64,
+        session_id: uuid::Uuid,
+        items: &[(shuvarie_llm::Attachment, Option<Vec<u8>>)],
+    ) -> Result<()> {
+        for (attachment, content) in items {
+            if let Some(content) = content {
+                self.put_blob_once(&attachment.sha256, content).await?;
+            }
+        }
+        MessageAttachment::filter_by_message_id(message_id)
+            .delete()
+            .exec(&mut self.db)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        for (seq, (attachment, _)) in items.iter().enumerate() {
+            toasty::create!(MessageAttachment {
+                message_id,
+                session_id,
+                seq: seq as u64,
+                kind: StoredAttachmentKind::from(attachment.kind),
+                name: attachment.name.clone(),
+                media_type: attachment.media_type.clone(),
+                size: attachment.size,
+                sha256: attachment.sha256.clone(),
+            })
+            .exec(&mut self.db)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        }
+        self.touch_session(session_id).await?;
+        Ok(())
+    }
+
+    /// Fetch one attachment blob's content by its sha256 (lowercase hex).
+    /// `None` when the blob is absent (pruned with its last referencing row,
+    /// or a metadata-only import): display and send paths handle a missing
+    /// blob by falling back to the `[image]`-placeholder render.
+    pub async fn attachment_blob(&mut self, sha256: &str) -> Result<Option<Vec<u8>>> {
+        let blob = AttachmentBlob::filter_by_sha256(sha256)
+            .first()
+            .exec(&mut self.db)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        Ok(blob.map(|b| b.content))
+    }
+
+    /// Decode an interchange attachment's base64 content, keeping it only
+    /// when it hashes to the record's `sha256`: a mismatched payload (a
+    /// corrupt or tampered export) degrades to metadata-only instead of
+    /// poisoning the content-addressed store.
+    fn decode_attachment_content(att: &FileAttachment) -> Option<Vec<u8>> {
+        let content = BASE64_STANDARD
+            .decode(att.content_base64.as_deref()?)
+            .ok()?;
+        (sha256_hex(&content) == att.sha256).then_some(content)
+    }
+
+    /// Insert one blob unless its sha256 is already present (content-addressed
+    /// dedup across messages, sessions, and attachment re-uses).
+    async fn put_blob_once(&mut self, sha256: &str, content: &[u8]) -> Result<()> {
+        let existing = AttachmentBlob::filter_by_sha256(sha256)
+            .first()
+            .exec(&mut self.db)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        if existing.is_none() {
+            toasty::create!(AttachmentBlob {
+                sha256: sha256.to_string(),
+                size: content.len() as u64,
+                content: content.to_vec(),
+            })
+            .exec(&mut self.db)
+            .await
+            .map_err(|e| DbError::Query(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Fill every [`FileAttachment`]'s `content_base64` from the blob table
+    /// when the blob exists. [`SessionFile::from_stored`] writes metadata
+    /// only; the export call sites run this so an export keeps the session's
+    /// attachment bytes self-contained through a lossless round trip.
+    pub async fn hydrate_attachment_blobs(&mut self, file: &mut SessionFile) -> Result<()> {
+        for message in &mut file.messages {
+            for attachment in &mut message.attachments {
+                if let Some(content) = self.attachment_blob(&attachment.sha256).await? {
+                    attachment.content_base64 = Some(BASE64_STANDARD.encode(content));
+                }
+            }
+        }
+        Ok(())
+    }
+    /// every cascade that removes `message_attachments` rows, so a shared
+    /// blob survives while its last referencing row's deletion reclaims it.
+    async fn gc_attachment_blobs(&mut self) -> Result<()> {
+        toasty::sql::statement(
+            "DELETE FROM attachment_blobs WHERE sha256 NOT IN \
+             (SELECT DISTINCT sha256 FROM message_attachments)",
+        )
+        .exec(&mut self.db)
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?;
         Ok(())
     }
 
@@ -1641,4 +1819,93 @@ fn f32_blob(values: &[f32]) -> Vec<u8> {
         out.extend_from_slice(&v.to_le_bytes());
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn store_with_attached_image() -> (Store, uuid::Uuid) {
+        let mut store = Store::open_in_memory().await.unwrap();
+        let id = store
+            .create_session("attachments", None, None, None)
+            .await
+            .unwrap();
+        let message = store
+            .append_message(id, None, Role::User, "see attachment")
+            .await
+            .unwrap();
+        let content = b"image bytes".to_vec();
+        store
+            .attach_message_content(
+                message.id,
+                id,
+                &[(
+                    shuvarie_llm::Attachment {
+                        kind: shuvarie_llm::AttachmentKind::Image,
+                        name: "a.png".into(),
+                        media_type: "image/png".into(),
+                        size: content.len() as u64,
+                        sha256: sha256_hex(&content),
+                    },
+                    Some(content),
+                )],
+            )
+            .await
+            .unwrap();
+        (store, id)
+    }
+
+    async fn blob_count(store: &mut Store) -> u64 {
+        let rows = toasty::sql::query("SELECT COUNT(*) FROM attachment_blobs")
+            .column_types([Type::I64])
+            .exec(&mut store.db)
+            .await
+            .unwrap();
+        match rows.into_iter().next() {
+            Some(toasty::stmt::Value::Record(fields)) => match &fields[0] {
+                toasty::stmt::Value::I64(v) => *v as u64,
+                toasty::stmt::Value::U64(v) => *v,
+                _ => 0,
+            },
+            _ => 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn attaching_identical_content_stores_one_blob() {
+        let (mut store, id) = store_with_attached_image().await;
+        let message = store
+            .append_message(id, None, Role::User, "again")
+            .await
+            .unwrap();
+        let content = b"image bytes".to_vec();
+        store
+            .attach_message_content(
+                message.id,
+                id,
+                &[(
+                    shuvarie_llm::Attachment {
+                        kind: shuvarie_llm::AttachmentKind::Image,
+                        name: "b.png".into(),
+                        media_type: "image/png".into(),
+                        size: content.len() as u64,
+                        sha256: sha256_hex(&content),
+                    },
+                    Some(content),
+                )],
+            )
+            .await
+            .unwrap();
+        assert_eq!(blob_count(&mut store).await, 1);
+    }
+
+    #[tokio::test]
+    async fn purge_session_rows_cleans_and_gcs_blobs() {
+        let (mut store, id) = store_with_attached_image().await;
+        store.purge_session_rows(id).await.unwrap();
+        assert_eq!(blob_count(&mut store).await, 0);
+        let messages = store.messages_for_session(id).await.unwrap();
+        assert!(messages.is_empty());
+    }
 }

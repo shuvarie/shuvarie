@@ -541,6 +541,7 @@ async fn auto_gen_drafts_the_session_title_after_the_first_user_prompt() {
     cmd_tx
         .send(Command::SendMessage {
             content: "hello world".into(),
+            attachments: Vec::new(),
             model: None,
         })
         .await
@@ -596,6 +597,7 @@ async fn default_title_policy_never_triggers_generation() {
     cmd_tx
         .send(Command::SendMessage {
             content: "hello world".into(),
+            attachments: Vec::new(),
             model: None,
         })
         .await
@@ -676,6 +678,7 @@ async fn gen_title_command_drafts_the_title_from_the_first_prompt() {
     cmd_tx
         .send(Command::SendMessage {
             content: "hello world".into(),
+            attachments: Vec::new(),
             model: None,
         })
         .await
@@ -767,6 +770,7 @@ async fn gen_title_command_reports_guards_and_resolve_failures() {
     cmd_tx
         .send(Command::SendMessage {
             content: "hello world".into(),
+            attachments: Vec::new(),
             model: None,
         })
         .await
@@ -791,12 +795,9 @@ async fn next_session_error(event_rx: &mut tokio::sync::mpsc::Receiver<Event>, e
             .await
             .expect("timed out waiting for the gen-title error")
             .expect("core task ended");
-        match ev {
-            Event::SessionError { error } => {
-                assert_eq!(error, expected, "unexpected session error");
-                return;
-            }
-            _ => {}
+        if let Event::SessionError { error } = ev {
+            assert_eq!(error, expected, "unexpected session error");
+            return;
         }
     }
 }
@@ -1038,6 +1039,7 @@ async fn send_message_without_active_provider_emits_error() {
     cmd_tx
         .send(Command::SendMessage {
             content: "hello".into(),
+            attachments: Vec::new(),
             model: None,
         })
         .await
@@ -1126,6 +1128,7 @@ async fn send_while_streaming_is_steered() {
     cmd_tx
         .send(Command::SendMessage {
             content: "first".into(),
+            attachments: Vec::new(),
             model: None,
         })
         .await
@@ -1133,6 +1136,7 @@ async fn send_while_streaming_is_steered() {
     cmd_tx
         .send(Command::SendMessage {
             content: "second".into(),
+            attachments: Vec::new(),
             model: None,
         })
         .await
@@ -1184,6 +1188,7 @@ async fn steered_recall_round_trip() {
     cmd_tx
         .send(Command::SendMessage {
             content: "first".into(),
+            attachments: Vec::new(),
             model: None,
         })
         .await
@@ -1191,6 +1196,7 @@ async fn steered_recall_round_trip() {
     cmd_tx
         .send(Command::SendMessage {
             content: "second".into(),
+            attachments: Vec::new(),
             model: None,
         })
         .await
@@ -1278,6 +1284,7 @@ async fn cancel_dispatches_first_steered_prompt() {
     cmd_tx
         .send(Command::SendMessage {
             content: "first".into(),
+            attachments: Vec::new(),
             model: None,
         })
         .await
@@ -1285,6 +1292,7 @@ async fn cancel_dispatches_first_steered_prompt() {
     cmd_tx
         .send(Command::SendMessage {
             content: "second".into(),
+            attachments: Vec::new(),
             model: None,
         })
         .await
@@ -1325,7 +1333,9 @@ async fn cancel_dispatches_first_steered_prompt() {
     let mut dispatched = false;
     for _ in 0..10 {
         match event_rx.recv().await {
-            Some(Event::TurnStarted { content, steered }) => {
+            Some(Event::TurnStarted {
+                content, steered, ..
+            }) => {
                 assert!(steered, "dispatch must be flagged as steered");
                 assert_eq!(content, "second");
                 dispatched = true;
@@ -1368,6 +1378,7 @@ async fn new_session_clears_steered_queue() {
     cmd_tx
         .send(Command::SendMessage {
             content: "first".into(),
+            attachments: Vec::new(),
             model: None,
         })
         .await
@@ -1375,6 +1386,7 @@ async fn new_session_clears_steered_queue() {
     cmd_tx
         .send(Command::SendMessage {
             content: "second".into(),
+            attachments: Vec::new(),
             model: None,
         })
         .await
@@ -1458,6 +1470,7 @@ async fn send_message_persists_session_and_messages() {
     cmd_tx
         .send(Command::SendMessage {
             content: "hello world".into(),
+            attachments: Vec::new(),
             model: None,
         })
         .await
@@ -1885,6 +1898,7 @@ async fn switch_scene_defers_the_persist_and_reports() {
     cmd_tx
         .send(Command::SendMessage {
             content: "hello".into(),
+            attachments: Vec::new(),
             model: None,
         })
         .await
@@ -2115,6 +2129,7 @@ async fn the_interlude_announces_a_mid_session_switch_once() {
     cmd_tx
         .send(Command::SendMessage {
             content: "one".into(),
+            attachments: Vec::new(),
             model: None,
         })
         .await
@@ -2159,6 +2174,7 @@ async fn the_interlude_announces_a_mid_session_switch_once() {
     cmd_tx
         .send(Command::SendMessage {
             content: "two".into(),
+            attachments: Vec::new(),
             model: None,
         })
         .await
@@ -2193,18 +2209,21 @@ async fn the_interlude_announces_a_mid_session_switch_once() {
     cmd_tx
         .send(Command::SendMessage {
             content: "three".into(),
+            attachments: Vec::new(),
             model: None,
         })
         .await
         .unwrap();
     settle(&mut event_rx).await;
-    let bodies = bodies.lock().unwrap();
-    let chat = chat_bodies(&bodies);
-    assert_eq!(chat.len(), 3);
-    assert!(
-        !chat[2].contains("we are in Plan mode"),
-        "the interlude is a one-shot announce, not a per-request wrap"
-    );
+    {
+        let bodies = bodies.lock().unwrap();
+        let chat = chat_bodies(&bodies);
+        assert_eq!(chat.len(), 3);
+        assert!(
+            !chat[2].contains("we are in Plan mode"),
+            "the interlude is a one-shot announce, not a per-request wrap"
+        );
+    }
 
     drop(cmd_tx);
     let _ = handle.await;
@@ -2332,6 +2351,7 @@ async fn switch_scene_requires_interlude_mid_session() {
     cmd_tx
         .send(Command::SendMessage {
             content: "hello".into(),
+            attachments: Vec::new(),
             model: None,
         })
         .await
@@ -2468,6 +2488,7 @@ async fn manual_compact_splices_the_summary_and_forwards_the_focus() {
         cmd_tx
             .send(Command::SendMessage {
                 content: prompt.into(),
+                attachments: Vec::new(),
                 model: None,
             })
             .await
@@ -2638,7 +2659,7 @@ async fn remote_first_custom_registry_fetches_at_startup() {
         Some(1),
         "the remote-first fetch ran before the startup events"
     );
-    assert!(requests.lock().unwrap().len() >= 1, "one fetch");
+    assert!(!requests.lock().unwrap().is_empty(), "one fetch");
 
     drop(cmd_tx);
     let _ = handle.await;
@@ -2826,6 +2847,7 @@ async fn manual_compact_without_enough_history_reports_nothing_to_compact() {
     cmd_tx
         .send(Command::SendMessage {
             content: "hello".into(),
+            attachments: Vec::new(),
             model: None,
         })
         .await
@@ -2851,6 +2873,364 @@ async fn manual_compact_without_enough_history_reports_nothing_to_compact() {
             _ => {}
         }
     }
+
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+/// A real 2×2 PNG encoded in-test: the ingest sniffs it and passes an
+/// already-fitting file through byte-for-byte.
+fn tiny_png() -> Vec<u8> {
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(2, 2)
+        .write_to(&mut out, image::ImageFormat::Png)
+        .expect("png encode");
+    out.into_inner()
+}
+
+/// The 1x1 PNG is a real decodable image; the ingest passes an
+/// already-fitting file through byte-for-byte, so its base64 appears in the
+/// outgoing request unmodified.
+///
+/// A full send with attachments: the image rides the OpenAI wire as a
+/// data-URI image part (base64 of the persisted bytes), a text file rides as
+/// a `<document>` text part, and the prompt text stays first.
+#[tokio::test]
+async fn attachments_ride_the_request_as_multimodal_parts() {
+    use base64::Engine as _;
+    let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let addr = spawn_mock_openai_recording("seen", bodies.clone());
+    let mut connections = empty_connections();
+    connections.providers.insert(
+        "mock".into(),
+        ProviderConfig::new(
+            "mock",
+            "openai-compat",
+            Some("sk-test".into()),
+            Some(format!("http://{addr}/v1")),
+        ),
+    );
+    connections.active = Some(Active {
+        provider: "mock".into(),
+        model: Some("test-model".into()),
+        variant: None,
+    });
+
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let handle = tokio::spawn(run(
+        empty_config(),
+        connections,
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        shuvarie_core::SceneSet {
+            scenes: Default::default(),
+            warnings: Vec::new(),
+        },
+        cmd_rx,
+        event_tx,
+    ));
+    recv_skills_loaded(&mut event_rx).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("shot.png");
+    let image_bytes = tiny_png();
+    std::fs::write(&image, &image_bytes).unwrap();
+    let note = dir.path().join("note.txt");
+    std::fs::write(&note, "plain note").unwrap();
+
+    cmd_tx
+        .send(Command::SendMessage {
+            content: "describe these".into(),
+            attachments: vec![
+                image.to_string_lossy().into_owned(),
+                note.to_string_lossy().into_owned(),
+            ],
+            model: None,
+        })
+        .await
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut turn_attachments = Vec::new();
+    loop {
+        match tokio::time::timeout(deadline - tokio::time::Instant::now(), event_rx.recv()).await {
+            Ok(Some(ev)) => match ev {
+                Event::TurnStarted {
+                    attachments,
+                    steered,
+                    ..
+                } => {
+                    assert!(!steered, "a fresh submit is not steered");
+                    turn_attachments = attachments;
+                }
+                Event::StreamDone { .. } => break,
+                other => {
+                    let _ = other;
+                }
+            },
+            Ok(None) => panic!("core task ended"),
+            Err(_) => panic!("timed out waiting for the turn"),
+        }
+    }
+    assert!(
+        turn_attachments
+            .iter()
+            .any(|a| a.kind == shuvarie_llm::AttachmentKind::Image),
+        "TurnStarted must carry the attachment metadata: {turn_attachments:?}"
+    );
+    let image_sha = turn_attachments
+        .iter()
+        .find(|a| a.kind == shuvarie_llm::AttachmentKind::Image)
+        .map(|a| a.sha256.clone())
+        .unwrap();
+
+    // Media display path: the TUI requests the blobs by hash; the reply must
+    // carry the exact persisted bytes (the tiny PNG passed the ingest
+    // unmodified), and unknown hashes degrade to `None`.
+    cmd_tx
+        .send(Command::LoadAttachmentMedia {
+            hashes: vec![image_sha.clone(), "not-in-store".into()],
+        })
+        .await
+        .unwrap();
+    let items = loop {
+        match tokio::time::timeout(deadline - tokio::time::Instant::now(), event_rx.recv()).await {
+            Ok(Some(Event::AttachmentMedia { items })) => break items,
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("core task ended"),
+            Err(_) => panic!("timed out waiting for the media reply"),
+        }
+    };
+    let fetched = items
+        .iter()
+        .find(|item| item.sha256 == image_sha)
+        .expect("the requested image hash is answered");
+    assert_eq!(fetched.bytes.as_deref(), Some(image_bytes.as_slice()));
+    assert!(
+        items
+            .iter()
+            .find(|item| item.sha256 == "not-in-store")
+            .is_some_and(|item| item.bytes.is_none()),
+        "unknown hashes answer with None"
+    );
+
+    let captured = bodies.lock().expect("bodies").join("\n---body---\n");
+    let expected_data = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
+    assert!(
+        captured.contains(&format!("data:image/png;base64,{expected_data}")),
+        "the image rides as a data uri: {captured}"
+    );
+    assert!(captured.contains("<document name=\\\"note.txt\\\">\\nplain note\\n</document>"));
+    assert!(captured.contains("describe these"), "prompt text present");
+
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+/// A transport without image parts (Copilot, no catalog entry): a fresh send
+/// with an image starts the turn (the prompt is already persisted) but fails
+/// with the capability error and never streams. Text attachments still ride.
+#[tokio::test]
+async fn an_image_send_to_a_text_only_transport_reports_the_capability() {
+    let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let addr = spawn_mock_openai_recording("seen", bodies.clone());
+    let mut connections = empty_connections();
+    // A copilot connection whose base URL answers nothing — the request
+    // must never happen.
+    connections.providers.insert(
+        "copilot".into(),
+        ProviderConfig::new(
+            "copilot",
+            "copilot",
+            Some("fake-key".into()),
+            Some(format!("http://{addr}/v1")),
+        ),
+    );
+    connections.active = Some(Active {
+        provider: "copilot".into(),
+        model: Some("test-model".into()),
+        variant: None,
+    });
+
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let handle = tokio::spawn(run(
+        empty_config(),
+        connections,
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        shuvarie_core::SceneSet {
+            scenes: Default::default(),
+            warnings: Vec::new(),
+        },
+        cmd_rx,
+        event_tx,
+    ));
+    recv_skills_loaded(&mut event_rx).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("shot.png");
+    std::fs::write(&image, tiny_png()).unwrap();
+    let note = dir.path().join("note.txt");
+    std::fs::write(&note, "plain note").unwrap();
+
+    cmd_tx
+        .send(Command::SendMessage {
+            content: "describe these".into(),
+            attachments: vec![
+                image.to_string_lossy().into_owned(),
+                note.to_string_lossy().into_owned(),
+            ],
+            model: None,
+        })
+        .await
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let ev = tokio::time::timeout(deadline - tokio::time::Instant::now(), event_rx.recv())
+            .await
+            .expect("timed out waiting for the capability error")
+            .expect("core task ended");
+        match ev {
+            Event::StreamDone { .. } => {
+                panic!("nothing may stream to a text-only model with image input");
+            }
+            Event::StreamError { error } => {
+                assert!(
+                    error.contains("does not support image attachments"),
+                    "{error}"
+                );
+                break;
+            }
+            _ => {}
+        }
+    }
+    // Nothing streamed; the model never received anything.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), async {
+            loop {
+                event_rx.recv().await.expect("core task ended");
+            }
+        })
+        .await
+        .is_err(),
+        "no events may follow the capability error"
+    );
+    for body in bodies.lock().expect("bodies").iter() {
+        assert!(
+            !body.contains("input_image") && !body.contains("instructions"),
+            "a chat-shaped request reached the mock: {}",
+            &body[..body.len().min(240)]
+        );
+    }
+    // Side traffic (core's message-embedding indexing) may hit the endpoint,
+    // but no completion request ever did.
+
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn directive_probe_and_completions_reply_in_order() {
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+
+    let handle = tokio::spawn(run(
+        empty_config(),
+        empty_connections(),
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        Default::default(),
+        cmd_rx,
+        event_tx,
+    ));
+    recv_skills_loaded(&mut event_rx).await;
+
+    // The probe: one document, one missing path — replies order-aligned.
+    let dir = tempfile::tempdir().unwrap();
+    let report = dir.path().join("report.rtf");
+    std::fs::write(&report, b"{\\rtf1 hello}").unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    cmd_tx
+        .send(Command::ProbeDirectives {
+            token: 7,
+            paths: vec![report.to_string_lossy().into_owned(), "nope.png".into()],
+        })
+        .await
+        .unwrap();
+    let event = event_rx.recv().await.expect("event");
+    let Event::DirectivesProbed { token, items } = event else {
+        panic!("expected DirectivesProbed, got {event:?}");
+    };
+    assert_eq!(token, 7);
+    let [document, missing] = items.as_slice() else {
+        panic!("two probes expected: {items:?}");
+    };
+    assert_eq!(document.kind, Some(shuvarie_llm::AttachmentKind::Document));
+    assert!(document.size.is_some());
+    assert_eq!(
+        missing.error.as_deref(),
+        Some("missing file"),
+        "the missing path probes as an error chip"
+    );
+
+    // Completions: absolute dir listing, token intact, dirs first.
+    let src = dir.path().join("src");
+    cmd_tx
+        .send(Command::RequestPathCompletions {
+            token: 3,
+            query: format!("{}/", src.to_string_lossy()),
+        })
+        .await
+        .unwrap();
+    let event = event_rx.recv().await.expect("event");
+    let Event::PathCompletions { token, candidates } = event else {
+        panic!("expected PathCompletions, got {event:?}");
+    };
+    assert_eq!(token, 3);
+    assert!(
+        candidates.is_empty(),
+        "the empty dir lists nothing: {candidates:?}"
+    );
+
+    // Completions: the cwd-rooted listing (tests run at the package root)
+    // answers with its entries.
+    cmd_tx
+        .send(Command::RequestPathCompletions {
+            token: 4,
+            query: "".into(),
+        })
+        .await
+        .unwrap();
+    let event = event_rx.recv().await.expect("event");
+    let Event::PathCompletions { token, candidates } = event else {
+        panic!("expected PathCompletions, got {event:?}");
+    };
+    assert_eq!(token, 4);
+    assert!(
+        candidates
+            .iter()
+            .any(|c| c.name == "Cargo.toml" && !c.is_dir),
+        "the crate root lists its files: {candidates:?}"
+    );
+    assert!(
+        candidates.iter().any(|c| c.name == "src/" && c.is_dir),
+        "dirs carry the trailing slash: {candidates:?}"
+    );
 
     drop(cmd_tx);
     let _ = handle.await;

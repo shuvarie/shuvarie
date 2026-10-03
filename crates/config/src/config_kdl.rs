@@ -24,6 +24,7 @@ pub(crate) fn from_kdl_with_sections(contents: &str) -> Result<(Config, Vec<Stri
             "db" => config.db = parse_db(node, contents)?,
             "embedding" => config.embedding = parse_embedding(node, contents)?,
             "agent" => config.agent = parse_agent(node, contents)?,
+            "attachments" => config.attachments = parse_attachments(node, contents)?,
             "lsp" => config.lsp = parse_lsp(node, contents)?,
             "skills" => config.skills = parse_skills(node, contents)?,
             "default-providers" => {
@@ -250,6 +251,7 @@ fn parse_ui(node: &KdlNode, input: &str) -> Result<UiPrefs> {
     let mut copy_on_select = None;
     let mut theme = None;
     let mut title = None;
+    let mut image = None;
     for child in child_nodes(node) {
         match child.name().value() {
             "frame-rate" => set_once(input, child, &mut frame_rate, scalar_u32(input, child))?,
@@ -259,6 +261,12 @@ fn parse_ui(node: &KdlNode, input: &str) -> Result<UiPrefs> {
             }
             "theme" => set_once(input, child, &mut theme, parse_theme_pref(input, child))?,
             "title" => set_once(input, child, &mut title, parse_title(child, input))?,
+            "image" => set_once(
+                input,
+                child,
+                &mut image,
+                parse_image(child, input).map(Some),
+            )?,
             _ => {}
         }
     }
@@ -274,7 +282,82 @@ fn parse_ui(node: &KdlNode, input: &str) -> Result<UiPrefs> {
     }
     prefs.theme = theme;
     prefs.title = title.unwrap_or_default();
+    prefs.image = image.unwrap_or_default();
     Ok(prefs)
+}
+
+/// `image { … }` — how the chat pane renders attached images. The optional
+/// `cell-size w h` spellings the terminal's font cell in pixels (the ratio
+/// drives halfblock row math); without it the TUI derives a size from the
+/// terminal's reported pixel dimensions, falling back to a 1:2 guess.
+fn parse_image(node: &KdlNode, input: &str) -> Result<ImagePrefs> {
+    if node.entries().iter().any(|entry| entry.name().is_none()) {
+        return Err(node_error(
+            input,
+            node,
+            "`image` takes no positional arguments",
+            None,
+        ));
+    }
+    let mut cell_size = None;
+    let mut protocol = None;
+    for child in child_nodes(node) {
+        if child.name().value() == "cell-size" {
+            set_once(input, child, &mut cell_size, cell_size_value(input, child))?;
+        } else if child.name().value() == "protocol" {
+            set_once(input, child, &mut protocol, protocol_value(input, child))?;
+        } else {
+            return Err(node_error(
+                input,
+                child,
+                format!(
+                    "unknown node `{}` in `image` (expected `cell-size` or `protocol`)",
+                    child.name().value()
+                ),
+                None,
+            ));
+        }
+    }
+    Ok(ImagePrefs {
+        cell_size,
+        protocol,
+    })
+}
+
+fn protocol_value(input: &str, node: &KdlNode) -> Result<Option<ImageProtocol>> {
+    match scalar_string(input, node)? {
+        None => Ok(None),
+        Some(value) => ImageProtocol::parse(&value).map(Some).ok_or_else(|| {
+            node_error(
+                input,
+                node,
+                "`protocol` takes one of halfblocks, kitty, sixel, or iterm2",
+                None,
+            )
+        }),
+    }
+}
+
+fn cell_size_value(input: &str, node: &KdlNode) -> Result<Option<(u16, u16)>> {
+    let mut values = Vec::new();
+    for entry in node.entries().iter().filter(|entry| entry.name().is_none()) {
+        match entry.value() {
+            KdlValue::Integer(value) => values.push(*value),
+            _ => return Err(type_error(input, node, "two pixel sizes (width, height)")),
+        }
+    }
+    let &[width, height] = values.as_slice() else {
+        return Err(node_error(
+            input,
+            node,
+            "`cell-size` takes two values (width, height)",
+            None,
+        ));
+    };
+    match (u16::try_from(width), u16::try_from(height)) {
+        (Ok(w), Ok(h)) if w > 0 && h > 0 => Ok(Some((w, h))),
+        _ => Err(range_error(input, node)),
+    }
 }
 
 /// `title { … }` — how a new session's title is drafted. The optional
@@ -477,6 +560,81 @@ fn parse_agent(node: &KdlNode, input: &str) -> Result<AgentConfig> {
     }
     if let Some(value) = worker_max_turns {
         config.worker_max_turns = value;
+    }
+    Ok(config)
+}
+
+/// `attachments { … }` — what the composer's `@path` attachments allow:
+/// the per-message image count, the per-request image byte/edge budgets,
+/// and the optional external converter program for legacy Office formats.
+fn parse_attachments(node: &KdlNode, input: &str) -> Result<AttachmentsConfig> {
+    if node.entries().iter().any(|entry| entry.name().is_none()) {
+        return Err(node_error(
+            input,
+            node,
+            "`attachments` takes no positional arguments",
+            None,
+        ));
+    }
+    let mut max_images = None;
+    let mut image_budget = None;
+    let mut image_edge = None;
+    let mut office_converter = None;
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "max-images" => set_once(input, child, &mut max_images, scalar_usize(input, child))?,
+            "image-budget" => {
+                set_once(input, child, &mut image_budget, scalar_usize(input, child))?
+            }
+            "image-edge" => set_once(input, child, &mut image_edge, scalar_u32(input, child))?,
+            "office-converter" => set_once(
+                input,
+                child,
+                &mut office_converter,
+                scalar_string(input, child),
+            )?,
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!(
+                        "unknown node `{other}` in `attachments` (expected `max-images`, \
+                         `image-budget`, `image-edge`, or `office-converter`)"
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    let mut config = AttachmentsConfig::default();
+    if let Some(value) = max_images {
+        if value == 0 || value > 128 {
+            return Err(range_error(input, node));
+        }
+        config.max_images = value;
+    }
+    if let Some(value) = image_budget {
+        if value == 0 || value > 4096 {
+            return Err(range_error(input, node));
+        }
+        config.image_budget = value;
+    }
+    if let Some(value) = image_edge {
+        if !(32..=8000).contains(&value) {
+            return Err(range_error(input, node));
+        }
+        config.image_edge = value;
+    }
+    if let Some(value) = office_converter {
+        if value.trim().is_empty() {
+            return Err(node_error(
+                input,
+                node,
+                "`office-converter` takes a program name or path",
+                None,
+            ));
+        }
+        config.office_converter = Some(value);
     }
     Ok(config)
 }
@@ -2588,6 +2746,7 @@ pub(crate) fn to_kdl(config: &Config) -> Result<String> {
         db_node(&config.db),
         embedding_node(&config.embedding),
         agent_node(&config.agent),
+        attachments_node(&config.attachments),
         lsp_node(&config.lsp),
         skills_node(&config.skills),
         default_providers_node(&config.default_providers),
@@ -2665,7 +2824,46 @@ fn ui_node(cfg: &UiPrefs) -> Option<KdlNode> {
     if cfg.title != defaults.title {
         children.push(title_node(&cfg.title));
     }
+    if cfg.image != defaults.image {
+        children.push(image_node(&cfg.image));
+    }
     section_node("ui", children)
+}
+
+/// Builds `image { … }`; only called with a non-default config, so it always
+/// has content.
+fn image_node(cfg: &ImagePrefs) -> KdlNode {
+    let mut children = Vec::new();
+    if let Some((width, height)) = cfg.cell_size {
+        let mut node = KdlNode::new("cell-size");
+        node.push(KdlEntry::new(i128::from(width)));
+        node.push(KdlEntry::new(i128::from(height)));
+        children.push(node);
+    }
+    if let Some(protocol) = cfg.protocol {
+        children.push(value_node("protocol", protocol.as_str()));
+    }
+    section_node("image", children).expect("image node always has content")
+}
+
+/// Builds `attachments { … }`; omitted entirely when every field is at
+/// its default.
+fn attachments_node(cfg: &AttachmentsConfig) -> Option<KdlNode> {
+    let defaults = AttachmentsConfig::default();
+    let mut children = Vec::new();
+    if cfg.max_images != defaults.max_images {
+        children.push(int_node("max-images", cfg.max_images as i128));
+    }
+    if cfg.image_budget != defaults.image_budget {
+        children.push(int_node("image-budget", cfg.image_budget as i128));
+    }
+    if cfg.image_edge != defaults.image_edge {
+        children.push(int_node("image-edge", cfg.image_edge as i128));
+    }
+    if let Some(program) = &cfg.office_converter {
+        children.push(value_node("office-converter", program.as_str()));
+    }
+    section_node("attachments", children)
 }
 
 /// Builds `db { … }` — the session-storage settings; omitted entirely when
