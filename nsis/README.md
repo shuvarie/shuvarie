@@ -40,7 +40,7 @@ from the repository root. `/DBINARY` is expected to be an
 
 | Switch | Default | Description |
 | --- | --- | --- |
-| `/DVERSION` | Crate version | Version string; must be three components (x.y.z) |
+| `/DVERSION` | *(required)* | Version string fed to the build (e.g. from CI / the crate version in `justfile`); must be three components (x.y.z) — compilation fails if omitted |
 | `/DBINARY` | `../target/release/shuvarie.exe` | Path to the release binary |
 | `/DOUT_FILE` | `shuvarie-setup-<version>.exe` | Installer output path |
 | `/DAPP_NAME` | `shuvarie` | Product name used everywhere |
