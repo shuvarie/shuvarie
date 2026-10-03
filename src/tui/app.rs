@@ -3,8 +3,8 @@ use std::io::{self, Write};
 
 use ratatui::prelude::*;
 use shuvarie_core::{Connections, Event as CoreEvent, Model, RegistriesConfig, UiPrefs};
-use termina::{Event as TermEvent, PlatformTerminal};
 use termina::event::{KeyCode, KeyEventKind, MouseButton, MouseEventKind};
+use termina::{Event as TermEvent, PlatformTerminal};
 use tokio::sync::mpsc::Sender;
 
 use crate::tui::event::Event;
@@ -227,8 +227,8 @@ pub struct App {
     current_theme_pref: Option<String>,
     /// The palette painted before the picker opened, restored on cancel.
     theme_backup: Option<shuvarie_core::ThemeColors>,
-    /// The fullscreen media viewer overlay (Tab on an empty composer, or a
-    /// click on an image region).
+    /// The fullscreen media viewer overlay (the `/images` slash command, or
+    /// a click on an image region).
     pub media_view: MediaViewer,
     quit: bool,
 }
@@ -1920,6 +1920,8 @@ impl App {
         );
         self.command_menu
             .set_availability(CommandAction::Export, self.session.session_id.is_some());
+        self.command_menu
+            .set_availability(CommandAction::Images, self.session.chat.has_images());
     }
 
     /// Runs a built-in command action (from the Ctrl+M menu or the inline
@@ -2060,6 +2062,12 @@ impl App {
             CommandAction::AssistedBy => {
                 self.assisted_by.open(self.session.models_used.clone());
                 self.overlay = Overlay::AssistedBy;
+            }
+            CommandAction::Images => {
+                let effect = self
+                    .session
+                    .update(SessionMessage::OpenMediaViewer { sha: None });
+                return effect.and_then(|effect| self.handle_session_effect(effect));
             }
             CommandAction::Quit => {
                 if self.session.is_streaming() {
@@ -2692,6 +2700,40 @@ mod tests {
         assert!(
             !app.session.sidebar.collapsed_at(200),
             "manual override sticks across widths"
+        );
+    }
+
+    #[test]
+    fn images_command_opens_the_media_viewer() {
+        let (mut app, mut rx) = app_with_rx(connected());
+        active_session(&mut app);
+        // No images: the command is a no-op (the session shows a status
+        // notice — covered at the session level).
+        app.run_command(CommandAction::Images, None);
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(rx.try_recv().is_err(), "nothing sent without images");
+        // TurnStarted delivers a turn with an image; the command now opens
+        // the viewer on the session's most recent image.
+        app.session.update(SessionMessage::TurnStarted {
+            content: "hi".into(),
+            attachments: vec![shuvarie_llm::Attachment {
+                kind: shuvarie_llm::AttachmentKind::Image,
+                name: "shot.png".into(),
+                media_type: "image/png".into(),
+                size: 2048,
+                sha256: "sha_x".into(),
+            }],
+            steered: false,
+        });
+        app.run_command(CommandAction::Images, None);
+        assert!(matches!(app.overlay, Overlay::MediaViewer));
+        assert!(app.media_view.is_open());
+        assert!(
+            matches!(
+                rx.try_recv().unwrap(),
+                shuvarie_core::Command::LoadAttachmentMedia { .. }
+            ),
+            "the viewer fetches the image's bytes"
         );
     }
 

@@ -147,8 +147,8 @@ pub enum SessionMessage {
         token: u64,
         candidates: Vec<shuvarie_core::attachments::PathCandidate>,
     },
-    /// Open the media viewer over the session's images (`v` with an empty
-    /// composer, or a click on an image region): `sha` is the image to land
+    /// Open the media viewer over the session's images (the `/images` slash
+    /// command, or a click on an image region): `sha` is the image to land
     /// on (`None` = the most recent).
     OpenMediaViewer {
         sha: Option<String>,
@@ -581,13 +581,6 @@ impl SessionScreen {
             }
             KeyCode::Up => Some(SessionMessage::Chat(ChatMessage::ScrollUp)),
             KeyCode::Down => Some(SessionMessage::Chat(ChatMessage::ScrollDown)),
-            // The media viewer over the session's images. Tab is dead with
-            // an empty composer otherwise (no popup to complete), so it is
-            // free to open the viewer here; the footer advertises it when
-            // images exist.
-            KeyCode::Tab if self.input.is_empty() => {
-                Some(SessionMessage::OpenMediaViewer { sha: None })
-            }
             KeyCode::Escape if key.kind == KeyEventKind::Press => {
                 if self.chat.is_streaming()
                     && self
@@ -653,6 +646,8 @@ impl SessionScreen {
         );
         self.slash
             .set_availability(CommandAction::Export, self.session_id.is_some());
+        self.slash
+            .set_availability(CommandAction::Images, self.chat.has_images());
         let buffer = self.input.buffer.value.clone();
         self.slash.sync(&buffer);
     }
@@ -865,7 +860,11 @@ impl SessionScreen {
             }
             SessionMessage::OpenMediaViewer { sha } => {
                 let items = self.chat.image_inventory();
-                (!items.is_empty()).then_some(SessionEffect::OpenMediaViewer {
+                if items.is_empty() {
+                    self.status = Some("No images attached in this session".into());
+                    return None;
+                }
+                Some(SessionEffect::OpenMediaViewer {
                     items,
                     selected: sha,
                 })
@@ -1514,7 +1513,7 @@ impl SessionScreen {
                 bindings.extend(cut);
                 bindings.extend(recall);
                 if self.chat.has_images() {
-                    bindings.push(("Tab", "images"));
+                    bindings.push(("/", "images"));
                 }
                 theme::help_line(&bindings)
             };
@@ -3630,18 +3629,33 @@ mod compose_tests {
     }
 
     #[test]
-    fn viewer_bound_to_tab_on_an_empty_composer() {
+    fn viewer_opens_through_the_images_slash_command() {
         let mut screen = SessionScreen::new();
-        // No images yet: the binding produces nothing.
+        screen.input.width.set(40);
+        // Tab with an empty composer no longer opens the viewer: the command
+        // owns that entry point.
+        assert!(key(&screen, KeyCode::Tab).is_none());
+        // The command routes to the viewer through the builtin action.
+        screen.input.buffer.set("/images");
         assert!(matches!(
-            key(&screen, KeyCode::Tab),
-            Some(SessionMessage::OpenMediaViewer { sha: None })
+            screen.update(SessionMessage::Text(TextAreaMessage::Submit)),
+            Some(SessionEffect::RunCommand {
+                action: CommandRef::Builtin(CommandAction::Images),
+                args: None
+            })
         ));
-        assert_eq!(
-            screen.update(SessionMessage::OpenMediaViewer { sha: None }),
-            None,
-            "no images → no viewer"
+        // No images yet: the menu entry is hidden, opening is a no-op with a
+        // status notice explaining why.
+        assert!(
+            screen
+                .update(SessionMessage::OpenMediaViewer { sha: None })
+                .is_none()
         );
+        assert_eq!(
+            screen.status.as_deref(),
+            Some("No images attached in this session")
+        );
+        assert!(!screen.slash.available(CommandAction::Images));
         // TurnStarted delivers a turn with an image (the session-side path).
         screen.update(SessionMessage::TurnStarted {
             content: "look".into(),
@@ -3655,6 +3669,7 @@ mod compose_tests {
             steered: false,
         });
         assert!(screen.chat.has_images());
+        assert!(screen.slash.available(CommandAction::Images));
         // Opening returns the viewer effect with the gallery and sha.
         match screen.update(SessionMessage::OpenMediaViewer {
             sha: Some("sha_x".into()),

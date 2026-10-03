@@ -2450,7 +2450,7 @@ pub struct ImagePrefs {
     /// renders through ordinary placeholder cells (scroll-safe for the
     /// chat pane). `sixel` and `iterm2` paint placements that persist at
     /// old screen rows, so the chat pane clamps them to `halfblocks`; the
-    /// fullscreen image viewer (Tab over an empty composer) honors any
+    /// fullscreen image viewer (the `/images` command) honors any
     /// protocol since nothing scrolls there.
     ///
     /// Omitted (`auto`) the TUI detects the protocol from the terminal

@@ -555,8 +555,8 @@ impl Chat {
         !self.turns.borrow().is_empty()
     }
 
-    /// Whether the chat holds any image attachment (the viewer key and the
-    /// footer hint).
+    /// Whether the chat holds any image attachment (the `/images` command's
+    /// availability and the footer hint).
     pub fn has_images(&self) -> bool {
         !self.image_scan().is_empty()
     }
