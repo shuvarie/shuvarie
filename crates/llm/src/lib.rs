@@ -10,6 +10,7 @@ pub mod provider;
 pub mod retry;
 pub mod stream;
 pub mod tool;
+pub mod tool_image;
 pub mod usage;
 
 pub use agent::WorkerAgent;
@@ -32,4 +33,6 @@ pub use tool::{
     DynamicTool, FileChangeHook, Tool, ToolContext, ToolDefinition, ToolErrorKind,
     ToolExecutionError, ToolOutput, ToolResult, ToolSet, into_dynamic,
 };
+pub use tool_image::DocumentSourceKind;
+pub use tool_image::{ToolResultContentAlias as ToolResultContent, tool_content_with_image};
 pub use usage::{TokenUsage, context_footprint, read_tokens};

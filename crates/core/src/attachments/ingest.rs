@@ -132,37 +132,68 @@ fn prepare_one(
     }
 }
 
-/// Converts the detected document to markdown. Legacy `.doc`/`.ppt` go
-/// through the configured external converter (the converted container
-/// re-enters the facade); without one they are rejected with the option
-/// hint. Everything else converts directly.
+/// Converts the detected document to markdown, preserving the taxonomy of
+/// failures so each consumer maps them to its own audience: the attachments
+/// pipeline renders short generic reasons; the file tools render
+/// model-actionable messages.
+#[derive(Debug)]
+pub(crate) enum DocumentFailure {
+    /// The facade's conversion taxonomy (NeedsOcr/Encrypted/Malformed/…).
+    Convert(shuvarie_doc::ConvertError),
+    /// The legacy external converter failed before the facade saw bytes.
+    External(String),
+}
+
+/// Converts a detected document to markdown, or fails with
+/// [`DocumentFailure`]. Legacy `.doc`/`.ppt` go through the configured
+/// external converter (the converted container re-enters the facade); without
+/// one they are rejected with the option hint.
 fn document_markdown(
     bytes: &[u8],
     format: SourceFormat,
     settings: &AttachmentSettings,
 ) -> Result<String, String> {
+    document_convert(bytes, format, settings).map_err(|failure| match failure {
+        DocumentFailure::Convert(error) => format!("cannot convert document: {error}"),
+        DocumentFailure::External(error) => error,
+    })
+}
+
+/// [`document_markdown`] for the file tools: the same conversion, with the
+/// failure taxonomy preserved for the actionable per-path mapping
+/// ([`document_error_message`]).
+pub(crate) fn document_convert(
+    bytes: &[u8],
+    format: SourceFormat,
+    settings: &AttachmentSettings,
+) -> Result<String, DocumentFailure> {
     if !matches!(format, SourceFormat::LegacyDoc | SourceFormat::LegacyPpt) {
-        return shuvarie_doc::to_markdown(format, bytes)
-            .map_err(|error| format!("cannot convert document: {error}"));
+        return shuvarie_doc::to_markdown(format, bytes).map_err(DocumentFailure::Convert);
     }
     let Some(program) = settings.office_converter.as_deref() else {
         let legacy =
             shuvarie_doc::to_markdown(format, bytes).expect_err("the legacy formats always reject");
-        return Err(format!(
-            "{legacy} — or set `attachments {{ office-converter \"soffice\" }}` and \
-             attach the converted file directly"
-        ));
+        return Err(legacy_convert_hint(legacy));
     };
-    let converted = crate::office_convert::convert_container(program, format, bytes)?;
+    let converted = crate::office_convert::convert_container(program, format, bytes)
+        .map_err(DocumentFailure::External)?;
     let target = if format == SourceFormat::LegacyDoc {
         "docx"
     } else {
         "pptx"
     };
-    let format = shuvarie_doc::detect(&converted, Some(target))
-        .ok_or_else(|| "the converter produced an unrecognized file".to_string())?;
-    shuvarie_doc::to_markdown(format, &converted)
-        .map_err(|error| format!("cannot convert document: {error}"))
+    let format = shuvarie_doc::detect(&converted, Some(target)).ok_or_else(|| {
+        DocumentFailure::External(String::from("the converter produced an unrecognized file"))
+    })?;
+    shuvarie_doc::to_markdown(format, &converted).map_err(DocumentFailure::Convert)
+}
+
+/// The rejection a legacy Office format gets without a configured converter.
+fn legacy_convert_hint(rejection: shuvarie_doc::ConvertError) -> DocumentFailure {
+    DocumentFailure::External(format!(
+        "{rejection} — or set `attachments {{ office-converter \"soffice\" }}` and \
+         attach the converted file directly"
+    ))
 }
 
 /// Read the file, checking that it is an in-bounds regular file.
@@ -233,7 +264,7 @@ fn document_media_type(format: SourceFormat) -> &'static str {
 /// Sniff the four raster types every multimodal provider accepts by their
 /// magic bytes. SVG and camera-exotic formats (heic, …) deliberately do not
 /// map — no provider pipeline here renders them.
-fn image_media_type(bytes: &[u8]) -> Option<&'static str> {
+pub(crate) fn image_media_type(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Some("image/png");
     }
@@ -256,7 +287,7 @@ fn image_media_type(bytes: &[u8]) -> Option<&'static str> {
 /// (text crispness) and JPEG at progressively lower quality otherwise —
 /// returning the final bytes plus their media type (both may change: a webp
 /// source may re-encode to png).
-fn fit_image(
+pub(crate) fn fit_image(
     bytes: &[u8],
     media_type: &'static str,
     image_edge: u32,

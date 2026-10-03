@@ -47,7 +47,7 @@ The attachment feature spans the stack around one currency type: `shuvarie-llm`'
   — capability gate, text-only degradation, newest-first image budget), limits from the
   `attachments { … }` config via `AttachmentSettings`.
 - `crates/core/src/office_convert.rs`: the optional external converter (`office-converter`
-  config) for legacy `.doc`/`.ppt` — shared by the composer attachments and `read_document`.
+  config) for legacy `.doc`/`.ppt` — shared by the composer attachments and the file tools
 - `crates/db/`: content-addressed `AttachmentBlob` store (sha256 → bytes, GC'd on delete
   cascades) + per-message `MessageAttachment` rows; session-file export/import carries base64 blobs.
 - `src/tui/session/media.rs`: decode-once `MediaStore` (LRU-capped) + halfblock lifting

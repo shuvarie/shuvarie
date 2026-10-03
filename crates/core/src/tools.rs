@@ -8,7 +8,6 @@ mod list_dir;
 mod lsp;
 mod mcp_tool;
 mod question;
-mod read_document;
 mod read_file;
 mod run_shell;
 mod skill;
@@ -40,12 +39,13 @@ use list_dir::ListDir;
 use lsp::Lsp;
 use mcp_tool::McpTool;
 use question::Question;
-use read_document::ReadDocument;
 use read_file::ReadFile;
 use run_shell::RunShell;
 use skill::SkillTool;
 use stdio::StdioTool;
 use web_search::WebSearch;
+
+use crate::attachments::AttachmentSettings;
 use webfetch::WebFetch;
 use write_file::WriteFile;
 
@@ -104,9 +104,8 @@ where
     }
 }
 
-/// Per-turn dedupe cache for `read_file`/`read_document`: tracks namespaced
-/// `(path, offset, limit)` keys
-/// that have already been returned to the model this turn, plus a set of all
+/// Per-turn dedupe cache for `read_file` tracks namespaced
+/// `(path, offset, limit)` keys that have already been returned to the model this turn, plus a set of all
 /// paths read this turn (any range) used by `write_file`'s read-first check
 /// for overwrites. Repeated identical reads get a short note instead of
 /// re-sending file content, which keeps the agent loop from blowing up the
@@ -128,10 +127,10 @@ impl ReadCache {
         self.mark_key(format!("file::{path}"), path, offset, limit)
     }
 
-    /// `read_document` variant: keys are namespaced so a converted read (e.g.
-    /// csv via `read_document`) and a plain `read_file` of the same path
-    /// never dedupe against each other, while both count as "the path was
-    /// read" for `write_file`'s read-first check.
+    /// Rich-content variant (documents converted to markdown, images): keys
+    /// are namespaced so a converted read (e.g. csv) and a plain text read of
+    /// the same path never dedupe against each other, while both count as
+    /// "the path was read" for `write_file`'s read-first check.
     fn mark_document(&self, path: &str, offset: Option<u64>, limit: Option<u64>) -> bool {
         self.mark_key(format!("document::{path}"), path, offset, limit)
     }
@@ -256,7 +255,8 @@ pub fn all_tools(
     todo_state: todos::TodoState,
     scene: &ToolScene,
     web_search: Option<&WebSearchConfig>,
-    office_converter: Option<&str>,
+    settings: &AttachmentSettings,
+    accepts_tool_images: bool,
     skills: &Skills,
     stdio_tools: &std::collections::BTreeMap<String, shuvarie_config::StdioToolConfig>,
     mcp_manager: Option<&shuvarie_mcp::SharedMcpManager>,
@@ -269,23 +269,10 @@ pub fn all_tools(
             max_output_chars,
             max_output_bytes,
             access,
+            settings.clone(),
+            accepts_tool_images,
         )
     }));
-    tools.extend(scene_tool(
-        "read_document",
-        scene,
-        &access,
-        true,
-        |access| {
-            ReadDocument::new(
-                read_cache.clone(),
-                max_output_chars,
-                max_output_bytes,
-                access,
-                office_converter.map(str::to_string),
-            )
-        },
-    ));
     tools.extend(scene_tool("write_file", scene, &access, true, |access| {
         WriteFile::new(read_cache.clone(), Some(lsp.clone()), locks.clone(), access)
     }));
@@ -382,7 +369,8 @@ pub fn read_tools(
     access: Access,
     scene: &ToolScene,
     web_search: Option<&WebSearchConfig>,
-    office_converter: Option<&str>,
+    settings: &AttachmentSettings,
+    accepts_tool_images: bool,
     skills: &Skills,
 ) -> Vec<DynamicTool> {
     let mut tools = Vec::new();
@@ -392,23 +380,10 @@ pub fn read_tools(
             max_output_chars,
             max_output_bytes,
             access,
+            settings.clone(),
+            accepts_tool_images,
         )
     }));
-    tools.extend(scene_tool(
-        "read_document",
-        scene,
-        &access,
-        true,
-        |access| {
-            ReadDocument::new(
-                read_cache.clone(),
-                max_output_chars,
-                max_output_bytes,
-                access,
-                office_converter.map(str::to_string),
-            )
-        },
-    ));
     tools.extend(scene_tool("list_dir", scene, &access, true, |access| {
         ListDir::new(access)
     }));
@@ -467,7 +442,8 @@ pub fn edit_tools(
     max_output_bytes: usize,
     access: Access,
     scene: &ToolScene,
-    office_converter: Option<&str>,
+    settings: &AttachmentSettings,
+    accepts_tool_images: bool,
 ) -> Vec<DynamicTool> {
     let mut tools = Vec::new();
     tools.extend(scene_tool("read_file", scene, &access, true, |access| {
@@ -476,23 +452,10 @@ pub fn edit_tools(
             max_output_chars,
             max_output_bytes,
             access,
+            settings.clone(),
+            accepts_tool_images,
         )
     }));
-    tools.extend(scene_tool(
-        "read_document",
-        scene,
-        &access,
-        true,
-        |access| {
-            ReadDocument::new(
-                read_cache.clone(),
-                max_output_chars,
-                max_output_bytes,
-                access,
-                office_converter.map(str::to_string),
-            )
-        },
-    ));
     tools.extend(scene_tool("write_file", scene, &access, true, |access| {
         WriteFile::new(read_cache, Some(lsp.clone()), locks.clone(), access)
     }));
@@ -541,7 +504,8 @@ mod tests {
             todos::TodoState::from_records(&[]),
             scene,
             None,
-            None,
+            &Default::default(),
+            true,
             skills,
             &Default::default(),
             None,
@@ -560,7 +524,6 @@ mod tests {
     fn the_default_scene_builds_every_tool() {
         let names = roster(&ToolScene::default());
         for expected in [
-            "read_document",
             "read_file",
             "write_file",
             "edit_file",

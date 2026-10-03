@@ -60,8 +60,7 @@ pub const ORCHESTRATOR_SCENE_DESCRIPTION: &str =
 /// The inspection tool roster kept in the read-only builtin scenes. It is
 /// the `read` worker toolset plus the scene-independent bookkeeping tools
 /// (`question`, `todo`); write, edit, and command tools stay disabled.
-const READ_ROSTER: [&str; 11] = [
-    "read_document",
+const READ_ROSTER: [&str; 10] = [
     "read_file",
     "list_dir",
     "grep",

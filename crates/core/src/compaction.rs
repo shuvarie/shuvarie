@@ -175,7 +175,7 @@ fn push_file_sections(out: &mut String, records: &[ToolRecord]) {
     let mut modified: Vec<String> = Vec::new();
     for record in records {
         match record.name.as_str() {
-            "read_file" | "read_document" | "grep" | "glob" | "list_dir" | "lsp" => {
+            "read_file" | "grep" | "glob" | "list_dir" | "lsp" => {
                 if let Some(path) = args_path(record) {
                     push_unique(&mut read, path);
                 }

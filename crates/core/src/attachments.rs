@@ -33,6 +33,7 @@ use std::path::{Path, PathBuf};
 
 pub use compose::{DirectiveProbe, PathCandidate, path_candidates, run_directive_probe};
 pub use ingest::resolve_directives;
+pub(crate) use ingest::{DocumentFailure, document_convert, fit_image, image_media_type};
 pub use shape::{
     FitReport, collect_blobs, prepare_for_send, resolve_stored_prepared, supports_images,
 };

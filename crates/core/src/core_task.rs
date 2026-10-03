@@ -2521,6 +2521,22 @@ impl CoreCtx {
                 .await;
             (manager.roster(), errors)
         };
+        // The streaming target's catalog identity decides whether tool
+        // results may carry image content (read_file's image arm) — computed
+        // with the prompt-side attachment gate below.
+        let catalog_provider = crate::catalog::providers();
+        let catalog_provider = self
+            .connections
+            .providers
+            .get(&provider_name)
+            .and_then(|pc| pc.catalog_id())
+            .and_then(|id| crate::catalog::find_provider(&catalog_provider, id))
+            .cloned();
+        let catalog_model = catalog_provider
+            .as_ref()
+            .and_then(|p| crate::catalog::find_model(p, &model));
+        let accepts_tool_images =
+            crate::attachments::supports_images(client.provider_type(), catalog_model);
         let tools = crate::tools::all_tools(
             self.lsp.clone(),
             file_locks.clone(),
@@ -2534,20 +2550,13 @@ impl CoreCtx {
             todo_state,
             &tool_scene,
             web_search,
-            self.config.attachments.office_converter.as_deref(),
+            &crate::attachments::AttachmentSettings::from(&self.config.attachments),
+            accepts_tool_images,
             &self.skills,
             &self.config.tools.tools,
             Some(&self.mcp),
             &mcp_roster,
         );
-        let catalog_provider = crate::catalog::providers();
-        let catalog_provider = self
-            .connections
-            .providers
-            .get(&provider_name)
-            .and_then(|pc| pc.catalog_id())
-            .and_then(|id| crate::catalog::find_provider(&catalog_provider, id))
-            .cloned();
         // The turn's attribution: the catalog's model code for the resolved
         // model (absent for providers outside the catalog) plus the scene the
         // request runs under. Persisted with the assistant row and recorded
@@ -2563,17 +2572,11 @@ impl CoreCtx {
         // gate, text-only degradation, image budget) before any history
         // injection: see `crate::attachments::prepare_for_send`.
         let prompt_attachments = if !prompt_attachments.is_empty() {
-            let accepts_images = crate::attachments::supports_images(
-                client.provider_type(),
-                catalog_provider
-                    .as_ref()
-                    .and_then(|p| crate::catalog::find_model(p, &model)),
-            );
             let report = match crate::attachments::prepare_for_send(
                 &mut prior,
                 &prompt_attachments,
                 &model,
-                accepts_images,
+                accepts_tool_images,
                 &crate::attachments::AttachmentSettings::from(&self.config.attachments),
             ) {
                 Ok(report) => report,
@@ -2607,7 +2610,8 @@ impl CoreCtx {
             self.access.clone(),
             &scene,
             web_search,
-            self.config.attachments.office_converter.as_deref(),
+            &crate::attachments::AttachmentSettings::from(&self.config.attachments),
+            accepts_tool_images,
             &self.skills,
         );
         let prior = crate::scenes::inject_history(&scene, &prior, Some(&content), announce);
