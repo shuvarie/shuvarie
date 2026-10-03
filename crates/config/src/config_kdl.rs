@@ -299,12 +299,42 @@ fn parse_image(node: &KdlNode, input: &str) -> Result<ImagePrefs> {
         ));
     }
     let mut cell_size = None;
+    let mut protocol = None;
     for child in child_nodes(node) {
         if child.name().value() == "cell-size" {
             set_once(input, child, &mut cell_size, cell_size_value(input, child))?;
+        } else if child.name().value() == "protocol" {
+            set_once(input, child, &mut protocol, protocol_value(input, child))?;
+        } else {
+            return Err(node_error(
+                input,
+                child,
+                format!(
+                    "unknown node `{}` in `image` (expected `cell-size` or `protocol`)",
+                    child.name().value()
+                ),
+                None,
+            ));
         }
     }
-    Ok(ImagePrefs { cell_size })
+    Ok(ImagePrefs {
+        cell_size,
+        protocol,
+    })
+}
+
+fn protocol_value(input: &str, node: &KdlNode) -> Result<Option<ImageProtocol>> {
+    match scalar_string(input, node)? {
+        None => Ok(None),
+        Some(value) => ImageProtocol::parse(&value).map(Some).ok_or_else(|| {
+            node_error(
+                input,
+                node,
+                "`protocol` takes one of halfblocks, kitty, sixel, or iterm2",
+                None,
+            )
+        }),
+    }
 }
 
 fn cell_size_value(input: &str, node: &KdlNode) -> Result<Option<(u16, u16)>> {
@@ -2732,6 +2762,9 @@ fn image_node(cfg: &ImagePrefs) -> KdlNode {
         node.push(KdlEntry::new(i128::from(width)));
         node.push(KdlEntry::new(i128::from(height)));
         children.push(node);
+    }
+    if let Some(protocol) = cfg.protocol {
+        children.push(value_node("protocol", protocol.as_str()));
     }
     section_node("image", children).expect("image node always has content")
 }

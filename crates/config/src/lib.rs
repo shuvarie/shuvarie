@@ -2439,6 +2439,55 @@ pub struct ImagePrefs {
     /// it); set it when your terminal's font is far from the 1:2 default
     /// guess, or when the terminal does not report its pixel size.
     pub cell_size: Option<(u16, u16)>,
+    /// The graphics protocol images render through: `protocol
+    /// halfblocks|kitty|sixel|iterm2`. `halfblocks` (the default) uses
+    /// unicode half blocks — plain text cells, safe everywhere. `kitty`
+    /// renders through ordinary placeholder cells (scroll-safe for the chat
+    /// pane). `sixel` and `iterm2` paint placements that persist at old
+    /// screen rows, so the chat pane clamps them to `halfblocks`; the
+    /// fullscreen image viewer (Tab over an empty composer) honors any
+    /// protocol since nothing scrolls there. Note the TUI does not query
+    /// the terminal for graphics support — pick only what yours truly
+    /// implements (kitty, sixel or iTerm2-capable ones).
+    pub protocol: Option<ImageProtocol>,
+}
+
+/// The `[ui.image] protocol` value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ImageProtocol {
+    #[default]
+    Halfblocks,
+    Sixel,
+    Kitty,
+    Iterm2,
+}
+
+impl ImageProtocol {
+    /// Parse the config spelling, case-insensitively.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "halfblocks" => Some(Self::Halfblocks),
+            "sixel" => Some(Self::Sixel),
+            "kitty" => Some(Self::Kitty),
+            "iterm2" => Some(Self::Iterm2),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Halfblocks => "halfblocks",
+            Self::Sixel => "sixel",
+            Self::Kitty => "kitty",
+            Self::Iterm2 => "iterm2",
+        }
+    }
+}
+
+impl std::fmt::Display for ImageProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3389,6 +3438,43 @@ mod tests {
             !config_kdl::to_kdl(&Config::default())
                 .unwrap()
                 .contains("cell-size")
+        );
+    }
+
+    #[test]
+    fn ui_image_protocol_round_trips() {
+        let parsed = config_kdl::from_kdl("").unwrap();
+        assert_eq!(parsed.ui.image.protocol, None);
+        for (text, expected) in [
+            (
+                "ui { image { protocol halfblocks } }",
+                ImageProtocol::Halfblocks,
+            ),
+            ("ui { image { protocol kitty } }", ImageProtocol::Kitty),
+            ("ui { image { protocol Sixel } }", ImageProtocol::Sixel),
+            (
+                "ui { image { protocol \"iterm2\" } }",
+                ImageProtocol::Iterm2,
+            ),
+        ] {
+            let parsed = config_kdl::from_kdl(text).unwrap();
+            assert_eq!(parsed.ui.image.protocol, Some(expected), "text: {text:?}");
+        }
+
+        let mut config = Config::default();
+        config.ui.image.protocol = Some(ImageProtocol::Kitty);
+        let text = config_kdl::to_kdl(&config).unwrap();
+        assert!(text.contains("protocol kitty"), "body: {text}");
+        let parsed = config_kdl::from_kdl(&text).unwrap();
+        assert_eq!(parsed, config);
+
+        // Unknown values error; the default never serializes the node.
+        let err = config_kdl::from_kdl("ui { image { protocol chafa } }").unwrap_err();
+        assert!(err.to_string().contains("protocol"), "unknown: {err}");
+        assert!(
+            !config_kdl::to_kdl(&Config::default())
+                .unwrap()
+                .contains("protocol")
         );
     }
 

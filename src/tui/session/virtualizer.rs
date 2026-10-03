@@ -585,7 +585,22 @@ pub fn render_turn_cache(
                     start: y,
                     end: y + height,
                     addr: addr.clone(),
+                    slot: None,
                 });
+            }
+            // Media blocks stamp per-image rows (offset by the segment's top
+            // padding row) so a click opens the viewer at that image.
+            let media_hits = std::mem::take(&mut segment.media_hits);
+            if !media_hits.is_empty() {
+                let pad = u32::from(segment.padding.1);
+                for media in &media_hits {
+                    hits.push(HitRegion {
+                        start: y + pad + media.from,
+                        end: y + pad + media.to,
+                        addr: addr.clone(),
+                        slot: Some(media.slot),
+                    });
+                }
             }
             prev_bg = segment.bg.is_some();
             y = push_segment(&mut segs, segment, y, height);

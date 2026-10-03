@@ -3139,3 +3139,99 @@ async fn an_image_send_to_a_text_only_transport_reports_the_capability() {
     drop(cmd_tx);
     let _ = handle.await;
 }
+
+#[tokio::test]
+async fn directive_probe_and_completions_reply_in_order() {
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+
+    let handle = tokio::spawn(run(
+        empty_config(),
+        empty_connections(),
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        Default::default(),
+        cmd_rx,
+        event_tx,
+    ));
+    recv_skills_loaded(&mut event_rx).await;
+
+    // The probe: one document, one missing path — replies order-aligned.
+    let dir = tempfile::tempdir().unwrap();
+    let report = dir.path().join("report.rtf");
+    std::fs::write(&report, b"{\\rtf1 hello}").unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    cmd_tx
+        .send(Command::ProbeDirectives {
+            token: 7,
+            paths: vec![report.to_string_lossy().into_owned(), "nope.png".into()],
+        })
+        .await
+        .unwrap();
+    let event = event_rx.recv().await.expect("event");
+    let Event::DirectivesProbed { token, items } = event else {
+        panic!("expected DirectivesProbed, got {event:?}");
+    };
+    assert_eq!(token, 7);
+    let [document, missing] = items.as_slice() else {
+        panic!("two probes expected: {items:?}");
+    };
+    assert_eq!(document.kind, Some(shuvarie_llm::AttachmentKind::Document));
+    assert!(document.size.is_some());
+    assert_eq!(
+        missing.error.as_deref(),
+        Some("missing file"),
+        "the missing path probes as an error chip"
+    );
+
+    // Completions: absolute dir listing, token intact, dirs first.
+    let src = dir.path().join("src");
+    cmd_tx
+        .send(Command::RequestPathCompletions {
+            token: 3,
+            query: format!("{}/", src.to_string_lossy()),
+        })
+        .await
+        .unwrap();
+    let event = event_rx.recv().await.expect("event");
+    let Event::PathCompletions { token, candidates } = event else {
+        panic!("expected PathCompletions, got {event:?}");
+    };
+    assert_eq!(token, 3);
+    assert!(
+        candidates.is_empty(),
+        "the empty dir lists nothing: {candidates:?}"
+    );
+
+    // Completions: the cwd-rooted listing (tests run at the package root)
+    // answers with its entries.
+    cmd_tx
+        .send(Command::RequestPathCompletions {
+            token: 4,
+            query: "".into(),
+        })
+        .await
+        .unwrap();
+    let event = event_rx.recv().await.expect("event");
+    let Event::PathCompletions { token, candidates } = event else {
+        panic!("expected PathCompletions, got {event:?}");
+    };
+    assert_eq!(token, 4);
+    assert!(
+        candidates
+            .iter()
+            .any(|c| c.name == "Cargo.toml" && !c.is_dir),
+        "the crate root lists its files: {candidates:?}"
+    );
+    assert!(
+        candidates.iter().any(|c| c.name == "src/" && c.is_dir),
+        "dirs carry the trailing slash: {candidates:?}"
+    );
+
+    drop(cmd_tx);
+    let _ = handle.await;
+}

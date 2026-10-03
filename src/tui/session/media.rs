@@ -67,8 +67,12 @@ impl MediaImage {
 /// attachment metadata, so presence is testable without decoding).
 pub struct MediaStore {
     cell: FontSize,
-    /// Bumped whenever the configured cell size changes: image caches keyed
-    /// on it re-render (halfblock row counts come from the font metrics).
+    /// The configured image protocol: the pane clamps placement-based ones
+    /// (their placements persist at old rows on scroll); the fullscreen
+    /// viewer may use any of them (nothing scrolls there).
+    protocol: ProtocolType,
+    /// Bumped whenever the configured cell size or protocol changes: image
+    /// caches keyed on it re-render.
     cell_gen: u64,
     images: HashMap<String, Rc<MediaImage>>,
     order: Vec<String>,
@@ -79,6 +83,7 @@ impl MediaStore {
     pub fn new(cell: FontSize) -> Self {
         Self {
             cell,
+            protocol: ProtocolType::Halfblocks,
             cell_gen: 0,
             images: HashMap::new(),
             order: Vec::new(),
@@ -98,6 +103,31 @@ impl MediaStore {
         if cell.width != self.cell.width || cell.height != self.cell.height {
             self.cell = cell;
             self.cell_gen += 1;
+        }
+    }
+
+    /// Switch the render protocol (from the `[ui.image] protocol` config):
+    /// bumps the generation so cached renders rebuild.
+    pub fn set_protocol(&mut self, protocol: ProtocolType) {
+        if protocol != self.protocol {
+            self.protocol = protocol;
+            self.cell_gen += 1;
+        }
+    }
+
+    /// The configured protocol (the viewer's unrestricted choice).
+    pub fn protocol(&self) -> ProtocolType {
+        self.protocol
+    }
+
+    /// The protocol the chat pane may render with: kitty's fixed variant
+    /// plants ordinary placeholder cells (scroll-safe), but placement-based
+    /// protocols — sixel, iTerm2 — leave their placements behind at old
+    /// rows when the buffer scrolls, so the pane clamps them to halfblocks.
+    pub fn pane_protocol(&self) -> ProtocolType {
+        match self.protocol {
+            ProtocolType::Kitty | ProtocolType::Halfblocks => self.protocol,
+            _ => ProtocolType::Halfblocks,
         }
     }
 
@@ -147,27 +177,47 @@ impl MediaStore {
     }
 }
 
-/// A halfblocks picker for the given font metrics (deprecated constructor —
-/// the only one that takes a font size without querying stdio).
-fn picker_for(cell: FontSize) -> Picker {
+/// A picker for the given font metrics and protocol (deprecated
+/// constructor — the only one that takes a font size without querying
+/// stdio).
+fn picker_for(cell: FontSize, protocol: ProtocolType) -> Picker {
     #[allow(deprecated)]
     let mut picker = Picker::from_fontsize(cell);
-    picker.set_protocol_type(ProtocolType::Halfblocks);
+    picker.set_protocol_type(protocol);
     picker
 }
 
-/// Render one image attachment into content-width lines through the
-/// halfblocks protocol (tricolor cells: ordinary diff-able cells that survive
-/// the virtualizer's clipped paint windows, unlike graphical payload
-/// protocols). `None` when the media is absent/undecodable or the width is
-/// degenerate.
+/// Render one image attachment into content-width lines through the pane's
+/// (clamped) protocol — ordinary diff-able cells that survive the
+/// virtualizer's clipped paint windows. `None` when the media is
+/// absent/undecodable or the width is degenerate.
 pub fn image_lines(store: &MediaStore, sha256: &str, width: u16) -> Option<Vec<Line<'static>>> {
+    image_lines_with(store.pane_protocol(), store, sha256, width)
+}
+
+/// The same render through the store's configured protocol, unclamped — the
+/// fullscreen viewer's choice (nothing scrolls there, so placement-based
+/// protocols are acceptable). Prefer [`image_lines`] for pane rendering.
+pub fn image_lines_full(
+    store: &MediaStore,
+    sha256: &str,
+    width: u16,
+) -> Option<Vec<Line<'static>>> {
+    image_lines_with(store.protocol(), store, sha256, width)
+}
+
+fn image_lines_with(
+    protocol: ProtocolType,
+    store: &MediaStore,
+    sha256: &str,
+    width: u16,
+) -> Option<Vec<Line<'static>>> {
     if width == 0 {
         return None;
     }
     let item = store.get(sha256)?;
     let decoded = Rc::try_unwrap(item.decoded()?).unwrap_or_else(|arc| (*arc).clone());
-    let picker = picker_for(store.cell_size());
+    let picker = picker_for(store.cell_size(), protocol);
     let proto = picker
         .new_protocol(
             decoded,

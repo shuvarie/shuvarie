@@ -144,6 +144,27 @@ pub enum Event {
     AttachmentMedia {
         items: Vec<LoadedAttachment>,
     },
+    /// Reply to [`Command::ProbeDirectives`]: the attach strip's per-path
+    /// preview, order-aligned with the requested paths. The composer drops
+    /// stale replies (an older `token`) when the pending set changed again.
+    DirectivesProbed {
+        token: u64,
+        items: Vec<crate::attachments::DirectiveProbe>,
+    },
+    /// Reply to [`Command::RequestPathCompletions`]: the matching directory
+    /// entries for the composer's `@` mention popup. Stale replies (an older
+    /// `token`) are dropped the same way.
+    PathCompletions {
+        token: u64,
+        candidates: Vec<crate::attachments::PathCandidate>,
+    },
+    /// A send-side attachment accommodation the user should know about
+    /// (history images trimmed to the request budget or degraded to notes on
+    /// a text-only target): shown in the status row until the next
+    /// busy-state event replaces it.
+    AttachmentNotice {
+        text: String,
+    },
     /// Reply to [`Command::RecallSteered`]: the recalled prompt content, or
     /// `None` when nothing was queued.
     SteeredRecalled {

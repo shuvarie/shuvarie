@@ -46,6 +46,7 @@ mod title;
 pub mod trust;
 mod utils;
 mod variant;
+mod viewer;
 mod warning;
 mod welcome;
 mod workspace;

@@ -5,12 +5,13 @@ use ratatui::layout::{Alignment, Constraint::*, Layout, Rect};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph};
 use shuvarie_db::StoredScroll;
-use shuvarie_llm::TokenUsage;
+use shuvarie_llm::{AttachmentKind, TokenUsage, format_size};
 use termina::event::{KeyCode, KeyEvent, KeyEventKind};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::tui::utils::{alt, alt_shift, ctrl};
 
+use self::mention::{MentionMenu, MentionMessage};
 use super::commands::{self, CommandAction, CommandRef};
 use super::components::{TextArea, TextAreaEffect, TextAreaMessage};
 use super::permission::{PermissionEffect, PermissionMessage, PermissionUI};
@@ -26,6 +27,7 @@ pub mod blocks;
 pub mod chat;
 pub mod md_cache;
 pub mod media;
+pub mod mention;
 pub mod search;
 pub mod segment;
 pub mod tree;
@@ -128,6 +130,29 @@ pub enum SessionMessage {
     },
     Question(QuestionMessage),
     Slash(SlashMessage),
+    /// The composer's `@` mention completion popup: navigation and
+    /// accept/dismiss. Accepted candidates splice into the buffer's trailing
+    /// mention token.
+    Mention(MentionMessage),
+    /// Reply to [`SessionEffect::ProbeDirectives`]: the pending attachment
+    /// directives' previews, order-aligned with the requested paths. Stale
+    /// tokens (an older probe) are dropped.
+    DirectivesValidated {
+        token: u64,
+        items: Vec<shuvarie_core::attachments::DirectiveProbe>,
+    },
+    /// Reply to [`SessionEffect::PathCompletions`]: the `@` mention popup's
+    /// directory listing (the mention menu matches by its token and dir).
+    PathCompletions {
+        token: u64,
+        candidates: Vec<shuvarie_core::attachments::PathCandidate>,
+    },
+    /// Open the media viewer over the session's images (`v` with an empty
+    /// composer, or a click on an image region): `sha` is the image to land
+    /// on (`None` = the most recent).
+    OpenMediaViewer {
+        sha: Option<String>,
+    },
     /// The theme palette changed (theme picker preview/apply/restore or a
     /// config reload): repaint the chat's cached turn renders and the
     /// sidebar's cached lines with the new palette.
@@ -262,6 +287,9 @@ pub struct SessionScreen {
     pub question: QuestionUI,
     pub permission: PermissionUI,
     slash: SlashMenu,
+    /// The composer's `@` mention completion popup (trailing-mention
+    /// candidates, directory listing cached per dir part).
+    mention: MentionMenu,
     pub chat: chat::Chat,
     /// Floating display-only window for the latest bash-mode run.
     pub bash: bash::BashPopup,
@@ -289,6 +317,13 @@ pub struct SessionScreen {
     /// The session's deduped per-model usage (first-use ordered), rebuilt on
     /// load and extended live; the `/assisted-by` popup reads it at open.
     pub models_used: Vec<shuvarie_core::ModelUsage>,
+    /// The attach strip's probe round-trip: the pending token, the path set
+    /// the last issued probe carried, the replies aligned to it, and the
+    /// core requests `sync_pending` queues (flushed by the app hop).
+    pending_token: u64,
+    requested_directives: Vec<String>,
+    pending: Option<Vec<PendingChip>>,
+    deferred_effects: Vec<SessionEffect>,
 }
 
 impl SessionScreen {
@@ -298,6 +333,7 @@ impl SessionScreen {
             question: QuestionUI::new(),
             permission: PermissionUI::new(),
             slash: SlashMenu::new(),
+            mention: MentionMenu::new(),
             chat: chat::Chat::new(),
             bash: bash::BashPopup::new(),
             search: SearchPrompt::new(),
@@ -319,6 +355,10 @@ impl SessionScreen {
             history_area: Cell::new(Rect::default()),
             copy_on_select: false,
             models_used: Vec::new(),
+            pending_token: 0,
+            requested_directives: Vec::new(),
+            pending: Some(Vec::new()),
+            deferred_effects: Vec::new(),
         }
     }
 
@@ -493,6 +533,14 @@ impl SessionScreen {
         {
             return Some(SessionMessage::Slash(m));
         }
+        // The `@` mention popup claims its navigation/accept keys the same
+        // way the slash menu does (never both — the slash trigger is the
+        // buffer's first char, mentions appear mid-text).
+        if self.mention.active()
+            && let Some(m) = self.mention.map_event(key)
+        {
+            return Some(SessionMessage::Mention(m));
+        }
         if ctrl(key) {
             if let Some(m) = self.sidebar.map_event(key) {
                 return Some(SessionMessage::Sidebar(m));
@@ -533,6 +581,13 @@ impl SessionScreen {
             }
             KeyCode::Up => Some(SessionMessage::Chat(ChatMessage::ScrollUp)),
             KeyCode::Down => Some(SessionMessage::Chat(ChatMessage::ScrollDown)),
+            // The media viewer over the session's images. Tab is dead with
+            // an empty composer otherwise (no popup to complete), so it is
+            // free to open the viewer here; the footer advertises it when
+            // images exist.
+            KeyCode::Tab if self.input.is_empty() => {
+                Some(SessionMessage::OpenMediaViewer { sha: None })
+            }
             KeyCode::Escape if key.kind == KeyEventKind::Press => {
                 if self.chat.is_streaming()
                     && self
@@ -604,6 +659,14 @@ impl SessionScreen {
 
     pub fn update(&mut self, msg: SessionMessage) -> Option<SessionEffect> {
         self.sync_slash();
+        let effect = self.update_effect(msg);
+        self.sync_pending();
+        effect
+    }
+
+    /// The update body proper; `update` wraps it with the compose-side sync
+    /// (`sync_slash` + `sync_pending`) so effects from both survive.
+    fn update_effect(&mut self, msg: SessionMessage) -> Option<SessionEffect> {
         match msg {
             SessionMessage::Text(m) => {
                 if let Some(effect) = self.input.update(m) {
@@ -665,6 +728,15 @@ impl SessionScreen {
             SessionMessage::Chat(msg) => {
                 self.observe_chat(&msg);
                 self.chat.update(msg);
+                if let Some((turn, slot)) = self.chat.take_media_open()
+                    && let Some((_, item)) = self.chat.image_hit_item(turn, slot)
+                {
+                    let items = self.chat.image_inventory();
+                    return Some(SessionEffect::OpenMediaViewer {
+                        items,
+                        selected: Some(item.0),
+                    });
+                }
                 self.drain_media()
             }
             SessionMessage::Mouse { kind, column, row } => self.handle_mouse(kind, column, row),
@@ -755,6 +827,49 @@ impl SessionScreen {
                     None
                 }
             },
+            SessionMessage::Mention(m) => {
+                match m {
+                    MentionMessage::Next => self.mention.next(),
+                    MentionMessage::Prev => self.mention.prev(),
+                    MentionMessage::Accept => {
+                        if let Some(candidate) = self.mention.accept() {
+                            let (start, end) = self.mention.token_range();
+                            self.input
+                                .buffer
+                                .replace_range(start..end, &format!("@{candidate}"));
+                            self.input.buffer.place_cursor(start + 1 + candidate.len());
+                        }
+                    }
+                    MentionMessage::Dismiss => self.mention.dismiss(),
+                }
+                None
+            }
+            SessionMessage::DirectivesValidated { token, items } => {
+                if token == self.pending_token {
+                    self.pending = Some(
+                        self.requested_directives
+                            .iter()
+                            .zip(items)
+                            .map(|(path, probe)| PendingChip {
+                                path: path.clone(),
+                                probe,
+                            })
+                            .collect(),
+                    );
+                }
+                None
+            }
+            SessionMessage::PathCompletions { token, candidates } => {
+                self.mention.set_candidates(token, candidates);
+                None
+            }
+            SessionMessage::OpenMediaViewer { sha } => {
+                let items = self.chat.image_inventory();
+                (!items.is_empty()).then_some(SessionEffect::OpenMediaViewer {
+                    items,
+                    selected: sha,
+                })
+            }
             SessionMessage::CancelRequested => {
                 if self.chat.is_streaming() {
                     self.last_escape = None;
@@ -1196,10 +1311,16 @@ impl SessionScreen {
             self.input.desired_height(content_area.width as usize)
         };
         let working_rows = working_rows(&self.working_todos);
+        let strip_rows = if self.permission.open || self.question.open {
+            0
+        } else {
+            pending_strip_rows(&self.pending)
+        };
         let [
             title_area,
             todos_area,
             history_area,
+            strip_area,
             input_area,
             status_area,
             info_area,
@@ -1208,6 +1329,7 @@ impl SessionScreen {
             Length(1),
             Length(working_rows),
             Min(0),
+            Length(strip_rows),
             Length(input_height),
             Length(1),
             Length(u16::from(collapsed)),
@@ -1241,6 +1363,16 @@ impl SessionScreen {
         frame.render_widget(history_block, history_area);
         self.chat.view(frame, history_inner);
 
+        // The pending-attachment strip sits directly above the composer,
+        // aligned with the content column's left padding so the chips line
+        // up under the chat.
+        if strip_rows > 0
+            && let Some(lines) = pending_strip_lines(&self.pending, strip_area.width)
+        {
+            let strip_block = Block::new().padding(Padding::horizontal(2));
+            frame.render_widget(Paragraph::new(lines), strip_block.inner(strip_area));
+        }
+
         if self.permission.open {
             self.permission.view(frame, input_area);
         } else if self.question.open {
@@ -1257,6 +1389,10 @@ impl SessionScreen {
         if !self.question.open && self.slash.active() {
             let rect = self.slash.popup_rect(history_area, input_area);
             self.slash.view(frame, rect);
+        }
+        if !self.question.open && self.mention.active() {
+            let rect = self.mention.popup_rect(history_area, input_area);
+            self.mention.view(frame, rect);
         }
 
         // The bash popup floats over the chat content, directly above the
@@ -1377,6 +1513,9 @@ impl SessionScreen {
                     vec![("Enter", enter), ("Ctrl+M", "commands"), ("Ctrl+C", ctrl_c)];
                 bindings.extend(cut);
                 bindings.extend(recall);
+                if self.chat.has_images() {
+                    bindings.push(("Tab", "images"));
+                }
                 theme::help_line(&bindings)
             };
             let workspace = if collapsed {
@@ -1444,11 +1583,95 @@ pub enum SessionEffect {
     LoadMedia {
         hashes: Vec<String>,
     },
+    /// Preview the composer's pending `@path` directives for the attach
+    /// strip (reply: `Event::DirectivesProbed`, matched by `token`).
+    ProbeDirectives {
+        token: u64,
+        paths: Vec<String>,
+    },
+    /// Directory entries for the `@` mention completion popup (reply:
+    /// `Event::PathCompletions`, matched in the mention menu).
+    PathCompletions {
+        token: u64,
+        query: String,
+    },
+    /// Open the media viewer over the session's images: `items` are the
+    /// viewer's gallery (image sha + name, display order) and `selected` is
+    /// the image to land on (an sha when opened by click, `None` = the
+    /// most recent). The viewer fetches its own bytes via `LoadAttachmentMedia`.
+    OpenMediaViewer {
+        items: Vec<(String, String)>,
+        selected: Option<String>,
+    },
     /// Store `text` on the system clipboard (written as OSC 52 by the render
     /// loop).
     CopyToClipboard {
         text: String,
     },
+}
+
+/// One chip of the composer's pending-attachment strip: the directive path
+/// and its shallow probe (metadata only; send time does the real work).
+#[derive(Debug, Clone)]
+struct PendingChip {
+    path: String,
+    probe: shuvarie_core::attachments::DirectiveProbe,
+}
+
+impl PendingChip {
+    fn line(&self) -> Line<'static> {
+        if let Some(error) = &self.probe.error {
+            return Line::from(vec![
+                Span::raw("✗").fg(theme::warning()),
+                Span::raw(format!(" @{}", self.path)).fg(theme::text()),
+                Span::raw(format!(" — {error}")).fg(theme::warning()),
+            ]);
+        }
+        let (icon, color, kind) = match self.probe.kind {
+            Some(AttachmentKind::Image) => ("🖼", theme::accent(), "image"),
+            Some(AttachmentKind::Document) => ("▤", theme::text(), "document"),
+            None => ("▪", theme::text_dim(), "file"),
+        };
+        let size = match self.probe.size {
+            Some(size) => format!(" · {}", format_size(size)),
+            None => String::new(),
+        };
+        Line::from(vec![
+            Span::raw(icon).fg(color),
+            Span::raw(format!(" @{} — {kind}{size}", self.path)).fg(color),
+        ])
+    }
+}
+
+/// Rows the pending-attachment strip reserves above the input: up to two
+/// chip rows plus an overflow hint, nothing while empty or validated-empty.
+fn pending_strip_rows(pending: &Option<Vec<PendingChip>>) -> u16 {
+    match pending {
+        Some(chips) if !chips.is_empty() => {
+            (chips.len().min(2) + usize::from(chips.len() > 2)) as u16
+        }
+        _ => 0,
+    }
+}
+
+/// The strip's lines: one chip per row (two visible) and an overflow hint.
+fn pending_strip_lines(
+    pending: &Option<Vec<PendingChip>>,
+    _width: u16,
+) -> Option<Vec<Line<'static>>> {
+    let chips = pending.as_ref()?;
+    if chips.is_empty() {
+        return None;
+    }
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for chip in chips.iter().take(2) {
+        lines.push(chip.line());
+    }
+    let overflow = chips.len().saturating_sub(2);
+    if overflow > 0 {
+        lines.push(Line::from(format!("… +{overflow} more")).fg(theme::text_muted()));
+    }
+    Some(lines)
 }
 
 /// Rows the working-todos strip occupies below the title bar: one per
@@ -1520,6 +1743,37 @@ impl SessionScreen {
     fn drain_media(&mut self) -> Option<SessionEffect> {
         let hashes = self.chat.take_media_requests();
         (!hashes.is_empty()).then_some(SessionEffect::LoadMedia { hashes })
+    }
+
+    /// Sync the compose-side attachment surfaces to the buffer: the pending
+    /// directive probe (the attach strip) and the `@` mention popup. Both
+    /// answer through effects queued into `deferred_effects` — the app hop
+    /// drains them via [`SessionScreen::take_deferred_effects`] so a message
+    /// with its own effect still gets them sent.
+    fn sync_pending(&mut self) {
+        let directives = at_directives(&self.input.buffer.value);
+        if self.requested_directives != directives {
+            self.pending_token = self.pending_token.wrapping_add(1);
+            self.requested_directives = directives.clone();
+            self.pending = Some(Vec::new());
+            if !directives.is_empty() {
+                self.deferred_effects.push(SessionEffect::ProbeDirectives {
+                    token: self.pending_token,
+                    paths: directives,
+                });
+            }
+        }
+        if let Some((token, query)) = self.mention.sync(&self.input.buffer.value) {
+            self.deferred_effects
+                .push(SessionEffect::PathCompletions { token, query });
+        }
+    }
+
+    /// Queued core requests from the compose-side sync; the app hop sends
+    /// each through `ctx.send`. Kept separate from `update`'s own effect so
+    /// both survive one message.
+    pub fn take_deferred_effects(&mut self) -> Vec<SessionEffect> {
+        std::mem::take(&mut self.deferred_effects)
     }
 }
 
@@ -1625,7 +1879,11 @@ mod tests {
         })
     }
 
-    fn draw(screen: &SessionScreen, w: u16, h: u16) -> ratatui::buffer::Buffer {
+    pub(in crate::tui::session) fn draw(
+        screen: &SessionScreen,
+        w: u16,
+        h: u16,
+    ) -> ratatui::buffer::Buffer {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -1654,7 +1912,10 @@ mod tests {
     }
 
     /// Row text of the content pane only (sidebar is 30 cols + 1 gutter).
-    fn content_row_text(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+    pub(in crate::tui::session) fn content_row_text(
+        buf: &ratatui::buffer::Buffer,
+        y: u16,
+    ) -> String {
         (31..buf.area().width)
             .map(|x| buf[(x, y)].symbol().to_string())
             .collect()
@@ -3218,5 +3479,183 @@ mod tests {
             title.trim_end().ends_with("search"),
             "pinned to the right edge: {title:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod compose_tests {
+    use super::tests::{content_row_text, draw};
+    use super::*;
+    use shuvarie_core::attachments::{DirectiveProbe, PathCandidate};
+    use termina::event::KeyCode;
+
+    fn type_text(screen: &mut SessionScreen, text: &str) {
+        for ch in text.chars() {
+            screen.update(SessionMessage::Text(TextAreaMessage::Input(ch)));
+        }
+    }
+
+    fn key(screen: &SessionScreen, code: KeyCode) -> Option<SessionMessage> {
+        screen.map_event(&termina::event::KeyEvent::new(
+            code,
+            termina::event::Modifiers::NONE,
+        ))
+    }
+
+    #[test]
+    fn typed_directives_request_probe_and_render_chips() {
+        let mut screen = SessionScreen::new();
+        type_text(&mut screen, "look at @plan.pdf");
+        // The sync queued probe round-trips one per directive-set change:
+        // `plan.pd` then `plan.pdf` (the `p` of `plan.p`... has no extension
+        // yet). The last one carried the final set.
+        let deferred = screen.take_deferred_effects();
+        let last = deferred.last().expect("a probe was queued");
+        let probe_token = match last {
+            SessionEffect::ProbeDirectives { token, paths } => {
+                assert_eq!(paths, &["plan.pdf".to_string()]);
+                *token
+            }
+            other => panic!("expected the probe last: {other:?}"),
+        };
+        // While probing, the strip is hidden.
+        assert_eq!(screen.pending.as_ref().unwrap().len(), 0);
+        // The reply fills the strip with chips.
+        screen.update(SessionMessage::DirectivesValidated {
+            token: probe_token,
+            items: vec![DirectiveProbe {
+                kind: Some(shuvarie_llm::AttachmentKind::Document),
+                size: Some(4096),
+                error: None,
+            }],
+        });
+        assert_eq!(screen.pending.as_ref().unwrap().len(), 1);
+        // A stale reply (an older token) never clobbers it.
+        screen.update(SessionMessage::DirectivesValidated {
+            token: 0,
+            items: vec![DirectiveProbe {
+                kind: None,
+                size: None,
+                error: Some("missing file".into()),
+            }],
+        });
+        assert!(screen.pending.as_ref().unwrap()[0].probe.error.is_none());
+        // The chip line renders above the input (its own row).
+        let buf = draw(&screen, 100, 30);
+        let chip_rows = (0..buf.area().height)
+            .filter(|y| content_row_text(&buf, *y).contains("@plan.pdf"))
+            .count();
+        assert!(chip_rows > 0, "the chip renders somewhere");
+        // And clearing the buffer drops the strip.
+        assert!(screen.pending.as_ref().unwrap().len() == 1);
+    }
+
+    #[test]
+    fn mention_flow_requests_lists_and_accepts_a_completion() {
+        let mut screen = SessionScreen::new();
+        type_text(&mut screen, "@");
+        // The listing request fires for the root dir.
+        let deferred = screen.take_deferred_effects();
+        assert!(matches!(
+            deferred.as_slice(),
+            [.., SessionEffect::PathCompletions { token: 0, query }]
+                if query.is_empty()
+        ));
+        // The listing reply opens the popup.
+        screen.update(SessionMessage::PathCompletions {
+            token: 0,
+            candidates: vec![
+                PathCandidate {
+                    name: "src/".into(),
+                    is_dir: true,
+                },
+                PathCandidate {
+                    name: "main.rs".into(),
+                    is_dir: false,
+                },
+            ],
+        });
+        assert!(screen.mention.active());
+        // Typing inside the same dir keeps candidates locally.
+        assert!(screen.take_deferred_effects().is_empty(), "same dir");
+        // Tab accepts the highlighted (first) candidate and splices it.
+        screen.update(SessionMessage::Mention(MentionMessage::Accept));
+        assert_eq!(screen.input.buffer.value, "@src/");
+        // Completing into a directory requests ITS listing next sync.
+        let deferred = screen.take_deferred_effects();
+        assert!(matches!(
+            deferred.as_slice(),
+            [SessionEffect::PathCompletions { token: 1, query }] if query == "src/"
+        ));
+    }
+
+    #[test]
+    fn map_event_claims_keys_while_the_mention_popup_is_open() {
+        let mut screen = SessionScreen::new();
+        type_text(&mut screen, "@");
+        screen.update(SessionMessage::PathCompletions {
+            token: 0,
+            candidates: vec![PathCandidate {
+                name: "main.rs".into(),
+                is_dir: false,
+            }],
+        });
+        assert!(screen.mention.active());
+        // Up/Down/Enter/Tab/Esc route to the popup, not the chat/input.
+        for code in [KeyCode::Up, KeyCode::Down, KeyCode::Enter, KeyCode::Tab] {
+            assert!(
+                matches!(key(&screen, code), Some(SessionMessage::Mention(_))),
+                "{code:?} goes to the mention popup"
+            );
+        }
+        assert!(matches!(
+            key(&screen, KeyCode::Escape),
+            Some(SessionMessage::Mention(_))
+        ));
+        // Escape dismissed: keys flow normally again.
+        screen.update(SessionMessage::Mention(MentionMessage::Dismiss));
+        assert!(matches!(
+            key(&screen, KeyCode::Up),
+            Some(SessionMessage::Chat(_))
+        ));
+        assert!(!screen.mention.active());
+    }
+
+    #[test]
+    fn viewer_bound_to_tab_on_an_empty_composer() {
+        let mut screen = SessionScreen::new();
+        // No images yet: the binding produces nothing.
+        assert!(matches!(
+            key(&screen, KeyCode::Tab),
+            Some(SessionMessage::OpenMediaViewer { sha: None })
+        ));
+        assert_eq!(
+            screen.update(SessionMessage::OpenMediaViewer { sha: None }),
+            None,
+            "no images → no viewer"
+        );
+        // TurnStarted delivers a turn with an image (the session-side path).
+        screen.update(SessionMessage::TurnStarted {
+            content: "look".into(),
+            attachments: vec![shuvarie_llm::Attachment {
+                kind: shuvarie_llm::AttachmentKind::Image,
+                name: "shot.png".into(),
+                media_type: "image/png".into(),
+                size: 2048,
+                sha256: "sha_x".into(),
+            }],
+            steered: false,
+        });
+        assert!(screen.chat.has_images());
+        // Opening returns the viewer effect with the gallery and sha.
+        match screen.update(SessionMessage::OpenMediaViewer {
+            sha: Some("sha_x".into()),
+        }) {
+            Some(SessionEffect::OpenMediaViewer { items, selected }) => {
+                assert_eq!(items, vec![("sha_x".to_string(), "shot.png".to_string())]);
+                assert_eq!(selected.as_deref(), Some("sha_x"));
+            }
+            other => panic!("expected the open effect: {other:?}"),
+        }
     }
 }

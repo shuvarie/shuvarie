@@ -330,6 +330,7 @@ impl ToolBlock {
             bg: Some(self.bg()),
             padding: BLOCK_PADDING,
             hit: None,
+            media_hits: Vec::new(),
             trim: false,
         }
     }

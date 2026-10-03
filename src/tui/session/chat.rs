@@ -201,6 +201,7 @@ pub enum ChatMessage {
     /// `None` = derive a 1:2 guess). Sent at startup.
     ImageConfig {
         cell_size: Option<(u16, u16)>,
+        protocol: Option<ratatui_image::picker::ProtocolType>,
     },
     TokenReceived {
         content: String,
@@ -440,6 +441,9 @@ pub struct Chat {
     /// Drained by the session screen into a `LoadMedia` effect after every
     /// chat update.
     pending_media: RefCell<BTreeSet<String>>,
+    /// A media click waiting for the session to drain: the turn index and
+    /// the image slot — opens the media viewer at that image.
+    pending_media_open: Cell<Option<(usize, u16)>>,
 }
 
 impl Chat {
@@ -469,6 +473,7 @@ impl Chat {
             search_matches: Cell::new(0),
             media: RefCell::new(MediaStore::new(FontSize::new(8, 16))),
             pending_media: RefCell::new(BTreeSet::new()),
+            pending_media_open: Cell::new(None),
         }
     }
 
@@ -495,6 +500,12 @@ impl Chat {
 
     pub fn has_messages(&self) -> bool {
         !self.turns.borrow().is_empty()
+    }
+
+    /// Whether the chat holds any image attachment (the viewer key and the
+    /// footer hint).
+    pub fn has_images(&self) -> bool {
+        !self.image_scan().is_empty()
     }
 
     /// Whether the visible history contains at least one user prompt: title
@@ -564,10 +575,16 @@ impl Chat {
                 drop(media);
                 self.refresh_turns_with_media(&arrived);
             }
-            ChatMessage::ImageConfig { cell_size } => {
+            ChatMessage::ImageConfig {
+                cell_size,
+                protocol,
+            } => {
                 let cell = cell_size.map(|(width, height)| FontSize::new(width, height));
                 if let Some(cell) = cell {
                     self.media.borrow_mut().set_cell_size(cell)
+                }
+                if let Some(protocol) = protocol {
+                    self.media.borrow_mut().set_protocol(protocol)
                 }
             }
             ChatMessage::TokenReceived { content } => {
@@ -1694,6 +1711,69 @@ impl Chat {
             .collect()
     }
 
+    /// A media click waiting to open the viewer: the turn index and the
+    /// clicked image's slot in that turn's attachment strip.
+    pub fn take_media_open(&self) -> Option<(usize, u16)> {
+        self.pending_media_open.replace(None)
+    }
+
+    /// The session's images in display order (committed turns from the
+    /// stored session — its messages address turns 1:1 — then the live
+    /// pushed turns), as (sha256, name) for the media viewer's gallery.
+    pub fn image_inventory(&self) -> Vec<(String, String)> {
+        self.image_scan()
+            .into_iter()
+            .map(|(item, _, _)| item)
+            .collect()
+    }
+
+    /// A clicked (turn, image slot) resolved into the gallery:
+    /// `(position, (sha, name))`.
+    pub fn image_hit_item(&self, turn: usize, slot: u16) -> Option<(usize, (String, String))> {
+        self.image_scan()
+            .into_iter()
+            .enumerate()
+            .find(|(_, (_, hit_turn, hit_slot))| *hit_turn == turn && *hit_slot == slot)
+            .map(|(pos, (item, _, _))| (pos, item))
+    }
+
+    fn image_scan(&self) -> Vec<((String, String), usize, u16)> {
+        let mut out = Vec::new();
+        // Committed turns read the stored session (lazy turns hold no
+        // blocks); its messages address turns 1:1.
+        if let Some(session) = self.stored.as_ref() {
+            for (turn_idx, message) in session.messages.iter().enumerate() {
+                out.extend(
+                    message
+                        .attachments
+                        .iter()
+                        .filter(|a| a.kind == AttachmentKind::Image)
+                        .enumerate()
+                        .map(|(slot, a)| {
+                            ((a.sha256.clone(), a.name.clone()), turn_idx, slot as u16)
+                        }),
+                );
+            }
+        }
+        // Live pushed turns (begun while streaming) are materialized at
+        // build time: read their media blocks.
+        let turns = self.turns.borrow();
+        for turn_idx in self.stored_len..turns.len() {
+            let Some(blocks) = turns[turn_idx].blocks.as_deref() else {
+                continue;
+            };
+            for block in blocks {
+                let Block::Media(media) = block else {
+                    continue;
+                };
+                for (slot, (sha, name)) in media.image_slots().enumerate() {
+                    out.push(((sha.to_string(), name.to_string()), turn_idx, slot as u16));
+                }
+            }
+        }
+        out
+    }
+
     /// Bump the revision of every turn holding a media block that gained one
     /// of the arrived shas: their caches re-render with the real images, and
     /// the first fresh render re-measures their heights.
@@ -1877,7 +1957,7 @@ impl Chat {
         let width = self.width.get();
         let env_rev = self.env_rev;
         let mut start = 0u32;
-        let mut target = None;
+        let mut target: Option<(BlockAddr, Option<u16>)> = None;
         {
             let turns = self.turns.borrow();
             for slot in turns.iter() {
@@ -1889,7 +1969,7 @@ impl Chat {
                             .hits
                             .iter()
                             .find(|region| local >= region.start && local < region.end)
-                            .map(|region| region.addr.clone());
+                            .map(|region| (region.addr.clone(), region.slot));
                     }
                     break;
                 }
@@ -1908,7 +1988,7 @@ impl Chat {
                         .hits
                         .iter()
                         .find(|region| local >= region.start && local < region.end)
-                        .map(|region| region.addr.clone());
+                        .map(|region| (region.addr.clone(), region.slot));
                 }
             }
         }
@@ -1929,15 +2009,22 @@ impl Chat {
                             .hits
                             .iter()
                             .find(|region| local >= region.start && local < region.end)
-                            .map(|region| region.addr.clone());
+                            .map(|region| (region.addr.clone(), region.slot));
                     }
                     break;
                 }
                 start += h;
             }
         }
-        if let Some(addr) = target {
-            self.toggle_block(addr);
+        if let Some((addr, slot)) = target {
+            if let Some(slot) = slot {
+                // A click on an image region opens the media viewer at that
+                // image; the session drains it into the open effect.
+                self.clear_selection();
+                self.pending_media_open.set(Some((addr.turn, slot)));
+            } else {
+                self.toggle_block(addr);
+            }
         }
     }
 
@@ -2281,7 +2368,11 @@ pub(crate) mod tests {
         }
     }
 
-    fn draw(chat: &Chat, width: u16, height: u16) -> ratatui::buffer::Buffer {
+    pub(in crate::tui::session) fn draw(
+        chat: &Chat,
+        width: u16,
+        height: u16,
+    ) -> ratatui::buffer::Buffer {
         draw_at(chat, Rect::new(0, 0, width, height))
     }
 
@@ -4837,5 +4928,188 @@ pub(crate) mod tests {
             "only the viewport's matches are counted: {visible}"
         );
         assert!(visible > 0, "the sticky-bottom viewport shows matches");
+    }
+}
+
+#[cfg(test)]
+mod media_hits_tests {
+    use super::tests::draw;
+    use super::*;
+    use crate::tui::session::segment::HitRegion;
+    use crate::tui::session::virtualizer::render_turn_cache;
+    fn image_attachment(sha: &str) -> shuvarie_llm::Attachment {
+        shuvarie_llm::Attachment {
+            kind: shuvarie_llm::AttachmentKind::Image,
+            name: "shot.png".into(),
+            media_type: "image/png".into(),
+            size: 2048,
+            sha256: sha.into(),
+        }
+    }
+
+    /// A session with one user turn carrying one image, applied as the
+    /// chat's stored state (the committed-turn path of the inventory).
+    fn stored_chat_with_image() -> (Chat, shuvarie_core::Session) {
+        let mut session = shuvarie_core::Session::new();
+        session.push_user_with("look", vec![image_attachment("sha_media")]);
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::Load {
+            session: session.clone(),
+        });
+        (chat, session)
+    }
+
+    /// The turn's hit regions at the given width (mirrors the live env).
+    fn turn_hits(chat: &Chat, idx: Option<usize>, width: u16) -> Vec<HitRegion> {
+        let diags = BTreeMap::new();
+        let media = chat.media.borrow();
+        let env = ChatEnv {
+            lsp_diagnostics: &diags,
+            rev: 0,
+            media: &media,
+        };
+        let turns = chat.turns.borrow();
+        let flight = chat.in_flight.borrow();
+        let (turn, turn_idx) = match idx {
+            Some(i) => (&turns[i], i),
+            None => (
+                flight.as_ref().expect("in-flight turn present"),
+                turns.len(),
+            ),
+        };
+        render_turn_cache(
+            turn,
+            turn_idx,
+            TurnFlags {
+                in_flight: false,
+                interrupted_marker: false,
+            },
+            width,
+            &env,
+            0,
+        )
+        .unwrap()
+        .hits
+    }
+
+    #[test]
+    fn committed_image_inventory_orders_and_addresses() {
+        let (mut chat, _) = stored_chat_with_image();
+        assert!(chat.has_images());
+        assert_eq!(
+            chat.image_inventory(),
+            vec![("sha_media".to_string(), "shot.png".to_string())]
+        );
+        // A committed turn is lazy until materialized; the viewport does it
+        // when visible — the click path works on visible turns. But the
+        // inventory addresses the stored session directly.
+        chat.ensure_materialized(0);
+        // Unloaded media renders the chip only: no image rows, no hits.
+        assert!(
+            turn_hits(&chat, Some(0), 60)
+                .iter()
+                .all(|hit| hit.slot.is_none())
+        );
+        // Loaded, the image rows stamp their hit region.
+        chat.update(ChatMessage::MediaArrived {
+            items: vec![(
+                "sha_media".into(),
+                Some(MediaBytes(media_png(48, 24).into())),
+            )],
+        });
+        let hits = turn_hits(&chat, Some(0), 60);
+        let media_hit = hits
+            .iter()
+            .find(|hit| hit.slot.is_some())
+            .expect("the media segment stamps an image hit");
+        assert_eq!(media_hit.slot, Some(0));
+        // The hit's rows sit below the turn's header row(s): non-trivial.
+        assert!(media_hit.end > media_hit.start);
+        assert!(media_hit.start >= 1, "below the prompt text");
+    }
+
+    #[test]
+    fn click_on_an_image_region_opens_the_viewer_at_it() {
+        let (mut chat, _) = stored_chat_with_image();
+        chat.update(ChatMessage::MediaArrived {
+            items: vec![(
+                "sha_media".into(),
+                Some(MediaBytes(media_png(48, 24).into())),
+            )],
+        });
+        chat.ensure_materialized(0);
+        let hits = turn_hits(&chat, Some(0), 60);
+        let media_hit = hits
+            .iter()
+            .find(|hit| hit.slot.is_some())
+            .expect("image hit stamped");
+        // One frame: the chat learns its pane rect (mouse coords are the
+        // pane's, the click maps through the hit rows at scroll 0).
+        draw(&chat, 80, 20);
+        let rect = chat.history_rect.get();
+        let row = rect.y + u16::try_from(media_hit.start).unwrap();
+        chat.update(ChatMessage::Mouse {
+            kind: MouseKind::Down,
+            column: rect.x + 2,
+            row,
+        });
+        chat.update(ChatMessage::Mouse {
+            kind: MouseKind::Up,
+            column: rect.x + 2,
+            row,
+        });
+        assert_eq!(
+            chat.take_media_open(),
+            Some((0, media_hit.slot.unwrap())),
+            "the image click opens the viewer"
+        );
+        assert_eq!(chat.take_media_open(), None, "draining empties the request");
+    }
+
+    #[test]
+    fn live_turns_extend_the_inventory() {
+        let (mut chat, _) = stored_chat_with_image();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "again".into(),
+            attachments: vec![image_attachment("sha_live")],
+        });
+        chat.update(ChatMessage::MediaArrived {
+            items: vec![(
+                "sha_live".into(),
+                Some(MediaBytes(media_png(48, 24).into())),
+            )],
+        });
+        let inventory = chat.image_inventory();
+        assert_eq!(
+            inventory,
+            vec![
+                ("sha_media".to_string(), "shot.png".to_string()),
+                ("sha_live".to_string(), "shot.png".to_string()),
+            ]
+        );
+        // The live turn sits at stored_len; clicking its image maps through.
+        let hits = turn_hits(&chat, Some(1), 60);
+        let media_hit = hits
+            .iter()
+            .find(|hit| hit.slot.is_some())
+            .expect("live turn stamps an image hit");
+        let (pos, item) = chat
+            .image_hit_item(1, media_hit.slot.unwrap())
+            .expect("the live click maps into the gallery");
+        assert_eq!(pos, 1);
+        assert_eq!(item.0, "sha_live");
+    }
+
+    fn media_png(width: u32, height: u32) -> Vec<u8> {
+        use image::ImageEncoder;
+        use image::codecs::png::PngEncoder;
+        let img = image::ImageBuffer::from_fn(width, height, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 90])
+        });
+        let mut out = Vec::new();
+        PngEncoder::new(std::io::Cursor::new(&mut out))
+            .write_image(img.as_raw(), width, height, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        out
     }
 }

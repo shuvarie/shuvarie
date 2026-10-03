@@ -10,7 +10,7 @@ use shuvarie_llm::{Attachment, AttachmentKind};
 
 use super::super::media;
 use super::super::media::MediaStore;
-use super::super::segment::{BLOCK_PADDING, BodyChunk, Segment};
+use super::super::segment::{BLOCK_PADDING, BodyChunk, MediaHit, Segment};
 use super::super::virtualizer::TurnEst;
 use crate::tui::theme;
 
@@ -42,7 +42,15 @@ struct MediaCacheKey {
 /// A user message's attachments, projected below the prompt text.
 pub struct MediaBlock {
     slots: Vec<MediaSlot>,
-    cache: RefCell<Option<(MediaCacheKey, Vec<Line<'static>>)>>,
+    cache: RefCell<Option<MediaCache>>,
+}
+
+/// The built strip: its lines plus the per-image hit rows (chunk-row space,
+/// `slot` = the image's index among the block's image slots).
+struct MediaCache {
+    key: MediaCacheKey,
+    lines: Vec<Line<'static>>,
+    hits: Vec<MediaHit>,
 }
 
 impl MediaBlock {
@@ -67,6 +75,20 @@ impl MediaBlock {
             .iter()
             .filter(|slot| slot.attachment.kind == AttachmentKind::Image)
             .map(|slot| slot.attachment.sha256.as_str())
+    }
+
+    /// The image slots' (sha, name) pairs (the media viewer's gallery
+    /// entries for one turn's strip).
+    pub(crate) fn image_slots(&self) -> impl Iterator<Item = (&str, &str)> + '_ {
+        self.slots
+            .iter()
+            .filter(|slot| slot.attachment.kind == AttachmentKind::Image)
+            .map(|slot| {
+                (
+                    slot.attachment.sha256.as_str(),
+                    slot.attachment.name.as_str(),
+                )
+            })
     }
 
     pub(super) fn est(&self) -> TurnEst {
@@ -95,29 +117,35 @@ impl MediaBlock {
             cell_gen: media_store.cell_gen(),
         };
         let mut cache = self.cache.borrow_mut();
-        let needs_build = cache
-            .as_ref()
-            .is_none_or(|(cached_key, _)| *cached_key != key);
+        let needs_build = cache.as_ref().is_none_or(|cached| cached.key != key);
         if needs_build {
-            *cache = Some((key, self.build_lines(width, media_store)));
+            let (lines, hits) = self.build_lines(width, media_store);
+            *cache = Some(MediaCache { key, lines, hits });
         }
-        let Some((_, lines)) = &*cache else {
+        let Some(cached) = &*cache else {
             return Vec::new();
         };
-        if lines.is_empty() {
+        if cached.lines.is_empty() {
             return Vec::new();
         }
         vec![Segment {
-            chunks: vec![BodyChunk::fixed(lines.clone())],
+            chunks: vec![BodyChunk::fixed(cached.lines.clone())],
             bg: Some(theme::prompt_bg()),
             padding: (BLOCK_PADDING.0, 1),
             hit: None,
+            media_hits: cached.hits.clone(),
             trim: true,
         }]
     }
 
-    fn build_lines(&self, width: u16, media_store: &MediaStore) -> Vec<Line<'static>> {
+    fn build_lines(
+        &self,
+        width: u16,
+        media_store: &MediaStore,
+    ) -> (Vec<Line<'static>>, Vec<MediaHit>) {
         let mut lines = Vec::new();
+        let mut hits = Vec::new();
+        let mut image_slot = 0u16;
         for slot in &self.slots {
             match slot.attachment.kind {
                 AttachmentKind::Document => {
@@ -133,13 +161,21 @@ impl MediaBlock {
                 }
                 AttachmentKind::Image => {
                     match media::image_lines(media_store, &slot.attachment.sha256, width) {
-                        Some(image) => lines.extend(image),
+                        Some(image) => {
+                            hits.push(MediaHit {
+                                from: lines.len() as u32,
+                                to: lines.len() as u32 + image.len() as u32,
+                                slot: image_slot,
+                            });
+                            lines.extend(image);
+                        }
                         None => lines.push(self.chip_line(slot, CHIP_ICON_IMAGE, "not loaded")),
                     }
+                    image_slot += 1;
                 }
             }
         }
-        lines
+        (lines, hits)
     }
 
     fn chip_line(&self, slot: &MediaSlot, icon: &str, kind: &str) -> Line<'static> {

@@ -836,6 +836,29 @@ pub async fn run(
                             .await
                             .ok();
                     }
+                    Command::ProbeDirectives { token, paths } => {
+                        let items = paths
+                            .iter()
+                            .map(|path| {
+                                crate::attachments::run_directive_probe(
+                                    &ctx.workspace_root,
+                                    path,
+                                )
+                            })
+                            .collect();
+                        ctx.event_tx
+                            .send(Event::DirectivesProbed { token, items })
+                            .await
+                            .ok();
+                    }
+                    Command::RequestPathCompletions { token, query } => {
+                        let candidates =
+                            crate::attachments::path_candidates(&ctx.workspace_root, &query);
+                        ctx.event_tx
+                            .send(Event::PathCompletions { token, candidates })
+                            .await
+                            .ok();
+                    }
                     Command::LoadSession { id } => {
                         if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;
@@ -2542,14 +2565,20 @@ impl CoreCtx {
                     .as_ref()
                     .and_then(|p| crate::catalog::find_model(p, &model)),
             );
-            if let Err(error) = crate::attachments::prepare_for_send(
+            let report = match crate::attachments::prepare_for_send(
                 &mut prior,
                 &prompt_attachments,
                 &model,
                 accepts_images,
             ) {
-                let _ = self.event_tx.send(Event::StreamError { error }).await;
-                return;
+                Ok(report) => report,
+                Err(error) => {
+                    let _ = self.event_tx.send(Event::StreamError { error }).await;
+                    return;
+                }
+            };
+            if let Some(text) = report.notice_text() {
+                let _ = self.event_tx.send(Event::AttachmentNotice { text }).await;
             }
             prompt_attachments
         } else {

@@ -81,6 +81,24 @@ pub enum Command {
     LoadAttachmentMedia {
         hashes: Vec<String>,
     },
+    /// Preview the composer's pending `@path` directives for the attach
+    /// strip: per-path existence/size/kind metadata only — no reads or
+    /// conversion (the authoritative preparation runs at send time), so the
+    /// handler answers directly instead of using the blocking pool. Reply:
+    /// [`crate::Event::DirectivesProbed`], matched by `token`. Read-only.
+    ProbeDirectives {
+        token: u64,
+        paths: Vec<String>,
+    },
+    /// Directory entries for the composer's `@` mention completion (reply:
+    /// [`crate::Event::PathCompletions`], matched by `token`). `query` is the
+    /// partial path typed after `@` — an optional directory part plus a name
+    /// prefix, resolved against the workspace root (absolute too). The
+    /// handler answers directly: one `read_dir`, no blocking pool.
+    RequestPathCompletions {
+        token: u64,
+        query: String,
+    },
     LoadSession {
         id: uuid::Uuid,
     },
