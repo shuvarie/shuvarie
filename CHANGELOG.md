@@ -1,5 +1,78 @@
 # Changelog
 
+## [unreleased]
+
+### 🚀 Features
+
+- *(compaction)* More lax compaction triggers (#78)
+- [**breaking**] Add model code-based `assisted-by` generation (#80)
+- *(config)* [**breaking**] Add back boolean argument for `enabled`/`disabled`
+- *(db)* Add global store support (#84)
+- *(registry)* Custom registry support (#88)
+- *(scene)* Add builtin scenes / scene tool concurrency
+- Replace councillor scene with orchestrator
+- *(theme)* Add builtin themes / rework theme system
+- *(permission)* Add allow directory
+- Image and document attachments and reading (#94)
+
+### 🐛 Bug Fixes
+
+- *(update)* Failed to fetch under proxy
+- *(db)* Wal file opening error preventing startup
+- *(tui)* Exit on welcome screen not effective
+
+### 📚 Documentation
+
+- Update CONTRIBUTING.md
+- *(agents)* Add test code notice
+- *(agents)* Update test code notice
+- *(agents)* Update AGENTS.md
+- *(agents)* Fix typo
+- *(readme)* Add legacy warning
+
+### ⚡ Performance
+
+- *(sidebar)* Cache context display
+
+### 🚜 Refactor
+
+- Update stale test cases
+- [**breaking**] Port to rig 0.43 and selune 0.4
+
+### 🎨 Styling
+
+- *(spinner)* Update wait spinner
+
+### 🧪 Testing
+
+- Remove stale/unreproducible test cases
+- Use temp directory instead
+
+### ⚙️ Miscellaneous Tasks
+
+- *(release)* Update changelog
+- Run tests on entire workspace with one character indication
+- Lint against entire workspace
+- Add cargo publish
+
+### ◀️ Revert
+
+- "build: update debug version display"
+
+### 💼 Other
+
+- *(version)* Update version display for debug build
+- *(nsis)* Make version parameter required
+## [0.2.4] - 2026-10-03
+
+### 🐛 Bug Fixes
+
+- *(session)* Retry wiping out assistant prompts
+## [0.2.3] - 2026-09-30
+
+### 🐛 Bug Fixes
+
+- *(session)* Retry would delete assistant prompts
 ## [0.2.2] - 2026-09-23
 
 ### 🐛 Bug Fixes
@@ -39,7 +112,6 @@
 
 - *(cli)* Update cli arguments
 - *(cli)* Add self update
-- *(tui)* Add git branch update for each turn
 - *(provider)* Provider expansion / add oauth2 login (#66)
 - *(tui)* Skill tool block with no output when collapsed
 - *(provider)* Update oauth2 login
@@ -55,7 +127,6 @@
 
 ### 🐛 Bug Fixes
 
-- *(question)* Custom answer selection / editing
 - *(tui)* Misinterpreted keys in tmux
 - *(scenes)* Make interludes truly only used during mid-session switch
 - *(windows)* Compile error when importing
@@ -78,3 +149,12 @@
 - Configure git-cliff
 - Prepare for trunk-based development
 - Replace gnu make with just
+## [0.1.1] - 2026-09-18
+
+### 🚀 Features
+
+- *(tui)* Add git branch update for each turn
+
+### 🐛 Bug Fixes
+
+- *(question)* Custom answer selection / editing
