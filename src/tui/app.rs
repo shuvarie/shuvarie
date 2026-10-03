@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use std::io::{self, Write};
 
 use ratatui::prelude::*;
 use shuvarie_core::{Connections, Event as CoreEvent, Model, RegistriesConfig, UiPrefs};
-use termina::Event as TermEvent;
+use termina::{Event as TermEvent, PlatformTerminal};
 use termina::event::{KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use tokio::sync::mpsc::Sender;
 
@@ -374,6 +375,56 @@ impl App {
     /// Whether the render loop should terminate.
     pub fn quit_requested(&self) -> bool {
         self.quit
+    }
+
+    /// Execute the frame's media renders and deliver the escape payloads
+    /// (kitty transmissions, placed sixel/iTerm2 graphics). Paint is pure:
+    /// this runs between frames, where `&mut` is legitimately held, and
+    /// fills every render entry the pane and viewer paint read. The queued
+    /// payloads reach the terminal outside the cell diff — a megabyte
+    /// payload inside a cell symbol gets wrap-sliced into text by the pane's
+    /// paint — and a draw that delivered one is immediately followed by one
+    /// empty-diff draw (the loop re-draws on `Ok(true)`), letting the
+    /// terminal re-render its grid with the now-transmitted graphic in
+    /// place.
+    pub fn after_frame(
+        &mut self,
+        rat: &mut ratatui::Terminal<TerminaBackend<PlatformTerminal>>,
+    ) -> io::Result<bool> {
+        self.session.chat.ensure_media_renders();
+        if self.media_view.is_open() {
+            let frame_area = rat.get_frame().area();
+            self.media_view.after_frame(frame_area);
+        }
+        let mut writes = self.session.chat.take_media_writes();
+        writes.extend(self.media_view.take_media_writes());
+        if writes.is_empty() {
+            return Ok(false);
+        }
+
+        let terminal = rat.backend_mut().terminal_mut();
+        for write in writes {
+            super::session::media::write_media_write(terminal, write)?;
+        }
+        terminal.flush()?;
+        Ok(true)
+    }
+
+    /// Delete every kitty image the chat pane and viewer transmitted — the
+    /// shutdown hop empties the terminal's image cache.
+    pub fn write_kitty_shutdown_deletes<W: io::Write>(
+        &mut self,
+        terminal: &mut W,
+    ) -> io::Result<()> {
+        let mut writes = self.session.chat.take_kitty_delete_writes();
+        writes.extend(self.media_view.take_kitty_delete_writes());
+        if writes.is_empty() {
+            return Ok(());
+        }
+        for bytes in writes {
+            terminal.write_all(&bytes)?;
+        }
+        terminal.flush()
     }
 
     /// Tab title shown by the terminal emulator: the active session title

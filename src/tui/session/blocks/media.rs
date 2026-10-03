@@ -1,9 +1,8 @@
-//! A user turn's attachment strip: one chip row per document, and one
-//! halfblock image region per image whose media has arrived from core.
-//! Rendered as ordinary styled cells so the chat virtualizer treats it like
-//! any other block (clipping, diffing, caching all keep working).
-
-use std::cell::RefCell;
+//! A user turn's attachment strip: one chip row per document, and one image
+//! region per image whose media has arrived from core (rendered through the
+//! store's protocol ladder; a cold entry shows the unloaded chip). Painted
+//! as ordinary styled cells so the chat virtualizer treats it like any other
+//! block (clipping, diffing, caching all keep working).
 
 use ratatui::prelude::*;
 use shuvarie_llm::{Attachment, AttachmentKind};
@@ -27,27 +26,9 @@ pub struct MediaSlot {
     attachment: Attachment,
 }
 
-/// A cache key: image regions change when the width, the which-images-loaded
-/// mask, or the configured cell size change.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MediaCacheKey {
-    width: u16,
-    media_mask: Vec<u8>,
-    cell_gen: u64,
-}
-
 /// A user message's attachments, projected below the prompt text.
 pub struct MediaBlock {
     slots: Vec<MediaSlot>,
-    cache: RefCell<Option<MediaCache>>,
-}
-
-/// The built strip: its lines plus the per-image hit rows (chunk-row space,
-/// `slot` = the image's index among the block's image slots).
-struct MediaCache {
-    key: MediaCacheKey,
-    lines: Vec<Line<'static>>,
-    hits: Vec<MediaHit>,
 }
 
 impl MediaBlock {
@@ -62,7 +43,6 @@ impl MediaBlock {
                 .into_iter()
                 .map(|attachment| MediaSlot { attachment })
                 .collect(),
-            cache: RefCell::new(None),
         })
     }
 
@@ -102,35 +82,21 @@ impl MediaBlock {
         est
     }
 
+    /// Paint is pure: it reads render entries from the media store (filled
+    /// by the between-frames executor pass; a cold entry shows the unloaded
+    /// chip exactly one frame) and assembles the strip per frame — the chip
+    /// lines and hits are cheap, and the image lines come from the store.
     pub(super) fn view(&self, width: u16, media_store: &MediaStore) -> Vec<Segment> {
-        let key = MediaCacheKey {
-            width,
-            media_mask: self
-                .slots
-                .iter()
-                .filter(|slot| slot.attachment.kind == AttachmentKind::Image)
-                .map(|slot| u8::from(media_store.has(&slot.attachment.sha256)))
-                .collect(),
-            cell_gen: media_store.cell_gen(),
-        };
-        let mut cache = self.cache.borrow_mut();
-        let needs_build = cache.as_ref().is_none_or(|cached| cached.key != key);
-        if needs_build {
-            let (lines, hits) = self.build_lines(width, media_store);
-            *cache = Some(MediaCache { key, lines, hits });
-        }
-        let Some(cached) = &*cache else {
-            return Vec::new();
-        };
-        if cached.lines.is_empty() {
+        let (lines, hits) = self.build_lines(width, media_store);
+        if lines.is_empty() {
             return Vec::new();
         }
         vec![Segment {
-            chunks: vec![BodyChunk::fixed(cached.lines.clone())],
+            chunks: vec![BodyChunk::fixed(lines)],
             bg: Some(theme::prompt_bg()),
             padding: (BLOCK_PADDING.0, 1),
             hit: None,
-            media_hits: cached.hits.clone(),
+            media_hits: hits,
             trim: true,
         }]
     }
@@ -240,6 +206,7 @@ mod tests {
         assert_eq!(unloaded[0].measure(40), 3, "chip row + 2 padding rows");
 
         store.insert("sha".into(), test_media_png());
+        store.ensure_pane("sha", 40);
         let loaded = block.view(40, &store);
         assert!(loaded[0].measure(40) > 3, "image rows add height");
     }

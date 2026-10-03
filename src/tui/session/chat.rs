@@ -16,7 +16,7 @@ use super::blocks::{
     Block, BlockMessage, ChatEnv, ContextBlock, MediaBlock, ReasoningBlock, SteeredPrompt,
     SystemText, TextBlock, ToolBlock, ToolMessage, UserPrompt,
 };
-use super::media::{CHIP_ROWS, MediaBytes, MediaStore};
+use super::media::{CHIP_ROWS, MediaBytes, MediaStore, MediaWrite};
 use super::segment::{BlockAddr, ResolvedRow, Segment, slice_visual, visual_row_text};
 use super::virtualizer::{TurnData, TurnEst, TurnFlags, locate, paint_turn};
 use crate::tui::theme;
@@ -435,8 +435,11 @@ pub struct Chat {
     /// Match tints painted in the last frame's visible window, reported to
     /// the search tooltip.
     pub(crate) search_matches: Cell<usize>,
-    /// Received attachment media for image blocks (LRU-capped).
-    media: RefCell<MediaStore>,
+    /// Received attachment media for image blocks (LRU-capped). Paint reads
+    /// it through a shared `ChatEnv` borrow; all mutation (inserts, render
+    /// entries, write queues) happens in update arms and the loop's
+    /// between-frames pass, through plain `&mut`.
+    media: MediaStore,
     /// Image shas materialized turns need that core has not shipped yet.
     /// Drained by the session screen into a `LoadMedia` effect after every
     /// chat update.
@@ -447,6 +450,56 @@ pub struct Chat {
 }
 
 impl Chat {
+    /// Between-frames media writes (kitty transmissions) queued by render
+    /// entries — the render loop delivers them past the cell diff.
+    pub(crate) fn take_media_writes(&mut self) -> Vec<MediaWrite> {
+        self.media.take_writes()
+    }
+
+    /// Delete sequences for every kitty image the pane transmitted — the
+    /// shutdown hop empties the terminal's image cache.
+    pub(crate) fn take_kitty_delete_writes(&mut self) -> Vec<Vec<u8>> {
+        self.media.take_kitty_deletes()
+    }
+
+    /// The between-frames executor pass for pane media: render entries for
+    /// every materialized turn's images at the frame's stored content width
+    /// (set by the last `view`). Paint is pure and reads the entries; this
+    /// runs where `&mut` is legitimately held. `self.width == 0` means no
+    /// frame has painted yet — the first frame paints chips, and this fills
+    /// from the second on.
+    pub(crate) fn ensure_media_renders(&mut self) {
+        let width = self.width.get();
+        if width == 0 {
+            return;
+        }
+        let mut shas = Vec::new();
+        {
+            let turns = self.turns.borrow();
+            for turn in turns.iter() {
+                if let Some(blocks) = turn.blocks.as_deref() {
+                    Self::collect_media_shas(blocks, &mut shas);
+                }
+            }
+        }
+        if let Some(turn) = self.in_flight.borrow().as_ref()
+            && let Some(blocks) = turn.blocks.as_deref()
+        {
+            Self::collect_media_shas(blocks, &mut shas);
+        }
+        {
+            let steered = self.steered.borrow();
+            for turn in steered.iter() {
+                if let Some(blocks) = turn.blocks.as_deref() {
+                    Self::collect_media_shas(blocks, &mut shas);
+                }
+            }
+        }
+        for sha in shas {
+            self.media.ensure_pane(&sha, width);
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             turns: RefCell::new(Vec::new()),
@@ -471,7 +524,7 @@ impl Chat {
             history_rect: Cell::new(Rect::default()),
             search: RefCell::new(None),
             search_matches: Cell::new(0),
-            media: RefCell::new(MediaStore::new(FontSize::new(8, 16))),
+            media: MediaStore::new(FontSize::new(8, 16)),
             pending_media: RefCell::new(BTreeSet::new()),
             pending_media_open: Cell::new(None),
         }
@@ -562,17 +615,15 @@ impl Chat {
             }
             ChatMessage::MediaArrived { items } => {
                 let mut arrived: Vec<String> = Vec::new();
-                let mut media = self.media.borrow_mut();
                 for (sha256, bytes) in items {
-                    if media.has(&sha256) {
+                    if self.media.has(&sha256) {
                         continue;
                     }
                     if let Some(bytes) = bytes {
-                        media.insert(sha256.clone(), bytes.0.to_vec());
+                        self.media.insert(sha256.clone(), bytes.0.to_vec());
                     }
                     arrived.push(sha256);
                 }
-                drop(media);
                 self.refresh_turns_with_media(&arrived);
             }
             ChatMessage::ImageConfig {
@@ -581,10 +632,10 @@ impl Chat {
             } => {
                 let cell = cell_size.map(|(width, height)| FontSize::new(width, height));
                 if let Some(cell) = cell {
-                    self.media.borrow_mut().set_cell_size(cell)
+                    self.media.set_cell_size(cell);
                 }
                 if let Some(protocol) = protocol {
-                    self.media.borrow_mut().set_protocol(protocol)
+                    self.media.set_protocol(protocol);
                 }
             }
             ChatMessage::TokenReceived { content } => {
@@ -802,11 +853,10 @@ impl Chat {
                 self.clear_selection_from(from);
             }
             ChatMessage::SpinnerUpdate => {
-                let env_media = self.media.borrow();
                 let env = ChatEnv {
                     lsp_diagnostics: &self.lsp_diagnostics,
                     rev: self.env_rev,
-                    media: &env_media,
+                    media: &self.media,
                 };
                 if let Some(turn) = self.in_flight.get_mut() {
                     turn.refresh_spinners(&env);
@@ -841,11 +891,10 @@ impl Chat {
             }
         }
 
-        let env_media = self.media.borrow();
         let env = ChatEnv {
             lsp_diagnostics: &self.lsp_diagnostics,
             rev: self.env_rev,
-            media: &env_media,
+            media: &self.media,
         };
         let env_rev = self.env_rev;
         let streaming = self.streaming;
@@ -1698,7 +1747,7 @@ impl Chat {
     where
         I: IntoIterator<Item = &'a str>,
     {
-        let missing = self.media.borrow().missing(shas);
+        let missing = self.media.missing(shas);
         if !missing.is_empty() {
             *self.pending_media.borrow_mut() = missing.into_iter().collect();
         }
@@ -1772,6 +1821,16 @@ impl Chat {
             }
         }
         out
+    }
+
+    /// The image shas a materialized turn's media blocks hold (the
+    /// between-frames render pass's work set).
+    fn collect_media_shas(blocks: &[Block], out: &mut Vec<String>) {
+        for block in blocks {
+            if let Block::Media(media) = block {
+                out.extend(media.image_shas().map(str::to_string));
+            }
+        }
     }
 
     /// Bump the revision of every turn holding a media block that gained one
@@ -2392,11 +2451,10 @@ pub(crate) mod tests {
         width: u16,
     ) -> Option<String> {
         let diags = BTreeMap::new();
-        let media = chat.media.borrow();
         let env = ChatEnv {
             lsp_diagnostics: &diags,
             rev: 0,
-            media: &media,
+            media: &chat.media,
         };
         let cache = match turn_idx {
             Some(idx) => {
@@ -2596,6 +2654,10 @@ pub(crate) mod tests {
                 Some(MediaBytes(media_png(48, 24).into())),
             )],
         });
+        // The between-frames executor pass fills the entry paint reads; the
+        // helper renders at width 60 without view(), so the key is set here.
+        chat.width.set(60);
+        chat.ensure_media_renders();
         let loaded = render_turn_lines(&chat, Some(0), 60).unwrap();
         assert!(
             loaded.lines().count() > unloaded_rows,
@@ -4962,11 +5024,10 @@ mod media_hits_tests {
     /// The turn's hit regions at the given width (mirrors the live env).
     fn turn_hits(chat: &Chat, idx: Option<usize>, width: u16) -> Vec<HitRegion> {
         let diags = BTreeMap::new();
-        let media = chat.media.borrow();
         let env = ChatEnv {
             lsp_diagnostics: &diags,
             rev: 0,
-            media: &media,
+            media: &chat.media,
         };
         let turns = chat.turns.borrow();
         let flight = chat.in_flight.borrow();
@@ -5010,13 +5071,16 @@ mod media_hits_tests {
                 .iter()
                 .all(|hit| hit.slot.is_none())
         );
-        // Loaded, the image rows stamp their hit region.
+        // Loaded, the image rows stamp their hit region. A between-frames
+        // pass fills the render entry after the arrival.
         chat.update(ChatMessage::MediaArrived {
             items: vec![(
                 "sha_media".into(),
                 Some(MediaBytes(media_png(48, 24).into())),
             )],
         });
+        chat.width.set(60);
+        chat.ensure_media_renders();
         let hits = turn_hits(&chat, Some(0), 60);
         let media_hit = hits
             .iter()
@@ -5031,21 +5095,27 @@ mod media_hits_tests {
     #[test]
     fn click_on_an_image_region_opens_the_viewer_at_it() {
         let (mut chat, _) = stored_chat_with_image();
+        // Materialize, then paint once cold (chip) — that first paint stores
+        // chat.width for the executor pass, exactly as the real loop runs.
+        chat.ensure_materialized(0);
+        draw(&chat, 61, 20);
         chat.update(ChatMessage::MediaArrived {
             items: vec![(
                 "sha_media".into(),
                 Some(MediaBytes(media_png(48, 24).into())),
             )],
         });
-        chat.ensure_materialized(0);
+        // The arrival bumped the materialized turn; the executor pass fills
+        // the render entry, and the next paint rebuilds the cache warm.
+        chat.ensure_media_renders();
+        draw(&chat, 61, 20);
         let hits = turn_hits(&chat, Some(0), 60);
         let media_hit = hits
             .iter()
             .find(|hit| hit.slot.is_some())
             .expect("image hit stamped");
-        // One frame: the chat learns its pane rect (mouse coords are the
-        // pane's, the click maps through the hit rows at scroll 0).
-        draw(&chat, 80, 20);
+        // The mouse click maps through the painted frame's hit rows using
+        // the pane rect the paint stored.
         let rect = chat.history_rect.get();
         let row = rect.y + u16::try_from(media_hit.start).unwrap();
         chat.update(ChatMessage::Mouse {
@@ -5088,6 +5158,9 @@ mod media_hits_tests {
             ]
         );
         // The live turn sits at stored_len; clicking its image maps through.
+        // A between-frames pass fills its entry at the helpers' width first.
+        chat.width.set(60);
+        chat.ensure_media_renders();
         let hits = turn_hits(&chat, Some(1), 60);
         let media_hit = hits
             .iter()

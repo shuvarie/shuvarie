@@ -185,7 +185,7 @@ where
     let mut picker_wake;
     const PICKER_REFRESH: Duration = Duration::from_secs(2);
 
-    'render_loop: loop {
+    let session_id = 'render_loop: loop {
         sync_window_title(
             rat.backend_mut().terminal_mut(),
             &mut last_title,
@@ -204,6 +204,17 @@ where
             .session_picker
             .open
             .then(|| tokio::time::Instant::now() + PICKER_REFRESH);
+
+        // Media transmissions (kitty) and placed graphics (sixel/iTerm2 in
+        // the fullscreen viewer) reach the terminal between frames, never
+        // through the cell diff. The pass also fills the render entries
+        // paint reads from (at this frame's width): paint stays pure. A
+        // draw that delivered a payload is immediately followed by one
+        // empty-diff draw: the terminal then re-renders its grid with the
+        // now-transmitted graphic in place.
+        if app.after_frame(rat)? {
+            continue;
+        }
 
         'event_listening: loop {
             let changed = tokio::select! {
@@ -259,20 +270,20 @@ where
                 // events; when idle the budget has already elapsed, so keys
                 // still render immediately.
                 ev = event_stream.next() => {
-                    let Some(ev_result) = ev else { break 'render_loop Ok(app.session.session_id); };
+                    let Some(ev_result) = ev else { break 'render_loop app.session.session_id; };
                     let msg = app.map_event(Event::Terminal(ev_result?));
                     apply_msg(&mut app, rat.backend_mut().terminal_mut(), msg)
                 }
                 // Core event — drain all already-queued core events as one batch.
                 ev = event_rx.recv() => {
-                    let Some(ev) = ev else { break 'render_loop Ok(app.session.session_id); };
+                    let Some(ev) = ev else { break 'render_loop app.session.session_id; };
                     let msg = app.map_event(Event::Core(ev));
                     apply_msg(&mut app, rat.backend_mut().terminal_mut(), msg)
                 }
             };
 
             if app.quit_requested() {
-                break 'render_loop Ok(app.session.session_id);
+                break 'render_loop app.session.session_id;
             }
 
             if !changed {
@@ -301,7 +312,12 @@ where
                 }
             }
         }
-    }
+    };
+
+    // Empty the terminal's kitty image cache: images the session displayed
+    // outlive the process otherwise.
+    app.write_kitty_shutdown_deletes(rat.backend_mut().terminal_mut())?;
+    Ok(session_id)
 }
 
 /// Apply a mapped message, recording a quit request on `AppEffect::Quit`,

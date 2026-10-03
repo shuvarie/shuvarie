@@ -6,15 +6,15 @@
 //! graphical protocols are acceptable here because nothing scrolls (the
 //! fullscreen surface re-paints its rows in place).
 
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use std::collections::HashSet;
 
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 use termina::event::{KeyCode, KeyEvent};
 
-use crate::tui::session::media::{CHIP_ICON_IMAGE, MediaBytes, MediaStore};
+use crate::tui::session::media::{
+    CHIP_ICON_IMAGE, MediaBytes, MediaStore, MediaWrite, image_lines,
+};
 use crate::tui::theme;
 
 pub enum MediaViewerMessage {
@@ -38,13 +38,7 @@ pub struct MediaViewer {
     store: MediaStore,
     /// Hashes already requested (or reported cannot-serve): no re-request.
     requested: HashSet<String>,
-    /// Render cache per (sha, width): `None` marks an undecodable image so
-    /// a failed image does not re-render per frame.
-    lines: ViewerLines,
 }
-
-/// The viewer's per-(image, width) render cache.
-type ViewerLines = RefCell<HashMap<(String, u16), Option<Rc<[Line<'static>]>>>>;
 
 impl MediaViewer {
     pub fn new(cell: ratatui_image::FontSize, protocol: shuvarie_core::ImageProtocol) -> Self {
@@ -56,7 +50,6 @@ impl MediaViewer {
             selected: 0,
             store,
             requested: HashSet::new(),
-            lines: RefCell::new(HashMap::new()),
         }
     }
 
@@ -79,6 +72,37 @@ impl MediaViewer {
         self.open
     }
 
+    /// Between-frames media writes (kitty transmissions, placed sixel/
+    /// iTerm2 payloads) queued by render entries — the render loop delivers
+    /// them past the cell diff.
+    pub(crate) fn take_media_writes(&mut self) -> Vec<MediaWrite> {
+        self.store.take_writes()
+    }
+
+    /// Delete sequences for every kitty image the viewer transmitted.
+    pub(crate) fn take_kitty_delete_writes(&mut self) -> Vec<Vec<u8>> {
+        self.store.take_kitty_deletes()
+    }
+
+    /// The fullscreen executor pass, run between frames where `&mut` is
+    /// legitimately held: render the selected image's entry at the frame's
+    /// inner width, its payload anchoring at the image area's origin. Paint
+    /// (`view`) then only reads entries.
+    pub(crate) fn after_frame(&mut self, area: Rect) {
+        if !self.open {
+            return;
+        }
+        let Some(item) = self.items.get(self.selected) else {
+            return;
+        };
+        // The banner text can't affect the block's inner geometry, so a
+        // static title keeps this derivable without any state carried from
+        // view.
+        let inner = theme::overlay_block("Media").inner(area);
+        self.store
+            .ensure_full(&item.sha256, inner.width, (inner.y, inner.x));
+    }
+
     /// The gallery's images the store cannot serve yet, excluding hashes
     /// already requested (or known cannot-serve).
     pub fn missing(&self) -> Vec<String> {
@@ -97,9 +121,7 @@ impl MediaViewer {
             self.requested.remove(sha);
             if let Some(bytes) = bytes {
                 self.store.insert(sha.clone(), Vec::from(&bytes.0[..]));
-                self.lines
-                    .borrow_mut()
-                    .retain(|(cached, _), _| cached != sha);
+                self.store.drop_rendered(sha);
             }
             self.requested.insert(sha.clone());
         }
@@ -147,19 +169,10 @@ impl MediaViewer {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let width = inner.width;
-        let lines = self
-            .lines
-            .borrow_mut()
-            .entry((item.sha256.clone(), width))
-            .or_insert_with(|| {
-                super::session::media::image_lines_full(&self.store, &item.sha256, width)
-                    .map(Into::into)
-            })
-            .clone();
-        if let Some(lines) = lines {
-            let owned: Vec<Line<'static>> = lines.iter().cloned().collect();
-            frame.render_widget(Paragraph::new(owned), inner);
+        // Paint is pure: the entries were rendered by `after_frame` between
+        // frames; a cold entry shows the unloaded chip exactly one frame.
+        if let Some(lines) = image_lines(&self.store, &item.sha256, inner.width) {
+            frame.render_widget(Paragraph::new(lines), inner);
         } else {
             frame.render_widget(
                 Paragraph::new(format!("{CHIP_ICON_IMAGE} {} — not loaded", item.name))
@@ -293,8 +306,9 @@ mod tests {
             .draw(|frame| viewer.view(frame, frame.area()))
             .unwrap();
         assert!(viewer.missing().is_empty(), "cannot-serve stops requests");
-        // The cache dropped with the arrival: a fixed image renders.
-        viewer.lines.borrow_mut().clear();
+        // The stored entries dropped with the arrival, so a later draw of a
+        // re-requested (fixed) image rebuilds instead of showing the stale
+        // failed render.
     }
 
     #[test]
@@ -322,5 +336,41 @@ mod tests {
             Some(MediaViewerMessage::Close)
         ));
         assert!(viewer.map_event(&key(KeyCode::Char('a'))).is_none());
+    }
+
+    /// The viewer queues a kitty transmission exactly once per cached render;
+    /// re-viewing the same frame re-pushes nothing (the terminal would be
+    /// flooded with retransmits otherwise).
+    #[test]
+    fn viewer_queues_the_kitty_payload_once_per_cached_render() {
+        let mut viewer = MediaViewer::new(
+            ratatui_image::FontSize::new(8, 16),
+            shuvarie_core::ImageProtocol::Kitty,
+        );
+        viewer.open(vec![item("a", "a.png")], None);
+        viewer.receive(&[("a".into(), Some(MediaBytes(png_bytes(16, 8).into())))]);
+        let area = Rect::new(0, 0, 40, 12);
+        let mut drawn: Option<Rect> = None;
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                drawn = Some(frame.area());
+                viewer.view(frame, frame.area());
+            })
+            .unwrap();
+        // The executor pass fills the entry (and queues its payload); paint
+        // is pure and queues nothing itself.
+        viewer.after_frame(drawn.unwrap_or(area));
+        let writes = viewer.store.take_writes();
+        assert!(
+            matches!(writes.first(), Some(MediaWrite::Raw(_))),
+            "kitty transmit queued: {writes:?}"
+        );
+        // Paint and re-execute: the existing entry re-pushes nothing.
+        terminal
+            .draw(|frame| viewer.view(frame, frame.area()))
+            .unwrap();
+        viewer.after_frame(drawn.unwrap_or(area));
+        assert!(viewer.store.take_writes().is_empty());
     }
 }
