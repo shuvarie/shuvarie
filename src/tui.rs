@@ -27,6 +27,9 @@ mod confirm_quit;
 mod context;
 mod escape;
 mod event;
+/// Filesystem watch on the workspace's git `HEAD` file: the sidebar branch
+/// label refreshes on checkouts made outside the TUI.
+mod git_watch;
 mod history_search;
 mod list;
 mod model_picker;
@@ -111,6 +114,10 @@ pub async fn run_tui(
     let mut rat = ratatui::Terminal::new(TerminaBackend::new(term))?;
     let connections = Connections::load().map_err(|e| io::Error::other(e.to_string()))?;
     let workspace = workspace::WorkspaceInfo::detect();
+    // Watch the workspace's `HEAD` file for the sidebar's branch label; the
+    // watch lives as long as the render loop (`branch_watch` is consumed by
+    // `render_tui`).
+    let branch_watch = self::git_watch::BranchWatch::start(&workspace.path);
     let app = App::new(
         ui,
         theme,
@@ -129,7 +136,15 @@ pub async fn run_tui(
     // during the wait stay buffered and are delivered by the stream later.
     let modify_other_keys = probe_keyboard_protocol(rat.backend_mut().terminal_mut(), &reader)?;
 
-    let session_id = render_tui(app, &mut rat, event_rx, event_stream, frame_budget).await;
+    let session_id = render_tui(
+        app,
+        &mut rat,
+        event_rx,
+        event_stream,
+        frame_budget,
+        branch_watch,
+    )
+    .await;
 
     let deinit = deinit_terminal(rat.backend_mut().terminal_mut(), modify_other_keys);
     let session_id = session_id?;
@@ -165,6 +180,7 @@ async fn render_tui(
     mut event_rx: Receiver<CoreEvent>,
     mut event_stream: EventStream,
     frame_budget: Option<Duration>,
+    mut branch_watch: git_watch::BranchWatch,
 ) -> io::Result<Option<uuid::Uuid>>
 where
     io::Error: From<<TerminaBackend<PlatformTerminal> as Backend>::Error>,
@@ -279,6 +295,16 @@ where
                     let Some(ev) = ev else { break 'render_loop app.session.session_id; };
                     let msg = app.map_event(Event::Core(ev));
                     apply_msg(&mut app, rat.backend_mut().terminal_mut(), msg)
+                }
+                // Git branch watcher — the workspace's `.git/HEAD` file was
+                // touched (a checkout or branch switch elsewhere); the
+                // sidebar re-reads the branch label.
+                _ = branch_watch.next() => {
+                    apply_msg(
+                        &mut app,
+                        rat.backend_mut().terminal_mut(),
+                        Some(AppMessage::BranchChanged),
+                    )
                 }
             };
 

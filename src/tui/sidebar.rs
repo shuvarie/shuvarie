@@ -90,9 +90,10 @@ pub enum SidebarMessage {
     SetWorkspace {
         workspace: WorkspaceInfo,
     },
-    /// Re-reads the git branch at the stored workspace path; sent at the
-    /// start of every turn so checkouts made between turns show up.
-    RefreshBranch,
+    /// The watched `.git/HEAD` file changed (a checkout or branch switch
+    /// made elsewhere, e.g. in another terminal): re-reads the git branch at
+    /// the stored workspace path.
+    BranchChanged,
     /// The session's current scene (`None` = the built-in Default scene,
     /// which hides the scene line).
     SetScene {
@@ -174,7 +175,7 @@ impl Sidebar {
             SidebarMessage::SetWorkspace { workspace } => {
                 self.workspace = workspace;
             }
-            SidebarMessage::RefreshBranch => {
+            SidebarMessage::BranchChanged => {
                 self.workspace.refresh_branch();
             }
             SidebarMessage::SetScene { name } => {
@@ -1220,7 +1221,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_branch_message_rereads_the_head() {
+    fn branch_changed_message_rereads_the_head() {
         use crate::tui::workspace::testing::seed_git_repo;
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1238,7 +1239,7 @@ mod tests {
         );
 
         seed_git_repo(dir.path(), "turn-branch");
-        sidebar.update(SidebarMessage::RefreshBranch);
+        sidebar.update(SidebarMessage::BranchChanged);
         assert!(
             text(sidebar.rendered_lines()).contains("⎇ turn-branch"),
             "refreshed: {}",

@@ -21,9 +21,10 @@ impl WorkspaceInfo {
         Self { path, home, branch }
     }
 
-    /// Re-read the git branch at the known workspace path. Sent when a turn
-    /// starts, so checkouts made between turns (e.g. in another terminal) are
-    /// picked up by the sidebar and the collapsed footer.
+    /// Re-read the git branch at the known workspace path. Sent when the
+    /// watched `.git/HEAD` file changes, so checkouts made elsewhere (e.g.
+    /// in another terminal) are picked up by the sidebar and the collapsed
+    /// footer.
     pub fn refresh_branch(&mut self) {
         if self.path.as_os_str().is_empty() {
             return;

@@ -182,6 +182,10 @@ pub enum AppMessage {
     Warning(WarningMessage),
     /// The render loop's spinner wake: refresh the animated spinner renders.
     SpinnerUpdate,
+    /// The workspace's watched `.git/HEAD` file changed (a checkout or
+    /// branch switch made outside the TUI): the sidebar re-reads the branch
+    /// label.
+    BranchChanged,
     PickerRefresh,
 }
 
@@ -1695,6 +1699,12 @@ impl App {
             AppMessage::Auth(AuthMessage::CopyCode { code }) => {
                 self.auth.copied("Code copied to clipboard");
                 return Some(AppEffect::CopyToClipboard(code));
+            }
+            AppMessage::BranchChanged => {
+                // The watched `.git/HEAD` file changed: the sidebar (and the
+                // collapsed footer) re-read the branch label.
+                self.session
+                    .update(SessionMessage::Sidebar(SidebarMessage::BranchChanged));
             }
             AppMessage::SpinnerUpdate => {
                 self.session.update(SessionMessage::SpinnerUpdate);
