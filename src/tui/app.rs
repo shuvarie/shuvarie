@@ -2476,6 +2476,55 @@ mod tests {
         connections
     }
 
+    /// A connection's active-model context window, read from the live catalog
+    /// instead of a pinned literal, so a registry bump (a renamed model, a new
+    /// context window) does not fail the test.
+    fn catalog_context_window(catalog_id: &str, model: &str) -> u64 {
+        let providers = shuvarie_core::catalog::providers();
+        shuvarie_core::catalog::find_provider(&providers, catalog_id)
+            .and_then(|provider| shuvarie_core::catalog::context_length(provider, model))
+            .unwrap_or_else(|| panic!("no catalog `{catalog_id}` model `{model}`"))
+            .max(0) as u64
+    }
+
+    /// The reasoning-effort variants the catalog declares for a model, in
+    /// declared order — the expectation side of the same lookup the app makes.
+    fn catalog_model_variants(catalog_id: &str, model: &str) -> Vec<String> {
+        let providers = shuvarie_core::catalog::providers();
+        let provider = shuvarie_core::catalog::find_provider(&providers, catalog_id)
+            .unwrap_or_else(|| panic!("no catalog provider `{catalog_id}`"));
+        shuvarie_core::catalog::find_model(provider, model)
+            .map(shuvarie_core::catalog::model_variants)
+            .unwrap_or_else(|| panic!("no catalog model `{model}` in `{catalog_id}`"))
+            .to_vec()
+    }
+
+    /// The first model the catalog declares for `catalog_id` with no
+    /// reasoning-effort variants, so the no-variant cases exercise real catalog
+    /// data instead of pinning a model that may gain variants later.
+    fn catalog_model_without_variants(catalog_id: &str) -> String {
+        let providers = shuvarie_core::catalog::providers();
+        let provider = shuvarie_core::catalog::find_provider(&providers, catalog_id)
+            .unwrap_or_else(|| panic!("no catalog provider `{catalog_id}`"));
+        provider
+            .models
+            .iter()
+            .find(|model| shuvarie_core::catalog::model_variants(model).is_empty())
+            .unwrap_or_else(|| panic!("catalog `{catalog_id}` has no variant-free model"))
+            .id
+            .clone()
+    }
+
+    #[test]
+    fn catalog_context_length_maps_catalog_and_alias_model_id() {
+        let app = app_with(connected());
+        assert_eq!(
+            catalog_context_length(&app.ctx.connections),
+            Some(catalog_context_window("anthropic", "claude-sonnet-4-5")),
+            "connection model alias `claude-sonnet-4-5` must map to the dated catalog entry"
+        );
+    }
+
     fn oauth_connected() -> Connections {
         let mut connections = Connections::default();
         let provider = shuvarie_core::ProviderConfig::new("ChatGPT", "chatgpt", None, None);
@@ -2607,6 +2656,38 @@ mod tests {
         let mut connections = connected();
         connections.active.as_mut().unwrap().model = None;
         assert_eq!(catalog_context_length(&connections), None);
+    }
+
+    #[test]
+    fn catalog_context_length_uses_connection_catalog_field() {
+        let mut connections = connected();
+        let pc = connections.providers.get_mut("anthropic").unwrap();
+        *pc = pc.clone().with_catalog(Some("anthropic"));
+        assert_eq!(
+            catalog_context_length(&connections),
+            Some(catalog_context_window("anthropic", "claude-sonnet-4-5")),
+            "explicit `catalog` field must drive the Selune lookup"
+        );
+    }
+
+    #[test]
+    fn catalog_context_length_resolves_tagged_ollama_cloud_variant() {
+        let mut connections = Connections::default();
+        let provider = shuvarie_core::ProviderConfig::new("Ollama Cloud", "ollama", None, None)
+            .with_catalog(Some("ollama-cloud"));
+        connections
+            .providers
+            .insert("ollama-cloud".into(), provider);
+        connections.active = Some(shuvarie_core::Active {
+            provider: "ollama-cloud".into(),
+            model: Some("glm-5.3-flash".into()),
+            variant: None,
+        });
+        assert_eq!(
+            catalog_context_length(&connections),
+            Some(catalog_context_window("ollama-cloud", "glm-5.3-flash")),
+            "untagged connection model `glm-5.3-flash` must map to the tagged catalog entry"
+        );
     }
 
     #[test]
@@ -2937,23 +3018,33 @@ mod tests {
 
     #[test]
     fn catalog_variants_resolves_the_tagged_ollama_cloud_model() {
-        assert_eq!(
-            catalog_variants(&connected_variant()),
-            Some(vec!["low".into(), "high".into(), "max".into()])
+        let declared = catalog_model_variants("ollama-cloud", "glm-5.3-flash");
+        assert!(
+            !declared.is_empty(),
+            "the fixture model must declare variants"
         );
+        assert_eq!(catalog_variants(&connected_variant()), Some(declared));
     }
 
     #[test]
     fn catalog_variants_is_none_for_a_model_without_variants() {
-        assert_eq!(catalog_variants(&connected()), None);
+        let mut connections = connected();
+        connections.active.as_mut().unwrap().model =
+            Some(catalog_model_without_variants("anthropic"));
+        assert_eq!(catalog_variants(&connections), None);
         assert_eq!(catalog_variants(&Connections::default()), None);
     }
 
     #[tokio::test]
     async fn variant_command_with_a_valid_argument_sends_select_variant() {
+        let variants = catalog_model_variants("ollama-cloud", "glm-5.3-flash");
+        let pick = variants
+            .last()
+            .expect("the fixture model must declare variants")
+            .clone();
         let (mut app, mut rx) = app_with_rx(connected_variant());
         active_session(&mut app);
-        app.run_command(CommandAction::OpenVariantPicker, Some("HIGH".into()));
+        app.run_command(CommandAction::OpenVariantPicker, Some(pick.to_uppercase()));
         assert!(matches!(app.overlay, Overlay::None), "no popup opens");
         let cmd = rx.recv().await.unwrap();
         assert!(
@@ -2961,7 +3052,7 @@ mod tests {
                 cmd,
                 shuvarie_core::Command::SelectVariant {
                     variant: Some(ref v)
-                } if v == "high"
+                } if v == &pick
             ),
             "the canonical casing is sent"
         );
@@ -2981,14 +3072,19 @@ mod tests {
 
     #[test]
     fn variant_command_with_an_invalid_argument_shows_an_error() {
+        let variants = catalog_model_variants("ollama-cloud", "glm-5.3-flash");
         let (mut app, mut rx) = app_with_rx(connected_variant());
         active_session(&mut app);
         app.run_command(CommandAction::OpenVariantPicker, Some("bogus".into()));
         assert!(app.session.error.is_some(), "an error is shown");
         let error = app.session.error.unwrap();
+        let accepted = format!(
+            "available: {}, {}",
+            variant::DEFAULT_VARIANT,
+            variants.join(", ")
+        );
         assert!(
-            error.contains("unknown variant `bogus`")
-                && error.contains("available: default, low, high, max"),
+            error.contains("unknown variant `bogus`") && error.contains(&accepted),
             "the error names the accepted values: {error}"
         );
         assert!(
@@ -2999,14 +3095,24 @@ mod tests {
 
     #[test]
     fn variant_command_without_argument_opens_the_selector() {
+        let variants = catalog_model_variants("ollama-cloud", "glm-5.3-flash");
+        let current = variants
+            .last()
+            .expect("the fixture model must declare variants")
+            .clone();
         let (mut app, mut rx) = app_with_rx(connected_variant());
         active_session(&mut app);
-        app.ctx.connections.active.as_mut().unwrap().variant = Some("max".into());
+        app.ctx.connections.active.as_mut().unwrap().variant = Some(current.clone());
         app.run_command(CommandAction::OpenVariantPicker, None);
         assert!(matches!(app.overlay, Overlay::Variant));
         assert!(app.variant_picker.open);
+        // Row 0 is the unset default, then the declared variants in order.
+        let preselected = 1 + variants
+            .iter()
+            .position(|v| v == &current)
+            .expect("the current pick must be a declared variant");
         assert_eq!(
-            app.variant_picker.selected, 3,
+            app.variant_picker.selected, preselected,
             "the current pick is preselected"
         );
         assert!(rx.try_recv().is_err(), "no command until Enter");
@@ -3014,13 +3120,16 @@ mod tests {
 
     #[test]
     fn variant_command_on_a_model_without_variants_shows_an_error() {
-        let (mut app, mut rx) = app_with_rx(connected());
+        let mut connections = connected();
+        let model = catalog_model_without_variants("anthropic");
+        connections.active.as_mut().unwrap().model = Some(model.clone());
+        let (mut app, mut rx) = app_with_rx(connections);
         active_session(&mut app);
         app.run_command(CommandAction::OpenVariantPicker, None);
         assert!(matches!(app.overlay, Overlay::None), "no popup opens");
         assert_eq!(
-            app.session.error.as_deref(),
-            Some("model claude-sonnet-4-5 has no variants")
+            app.session.error,
+            Some(format!("model {model} has no variants"))
         );
         assert!(rx.try_recv().is_err());
     }

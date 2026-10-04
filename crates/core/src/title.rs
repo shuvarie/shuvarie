@@ -165,6 +165,19 @@ mod tests {
         connections
     }
 
+    /// The default small model the live catalog declares for `catalog_id`.
+    /// Read from the catalog rather than pinned, so a registry bump that renames
+    /// a model does not fail the test.
+    fn catalog_default_small_model(catalog_id: &str) -> String {
+        let providers = crate::catalog::providers();
+        let provider = crate::catalog::find_provider(&providers, catalog_id)
+            .unwrap_or_else(|| panic!("no catalog provider `{catalog_id}`"));
+        provider
+            .default_small_model()
+            .unwrap_or_else(|| panic!("catalog provider `{catalog_id}` has no models"))
+            .to_string()
+    }
+
     #[test]
     fn resolve_model_defaults_to_the_active_provider_small_model() {
         let mut connections = connections_with("Anthropic", "anthropic");
@@ -176,7 +189,7 @@ mod tests {
         let (name, model) = resolve_model(&connections, None, None).unwrap();
         assert_eq!(name, "Anthropic");
         // The active model is ignored: the catalog's default small model wins.
-        assert_eq!(model, "claude-haiku-4-5-20251001");
+        assert_eq!(model, catalog_default_small_model("anthropic"));
     }
 
     #[test]
@@ -194,7 +207,7 @@ mod tests {
         // An explicit provider: its own catalog's default small model.
         let (name, model) = resolve_model(&connections, Some("Openai"), None).unwrap();
         assert_eq!(name, "Openai");
-        assert_eq!(model, "gpt-5.6-luna");
+        assert_eq!(model, catalog_default_small_model("openai"));
         // An explicit model is used verbatim, skipping the catalog.
         let (name, model) =
             resolve_model(&connections, Some("Openai"), Some("gpt-5-nano")).unwrap();
