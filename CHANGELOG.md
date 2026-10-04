@@ -71,6 +71,7 @@
 ### ◀️ Revert
 
 - "build: update debug version display"
+- "ci: changelog dedup with shell script"
 
 ### 💼 Other
 
