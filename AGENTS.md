@@ -6,7 +6,7 @@
 - `./crates/core/` (`shuvarie-core`): Core module
 - `./crates/config/` (`shuvarie-config`): config module (for KDL parser etc)
 - `./crates/llm/` (`shuvarie-llm`): LLM module (Rig bridge)
-- `./crates/decision/` (`shuvarie-decision`): Decision module (System One decision models — Jev/Kev/Laya/Nimble, Ollama's Clef, Cloudflare)
+- `./crates/decision/` (`shuvarie-decision`): Decision module (System One decision models)
 - `./crates/db/` (`shuvarie-db`): DB module (migrations and Toasty ORM)
 - `./crates/doc/` (`shuvarie-doc`): Document → GitHub-Flavored Markdown conversion (office docs, pdf, spreadsheets, epub, csv)
 - `./crates/highlight/` (`shuvarie-highlight`): Highlight module
