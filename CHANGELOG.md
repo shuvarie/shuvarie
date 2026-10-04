@@ -2,6 +2,11 @@
 
 ## [unreleased]
 
+### 📚 Documentation
+
+- *(readme)* Add legacy warning
+## [0.3.0] - 2026-10-04
+
 ### 🚀 Features
 
 - *(compaction)* More lax compaction triggers (#78)
@@ -14,12 +19,18 @@
 - *(theme)* Add builtin themes / rework theme system
 - *(permission)* Add allow directory
 - Image and document attachments and reading (#94)
+- *(permission)* Add allowed builtin rules
+- *(git)* Listen to HEAD file for branch update
+- *(decision-model)* Add decision model provider support
+- *(scrolling)* Add emacs-like half-screen scrolling
 
 ### 🐛 Bug Fixes
 
 - *(update)* Failed to fetch under proxy
 - *(db)* Wal file opening error preventing startup
 - *(tui)* Exit on welcome screen not effective
+- *(tui)* Ctrl modifier in tmux
+- *(key)* Remove `j`/`k` for up and down
 
 ### 📚 Documentation
 
@@ -28,7 +39,9 @@
 - *(agents)* Update test code notice
 - *(agents)* Update AGENTS.md
 - *(agents)* Fix typo
-- *(readme)* Add legacy warning
+- *(agents)* Update design docs
+- *(agents)* Remove model listing
+- *(agents)* Update decision model description
 
 ### ⚡ Performance
 
@@ -42,11 +55,16 @@
 ### 🎨 Styling
 
 - *(spinner)* Update wait spinner
+- *(tui)* Use styled popups by `tui-popup`
+- *(tui)* Make chat scrollbar based on `tui-scrollbar`
 
 ### 🧪 Testing
 
 - Remove stale/unreproducible test cases
 - Use temp directory instead
+- Optimize RAM usage of test cases
+- Trim out context window test case due to strong coupling
+- Replace hard-coded data
 
 ### ⚙️ Miscellaneous Tasks
 
@@ -54,6 +72,7 @@
 - Run tests on entire workspace with one character indication
 - Lint against entire workspace
 - Add cargo publish
+- Changelog dedup with shell script
 
 ### ◀️ Revert
 
@@ -64,6 +83,7 @@
 - *(version)* Update version display for debug build
 - *(nsis)* Make version parameter required
 - *(cliff)* Update changelog generation logic
+- *(cliff)* Add shell file for changelog extraction
 ## [0.2.4] - 2026-10-03
 
 ### 🐛 Bug Fixes
