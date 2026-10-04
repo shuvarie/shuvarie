@@ -29,7 +29,6 @@
 
 ### 📚 Documentation
 
-- Update CONTRIBUTING.md
 - *(agents)* Add test code notice
 - *(agents)* Update test code notice
 - *(agents)* Update AGENTS.md
@@ -146,11 +145,6 @@
 - *(tui)* Misinterpreted keys in tmux
 - *(scenes)* Make interludes truly only used during mid-session switch
 - *(windows)* Compile error when importing
-
-### 📚 Documentation
-
-- Update AGENTS.md
-- *(readme)* Update feature description
 
 ### ⚙️ Miscellaneous Tasks
 
