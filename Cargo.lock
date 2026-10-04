@@ -6834,7 +6834,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "clap",
  "color-eyre",
@@ -6871,7 +6871,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-config"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "dirs",
  "kdl",
@@ -6881,7 +6881,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-core"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "base64 0.23.1",
  "dirs",
@@ -6920,7 +6920,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-db"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -6944,7 +6944,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-decision"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "http",
  "httpmock",
@@ -6957,7 +6957,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-doc"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "calamine",
  "csv",
@@ -6970,7 +6970,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-highlight"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "pulldown-cmark",
  "ratatui",
@@ -6981,7 +6981,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-llm"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "base64 0.23.1",
  "futures-core",
@@ -7000,7 +7000,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-lsp"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "async-lsp",
  "serde",
@@ -7014,7 +7014,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-mcp"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "http",
  "rmcp",
@@ -8650,9 +8650,9 @@ dependencies = [
 
 [[package]]
 name = "twox-hash"
-version = "2.1.4"
+version = "2.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5283634e518fe9e82c7b20520bb4bc209009fd16c82077c802f8111ecbb0117a"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 dependencies = [
  "rand 0.10.3",
 ]
