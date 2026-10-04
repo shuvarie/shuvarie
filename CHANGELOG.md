@@ -1,10 +1,5 @@
 # Changelog
 
-## [unreleased]
-
-### 📚 Documentation
-
-- *(readme)* Add legacy warning
 ## [0.3.0] - 2026-10-04
 
 ### 🚀 Features
