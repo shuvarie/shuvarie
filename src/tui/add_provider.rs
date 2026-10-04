@@ -422,8 +422,8 @@ impl AddProviderForm {
                 }
                 match key.code {
                     KeyCode::Escape => Some(AddProviderMessage::Cancel),
-                    KeyCode::Down | KeyCode::Char('j') => Some(AddProviderMessage::Next),
-                    KeyCode::Up | KeyCode::Char('k') => Some(AddProviderMessage::Prev),
+                    KeyCode::Down => Some(AddProviderMessage::Next),
+                    KeyCode::Up => Some(AddProviderMessage::Prev),
                     KeyCode::Enter => Some(AddProviderMessage::Select),
                     KeyCode::Backspace => {
                         Some(AddProviderMessage::Search(SearchMessage::Backspace))
