@@ -1,12 +1,11 @@
 use ratatui::layout::{Constraint::*, Layout, Rect};
 use ratatui::prelude::*;
-use ratatui::widgets::{Clear, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 use termina::event::{KeyCode, KeyEvent};
 
 use shuvarie_core::ModelUsage;
 
-use super::add_provider::centered_rect;
-use super::theme;
+use super::{add_provider::centered_rect, popup, theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssistedByMessage {
@@ -97,41 +96,42 @@ impl AssistedByPopup {
         format!("Assisted-By: {} via Shuvarie", parts.join(", "))
     }
 
-    pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
+    pub fn view(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool) {
         if !self.open {
             return;
         }
         let popup = centered_rect(70, 30, area);
-        frame.render_widget(Clear, popup);
-        let block = theme::overlay_block("Assisted By");
-        let inner = block.inner(popup);
-        frame.render_widget(block, popup);
-        if inner.width == 0 || inner.height == 0 {
-            return;
-        }
+        popup::dialog(frame, popup, "Assisted By", dimmed, |inner, buf| {
+            if inner.width == 0 || inner.height == 0 {
+                return;
+            }
 
-        let [body_area, _spacer, help_area] =
-            Layout::vertical([Min(1), Length(1), Length(1)]).areas(inner);
+            let [body_area, _spacer, help_area] =
+                Layout::vertical([Min(1), Length(1), Length(1)]).areas(inner);
 
-        if self.models.is_empty() {
-            frame.render_widget(
-                Paragraph::new("No models used yet in this session.").fg(theme::text_muted()),
-                body_area,
-            );
-        } else {
-            let line = Line::from(vec![
-                Span::styled("Assisted-By: ", Style::new().fg(theme::accent())),
-                Span::styled(self.trailer_body(), Style::new().fg(theme::text())),
-            ]);
-            frame.render_widget(Paragraph::new(line).wrap(Wrap { trim: false }), body_area);
-        }
+            if self.models.is_empty() {
+                Paragraph::new("No models used yet in this session.")
+                    .fg(theme::text_muted())
+                    .render(body_area, buf);
+            } else {
+                let line = Line::from(vec![
+                    Span::styled("Assisted-By: ", Style::new().fg(theme::accent())),
+                    Span::styled(self.trailer_body(), Style::new().fg(theme::text())),
+                ]);
+                Paragraph::new(line)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, buf);
+            }
 
-        let help = if self.copied {
-            theme::help_line(&[("Enter", "copied"), ("Esc", "close")])
-        } else {
-            theme::help_line(&[("Enter", "copy"), ("Esc", "close")])
-        };
-        frame.render_widget(Paragraph::new(help).fg(theme::text_muted()), help_area);
+            let help = if self.copied {
+                theme::help_line(&[("Enter", "copied"), ("Esc", "close")])
+            } else {
+                theme::help_line(&[("Enter", "copy"), ("Esc", "close")])
+            };
+            Paragraph::new(help)
+                .fg(theme::text_muted())
+                .render(help_area, buf);
+        });
     }
 
     /// The trailer without the `Assisted-By: ` prefix (the view styles that

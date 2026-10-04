@@ -34,6 +34,7 @@ mod history_search;
 mod list;
 mod model_picker;
 mod permission;
+mod popup;
 mod question;
 mod registry;
 mod scene;

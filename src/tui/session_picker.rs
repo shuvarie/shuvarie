@@ -1,14 +1,13 @@
 use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
-use ratatui::widgets::{Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{List, ListItem, Paragraph};
 use shuvarie_core::SessionSummary;
 use termina::event::{KeyCode, KeyEvent};
 
 use crate::tui::utils::ctrl;
 
-use super::add_provider::centered_rect;
 use super::list::{render_list_item, render_list_item_dim, scroll_offset_for};
-use super::theme;
+use super::{add_provider::centered_rect, popup, theme};
 
 pub enum SessionPickerMessage {
     Next,
@@ -197,76 +196,73 @@ impl SessionPicker {
         }
     }
 
-    pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
+    pub fn view(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool) {
         if !self.open {
             return;
         }
         let popup = centered_rect(64, 36, area);
-        frame.render_widget(Clear, popup);
-        let block = theme::overlay_block("Sessions");
-        let inner = block.inner(popup);
-        frame.render_widget(block, popup);
+        popup::dialog(frame, popup, "Sessions", dimmed, |inner, buf| {
+            let [list_area, hint_area] = Layout::vertical([Min(0), Length(1)]).areas(inner);
 
-        let [list_area, hint_area] = Layout::vertical([Min(0), Length(1)]).areas(inner);
-
-        if self.loading && self.sessions.is_empty() {
-            frame.render_widget(
+            if self.loading && self.sessions.is_empty() {
                 Paragraph::new(Line::from(vec![
                     super::spinner::spinner(),
                     Span::raw(" Loading sessions...").fg(theme::text_muted()),
-                ])),
-                list_area,
-            );
-        } else {
-            let offset = scroll_offset_for(
-                self.selected,
-                self.offset,
-                list_area.height as usize,
-                self.sessions.len(),
-            );
-            let visible: Vec<ListItem> = self
-                .sessions
-                .iter()
-                .enumerate()
-                .skip(offset)
-                .take(list_area.height as usize)
-                .map(|(idx, s)| {
-                    let marker = theme::active_marker(Some(s.id) == self.active_id);
-                    if s.in_use {
-                        render_list_item_dim(
-                            format!(
-                                "{marker}{} · {} msgs · used elsewhere",
-                                s.title, s.message_count
-                            ),
-                            idx == self.selected,
-                        )
-                    } else {
-                        render_list_item(
-                            format!("{marker}{} · {} msgs", s.title, s.message_count),
-                            idx == self.selected,
-                        )
-                    }
-                })
-                .collect();
-            frame.render_widget(List::new(visible), list_area);
-        }
+                ]))
+                .render(list_area, buf);
+            } else {
+                let offset = scroll_offset_for(
+                    self.selected,
+                    self.offset,
+                    list_area.height as usize,
+                    self.sessions.len(),
+                );
+                let visible: Vec<ListItem> = self
+                    .sessions
+                    .iter()
+                    .enumerate()
+                    .skip(offset)
+                    .take(list_area.height as usize)
+                    .map(|(idx, s)| {
+                        let marker = theme::active_marker(Some(s.id) == self.active_id);
+                        if s.in_use {
+                            render_list_item_dim(
+                                format!(
+                                    "{marker}{} · {} msgs · used elsewhere",
+                                    s.title, s.message_count
+                                ),
+                                idx == self.selected,
+                            )
+                        } else {
+                            render_list_item(
+                                format!("{marker}{} · {} msgs", s.title, s.message_count),
+                                idx == self.selected,
+                            )
+                        }
+                    })
+                    .collect();
+                Widget::render(List::new(visible), list_area, buf);
+            }
 
-        let locked_selected = self.sessions.get(self.selected).is_some_and(|s| s.in_use);
-        let hint = if self.confirm_delete {
-            theme::help_line(&[("Ctrl+D", "confirm delete"), ("Esc", "cancel")])
-        } else if self.sessions.is_empty() {
-            theme::help_line(&[("N", "new session"), ("Esc", "close")])
-        } else if locked_selected {
-            theme::help_line(&[("N", "new"), ("Esc", "close")])
-        } else {
-            theme::help_line(&[
-                ("Enter", "resume"),
-                ("Ctrl+D", "delete"),
-                ("N", "new"),
-                ("Esc", "close"),
-            ])
-        };
-        frame.render_widget(Paragraph::new(hint).fg(theme::text_muted()), hint_area);
+            let locked_selected = self.sessions.get(self.selected).is_some_and(|s| s.in_use);
+            let hint = if self.confirm_delete {
+                theme::help_line(&[("Ctrl+D", "confirm delete"), ("Esc", "cancel")])
+            } else if self.sessions.is_empty() {
+                theme::help_line(&[("N", "new session"), ("Esc", "close")])
+            } else if locked_selected {
+                theme::help_line(&[("N", "new"), ("Esc", "close")])
+            } else {
+                theme::help_line(&[
+                    ("Enter", "resume"),
+                    ("Ctrl+D", "delete"),
+                    ("N", "new"),
+                    ("Esc", "close"),
+                ])
+            };
+            Paragraph::new(hint)
+                .fg(theme::text_muted())
+                .render(hint_area, buf);
+        });
     }
 }
 

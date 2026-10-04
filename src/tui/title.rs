@@ -1,14 +1,13 @@
 use ratatui::layout::{Constraint::*, Layout, Rect};
 use ratatui::prelude::*;
 use ratatui::style::Modifier;
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 use termina::event::{KeyCode, KeyEvent};
 
 use crate::tui::utils::{alt, ctrl};
 
-use super::add_provider::centered_rect;
 use super::components::{InputBuffer, flatten_newlines};
-use super::theme;
+use super::{add_provider::centered_rect, popup, theme};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TitleMessage {
@@ -148,36 +147,31 @@ impl TitlePopup {
         Line::from(spans)
     }
 
-    pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
+    pub fn view(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool) {
         if !self.open {
             return;
         }
         let popup = centered_rect(46, 18, area);
-        frame.render_widget(Clear, popup);
-        let block = theme::overlay_block("Session Title");
-        let inner = block.inner(popup);
-        frame.render_widget(block, popup);
-        if inner.width == 0 || inner.height == 0 {
-            return;
-        }
+        popup::dialog(frame, popup, "Session Title", dimmed, |inner, buf| {
+            if inner.width == 0 || inner.height == 0 {
+                return;
+            }
 
-        let [input_area, _spacer, help_area] =
-            Layout::vertical([Length(1), Min(0), Length(1)]).areas(inner);
+            let [input_area, _spacer, help_area] =
+                Layout::vertical([Length(1), Min(0), Length(1)]).areas(inner);
 
-        if self.buffer.value.is_empty() {
-            frame.render_widget(
-                Paragraph::new("Untitled session").fg(theme::text_muted()),
-                input_area,
-            );
-        } else {
-            frame.render_widget(Paragraph::new(self.input_line()), input_area);
-        }
+            if self.buffer.value.is_empty() {
+                Paragraph::new("Untitled session")
+                    .fg(theme::text_muted())
+                    .render(input_area, buf);
+            } else {
+                Paragraph::new(self.input_line()).render(input_area, buf);
+            }
 
-        frame.render_widget(
             Paragraph::new(theme::help_line(&[("Enter", "save"), ("Esc", "cancel")]))
-                .fg(theme::text_muted()),
-            help_area,
-        );
+                .fg(theme::text_muted())
+                .render(help_area, buf);
+        });
     }
 }
 

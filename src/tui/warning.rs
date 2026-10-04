@@ -1,9 +1,9 @@
+use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
-use ratatui::widgets::{Clear, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 use termina::event::{KeyCode, KeyEvent, KeyEventKind};
 
-use super::add_provider::centered_rect;
-use super::theme;
+use super::{add_provider::centered_rect, popup, theme};
 
 pub enum WarningMessage {
     Dismiss,
@@ -48,32 +48,21 @@ impl WarningPopup {
         }
     }
 
-    pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
+    pub fn view(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool) {
         if !self.open {
             return;
         }
         let popup = centered_rect(60, 25, area);
-        frame.render_widget(Clear, popup);
-        let block = theme::overlay_block("Warning");
-        let inner = block.inner(popup);
-        frame.render_widget(block, popup);
-
-        frame.render_widget(
-            Paragraph::new(self.message.clone())
+        popup::dialog(frame, popup, "Warning", dimmed, |inner, buf| {
+            let [body_area, help_area] = Layout::vertical([Min(0), Length(1)]).areas(inner);
+            Paragraph::new(self.message.as_str())
                 .style(Style::new().fg(theme::text()))
-                .wrap(Wrap { trim: false }),
-            Rect::new(
-                inner.x,
-                inner.y,
-                inner.width,
-                inner.height.saturating_sub(1),
-            ),
-        );
-
-        frame.render_widget(
-            Paragraph::new(theme::help_line(&[("any key", "dismiss")])).fg(theme::text_muted()),
-            Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
-        );
+                .wrap(Wrap { trim: false })
+                .render(body_area, buf);
+            Paragraph::new(theme::help_line(&[("any key", "dismiss")]))
+                .fg(theme::text_muted())
+                .render(help_area, buf);
+        });
     }
 }
 

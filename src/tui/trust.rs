@@ -3,14 +3,14 @@ use std::path::{Path, PathBuf};
 
 use futures_util::StreamExt;
 use ratatui::prelude::*;
-use ratatui::widgets::{Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{List, ListItem, Paragraph};
 use termina::event::{Event, KeyCode, KeyEventKind, Modifiers};
 use termina::{EventStream, PlatformTerminal, Terminal};
 
 use shuvarie_core::{Category, TrustGrants, WorkspaceScan};
 
 use super::add_provider::centered_rect;
-use super::{escape, list, theme};
+use super::{escape, list, popup, theme};
 
 /// How the trust prompt ended.
 pub enum TrustPromptOutcome {
@@ -156,60 +156,56 @@ impl TrustPrompt {
             return;
         }
         let popup = centered_rect(64, 44, area);
-        frame.render_widget(Clear, popup);
         let title = if self.new_items {
             "Workspace trust — new files"
         } else {
             "Workspace trust"
         };
-        let block = theme::overlay_block(title);
-        let inner = block.inner(popup);
-        frame.render_widget(block, popup);
+        popup::dialog(frame, popup, title, false, |inner, buf| {
+            let label_width = self
+                .items
+                .iter()
+                .map(|(category, _)| label(*category).len())
+                .max()
+                .unwrap_or(0);
 
-        let label_width = self
-            .items
-            .iter()
-            .map(|(category, _)| label(*category).len())
-            .max()
-            .unwrap_or(0);
+            let mut lines: Vec<ListItem> = vec![
+                ListItem::new(Line::from(
+                    Span::raw(self.cwd.to_string_lossy().into_owned()).fg(theme::text_muted()),
+                )),
+                ListItem::new(Line::from("")),
+            ];
+            for (i, (category, detail)) in self.items.iter().enumerate() {
+                let checked = self.checked[i];
+                let box_glyph: &str = if checked { "[x]" } else { "[ ]" };
+                let line = Line::from(vec![
+                    Span::raw(format!("{box_glyph} ")).fg(if checked {
+                        theme::accent()
+                    } else {
+                        theme::text_muted()
+                    }),
+                    Span::raw(format!("{:<label_width$}", label(*category))).fg(theme::text()),
+                    Span::raw("  ").fg(theme::text()),
+                    Span::raw(detail.clone()).fg(theme::text_muted()),
+                ]);
+                lines.push(list::render_list_item_line(line, i == self.selected));
+            }
+            lines.push(ListItem::new(Line::from("")));
+            Widget::render(List::new(lines), inner, buf);
 
-        let mut lines: Vec<ListItem> = vec![
-            ListItem::new(Line::from(
-                Span::raw(self.cwd.to_string_lossy().into_owned()).fg(theme::text_muted()),
-            )),
-            ListItem::new(Line::from("")),
-        ];
-        for (i, (category, detail)) in self.items.iter().enumerate() {
-            let checked = self.checked[i];
-            let box_glyph: &str = if checked { "[x]" } else { "[ ]" };
-            let line = Line::from(vec![
-                Span::raw(format!("{box_glyph} ")).fg(if checked {
-                    theme::accent()
-                } else {
-                    theme::text_muted()
-                }),
-                Span::raw(format!("{:<label_width$}", label(*category))).fg(theme::text()),
-                Span::raw("  ").fg(theme::text()),
-                Span::raw(detail.clone()).fg(theme::text_muted()),
+            let help = theme::help_line(&[
+                ("↑↓", "select"),
+                ("Space", "toggle"),
+                ("a", "trust all"),
+                ("n", "none"),
+                ("Enter", "confirm"),
+                ("Esc", "skip (session only)"),
             ]);
-            lines.push(list::render_list_item_line(line, i == self.selected));
-        }
-        lines.push(ListItem::new(Line::from("")));
-        let list = List::new(lines);
-        frame.render_widget(list, inner);
-
-        let help = theme::help_line(&[
-            ("↑↓", "select"),
-            ("Space", "toggle"),
-            ("a", "trust all"),
-            ("n", "none"),
-            ("Enter", "confirm"),
-            ("Esc", "skip (session only)"),
-        ]);
-        frame.render_widget(
-            Paragraph::new(help).fg(theme::text_muted()),
-            Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
-        );
+            Paragraph::new(help).fg(theme::text_muted()).render(
+                Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+                buf,
+            );
+        });
     }
 }
 

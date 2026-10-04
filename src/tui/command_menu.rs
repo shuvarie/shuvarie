@@ -1,6 +1,6 @@
 use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
-use ratatui::widgets::{Clear, ListItem, Paragraph};
+use ratatui::widgets::{ListItem, Paragraph};
 use termina::event::{KeyCode, KeyEvent};
 
 use crate::tui::utils::ctrl;
@@ -8,7 +8,7 @@ use crate::tui::utils::ctrl;
 use super::commands::{CommandAction, CommandEntry, CommandRef, default_commands};
 use super::list::{render_list_item_line, scroll_offset_for};
 use super::search::{Search, SearchMessage};
-use super::theme;
+use super::{add_provider::centered_rect, popup, theme};
 
 pub enum CommandMenuMessage {
     Search(SearchMessage),
@@ -167,63 +167,49 @@ impl CommandMenu {
         None
     }
 
-    pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
+    pub fn view(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool) {
         if !self.open {
             return;
         }
         let popup = centered_rect(60, 40, area);
-        frame.render_widget(Clear, popup);
-        let block = theme::overlay_block("Command Menu");
-        let inner = block.inner(popup);
-        frame.render_widget(block, popup);
+        popup::dialog(frame, popup, "Command Menu", dimmed, |inner, buf| {
+            let [input_area, list_area, hint_area] =
+                Layout::vertical([Length(1), Min(0), Length(1)]).areas(inner);
 
-        let [input_area, list_area, hint_area] =
-            Layout::vertical([Length(1), Min(0), Length(1)]).areas(inner);
+            self.search.view(buf, input_area, "Type to search commands");
 
-        self.search
-            .view(frame, input_area, "Type to search commands");
+            let offset = scroll_offset_for(
+                self.selected,
+                self.offset,
+                list_area.height as usize,
+                self.filtered.len(),
+            );
+            let visible: Vec<ListItem> = self
+                .filtered
+                .iter()
+                .enumerate()
+                .skip(offset)
+                .take(list_area.height as usize)
+                .map(|(idx, &i)| {
+                    let cmd = &self.commands[i];
+                    let line = Line::from(vec![
+                        Span::raw(format!("{:<20} ", cmd.name)).fg(theme::text()),
+                        Span::raw(cmd.description.to_string()).fg(theme::text_muted()),
+                    ]);
+                    render_list_item_line(line, idx == self.selected)
+                })
+                .collect();
+            Widget::render(ratatui::widgets::List::new(visible), list_area, buf);
 
-        let offset = scroll_offset_for(
-            self.selected,
-            self.offset,
-            list_area.height as usize,
-            self.filtered.len(),
-        );
-        let visible: Vec<ListItem> = self
-            .filtered
-            .iter()
-            .enumerate()
-            .skip(offset)
-            .take(list_area.height as usize)
-            .map(|(idx, &i)| {
-                let cmd = &self.commands[i];
-                let line = Line::from(vec![
-                    Span::raw(format!("{:<20} ", cmd.name)).fg(theme::text()),
-                    Span::raw(cmd.description.to_string()).fg(theme::text_muted()),
-                ]);
-                render_list_item_line(line, idx == self.selected)
-            })
-            .collect();
-        frame.render_widget(ratatui::widgets::List::new(visible), list_area);
-
-        frame.render_widget(
             Paragraph::new(theme::help_line(&[
                 ("Enter", "run"),
                 ("Esc", "close"),
                 ("↑↓", "navigate"),
             ]))
-            .fg(theme::text_muted()),
-            hint_area,
-        );
+            .fg(theme::text_muted())
+            .render(hint_area, buf);
+        });
     }
-}
-
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let pop_w = area.width * percent_x / 100;
-    let pop_h = area.height * percent_y / 100;
-    let x = area.x + (area.width.saturating_sub(pop_w)) / 2;
-    let y = area.y + (area.height.saturating_sub(pop_h)) / 2;
-    Rect::new(x, y, pop_w, pop_h)
 }
 
 impl Default for CommandMenu {

@@ -2259,24 +2259,28 @@ impl App {
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
         self.session.view(frame, area);
 
-        self.welcome.view(frame, area);
+        // `auth` and `warning` are transient popups that paint above every
+        // overlay; the dialogs underneath them take the dim border so the
+        // stack reads top-down.
+        let stacked = self.auth.open || self.warning.open;
+        self.welcome.view(frame, area, stacked);
         if let Some(form) = &self.add_provider_form {
-            form.view(frame, area);
+            form.view(frame, area, stacked);
         }
-        self.model_picker.view(frame, area);
-        self.session_picker.view(frame, area);
-        self.tree_popup.view(frame, area);
-        self.scene_picker.view(frame, area);
-        self.variant_picker.view(frame, area);
-        self.theme_picker.view(frame, area);
+        self.model_picker.view(frame, area, stacked);
+        self.session_picker.view(frame, area, stacked);
+        self.tree_popup.view(frame, area, stacked);
+        self.scene_picker.view(frame, area, stacked);
+        self.variant_picker.view(frame, area, stacked);
+        self.theme_picker.view(frame, area, stacked);
         self.media_view.view(frame, area);
-        self.history_search.view(frame, area);
-        self.command_menu.view(frame, area);
-        self.title_popup.view(frame, area);
-        self.assisted_by.view(frame, area);
-        self.confirm_quit.view(frame, area);
-        self.auth.view(frame, area);
-        self.warning.view(frame, area);
+        self.history_search.view(frame, area, stacked);
+        self.command_menu.view(frame, area, stacked);
+        self.title_popup.view(frame, area, stacked);
+        self.assisted_by.view(frame, area, stacked);
+        self.confirm_quit.view(frame, area, stacked);
+        self.auth.view(frame, area, self.warning.open);
+        self.warning.view(frame, area, false);
     }
 }
 

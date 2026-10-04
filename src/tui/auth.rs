@@ -1,9 +1,9 @@
+use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
-use ratatui::widgets::{Clear, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 use termina::event::{KeyCode, KeyEvent, KeyEventKind};
 
-use super::add_provider::centered_rect;
-use super::theme;
+use super::{add_provider::centered_rect, popup, theme};
 
 /// Device-flow sign-in messages for the TUI auth popup.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,68 +96,57 @@ impl AuthPopup {
         }
     }
 
-    pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
+    pub fn view(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool) {
         if !self.open {
             return;
         }
         let popup = centered_rect(60, 40, area);
-        frame.render_widget(Clear, popup);
         let title = format!("Sign in with {}", self.provider);
-        let block = theme::overlay_block(&title);
-        let inner = block.inner(popup);
-        frame.render_widget(block, popup);
+        popup::dialog(frame, popup, &title, dimmed, |inner, buf| {
+            let body = vec![
+                Line::from("Visit this URL in a browser:"),
+                Line::from(""),
+                Line::from(Span::styled(
+                    self.verification_uri.clone(),
+                    Style::new().fg(theme::accent()).bold(),
+                )),
+                Line::from(""),
+                Line::from("Then enter the code:"),
+                Line::from(""),
+                Line::from(Span::styled(
+                    self.user_code.clone(),
+                    Style::new().fg(theme::accent()).bold(),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "The provider finishes sign-in automatically while it polls.",
+                    Style::new().fg(theme::text_muted()),
+                )),
+                Line::from(Span::styled(
+                    "Do not share this device code.",
+                    Style::new().fg(theme::text_muted()),
+                )),
+            ];
+            let feedback_rows = u16::from(self.feedback.is_some());
+            let [body_area, feedback_area, help_area] =
+                Layout::vertical([Min(0), Length(feedback_rows), Length(1)]).areas(inner);
+            Paragraph::new(body)
+                .wrap(Wrap { trim: false })
+                .render(body_area, buf);
+            if let Some(f) = self.feedback {
+                Paragraph::new(Span::styled(f, Style::new().fg(theme::accent())))
+                    .render(feedback_area, buf);
+            }
 
-        let body = vec![
-            Line::from("Visit this URL in a browser:"),
-            Line::from(""),
-            Line::from(Span::styled(
-                self.verification_uri.clone(),
-                Style::new().fg(theme::accent()).bold(),
-            )),
-            Line::from(""),
-            Line::from("Then enter the code:"),
-            Line::from(""),
-            Line::from(Span::styled(
-                self.user_code.clone(),
-                Style::new().fg(theme::accent()).bold(),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "The provider finishes sign-in automatically while it polls.",
-                Style::new().fg(theme::text_muted()),
-            )),
-            Line::from(Span::styled(
-                "Do not share this device code.",
-                Style::new().fg(theme::text_muted()),
-            )),
-        ];
-        let feedback_rows = u16::from(self.feedback.is_some());
-        frame.render_widget(
-            Paragraph::new(body).wrap(Wrap { trim: false }),
-            Rect::new(
-                inner.x,
-                inner.y,
-                inner.width,
-                inner.height.saturating_sub(1 + feedback_rows),
-            ),
-        );
-        if let Some(f) = self.feedback {
-            frame.render_widget(
-                Paragraph::new(Span::styled(f, Style::new().fg(theme::accent()))),
-                Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1),
-            );
-        }
-
-        frame.render_widget(
             Paragraph::new(theme::help_line(&[
                 ("o", "open in browser"),
                 ("y", "copy URL"),
                 ("c", "copy code"),
                 ("any key", "dismiss"),
             ]))
-            .fg(theme::text_muted()),
-            Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
-        );
+            .fg(theme::text_muted())
+            .render(help_area, buf);
+        });
     }
 }
 

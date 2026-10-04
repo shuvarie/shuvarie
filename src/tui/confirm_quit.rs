@@ -1,10 +1,10 @@
 use ratatui::layout::Alignment;
+use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 use termina::event::{KeyCode, KeyEvent, Modifiers};
 
-use super::add_provider::centered_rect;
-use super::theme;
+use super::{add_provider::centered_rect, popup, theme};
 
 pub enum ConfirmQuitMessage {
     Confirm,
@@ -61,46 +61,32 @@ impl ConfirmQuit {
         }
     }
 
-    pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
+    pub fn view(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool) {
         if !self.open {
             return;
         }
         let popup = centered_rect(45, 25, area);
-        frame.render_widget(Clear, popup);
-        let block = theme::overlay_block("Quit?");
-        let inner = block.inner(popup);
-        frame.render_widget(block, popup);
+        popup::dialog(frame, popup, "Quit?", dimmed, |inner, buf| {
+            let [body_area, help_area] = Layout::vertical([Min(0), Length(1)]).areas(inner);
 
-        let lines = vec![
-            Line::from(""),
-            Line::from("Are you sure you want to quit?")
-                .style(Style::new().fg(theme::text()))
-                .alignment(Alignment::Center),
-            Line::from(""),
-            Line::from(""),
-        ];
+            let lines = vec![
+                Line::from(""),
+                Line::from("Are you sure you want to quit?").style(Style::new().fg(theme::text())),
+                Line::from(""),
+            ];
+            Paragraph::new(lines)
+                .alignment(Alignment::Center)
+                .render(body_area, buf);
 
-        let content_width = lines
-            .iter()
-            .map(|l| l.width() as u16)
-            .max()
-            .unwrap_or(0)
-            .min(inner.width);
-        let x = inner.x + (inner.width.saturating_sub(content_width)) / 2;
-        let text_area = Rect::new(x, inner.y, content_width, inner.height.saturating_sub(1));
-
-        frame.render_widget(Paragraph::new(lines).alignment(Alignment::Left), text_area);
-
-        frame.render_widget(
             Paragraph::new(theme::help_line(&[
                 ("Enter", "confirm"),
                 ("Ctrl+C", "confirm"),
                 ("Esc", "cancel"),
             ]))
             .fg(theme::text_muted())
-            .alignment(Alignment::Center),
-            Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
-        );
+            .alignment(Alignment::Center)
+            .render(help_area, buf);
+        });
     }
 }
 

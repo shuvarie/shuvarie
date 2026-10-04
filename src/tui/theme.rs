@@ -101,6 +101,18 @@ pub fn search_match() -> Color {
     paint(blend(active().selection, active().warning, 0.55))
 }
 
+/// The border of a popup dialog: the accent tinted halfway toward the overlay
+/// background so the frame reads as quiet chrome around the content.
+pub fn popup_border() -> Color {
+    paint(blend(active().accent, active().overlay, 0.5))
+}
+
+/// The border of a popup stacked underneath another popup: a ghost of the
+/// ordinary border, marking the lower dialogs of a stack as inactive.
+pub fn popup_border_dim() -> Color {
+    paint(blend(active().accent, active().overlay, 0.85))
+}
+
 pub fn text() -> Color {
     paint(active().text)
 }

@@ -4,18 +4,17 @@ use std::ops::Not;
 use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
 use ratatui::style::Modifier;
-use ratatui::widgets::{Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{List, ListItem, Paragraph};
 use selune::Provider;
 use termina::event::{KeyCode, KeyEvent};
 
 use crate::tui::utils::ctrl;
 use crate::tui::utils::num::fmt_scaled_number;
 
-use super::add_provider::centered_rect;
 use super::list::{render_list_item_line, scroll_offset_for};
 use super::registry::RegistryManager;
 use super::search::{Search, SearchMessage, filter_indices};
-use super::theme;
+use super::{add_provider::centered_rect, popup, theme};
 
 use shuvarie_core::{Connections, Model};
 
@@ -494,106 +493,102 @@ impl ModelPicker {
         self.recompute_offset();
     }
 
-    pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
+    pub fn view(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool) {
         if !self.open {
             return;
         }
         let popup = centered_rect(60, 60, area);
-        frame.render_widget(Clear, popup);
-        let block = theme::overlay_block("Select Model");
-        let inner = block.inner(popup);
-        frame.render_widget(block, popup);
+        popup::dialog(frame, popup, "Select Model", dimmed, |inner, buf| {
+            let [input_area, list_area, hint_area] =
+                Layout::vertical([Length(1), Min(0), Length(1)]).areas(inner);
 
-        let [input_area, list_area, hint_area] =
-            Layout::vertical([Length(1), Min(0), Length(1)]).areas(inner);
+            self.search.view(buf, input_area, "Type to filter models");
 
-        self.search.view(frame, input_area, "Type to filter models");
-
-        let offset = scroll_offset_for(
-            self.selected,
-            self.offset,
-            list_area.height as usize,
-            self.rows.len(),
-        );
-        let visible_len = list_area.height as usize;
-        let mut items: Vec<ListItem> = Vec::new();
-        for idx in offset..self.rows.len().min(offset + visible_len) {
-            let is_selected = self.selected == idx;
-            let row = &self.rows[idx];
-            let item = match row {
-                Row::Custom => {
-                    let mut line = vec![
-                        Span::raw("Use this input anyway")
-                            .fg(theme::accent())
-                            .add_modifier(Modifier::BOLD),
-                    ];
-                    line.push(
-                        Span::raw(format!("  — {}", self.search.query.trim()))
-                            .fg(theme::text_muted()),
-                    );
-                    render_list_item_line(Line::from(line), is_selected)
-                }
-                Row::RegistryHeader { registry } => {
-                    let header = self
-                        .registries
-                        .state(registry)
-                        .map(|registry| registry.header_line())
-                        .unwrap_or_else(|| Line::from(String::new()));
-                    ListItem::new(header)
-                }
-                Row::Header { name, active } => {
-                    let mut spans = vec![Span::raw("  ".to_string())];
-                    spans.push(
-                        Span::raw(name.clone())
-                            .fg(theme::text_dim())
-                            .add_modifier(Modifier::BOLD),
-                    );
-                    if *active {
-                        spans.push(Span::raw("  · active").fg(theme::accent()));
-                    }
-                    ListItem::new(Line::from(spans))
-                }
-                Row::Model { id, context, .. } => {
-                    let mut line = vec![Span::raw(id.clone()).fg(theme::text())];
-                    if let Some(ctx) = context {
+            let offset = scroll_offset_for(
+                self.selected,
+                self.offset,
+                list_area.height as usize,
+                self.rows.len(),
+            );
+            let visible_len = list_area.height as usize;
+            let mut items: Vec<ListItem> = Vec::new();
+            for idx in offset..self.rows.len().min(offset + visible_len) {
+                let is_selected = self.selected == idx;
+                let row = &self.rows[idx];
+                let item = match row {
+                    Row::Custom => {
+                        let mut line = vec![
+                            Span::raw("Use this input anyway")
+                                .fg(theme::accent())
+                                .add_modifier(Modifier::BOLD),
+                        ];
                         line.push(
-                            Span::raw(format!(" · {} ctx", fmt_scaled_number(u64::from(*ctx))))
+                            Span::raw(format!("  — {}", self.search.query.trim()))
                                 .fg(theme::text_muted()),
                         );
+                        render_list_item_line(Line::from(line), is_selected)
                     }
-                    render_list_item_line(Line::from(line), is_selected)
-                }
-                Row::Status { text } => ListItem::new(Line::from(
-                    Span::raw(format!("  {text}")).fg(theme::text_muted()),
-                )),
-            };
-            items.push(item);
-        }
-        if items.is_empty() {
-            items.push(ListItem::new(Line::from(
-                Span::raw("  no providers configured").fg(theme::text_muted()),
-            )));
-        }
-        frame.render_widget(List::new(items), list_area);
+                    Row::RegistryHeader { registry } => {
+                        let header = self
+                            .registries
+                            .state(registry)
+                            .map(|registry| registry.header_line())
+                            .unwrap_or_else(|| Line::from(String::new()));
+                        ListItem::new(header)
+                    }
+                    Row::Header { name, active } => {
+                        let mut spans = vec![Span::raw("  ".to_string())];
+                        spans.push(
+                            Span::raw(name.clone())
+                                .fg(theme::text_dim())
+                                .add_modifier(Modifier::BOLD),
+                        );
+                        if *active {
+                            spans.push(Span::raw("  · active").fg(theme::accent()));
+                        }
+                        ListItem::new(Line::from(spans))
+                    }
+                    Row::Model { id, context, .. } => {
+                        let mut line = vec![Span::raw(id.clone()).fg(theme::text())];
+                        if let Some(ctx) = context {
+                            line.push(
+                                Span::raw(format!(" · {} ctx", fmt_scaled_number(u64::from(*ctx))))
+                                    .fg(theme::text_muted()),
+                            );
+                        }
+                        render_list_item_line(Line::from(line), is_selected)
+                    }
+                    Row::Status { text } => ListItem::new(Line::from(
+                        Span::raw(format!("  {text}")).fg(theme::text_muted()),
+                    )),
+                };
+                items.push(item);
+            }
+            if items.is_empty() {
+                items.push(ListItem::new(Line::from(
+                    Span::raw("  no providers configured").fg(theme::text_muted()),
+                )));
+            }
+            Widget::render(List::new(items), list_area, buf);
 
-        let mut hints = vec![("↑↓", "navigate")];
-        if self
-            .rows
-            .first()
-            .is_some_and(|row| matches!(row, Row::Custom))
-        {
-            hints.push(("Enter", "use input as model"));
-        } else {
-            hints.push(("Enter", "select"));
-        }
-        if self.registries.can_toggle() {
-            hints.push(("Ctrl+O", "online registry"));
-        }
-        hints.push(("Esc", "close"));
-        frame.render_widget(
-            Paragraph::new(theme::help_line(&hints)).fg(theme::text_muted()),
-            hint_area,
-        );
+            let mut hints = vec![("↑↓", "navigate")];
+            if self
+                .rows
+                .first()
+                .is_some_and(|row| matches!(row, Row::Custom))
+            {
+                hints.push(("Enter", "use input as model"));
+            } else {
+                hints.push(("Enter", "select"));
+            }
+            if self.registries.can_toggle() {
+                hints.push(("Ctrl+O", "online registry"));
+            }
+            hints.push(("Esc", "close"));
+            Paragraph::new(theme::help_line(&hints))
+                .fg(theme::text_muted())
+                .render(hint_area, buf);
+        });
     }
 }
 

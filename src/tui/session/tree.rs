@@ -1,6 +1,6 @@
 use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
-use ratatui::widgets::{Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{List, ListItem, Paragraph};
 use shuvarie_core::Role;
 use shuvarie_core::session::TreeNodeTool;
 use termina::event::{KeyCode, KeyEvent};
@@ -9,6 +9,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::theme;
 use crate::tui::add_provider::centered_rect;
 use crate::tui::list::scroll_offset_for;
+use crate::tui::popup;
 use crate::tui::utils::ctrl;
 
 pub enum TreeMessage {
@@ -240,63 +241,61 @@ impl TreePopup {
         }
     }
 
-    pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
+    pub fn view(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool) {
         if !self.open {
             return;
         }
         let popup = centered_rect(72, 46, area);
-        frame.render_widget(Clear, popup);
-        let block = theme::overlay_block("Session tree");
-        let inner = block.inner(popup);
-        frame.render_widget(block, popup);
-
-        let [list_area, hint_area] = Layout::vertical([Min(0), Length(1)]).areas(inner);
-        if self.rows.is_empty() {
-            frame.render_widget(
-                Paragraph::new("empty conversation".to_string()).fg(theme::text_muted()),
-                list_area,
-            );
-        } else {
-            let offset = scroll_offset_for(
-                self.selected,
-                self.offset,
-                list_area.height as usize,
-                self.rows.len(),
-            );
-            let items: Vec<ListItem> = self
-                .rows
-                .iter()
-                .enumerate()
-                .skip(offset)
-                .take(list_area.height as usize)
-                .map(|(idx, row)| self.render_row(row, idx == self.selected))
-                .collect();
-            frame.render_widget(List::new(items), list_area);
-        }
-
-        let hint = if self.confirm_delete {
-            theme::help_line(&[("Enter", "delete branch"), ("Esc", "cancel")])
-        } else if self.busy {
-            theme::help_line(&[
-                ("↑↓", "walk"),
-                ("⌛", "switching disabled"),
-                ("Esc", "close"),
-            ])
-        } else {
-            let summarize_label: &str = if self.summarize {
-                "summarize: on"
+        popup::dialog(frame, popup, "Session tree", dimmed, |inner, buf| {
+            let [list_area, hint_area] = Layout::vertical([Min(0), Length(1)]).areas(inner);
+            if self.rows.is_empty() {
+                Paragraph::new("empty conversation".to_string())
+                    .fg(theme::text_muted())
+                    .render(list_area, buf);
             } else {
-                "summarize: off"
+                let offset = scroll_offset_for(
+                    self.selected,
+                    self.offset,
+                    list_area.height as usize,
+                    self.rows.len(),
+                );
+                let items: Vec<ListItem> = self
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .skip(offset)
+                    .take(list_area.height as usize)
+                    .map(|(idx, row)| self.render_row(row, idx == self.selected))
+                    .collect();
+                Widget::render(List::new(items), list_area, buf);
+            }
+
+            let hint = if self.confirm_delete {
+                theme::help_line(&[("Enter", "delete branch"), ("Esc", "cancel")])
+            } else if self.busy {
+                theme::help_line(&[
+                    ("↑↓", "walk"),
+                    ("⌛", "switching disabled"),
+                    ("Esc", "close"),
+                ])
+            } else {
+                let summarize_label: &str = if self.summarize {
+                    "summarize: on"
+                } else {
+                    "summarize: off"
+                };
+                theme::help_line(&[
+                    ("↑↓", "walk"),
+                    ("Enter", "fork here"),
+                    ("s", summarize_label),
+                    ("d", "delete branch"),
+                    ("Esc", "close"),
+                ])
             };
-            theme::help_line(&[
-                ("↑↓", "walk"),
-                ("Enter", "fork here"),
-                ("s", summarize_label),
-                ("d", "delete branch"),
-                ("Esc", "close"),
-            ])
-        };
-        frame.render_widget(Paragraph::new(hint).fg(theme::text_muted()), hint_area);
+            Paragraph::new(hint)
+                .fg(theme::text_muted())
+                .render(hint_area, buf);
+        });
     }
 
     fn render_row(&self, row: &TreeRow, is_selected: bool) -> ListItem<'static> {

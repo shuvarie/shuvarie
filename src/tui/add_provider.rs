@@ -1,7 +1,7 @@
 use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
 use ratatui::style::Modifier;
-use ratatui::widgets::{Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{List, ListItem, Paragraph, Wrap};
 use selune::Provider;
 use termina::event::{KeyCode, KeyEvent};
 
@@ -11,7 +11,7 @@ use super::components::InputBuffer;
 use super::list::{render_list_item, render_list_item_line, scroll_offset_for};
 use super::registry::RegistryManager;
 use super::search::{Search, SearchMessage, filter_indices};
-use super::theme;
+use super::{popup, theme};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AddProviderStage {
@@ -802,183 +802,173 @@ impl AddProviderForm {
         Line::from(spans)
     }
 
-    pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
+    pub fn view(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool) {
         match self.stage {
-            AddProviderStage::Select => self.view_select(frame, area),
-            AddProviderStage::KindList => self.view_kind_list(frame, area),
-            AddProviderStage::Details => self.view_details(frame, area),
+            AddProviderStage::Select => self.view_select(frame, area, dimmed),
+            AddProviderStage::KindList => self.view_kind_list(frame, area, dimmed),
+            AddProviderStage::Details => self.view_details(frame, area, dimmed),
         }
     }
 
-    fn view_select(&self, frame: &mut Frame<'_>, area: Rect) {
+    fn view_select(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool) {
         let popup = centered_rect(50, 55, area);
-        frame.render_widget(Clear, popup);
-        let block = theme::overlay_block("Add Provider");
-        let inner = block.inner(popup);
-        frame.render_widget(block, popup);
+        popup::dialog(frame, popup, "Add Provider", dimmed, |inner, buf| {
+            let [search_area, list_area, hint_area] =
+                Layout::vertical([Length(1), Min(0), Length(1)]).areas(inner);
 
-        let [search_area, list_area, hint_area] =
-            Layout::vertical([Length(1), Min(0), Length(1)]).areas(inner);
+            self.search
+                .view(buf, search_area, "Type to filter providers");
 
-        self.search
-            .view(frame, search_area, "Type to filter providers");
-
-        let offset = scroll_offset_for(
-            self.selected,
-            self.offset,
-            list_area.height as usize,
-            self.rows.len(),
-        );
-        let visible_len = list_area.height as usize;
-        let mut items: Vec<ListItem> = Vec::new();
-        for row in offset..self.rows.len().min(offset + visible_len) {
-            let is_selected = self.selected == row;
-            let item = match &self.rows[row] {
-                SelectRow::Header { registry } => {
-                    let header = self
-                        .registries
-                        .state(registry)
-                        .map(|registry| registry.header_line())
-                        .unwrap_or_else(|| Line::from(String::new()));
-                    ListItem::new(header)
-                }
-                SelectRow::Provider { registry, index } => {
-                    match self
-                        .registries
-                        .state(registry)
-                        .and_then(|registry| registry.providers().get(*index))
-                    {
-                        Some(provider) => {
-                            let mut line = vec![Span::raw(provider.name.clone()).fg(theme::text())];
-                            if self.existing_catalog_ids.contains(&provider.id.0) {
-                                line.push(Span::raw("  ✓ configured").fg(theme::text_muted()));
-                            }
-                            render_list_item_line(Line::from(line), is_selected)
-                        }
-                        // Rows are always in step with the manager; defensive
-                        // fallback that renders nothing.
-                        None => ListItem::new(Line::from(String::new())),
+            let offset = scroll_offset_for(
+                self.selected,
+                self.offset,
+                list_area.height as usize,
+                self.rows.len(),
+            );
+            let visible_len = list_area.height as usize;
+            let mut items: Vec<ListItem> = Vec::new();
+            for row in offset..self.rows.len().min(offset + visible_len) {
+                let is_selected = self.selected == row;
+                let item = match &self.rows[row] {
+                    SelectRow::Header { registry } => {
+                        let header = self
+                            .registries
+                            .state(registry)
+                            .map(|registry| registry.header_line())
+                            .unwrap_or_else(|| Line::from(String::new()));
+                        ListItem::new(header)
                     }
-                }
-                SelectRow::Custom => {
-                    render_list_item("Add custom provider…".to_string(), is_selected)
-                }
-            };
-            items.push(item);
-        }
-        frame.render_widget(List::new(items), list_area);
+                    SelectRow::Provider { registry, index } => {
+                        match self
+                            .registries
+                            .state(registry)
+                            .and_then(|registry| registry.providers().get(*index))
+                        {
+                            Some(provider) => {
+                                let mut line =
+                                    vec![Span::raw(provider.name.clone()).fg(theme::text())];
+                                if self.existing_catalog_ids.contains(&provider.id.0) {
+                                    line.push(Span::raw("  ✓ configured").fg(theme::text_muted()));
+                                }
+                                render_list_item_line(Line::from(line), is_selected)
+                            }
+                            // Rows are always in step with the manager; defensive
+                            // fallback that renders nothing.
+                            None => ListItem::new(Line::from(String::new())),
+                        }
+                    }
+                    SelectRow::Custom => {
+                        render_list_item("Add custom provider…".to_string(), is_selected)
+                    }
+                };
+                items.push(item);
+            }
+            Widget::render(List::new(items), list_area, buf);
 
-        let mut hints = vec![
-            ("Type", "to filter"),
-            ("↑↓", "navigate"),
-            ("Enter", "continue"),
-        ];
-        if self.registries.can_toggle() {
-            hints.push(("Ctrl+O", "online registry"));
-        }
-        hints.push(("Ctrl+I", "custom"));
-        hints.push(("Esc", "cancel"));
-        frame.render_widget(
-            Paragraph::new(theme::help_line(&hints)).fg(theme::text_muted()),
-            hint_area,
-        );
+            let mut hints = vec![
+                ("Type", "to filter"),
+                ("↑↓", "navigate"),
+                ("Enter", "continue"),
+            ];
+            if self.registries.can_toggle() {
+                hints.push(("Ctrl+O", "online registry"));
+            }
+            hints.push(("Ctrl+I", "custom"));
+            hints.push(("Esc", "cancel"));
+            Paragraph::new(theme::help_line(&hints))
+                .fg(theme::text_muted())
+                .render(hint_area, buf);
+        });
     }
 
-    fn view_kind_list(&self, frame: &mut Frame<'_>, area: Rect) {
+    fn view_kind_list(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool) {
         let popup = centered_rect(50, 55, area);
-        frame.render_widget(Clear, popup);
-        let block = theme::overlay_block("Provider Type");
-        let inner = block.inner(popup);
-        frame.render_widget(block, popup);
+        popup::dialog(frame, popup, "Provider Type", dimmed, |inner, buf| {
+            let [list_area, hint_area] = Layout::vertical([Min(0), Length(1)]).areas(inner);
 
-        let [list_area, hint_area] = Layout::vertical([Min(0), Length(1)]).areas(inner);
+            let offset = scroll_offset_for(
+                self.kind_selected,
+                self.kind_offset,
+                list_area.height as usize,
+                TRANSPORTS.len(),
+            );
+            let visible_len = list_area.height as usize;
+            let items: Vec<ListItem> = (offset..TRANSPORTS.len().min(offset + visible_len))
+                .map(|i| {
+                    let (transport, description) = TRANSPORTS[i];
+                    let line = Line::from(vec![
+                        Span::raw(shuvarie_core::catalog::provider_kind_name(transport))
+                            .fg(theme::text()),
+                        Span::raw(format!("  — {description}")).fg(theme::text_muted()),
+                    ]);
+                    render_list_item_line(line, i == self.kind_selected)
+                })
+                .collect();
+            Widget::render(List::new(items), list_area, buf);
 
-        let offset = scroll_offset_for(
-            self.kind_selected,
-            self.kind_offset,
-            list_area.height as usize,
-            TRANSPORTS.len(),
-        );
-        let visible_len = list_area.height as usize;
-        let items: Vec<ListItem> = (offset..TRANSPORTS.len().min(offset + visible_len))
-            .map(|i| {
-                let (transport, description) = TRANSPORTS[i];
-                let line = Line::from(vec![
-                    Span::raw(shuvarie_core::catalog::provider_kind_name(transport))
-                        .fg(theme::text()),
-                    Span::raw(format!("  — {description}")).fg(theme::text_muted()),
-                ]);
-                render_list_item_line(line, i == self.kind_selected)
-            })
-            .collect();
-        frame.render_widget(List::new(items), list_area);
-
-        frame.render_widget(
             Paragraph::new(theme::help_line(&[
                 ("↑↓", "navigate"),
                 ("Enter", "pick"),
                 ("Esc", "back"),
             ]))
-            .fg(theme::text_muted()),
-            hint_area,
-        );
+            .fg(theme::text_muted())
+            .render(hint_area, buf);
+        });
     }
 
-    fn view_details(&self, frame: &mut Frame<'_>, area: Rect) {
+    fn view_details(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool) {
         let popup = centered_rect(60, 55, area);
-        frame.render_widget(Clear, popup);
         let title = match &self.origin {
             Some(provider) => format!("Configure Provider — {}", provider.name),
             None => "Add Custom Provider".to_string(),
         };
-        let block = theme::overlay_block(&title);
-        let inner = block.inner(popup);
-        frame.render_widget(block, popup);
-
-        let name_line = self.field_line("Name", &self.name, FormField::Name, "");
-        let kind_line = self.field_line("Kind", &self.kind, FormField::Kind, "  (Enter to pick)");
-        let catalog_suffix = if self.origin.is_none() {
-            "  (optional Selune id)"
-        } else {
-            ""
-        };
-        let catalog_line =
-            self.field_line("Catalog", &self.catalog, FormField::Catalog, catalog_suffix);
-        let url_line = self.field_line("Base URL", &self.base_url, FormField::BaseUrl, "");
-        let key_line = if self.oauth_login() {
-            Line::from(vec![
-                Span::styled("Sign in   ".to_string(), Style::new().fg(theme::text_dim())),
-                Span::styled(
-                    "  device flow — opens your browser on submit",
-                    Style::new().fg(theme::text_muted()),
-                ),
-            ])
-        } else {
-            let key_suffix = if self.key_required() {
-                ""
+        popup::dialog(frame, popup, &title, dimmed, |inner, buf| {
+            let name_line = self.field_line("Name", &self.name, FormField::Name, "");
+            let kind_line =
+                self.field_line("Kind", &self.kind, FormField::Kind, "  (Enter to pick)");
+            let catalog_suffix = if self.origin.is_none() {
+                "  (optional Selune id)"
             } else {
-                "  (not required)"
+                ""
             };
-            self.field_line("API key", &self.api_key, FormField::ApiKey, key_suffix)
-        };
+            let catalog_line =
+                self.field_line("Catalog", &self.catalog, FormField::Catalog, catalog_suffix);
+            let url_line = self.field_line("Base URL", &self.base_url, FormField::BaseUrl, "");
+            let key_line = if self.oauth_login() {
+                Line::from(vec![
+                    Span::styled("Sign in   ".to_string(), Style::new().fg(theme::text_dim())),
+                    Span::styled(
+                        "  device flow — opens your browser on submit",
+                        Style::new().fg(theme::text_muted()),
+                    ),
+                ])
+            } else {
+                let key_suffix = if self.key_required() {
+                    ""
+                } else {
+                    "  (not required)"
+                };
+                self.field_line("API key", &self.api_key, FormField::ApiKey, key_suffix)
+            };
 
-        let lines = vec![name_line, kind_line, catalog_line, url_line, key_line];
-        let body = Paragraph::new(lines).wrap(Wrap { trim: false });
-        let [body_area, error_area, hint_area] =
-            Layout::vertical([Min(0), Length(2), Length(1)]).areas(inner);
-        frame.render_widget(body, body_area);
-        if let Some(e) = &self.error {
-            frame.render_widget(Paragraph::new(e.as_str()).fg(theme::error()), error_area);
-        }
-        frame.render_widget(
+            let lines = vec![name_line, kind_line, catalog_line, url_line, key_line];
+            let body = Paragraph::new(lines).wrap(Wrap { trim: false });
+            let [body_area, error_area, hint_area] =
+                Layout::vertical([Min(0), Length(2), Length(1)]).areas(inner);
+            body.render(body_area, buf);
+            if let Some(e) = &self.error {
+                Paragraph::new(e.as_str())
+                    .fg(theme::error())
+                    .render(error_area, buf);
+            }
             Paragraph::new(theme::help_line(&[
                 ("Tab", "next"),
                 ("Enter", "submit"),
                 ("Esc", "back"),
             ]))
-            .fg(theme::text_muted()),
-            hint_area,
-        );
+            .fg(theme::text_muted())
+            .render(hint_area, buf);
+        });
     }
 }
 

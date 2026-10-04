@@ -1,9 +1,9 @@
 use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
-use ratatui::widgets::{Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{List, ListItem, Paragraph};
 use termina::event::{KeyCode, KeyEvent};
 
-use super::theme;
+use super::{popup, theme};
 use crate::tui::add_provider::centered_rect;
 use crate::tui::list::scroll_offset_for;
 use crate::tui::utils::ctrl;
@@ -141,42 +141,40 @@ impl ScenePicker {
         self.offset = scroll_offset_for(self.selected, self.offset, 0, self.entries.len());
     }
 
-    pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
+    pub fn view(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool) {
         if !self.open {
             return;
         }
         let popup = centered_rect(56, 30, area);
-        frame.render_widget(Clear, popup);
-        let block = theme::overlay_block("Scene");
-        let inner = block.inner(popup);
-        frame.render_widget(block, popup);
+        popup::dialog(frame, popup, "Scene", dimmed, |inner, buf| {
+            let [list_area, hint_area] = Layout::vertical([Min(0), Length(1)]).areas(inner);
+            if self.entries.is_empty() {
+                Paragraph::new("no scenes configured".to_string())
+                    .fg(theme::text_muted())
+                    .render(list_area, buf);
+            } else {
+                let offset = scroll_offset_for(
+                    self.selected,
+                    self.offset,
+                    list_area.height as usize,
+                    self.entries.len(),
+                );
+                let items: Vec<ListItem> = self
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .skip(offset)
+                    .take(list_area.height as usize)
+                    .map(|(idx, entry)| self.render_row(entry, idx == self.selected))
+                    .collect();
+                Widget::render(List::new(items), list_area, buf);
+            }
 
-        let [list_area, hint_area] = Layout::vertical([Min(0), Length(1)]).areas(inner);
-        if self.entries.is_empty() {
-            frame.render_widget(
-                Paragraph::new("no scenes configured".to_string()).fg(theme::text_muted()),
-                list_area,
-            );
-        } else {
-            let offset = scroll_offset_for(
-                self.selected,
-                self.offset,
-                list_area.height as usize,
-                self.entries.len(),
-            );
-            let items: Vec<ListItem> = self
-                .entries
-                .iter()
-                .enumerate()
-                .skip(offset)
-                .take(list_area.height as usize)
-                .map(|(idx, entry)| self.render_row(entry, idx == self.selected))
-                .collect();
-            frame.render_widget(List::new(items), list_area);
-        }
-
-        let hint = theme::help_line(&[("↑↓", "walk"), ("Enter", "switch"), ("Esc", "close")]);
-        frame.render_widget(Paragraph::new(hint).fg(theme::text_muted()), hint_area);
+            let hint = theme::help_line(&[("↑↓", "walk"), ("Enter", "switch"), ("Esc", "close")]);
+            Paragraph::new(hint)
+                .fg(theme::text_muted())
+                .render(hint_area, buf);
+        });
     }
 
     fn render_row(&self, entry: &SceneEntry, is_selected: bool) -> ListItem<'static> {

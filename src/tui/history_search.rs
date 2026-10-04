@@ -1,15 +1,14 @@
 use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
-use ratatui::widgets::{Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{List, ListItem, Paragraph};
 use shuvarie_core::SearchHit;
 use termina::event::{KeyCode, KeyEvent};
 
 use crate::tui::utils::ctrl;
 
-use super::add_provider::centered_rect;
 use super::components::InputBuffer;
 use super::list::{render_list_item_line, scroll_offset_for};
-use super::theme;
+use super::{add_provider::centered_rect, popup, theme};
 pub enum HistorySearchMessage {
     Open,
     Input(char),
@@ -217,89 +216,84 @@ impl HistorySearch {
         }
     }
 
-    pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
+    pub fn view(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool) {
         if !self.open {
             return;
         }
         let popup = centered_rect(64, 40, area);
-        frame.render_widget(Clear, popup);
-        let block = theme::overlay_block("Search history");
-        let inner = block.inner(popup);
-        frame.render_widget(block, popup);
+        popup::dialog(frame, popup, "Search history", dimmed, |inner, buf| {
+            let [input_area, status_area, list_area, hint_area] =
+                Layout::vertical([Length(1), Length(1), Min(0), Length(1)]).areas(inner);
 
-        let [input_area, status_area, list_area, hint_area] =
-            Layout::vertical([Length(1), Length(1), Min(0), Length(1)]).areas(inner);
+            let input_line = self.query.cursor_line(theme::text(), theme::accent());
+            let mut input_spans = vec![Span::raw("/ ").fg(theme::text_muted())];
+            input_spans.extend(input_line.spans);
+            Paragraph::new(Line::from(input_spans)).render(input_area, buf);
 
-        let input_line = self.query.cursor_line(theme::text(), theme::accent());
-        let mut input_spans = vec![Span::raw("/ ").fg(theme::text_muted())];
-        input_spans.extend(input_line.spans);
-        frame.render_widget(Paragraph::new(Line::from(input_spans)), input_area);
+            let status = if let Some(err) = &self.error {
+                Paragraph::new(err.as_str()).fg(theme::error())
+            } else if self.loading {
+                Paragraph::new(Line::from(vec![
+                    super::spinner::spinner(),
+                    Span::raw(" Searching...").fg(theme::text_muted()),
+                ]))
+            } else if self.query.value.is_empty() {
+                Paragraph::new("type to search all sessions").fg(theme::text_muted())
+            } else if self.hits.is_empty() {
+                Paragraph::new("no matches").fg(theme::text_muted())
+            } else {
+                Paragraph::new(format!(
+                    "{} matches · ⌕ semantic results are merged as they arrive",
+                    self.hits.len()
+                ))
+                .fg(theme::text_muted())
+            };
+            status.render(status_area, buf);
 
-        let status = if let Some(err) = &self.error {
-            Paragraph::new(err.as_str()).fg(theme::error())
-        } else if self.loading {
-            Paragraph::new(Line::from(vec![
-                super::spinner::spinner(),
-                Span::raw(" Searching...").fg(theme::text_muted()),
-            ]))
-        } else if self.query.value.is_empty() {
-            Paragraph::new("type to search all sessions").fg(theme::text_muted())
-        } else if self.hits.is_empty() {
-            Paragraph::new("no matches").fg(theme::text_muted())
-        } else {
-            Paragraph::new(format!(
-                "{} matches · ⌕ semantic results are merged as they arrive",
-                self.hits.len()
-            ))
-            .fg(theme::text_muted())
-        };
-        frame.render_widget(status, status_area);
+            let offset = scroll_offset_for(
+                self.selected,
+                self.offset,
+                list_area.height as usize,
+                self.hits.len(),
+            );
+            let visible: Vec<ListItem> = self
+                .hits
+                .iter()
+                .enumerate()
+                .skip(offset)
+                .take(list_area.height as usize)
+                .map(|(idx, hit)| {
+                    let role_tag = match hit.role {
+                        shuvarie_core::MsgRole::System => "sys",
+                        shuvarie_core::MsgRole::User => "user",
+                        shuvarie_core::MsgRole::Assistant => "asst",
+                    };
+                    let source_tag = match hit.source {
+                        shuvarie_core::SearchSource::Semantic => "⌕ ",
+                        shuvarie_core::SearchSource::Fts => "",
+                    };
+                    let line = Line::from(vec![
+                        Span::raw(format!("{} · ", hit.session_title)).fg(theme::accent()),
+                        Span::raw(role_tag).fg(theme::text_muted()),
+                        Span::raw("  "),
+                        Span::raw(source_tag).fg(theme::accent()),
+                        Span::raw(Self::snippet(&hit.content)).fg(theme::text()),
+                        Span::raw(format!("  {:.2}", hit.score)).fg(theme::text_muted()),
+                    ]);
+                    render_list_item_line(line, idx == self.selected)
+                })
+                .collect();
+            Widget::render(List::new(visible), list_area, buf);
 
-        let offset = scroll_offset_for(
-            self.selected,
-            self.offset,
-            list_area.height as usize,
-            self.hits.len(),
-        );
-        let visible: Vec<ListItem> = self
-            .hits
-            .iter()
-            .enumerate()
-            .skip(offset)
-            .take(list_area.height as usize)
-            .map(|(idx, hit)| {
-                let role_tag = match hit.role {
-                    shuvarie_core::MsgRole::System => "sys",
-                    shuvarie_core::MsgRole::User => "user",
-                    shuvarie_core::MsgRole::Assistant => "asst",
-                };
-                let source_tag = match hit.source {
-                    shuvarie_core::SearchSource::Semantic => "⌕ ",
-                    shuvarie_core::SearchSource::Fts => "",
-                };
-                let line = Line::from(vec![
-                    Span::raw(format!("{} · ", hit.session_title)).fg(theme::accent()),
-                    Span::raw(role_tag).fg(theme::text_muted()),
-                    Span::raw("  "),
-                    Span::raw(source_tag).fg(theme::accent()),
-                    Span::raw(Self::snippet(&hit.content)).fg(theme::text()),
-                    Span::raw(format!("  {:.2}", hit.score)).fg(theme::text_muted()),
-                ]);
-                render_list_item_line(line, idx == self.selected)
-            })
-            .collect();
-        frame.render_widget(List::new(visible), list_area);
-
-        frame.render_widget(
             Paragraph::new(theme::help_line(&[
                 ("Type", "to search"),
                 ("↑↓", "navigate"),
                 ("Enter", "open session"),
                 ("Esc", "close"),
             ]))
-            .fg(theme::text_muted()),
-            hint_area,
-        );
+            .fg(theme::text_muted())
+            .render(hint_area, buf);
+        });
     }
 }
 

@@ -1,3 +1,4 @@
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::prelude::*;
 use ratatui::style::Modifier;
@@ -105,7 +106,9 @@ impl Search {
         filter_indices(&self.query, count, key)
     }
 
-    pub fn view(&self, frame: &mut Frame<'_>, area: Rect, placeholder: &str) {
+    /// Paints the query line into `buf` at `area` — buffer-based because the
+    /// popup dialogs render their bodies through a buffer closure.
+    pub fn view(&self, buf: &mut Buffer, area: Rect, placeholder: &str) {
         let widget = if self.query.is_empty() {
             Paragraph::new(placeholder).fg(theme::text_muted())
         } else {
@@ -121,7 +124,7 @@ impl Search {
             }
             Paragraph::new(Line::from(spans))
         };
-        frame.render_widget(widget, area);
+        widget.render(area, buf);
     }
 }
 
