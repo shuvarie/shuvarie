@@ -408,7 +408,9 @@ mod tests {
             .unwrap()
     }
 
-    #[tokio::test]
+    /// The runtime clock is paused, so the retry backoff is advanced instantly
+    /// instead of costing the suite ~1.5 s of real sleeping.
+    #[tokio::test(start_paused = true)]
     async fn exhausts_retries_on_connect_errors() {
         let client = failing_client();
         let attempts = Cell::new(0u32);
@@ -429,7 +431,8 @@ mod tests {
         assert!(text.contains("connect failed"), "missing cause: {text}");
     }
 
-    #[tokio::test]
+    /// Paused clock: the single backoff between the two attempts is free.
+    #[tokio::test(start_paused = true)]
     async fn succeeds_after_a_retry() {
         let client = failing_client();
         let attempts = Cell::new(0u32);

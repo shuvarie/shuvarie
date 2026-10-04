@@ -893,11 +893,12 @@ mod tests {
     }
 
     /// An oversized image is downscaled to the configured edge cap before it
-    /// reaches the model.
+    /// reaches the model. The source only has to clear the 1568 px cap: a
+    /// barely-oversized square keeps the resize cheap.
     #[tokio::test]
     async fn oversized_image_downscales_to_the_edge_cap() {
         let (dir, _guard) = tempdir();
-        std::fs::write("big.png", png_bytes(2000)).unwrap();
+        std::fs::write("big.png", png_bytes(1600)).unwrap();
         let out = read_file_tool()
             .call(&mut new_ctx(), json!({ "path": "big.png" }))
             .await

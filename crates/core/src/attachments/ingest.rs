@@ -425,7 +425,9 @@ mod tests {
     #[test]
     fn over_dimensioned_image_downscales_to_the_long_edge_cap() {
         let dir = tempfile::tempdir().unwrap();
-        let raw = square_png(2000);
+        // Just over the 1568 px cap: the downscale path is what matters here,
+        // and a smaller source keeps the resize off the suite's critical path.
+        let raw = square_png(1600);
         std::fs::write(dir.path().join("big.png"), &raw).unwrap();
         let prepared = prep_sync(dir.path(), &["big.png"]).unwrap();
         let meta = &prepared[0].meta;

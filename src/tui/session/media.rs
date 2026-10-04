@@ -1013,12 +1013,13 @@ mod passthrough_spike {
     fn kitty_transmit_is_prescaled_to_the_display_box() {
         let mut store = MediaStore::new(FontSize::new(8, 16));
         store.set_protocol(ImageProtocol::Kitty);
-        let big = image::ImageBuffer::from_fn(2000, 1200, |x, y| {
-            image::Rgba([x as u8, y as u8, 30, 255])
-        });
+        // Same 5:3 aspect as the display box, but 5× wider/taller: the source
+        // is deliberately far bigger than what gets transmitted.
+        let big =
+            image::ImageBuffer::from_fn(800, 480, |x, y| image::Rgba([x as u8, y as u8, 30, 255]));
         let mut bytes = Vec::new();
         image::codecs::png::PngEncoder::new(std::io::Cursor::new(&mut bytes))
-            .write_image(big.as_raw(), 2000, 1200, image::ExtendedColorType::Rgba8)
+            .write_image(big.as_raw(), 800, 480, image::ExtendedColorType::Rgba8)
             .unwrap();
         store.insert("big".into(), bytes);
         render(&mut store, "big", 20).expect("renders");
@@ -1028,7 +1029,7 @@ mod passthrough_spike {
         };
         let text = std::str::from_utf8(payload).expect("transmit is utf-8");
         // 20 cells × 8px/width cell = a 160px-wide display box; the height
-        // follows the 2000:1200 aspect (96px).
+        // follows the 800:480 aspect (96px).
         assert!(text.contains("s=160,v=96,"), "prescaled dims: {text:?}");
         assert!(
             payload.len() < 400 * 1024,
@@ -1037,21 +1038,23 @@ mod passthrough_spike {
         );
     }
 
-    /// A 2000×1200 RGBA image at a 20-cell display box must not wrap-slice a
-    /// megabyte span through the pane's `Paragraph` paint: the same store,
-    /// rendered twice (identical frame, then shifted by one row), streams
-    /// the transmit exactly once and nothing but placeholder cells after.
+    /// A 800×480 RGBA source at a 20-cell display box (160×96 px) must not
+    /// wrap-slice a large span through the pane's `Paragraph` paint: the same
+    /// store, rendered twice (identical frame, then shifted by one row),
+    /// streams the transmit exactly once and nothing but placeholder cells
+    /// after.
     #[test]
     fn kitty_frames_and_scroll_stream_no_payload_text() {
         let (mut terminal, capture) = capture_terminal();
         let mut store = MediaStore::new(FontSize::new(8, 16));
         store.set_protocol(ImageProtocol::Kitty);
-        let big = image::ImageBuffer::from_fn(2000, 1200, |x, y| {
-            image::Rgba([x as u8, y as u8, 30, 255])
-        });
+        // 25× the display box on each edge: the transmit must still be
+        // prescaled, and generating/encoding it stays off the critical path.
+        let big =
+            image::ImageBuffer::from_fn(800, 480, |x, y| image::Rgba([x as u8, y as u8, 30, 255]));
         let mut bytes = Vec::new();
         image::codecs::png::PngEncoder::new(std::io::Cursor::new(&mut bytes))
-            .write_image(big.as_raw(), 2000, 1200, image::ExtendedColorType::Rgba8)
+            .write_image(big.as_raw(), 800, 480, image::ExtendedColorType::Rgba8)
             .unwrap();
         store.insert("big".into(), bytes);
         let lines = render(&mut store, "big", 20).expect("renders");
