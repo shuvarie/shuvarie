@@ -296,6 +296,12 @@ pub enum ChatMessage {
     ThemeChanged,
     ScrollUp,
     ScrollDown,
+    /// Emacs `C-v`: move the viewport half a screen toward the end of the
+    /// history (the text scrolls up).
+    ScrollHalfPageDown,
+    /// Emacs `M-v`: move the viewport half a screen back toward the start
+    /// (the text scrolls down).
+    ScrollHalfPageUp,
     /// Left-button mouse activity at a terminal cell inside the history
     /// pane: down starts a selection, drag extends it, up finalizes — or
     /// toggles the block under a click (movement under the drag slop).
@@ -426,6 +432,10 @@ pub struct Chat {
     stored_len: usize,
     scroll: RefCell<Scroll>,
     width: Cell<u16>,
+    /// The history pane's painted height in rows, set by the last `view`. The
+    /// half-page scrolls measure against it; a scroll arriving before the
+    /// first frame falls back to a single row.
+    viewport: Cell<u32>,
     env_rev: u64,
     toggled: BTreeSet<(usize, usize)>,
     /// Live drag selection in content space; survives scrolling.
@@ -525,6 +535,7 @@ impl Chat {
                 ..Scroll::default()
             }),
             width: Cell::new(0),
+            viewport: Cell::new(0),
             env_rev: 0,
             toggled: BTreeSet::new(),
             selection: RefCell::new(None),
@@ -598,6 +609,12 @@ impl Chat {
         turn.blocks
             .as_deref()
             .is_some_and(|blocks| blocks.iter().any(|block| block.tool_is_running()))
+    }
+
+    /// The rows a half-page scroll moves: half the last painted viewport,
+    /// floored at one row so a scroll before the first frame still moves.
+    fn half_page(&self) -> u32 {
+        (self.viewport.get() / 2).max(1)
     }
 
     pub fn update(&mut self, msg: ChatMessage) {
@@ -822,6 +839,17 @@ impl Chat {
                 let mut scroll = self.scroll.borrow_mut();
                 scroll.offset = scroll.offset.saturating_add(1);
             }
+            ChatMessage::ScrollHalfPageUp => {
+                let half = self.half_page();
+                let mut scroll = self.scroll.borrow_mut();
+                scroll.offset = scroll.offset.saturating_sub(half);
+                scroll.sticky_bottom = false;
+            }
+            ChatMessage::ScrollHalfPageDown => {
+                let half = self.half_page();
+                let mut scroll = self.scroll.borrow_mut();
+                scroll.offset = scroll.offset.saturating_add(half);
+            }
             ChatMessage::Mouse { kind, column, row } => {
                 self.handle_mouse(kind, column, row);
             }
@@ -887,6 +915,7 @@ impl Chat {
             return;
         }
         let viewport = u32::from(area.height);
+        self.viewport.set(viewport);
         let mut turns = self.turns.borrow_mut();
         let mut in_flight = self.in_flight.borrow_mut();
 
@@ -3312,6 +3341,16 @@ pub(crate) mod tests {
         session
     }
 
+    /// [`est_hostile_session`] with a bottom-pinned scroll position: a loaded
+    /// session restores its persisted `StoredScroll`, and the fixture's
+    /// default is unpinned — the viewport would open at the very top instead
+    /// of following the last turn.
+    fn bottom_pinned_session(turns: usize) -> shuvarie_core::Session {
+        let mut session = est_hostile_session(turns);
+        session.scroll.sticky = true;
+        session
+    }
+
     #[test]
     fn turn_height_stays_measured_when_cache_invalidated() {
         let mut chat = Chat::new();
@@ -3435,6 +3474,79 @@ pub(crate) mod tests {
             chat.scroll.borrow().sticky_bottom,
             "scrolling back to the bottom re-engages sticky"
         );
+    }
+
+    #[test]
+    fn half_page_scrolling_steps_half_the_painted_viewport() {
+        let mut chat = Chat::new();
+        // Before the first frame the painted height is unknown, so the step
+        // falls back to a single row rather than stalling on a zero-length
+        // page.
+        assert_eq!(chat.half_page(), 1);
+        chat.update(ChatMessage::ScrollHalfPageUp);
+        assert_eq!(chat.scroll.borrow().offset, 0, "no content, no movement");
+
+        chat.update(ChatMessage::Load {
+            session: bottom_pinned_session(30),
+        });
+        // Two frames: the first paint only measures the turns in the window,
+        // so the settled bottom (what a scrolling user actually sees) is the
+        // one the second paint holds.
+        draw(&chat, 80, 21);
+        draw(&chat, 80, 21);
+        assert_eq!(chat.half_page(), 10, "half of the 21-row pane");
+        let bottom = chat.scroll.borrow().offset;
+        assert!(bottom > 20, "the session must overflow the viewport");
+
+        chat.update(ChatMessage::ScrollHalfPageUp);
+        draw(&chat, 80, 21);
+        assert_eq!(
+            chat.scroll.borrow().offset,
+            bottom - 10,
+            "half of the 21-row viewport, floored"
+        );
+        assert!(
+            !chat.scroll.borrow().sticky_bottom,
+            "a half-page up releases the follow pin"
+        );
+
+        chat.update(ChatMessage::ScrollHalfPageDown);
+        draw(&chat, 80, 21);
+        assert_eq!(chat.scroll.borrow().offset, bottom, "half a page back down");
+        assert!(
+            chat.scroll.borrow().sticky_bottom,
+            "landing on the bottom re-engages the pin"
+        );
+    }
+
+    #[test]
+    fn half_page_step_follows_the_painted_height() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::Load {
+            session: bottom_pinned_session(30),
+        });
+        for height in [20u16, 40] {
+            // Settle pinned at the bottom, then step up by half the pane.
+            draw(&chat, 80, height);
+            draw(&chat, 80, height);
+            assert!(chat.scroll.borrow().sticky_bottom);
+            let bottom = chat.scroll.borrow().offset;
+            chat.update(ChatMessage::ScrollHalfPageUp);
+            draw(&chat, 80, height);
+            assert_eq!(
+                chat.scroll.borrow().offset,
+                bottom - u32::from(height) / 2,
+                "a {height}-row pane steps {} rows",
+                height / 2
+            );
+            chat.update(ChatMessage::ScrollHalfPageDown);
+            draw(&chat, 80, height);
+            assert_eq!(
+                chat.scroll.borrow().offset,
+                bottom,
+                "the step back down returns to the bottom"
+            );
+        }
     }
 
     #[test]

@@ -520,6 +520,12 @@ impl SessionScreen {
                 KeyCode::Char('p') if ctrl(key) => {
                     Some(SessionMessage::Chat(ChatMessage::ScrollUp))
                 }
+                KeyCode::Char('v') if ctrl(key) => {
+                    Some(SessionMessage::Chat(ChatMessage::ScrollHalfPageDown))
+                }
+                KeyCode::Char('v') if alt(key) => {
+                    Some(SessionMessage::Chat(ChatMessage::ScrollHalfPageUp))
+                }
                 _ => Some(SessionMessage::Search(SearchMessage::Swallow)),
             };
         }
@@ -561,16 +567,20 @@ impl SessionScreen {
                     }
                 }
                 KeyCode::Char('o') => Some(SessionMessage::Chat(ChatMessage::ToggleLastTool)),
+                // Emacs `C-v`: half a screen toward the end of the history.
+                KeyCode::Char('v') => Some(SessionMessage::Chat(ChatMessage::ScrollHalfPageDown)),
                 _ => self.input.map_event(key).map(SessionMessage::Text),
             };
         }
         if alt(key) {
-            if key.code == KeyCode::Up {
-                return Some(SessionMessage::RecallSteered {
+            return match key.code {
+                KeyCode::Up => Some(SessionMessage::RecallSteered {
                     stacked: alt_shift(key),
-                });
-            }
-            return self.input.map_event(key).map(SessionMessage::Text);
+                }),
+                // Emacs `M-v`: half a screen back toward the start.
+                KeyCode::Char('v') => Some(SessionMessage::Chat(ChatMessage::ScrollHalfPageUp)),
+                _ => self.input.map_event(key).map(SessionMessage::Text),
+            };
         }
         match key.code {
             KeyCode::Up if self.input_is_multiline() || self.input.wants_recall_up() => {
@@ -2618,6 +2628,34 @@ mod tests {
             screen.map_event(&KeyEvent::new(KeyCode::Char('n'), Modifiers::CONTROL)),
             Some(SessionMessage::Text(TextAreaMessage::CursorDown))
         ));
+    }
+
+    #[test]
+    fn ctrl_v_and_alt_v_half_page_the_chat() {
+        let mut screen = SessionScreen::new();
+        screen.input.width.set(40);
+        screen.input.buffer.set("draft");
+        assert!(matches!(
+            screen.map_event(&KeyEvent::new(KeyCode::Char('v'), Modifiers::CONTROL)),
+            Some(SessionMessage::Chat(ChatMessage::ScrollHalfPageDown))
+        ));
+        assert!(matches!(
+            screen.map_event(&KeyEvent::new(KeyCode::Char('v'), Modifiers::ALT)),
+            Some(SessionMessage::Chat(ChatMessage::ScrollHalfPageUp))
+        ));
+        assert_eq!(
+            screen.input.buffer.value, "draft",
+            "no leak into the prompt"
+        );
+
+        // The search tooltip keeps the half-page chords reachable, the way it
+        // does for Ctrl+N/Ctrl+P.
+        screen.open_search(Some("needle"));
+        assert!(matches!(
+            screen.map_event(&KeyEvent::new(KeyCode::Char('v'), Modifiers::CONTROL)),
+            Some(SessionMessage::Chat(ChatMessage::ScrollHalfPageDown))
+        ));
+        assert_eq!(screen.search.needle().as_deref(), Some("needle"));
     }
 
     #[test]
