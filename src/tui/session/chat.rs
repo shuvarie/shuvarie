@@ -9,6 +9,7 @@ use shuvarie_core::tool_record::ToolRecord;
 use shuvarie_core::{DiagnosticInfo, Role};
 use shuvarie_db::{ReasoningSegment, StoredScroll, TextSegment};
 use shuvarie_llm::{AttachmentKind, FileChange, ShellStreams};
+use tui_scrollbar::{GlyphSet, ScrollBar, ScrollLengths};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::MouseKind;
@@ -23,6 +24,15 @@ use crate::tui::theme;
 
 /// Selection column bounds of one wrapped row.
 type WrapBounds = (Option<u16>, Option<u16>);
+
+/// Chat scrollbar glyphs: standard Unicode block elements only so every
+/// terminal font renders the thumb edge, with an invisible space track that
+/// keeps the gutter a bare column of chrome like the rest of the frame.
+const CHAT_GLYPHS: GlyphSet = GlyphSet {
+    track_vertical: ' ',
+    track_horizontal: ' ',
+    ..GlyphSet::unicode()
+};
 
 /// One logical source row under the selection: which turn/segment/source
 /// row it came from, the wrapped rows it covers with their selection column
@@ -2212,33 +2222,26 @@ impl Chat {
         scroll_y: u32,
         content_height: u32,
     ) {
-        let track_len = area.height as usize;
-        if track_len < 2 || content_height <= u32::from(area.height) {
+        let content_len = content_height as usize;
+        let viewport_len = u32::from(area.height) as usize;
+        if area.height < 2 || content_len <= viewport_len {
             return;
         }
-        let content_len = content_height as usize;
-        let viewport_len = area.height as usize;
-        let offset = scroll_y as usize;
-        let max_offset = content_len - viewport_len;
-        let thumb_len = (track_len * viewport_len / content_len).clamp(1, track_len);
-        let max_start = track_len - thumb_len;
-        let thumb_start = (max_start * offset)
-            .checked_div(max_offset)
-            .unwrap_or(0)
-            .min(max_start);
-        let bar_x = area.right().saturating_sub(1);
-        let buf = frame.buffer_mut();
-        for row in area.top()..area.bottom() {
-            let y = row as usize;
-            let (symbol, style) = if (thumb_start..thumb_start + thumb_len).contains(&y) {
-                ("█", theme::accent())
-            } else {
-                (" ", theme::text_muted())
-            };
-            let cell = buf.cell_mut((bar_x, row)).expect("bar_x in bounds");
-            cell.set_symbol(symbol);
-            cell.set_style(Style::new().fg(style));
-        }
+        let bar_area = Rect {
+            x: area.right().saturating_sub(1),
+            y: area.top(),
+            width: 1,
+            height: area.height,
+        };
+        let scrollbar = ScrollBar::vertical(ScrollLengths {
+            content_len,
+            viewport_len,
+        })
+        .offset(scroll_y as usize)
+        .glyph_set(CHAT_GLYPHS)
+        .track_style(Style::new())
+        .thumb_style(Style::new().fg(theme::accent()));
+        frame.render_widget(&scrollbar, bar_area);
     }
 }
 
@@ -3715,6 +3718,31 @@ pub(crate) mod tests {
             "thumb covers the last track row"
         );
         assert_eq!(buf[(bar_x, 0)].symbol(), " ", "top of the track is empty");
+    }
+
+    #[test]
+    fn scrollbar_has_no_arrow_endcaps_and_hugs_track_top_when_fully_up() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::Load {
+            session: session_with_user_turns(30),
+        });
+        for _ in 0..6000 {
+            chat.update(ChatMessage::ScrollUp);
+        }
+        let buf = draw(&chat, 80, 10);
+        let bar_x = buf.area().width - 1;
+        assert_eq!(
+            buf[(bar_x, 0)].symbol(),
+            "█",
+            "thumb hugs the top when fully scrolled up"
+        );
+        let bar_symbols: Vec<String> = (0..buf.area().height)
+            .map(|row| buf[(bar_x, row)].symbol().to_string())
+            .collect();
+        assert!(
+            !bar_symbols.iter().any(|s| s == "▲" || s == "▼"),
+            "bar rows must not show arrow endcaps: {bar_symbols:?}"
+        );
     }
 
     #[test]

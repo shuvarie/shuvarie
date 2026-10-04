@@ -6726,6 +6726,7 @@ dependencies = [
  "termina",
  "tokio",
  "tui-popup",
+ "tui-scrollbar",
  "unicode-width 0.2.2",
  "uuid",
  "zip",
@@ -8250,6 +8251,16 @@ dependencies = [
  "document-features",
  "ratatui-core",
  "ratatui-widgets",
+]
+
+[[package]]
+name = "tui-scrollbar"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c9ab2280aad13c3c49227037f2eb19c9274c0669327dfbc188280458ede6a72"
+dependencies = [
+ "document-features",
+ "ratatui-core",
 ]
 
 [[package]]
