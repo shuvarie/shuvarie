@@ -481,21 +481,49 @@ impl Default for PermissionsConfig {
 
 impl PermissionsConfig {
     /// The built-in permission baseline, which sits at the deepest end of the
-    /// merged rule chain: ask all, allow inside the working directory except
-    /// hidden files, and allow all shell commands. Its verbs apply when no
-    /// config layer sets them.
+    /// merged rule chain: ask all, allow the agent-owned and project metadata
+    /// paths (.shuvarie/.shuvarie-dev, `.agents`, and the git and forge dot
+    /// directories), allow inside the working directory except hidden files,
+    /// and allow all shell commands. Its verbs apply when no config layer sets
+    /// them.
     pub fn builtin() -> Self {
+        // Hidden paths the agent keeps quiet access to: fully allowed,
+        // including hidden entries inside them, ahead of the except-hidden
+        // working-directory rule below.
+        let allow = |path: &str| PathRule {
+            verb: Verb::Allow,
+            path: path.to_string(),
+            except_hidden: false,
+            exact: false,
+            mode: Mode::Rw,
+        };
         Self {
             default: Some(Verb::Ask),
             paths: RuleSet {
                 default: None,
-                rules: vec![PathRule {
-                    verb: Verb::Allow,
-                    path: ".".to_string(),
-                    except_hidden: true,
-                    exact: false,
-                    mode: Mode::Rw,
-                }],
+                rules: vec![
+                    // The app's workspace dir (debug/release suffix baked in).
+                    allow(WORKSPACE_DIR_NAME),
+                    // Agent-owned skills (etc) at the workspace root.
+                    allow(".agents"),
+                    // Git metadata at the workspace root, and the
+                    // forge/config directories: any subset may exist.
+                    allow(".git"),
+                    allow(".gitignore"),
+                    allow(".gitattributes"),
+                    allow(".gitmodules"),
+                    allow(".github"),
+                    allow(".gitlab"),
+                    allow(".gitea"),
+                    allow(".forgejo"),
+                    PathRule {
+                        verb: Verb::Allow,
+                        path: ".".to_string(),
+                        except_hidden: true,
+                        exact: false,
+                        mode: Mode::Rw,
+                    },
+                ],
             },
             shell: RuleSet {
                 default: Some(Verb::Allow),
@@ -5313,10 +5341,20 @@ mod tests {
         let parsed = config_kdl::from_kdl("").unwrap();
         assert_eq!(parsed.permissions, PermissionsConfig::builtin());
         assert_eq!(parsed.permissions.default, Some(Verb::Ask));
-        assert_eq!(parsed.permissions.paths.rules.len(), 1);
-        assert_eq!(parsed.permissions.paths.rules[0].verb, Verb::Allow);
-        assert_eq!(parsed.permissions.paths.rules[0].path, ".");
-        assert!(parsed.permissions.paths.rules[0].except_hidden);
+        // The metadata allow rules lead, then the working-directory rule.
+        assert_eq!(parsed.permissions.paths.rules.len(), 11);
+        assert_eq!(parsed.permissions.paths.rules[0].path, WORKSPACE_DIR_NAME);
+        assert_eq!(parsed.permissions.paths.rules[1].path, ".agents");
+        assert_eq!(parsed.permissions.paths.rules[2].path, ".git");
+        for rule in &parsed.permissions.paths.rules[..10] {
+            assert_eq!(rule.verb, Verb::Allow);
+            assert!(!rule.except_hidden);
+            assert_eq!(rule.mode, Mode::Rw);
+        }
+        let last = parsed.permissions.paths.rules.last().unwrap();
+        assert_eq!(last.path, ".");
+        assert_eq!(last.verb, Verb::Allow);
+        assert!(last.except_hidden);
         assert_eq!(parsed.permissions.shell.rules.len(), 0);
         assert_eq!(parsed.permissions.shell.default, Some(Verb::Allow));
     }
@@ -5625,13 +5663,17 @@ mod tests {
             .iter()
             .map(|rule| (rule.verb, rule.path.as_str()))
             .collect();
+        let builtin = PermissionsConfig::builtin();
+        let mut expected = vec![(Verb::Deny, "secrets/"), (Verb::Allow, ".")];
+        expected.extend(
+            builtin
+                .paths
+                .rules
+                .iter()
+                .map(|rule| (rule.verb, rule.path.as_str())),
+        );
         assert_eq!(
-            paths,
-            vec![
-                (Verb::Deny, "secrets/"),
-                (Verb::Allow, "."),
-                (Verb::Allow, ".")
-            ],
+            paths, expected,
             "local rules first, global second, builtin deepest"
         );
         assert_eq!(perms.paths.default, None);
@@ -5658,9 +5700,17 @@ mod tests {
             .iter()
             .map(|rule| (rule.verb, rule.path.as_str()))
             .collect();
+        let builtin = PermissionsConfig::builtin();
+        let mut expected = vec![(Verb::Allow, ".")];
+        expected.extend(
+            builtin
+                .paths
+                .rules
+                .iter()
+                .map(|rule| (rule.verb, rule.path.as_str())),
+        );
         assert_eq!(
-            paths,
-            vec![(Verb::Allow, "."), (Verb::Allow, ".")],
+            paths, expected,
             "the global allow rules survive a local section without rules"
         );
         assert_eq!(perms.shell.default, Some(Verb::Allow));
@@ -5679,10 +5729,18 @@ mod tests {
             .iter()
             .map(|rule| (rule.verb, rule.path.as_str()))
             .collect();
+        let builtin = PermissionsConfig::builtin();
+        let mut expected = vec![(Verb::Deny, "secrets/")];
+        expected.extend(
+            builtin
+                .paths
+                .rules
+                .iter()
+                .map(|rule| (rule.verb, rule.path.as_str())),
+        );
         assert_eq!(
-            paths,
-            vec![(Verb::Deny, "secrets/"), (Verb::Allow, ".")],
-            "the builtin cwd allow stays beneath the local rules"
+            paths, expected,
+            "the builtin rules stay beneath the local rules"
         );
         assert_eq!(config.permissions.shell.default, Some(Verb::Allow));
     }
@@ -5700,7 +5758,10 @@ mod tests {
             Some(Verb::Allow),
             "the top file set no bare verb, the global one survives"
         );
-        assert_eq!(config.permissions.paths.rules.len(), 2);
+        assert_eq!(
+            config.permissions.paths.rules.len(),
+            1 + PermissionsConfig::builtin().paths.rules.len()
+        );
 
         std::fs::write(&top, "permissions { paths { ask-all } }").unwrap();
         let config = Config::load_chain(&[(top, true), (global, false)]).unwrap();

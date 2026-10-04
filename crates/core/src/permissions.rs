@@ -980,9 +980,7 @@ mod tests {
         );
         assert_eq!(
             perms.check_path(PathKind::Read, Path::new("/ws/.agents/.secrets/key")),
-            Decision::Ask {
-                reason: "permissions default: ask-all".into()
-            }
+            Decision::Allow
         );
         assert_eq!(
             perms.check_path(PathKind::Read, Path::new("/ws/sub/.agents/x")),
@@ -996,6 +994,44 @@ mod tests {
         assert_eq!(
             perms.check_path(PathKind::Read, &home.join(".agents/skills/tokio/SKILL.md")),
             Decision::Allow
+        );
+    }
+
+    /// The builtin allows the git, forge, and agent-owned dot paths — the
+    /// hidden entries inside them included — without asking; other root
+    /// dot files and git-prefixed names beyond the enumerated metadata
+    /// (`.gitignore` and friends) still ask.
+    #[test]
+    fn builtin_allows_agent_and_git_dot_paths_without_asking() {
+        let perms = builtin();
+        for dir in [".github", ".gitlab", ".gitea", ".forgejo"] {
+            let visible = format!("/ws/{dir}/workflows/ci.yml");
+            assert_eq!(
+                perms.check_path(PathKind::Read, Path::new(&visible)),
+                Decision::Allow,
+                "{dir}"
+            );
+            let hidden = format!("/ws/{dir}/.hidden");
+            assert_eq!(
+                perms.check_path(PathKind::Read, Path::new(&hidden)),
+                Decision::Allow,
+                "{dir}"
+            );
+        }
+        assert_eq!(
+            perms.check_path(PathKind::Read, Path::new("/ws/.gitignore")),
+            Decision::Allow
+        );
+        assert_eq!(
+            perms.check_path(PathKind::Write, Path::new("/ws/.git/config")),
+            Decision::Allow
+        );
+        // Unlisted git-prefixed names beyond the enumerated metadata ask.
+        assert_eq!(
+            perms.check_path(PathKind::Read, Path::new("/ws/.gitlab-ci.yml")),
+            Decision::Ask {
+                reason: "permissions default: ask-all".into()
+            }
         );
     }
 
