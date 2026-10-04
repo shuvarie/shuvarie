@@ -2827,6 +2827,21 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_m_opens_the_command_menu() {
+        let mut app = app_with(connected());
+        active_session(&mut app);
+        let key =
+            termina::event::KeyEvent::new(KeyCode::Char('m'), termina::event::Modifiers::CONTROL);
+        assert!(matches!(
+            app.map_event(Event::Terminal(TermEvent::Key(key))),
+            Some(AppMessage::OpenCommandMenu)
+        ));
+        app.update(AppMessage::OpenCommandMenu);
+        assert!(app.command_menu.open, "the menu opens");
+        assert!(matches!(app.overlay, Overlay::CommandMenu));
+    }
+
+    #[test]
     fn resized_tracks_sidebar_width_for_toggle() {
         let mut app = app_with(connected());
         assert!(!app.session.sidebar.collapsed_at(200), "wide default");

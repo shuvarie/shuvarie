@@ -1,5 +1,6 @@
 use termina::escape::csi::{
     Csi, DecPrivateMode, DecPrivateModeCode, Keyboard, KittyKeyboardFlags, Mode, Window,
+    XtermKeyModifierResource,
 };
 use termina::escape::osc::{ColorOrQuery, DynamicColorNumber, Osc, Selection};
 
@@ -39,17 +40,41 @@ pub const QUERY_CELL_SIZE_PX: &str = "\x1b[16t";
 
 // Fallback for terminals without the kitty keyboard protocol (notably tmux,
 // which ignores both the flag push and `CSI ? u`): request xterm
-// `modifyOtherKeys=1` (`CSI > 4;1m`). tmux then tracks the request and starts
-// forwarding modified keys toward the pane — as CSI-u (e.g. Shift+Enter as
-// `CSI 13;2u`) with its `extended-keys-format csi-u` option (the tmux 3.5+
-// default), which termina parses into modifier-carrying key events. Mode 1
-// only affects keys that have no legacy encoding, so Ctrl/Alt chords keep
-// their legacy sequences.
+// `modifyOtherKeys`. The request goes through termina's typed key-modifier
+// resource command (`CSI > 4 ; Pv m`, resource 4 = "other keys") rather than a
+// hand-written string, like every other escape here. tmux then tracks the
+// request and starts forwarding modified keys toward the pane, which termina
+// parses into modifier-carrying key events.
 //
-// Not the `xterm` format (`CSI 27;2;13~`): termina's input parser drops
-// those sequences, so Shift+Enter would still be inert. tmux < 3.5 has no
-// `extended-keys-format` option and defaults to the xterm encoding.
-pub const REQUEST_MODIFY_OTHER_KEYS: &str = "\x1b[>4;1m";
+// The level matters. Level 1 only escapes keys that have no legacy encoding:
+// chords whose control byte already exists keep it, and Ctrl+M is CR — exactly
+// what Enter sends — so the Ctrl+M command-menu binding could never fire under
+// tmux. Level 2 escapes every modified chord, sending Ctrl+M as CSI-u while
+// plain Enter keeps its CR. tmux folds both levels into one "extended" mode
+// before 3.5 (`input.c`: `m == 1 || m == 2`) and only distinguishes level 2
+// from 3.5 on, where `extended-keys-format csi-u` makes it emit the CSI-u form
+// termina understands (e.g. Ctrl+M as `CSI 109;5u`).
+//
+// Request level 2 only where that encoding holds. Elsewhere — and in tmux
+// configured with `extended-keys-format xterm` — extended keys arrive as
+// xterm's `CSI 27 ; mod ; code ~`, which termina's input parser drops, so
+// level 2 would merely turn today's working legacy chords (Ctrl+C, Ctrl+J,
+// ...) into sequences nothing can decode.
+//
+// No termina equivalent covers the *disable* verb: `Mode::XtermKeyMode`
+// renders the `m` (set/reset value) and `? n` (query) forms, not xterm's
+// `CSI > Pv n` "disable modifiers". `value: None` renders `CSI > 4 ; m`,
+// which tmux accepts as a reset, but termina documents that same form as a
+// *query*, so the explicit `n` verb stays hand-written below.
+pub const REQUEST_MODIFY_OTHER_KEYS_LEVEL1: Csi = Csi::Mode(Mode::XtermKeyMode {
+    resource: XtermKeyModifierResource::OtherKeys,
+    value: Some(1),
+});
+
+pub const REQUEST_MODIFY_OTHER_KEYS_LEVEL2: Csi = Csi::Mode(Mode::XtermKeyMode {
+    resource: XtermKeyModifierResource::OtherKeys,
+    value: Some(2),
+});
 
 // Reset modifyOtherKeys (`CSI > 4n`) after a fallback request, mirroring the
 // kitty flag pop on exit.

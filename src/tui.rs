@@ -438,9 +438,12 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 /// ignores both the flag push and the query, and without help it strips the
 /// modifiers from keys that have no legacy encoding — Shift+Enter arrives as
 /// plain `\r`, indistinguishable from Enter. A silent terminal therefore gets
-/// an xterm `modifyOtherKeys=1` request (`CSI > 4;1m`); tmux tracks it and
-/// starts forwarding modified keys as CSI-u (its `extended-keys` and
-/// `extended-keys-format csi-u` options, on by default since tmux 3.5).
+/// an xterm `modifyOtherKeys` request (`CSI > 4 ; Pv m`); tmux tracks it and
+/// starts forwarding modified keys as CSI-u when its `extended-keys` server
+/// option is on and `extended-keys-format` is `csi-u` (tmux 3.5+; both default
+/// to `off`/`xterm`). The level comes from `modify_other_keys_request`: level 2
+/// when the modified keys will arrive as CSI-u, so chords like Ctrl+M stop
+/// colliding with their legacy control bytes without Ctrl+C losing its `\x03`.
 ///
 /// Returns `true` when the kitty protocol is available and `false` when the
 /// modifyOtherKeys fallback was requested, so `deinit_terminal` can reset it.
@@ -453,9 +456,82 @@ fn probe_keyboard_protocol(term: &mut PlatformTerminal, reader: &EventReader) ->
         let _ = reader.read(kitty_flags_report)?;
         return Ok(true);
     }
-    write!(term, "{}", escape::REQUEST_MODIFY_OTHER_KEYS)?;
+    write!(term, "{}", modify_other_keys_request(tmux_forwards_csi_u()))?;
     term.flush()?;
     Ok(false)
+}
+
+/// The `modifyOtherKeys` level to request from a terminal that stayed silent
+/// during the kitty probe.
+///
+/// Level 2 is worth asking for only where modified keys come back as CSI-u:
+/// tmux with `extended-keys on` and `extended-keys-format csi-u` then forwards
+/// every modified chord that way, so Ctrl+M arrives as `CSI 109;5u` rather than
+/// the CR that Enter also sends — level 1 deliberately leaves chords with a
+/// legacy control byte alone, which is why the Ctrl+M command-menu binding
+/// stayed dead under tmux. `tmux_forwards_csi_u` is what establishes that.
+///
+/// Everywhere else level 1 stands: extended keys arrive in the xterm
+/// `CSI 27 ; mod ; code ~` form that termina's parser drops, so level 2 would
+/// turn working legacy chords (Ctrl+C, Ctrl+J, ...) into sequences nothing can
+/// decode — a quit binding that stops quitting, to fix one binding that still
+/// works as Enter.
+fn modify_other_keys_request(csi_u_extended_keys: bool) -> Csi {
+    if csi_u_extended_keys {
+        escape::REQUEST_MODIFY_OTHER_KEYS_LEVEL2
+    } else {
+        escape::REQUEST_MODIFY_OTHER_KEYS_LEVEL1
+    }
+}
+
+/// Whether tmux will encode the extended keys we are about to ask for as CSI-u
+/// — the one encoding termina's parser understands.
+///
+/// tmux's `extended-keys-format` is a *server* option a pane cannot change: the
+/// format is the user's choice, and it defaults to `xterm` (alongside
+/// `extended-keys off`). Only `csi-u` output is worth asking level 2 for. At
+/// `xterm` the extended keys arrive as `CSI 27 ; mod ; code ~`, which termina
+/// drops, so level 2 would turn Ctrl+C into an undecodable sequence where level
+/// 1 leaves its `\x03` alone — a quit binding that stops quitting, to fix one
+/// binding that still reaches Enter.
+///
+/// `extended-keys` itself is deliberately not consulted: with it `off` tmux
+/// ignores the level request entirely (measured: keys byte-identical to no
+/// request), and with it `on` or `always` the format above decides how keys
+/// arrive. Requiring it to be on would only strand users who enable extended
+/// keys mid-session.
+///
+/// An option tmux does not know reads as `None` — versions predating
+/// `extended-keys-format` (tmux 3.5) fold modifyOtherKeys levels 1 and 2 into
+/// one extended mode, so the lower level is equivalent there rather than worse.
+fn tmux_forwards_csi_u() -> bool {
+    in_tmux() && tmux_format_is_csi_u(tmux_option("extended-keys-format").as_deref())
+}
+
+/// Whether tmux's `extended-keys-format` says modified keys come back as CSI-u.
+fn tmux_format_is_csi_u(format: Option<&str>) -> bool {
+    format == Some("csi-u")
+}
+
+/// Read one tmux server option (`tmux show-options -sv <name>`), without the
+/// trailing newline. `None` when tmux cannot be run or does not know the
+/// option. The child inherits `TMUX`, so it addresses the server this pane
+/// belongs to.
+fn tmux_option(name: &str) -> Option<String> {
+    let out = std::process::Command::new("tmux")
+        .args(["show-options", "-sv", name])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(out.stdout).ok()?;
+    Some(value.trim().to_owned())
+}
+
+/// Whether the TUI runs inside a tmux pane (`$TMUX` is set).
+fn in_tmux() -> bool {
+    std::env::var_os("TMUX").is_some()
 }
 
 /// Matches the kitty keyboard flags report (`CSI ? flags u`). Non-matching
@@ -538,9 +614,58 @@ mod tests {
     #[test]
     fn keyboard_protocol_probe_sequences() {
         assert_eq!(escape::QUERY_KITTY_FLAGS.to_string(), "\x1b[?u");
-        assert_eq!(escape::REQUEST_MODIFY_OTHER_KEYS, "\x1b[>4;1m");
+        // The modifyOtherKeys request is built from termina's typed
+        // key-modifier resource command; the bytes must match xterm's
+        // `CSI > 4 ; Pv m` exactly for tmux to act on it.
+        assert_eq!(
+            escape::REQUEST_MODIFY_OTHER_KEYS_LEVEL1.to_string(),
+            "\x1b[>4;1m"
+        );
+        assert_eq!(
+            escape::REQUEST_MODIFY_OTHER_KEYS_LEVEL2.to_string(),
+            "\x1b[>4;2m"
+        );
         assert_eq!(escape::RESET_MODIFY_OTHER_KEYS, "\x1b[>4n");
         assert_eq!(escape::QUERY_CELL_SIZE_PX.to_string(), "\x1b[16t");
+    }
+
+    #[test]
+    fn tmux_asks_for_modify_other_keys_level_two() {
+        // Level 2 is what makes tmux send Ctrl+M as CSI-u instead of CR, so it
+        // is only requested once the keys are known to come back that way.
+        assert_eq!(modify_other_keys_request(true).to_string(), "\x1b[>4;2m");
+        // Everything else keeps level 1: extended keys use the xterm format
+        // termina drops, so level 2 would only break Ctrl+C for no gain.
+        assert_eq!(modify_other_keys_request(false).to_string(), "\x1b[>4;1m");
+    }
+
+    #[test]
+    fn tmux_level_two_needs_the_csi_u_format() {
+        // The option value that makes tmux send Ctrl+M as CSI-u instead of CR.
+        assert!(tmux_format_is_csi_u(Some("csi-u")));
+        // `xterm` (the default format) encodes extended keys as
+        // `CSI 27 ; mod ; code ~`, which termina drops.
+        assert!(!tmux_format_is_csi_u(Some("xterm")));
+        // tmux older than the option, or an answer we could not read: the
+        // format is unknown, so the level stays 1.
+        assert!(!tmux_format_is_csi_u(None));
+    }
+
+    #[test]
+    fn tmux_level_two_ctrl_m_parses_as_a_control_chord() {
+        use termina::event::{KeyCode, Modifiers};
+
+        // What tmux 3.5+ sends for Ctrl+M once `CSI > 4;2m` is requested; the
+        // legacy CR it sends at level 1 carries no CONTROL modifier.
+        let mut parser = termina::Parser::default();
+        parser.parse(b"\x1b[109;5u", false);
+        match parser.pop() {
+            Some(TerminalEvent::Key(key)) => {
+                assert_eq!(key.code, KeyCode::Char('m'));
+                assert!(key.modifiers.contains(Modifiers::CONTROL));
+            }
+            other => panic!("expected a Ctrl+M key event, got {other:?}"),
+        }
     }
 
     #[test]
