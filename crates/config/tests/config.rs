@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use shuvarie_config::{
     Active, Config, ConfigError, Connections, LspConfigRepr, LspServerSpecRepr, ProviderConfig,
+    RankingConfig,
 };
 
 fn sample_connections() -> Connections {
@@ -26,6 +27,8 @@ fn sample_connections() -> Connections {
             model: Some("gpt-5.5".to_string()),
             variant: None,
         }),
+        decision_providers: BTreeMap::new(),
+        decision: None,
     }
 }
 
@@ -363,4 +366,627 @@ fn lsp_config_repr_default_matches() {
     let repr = LspConfigRepr::default();
     assert!(!repr.disabled);
     assert!(repr.servers.is_empty());
+}
+
+/// Parses one config file through the public surface.
+fn parse_config(kdl: &str) -> shuvarie_config::Result<Config> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.kdl");
+    std::fs::write(&path, kdl).expect("write");
+    Config::load_from(&path)
+}
+
+/// Writes a config and reads it back, the way the app's save path does.
+fn round_trip(config: &Config) -> Config {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.kdl");
+    config.save_to(&path).expect("save");
+    Config::load_from(&path).expect("load")
+}
+
+#[test]
+fn decisions_cover_all_three_answer_shapes() {
+    let config = parse_config(
+        r#"
+        decisions {
+            decision "shell-safety" {
+                type "noul"
+                instructions "Does this command carry a destructive intent?"
+                yes "harmful"
+                no "benign"
+            }
+            decision "tool-risk" {
+                type "choice"
+                instructions "Which risk class does this tool call fall into?"
+                option "safe"
+                option "review" { description "Runs, but should be confirmed" }
+            }
+            decision "option-fit" {
+                type "score"
+                instructions "How well does this option satisfy the intent?"
+                level "poor" { description "Does not address the intent" }
+                level "best"
+            }
+        }
+        "#,
+    )
+    .expect("parses");
+
+    assert_eq!(config.decisions.decisions.len(), 3);
+    let safety = config.decisions.get("shell-safety").expect("shell-safety");
+    assert_eq!(safety.kind, shuvarie_config::DecisionType::Noul);
+    assert_eq!(safety.yes.as_deref(), Some("harmful"));
+    assert_eq!(safety.no.as_deref(), Some("benign"));
+
+    let risk = config.decisions.get("tool-risk").expect("tool-risk");
+    assert_eq!(risk.options.len(), 2);
+    assert_eq!(risk.options[0].label, "safe");
+    // A missing description reads as the label itself.
+    assert!(risk.options[0].description.is_none());
+    assert_eq!(
+        risk.options[1].description.as_deref(),
+        Some("Runs, but should be confirmed")
+    );
+
+    let fit = config.decisions.get("option-fit").expect("option-fit");
+    assert_eq!(fit.levels.len(), 2);
+    // A labelled level keeps its label; the wire text is the description.
+    assert_eq!(fit.levels[0].name.as_deref(), Some("poor"));
+    assert_eq!(fit.levels[0].description, "Does not address the intent");
+    // A bare level is its own description.
+    assert_eq!(fit.levels[1].name, None);
+    assert_eq!(fit.levels[1].description, "best");
+
+    assert_eq!(config, round_trip(&config));
+}
+
+#[test]
+fn decision_children_must_match_the_declared_type() {
+    for (kdl, expected) in [
+        (
+            "decisions {\n    decision \"a\" {\n        type \"noul\"\n        \
+                    instructions \"x\"\n        option \"safe\"\n    }\n}",
+            "a `noul` decision takes",
+        ),
+        (
+            "decisions {\n    decision \"a\" {\n        type \"choice\"\n        \
+                    instructions \"x\"\n    }\n}",
+            "at least one `option`",
+        ),
+        (
+            "decisions {\n    decision \"a\" {\n        type \"score\"\n        \
+                    instructions \"x\"\n    }\n}",
+            "at least one `level`",
+        ),
+        (
+            "decisions {\n    decision \"a\" {\n        instructions \"x\"\n    }\n}",
+            "requires a `type` child",
+        ),
+        (
+            "decisions {\n    decision \"a\" {\n        type \"noul\"\n    }\n}",
+            "requires an `instructions` child",
+        ),
+        (
+            "decisions {\n    decision \"a\" {\n        type \"ranking\"\n        \
+                    instructions \"x\"\n    }\n}",
+            "unknown decision type `ranking`",
+        ),
+        (
+            "decisions {\n    decision \"a\" {\n        type \"noul\"\n        \
+                    instructions \"x\"\n        yes \"y\"\n    }\n}",
+            "needs both `yes` and `no`",
+        ),
+        (
+            "decisions {\n    decision \"a\" {\n        type \"choice\"\n        \
+                    instructions \"x\"\n        option \"safe\"\n        option \"safe\"\n    \
+                    }\n}",
+            "duplicate `option` label",
+        ),
+        (
+            "decisions {\n    decision \"a\" {\n        type \"noul\"\n        \
+                    instructions \"\"\n    }\n}",
+            "`instructions` must not be empty",
+        ),
+        (
+            "decisions {\n    decision \"a\" {\n        type \"noul\"\n        \
+                    instructions \"x\"\n    }\n    decision \"a\" {\n        \
+                    type \"noul\"\n        instructions \"y\"\n    }\n}",
+            "duplicate decision `a`",
+        ),
+    ] {
+        let err = parse_config(kdl).expect_err("should fail");
+        assert!(err.to_string().contains(expected), "{kdl}: {err}");
+    }
+}
+
+/// Decision models reach a network endpoint, so a `decisions` section is off
+/// unless it says otherwise — and the switch round-trips in both spellings.
+#[test]
+fn decisions_are_disabled_unless_the_section_enables_them() {
+    const DECISION: &str =
+        "    decision \"a\" {\n        type \"noul\"\n        instructions \"x\"\n    \n}";
+
+    // No switch at all: the definitions parse, but the feature stays off.
+    let silent = parse_config(&format!("decisions {{\n{DECISION}}}\n")).expect("parses");
+    assert!(!silent.decisions.is_enabled());
+    assert_eq!(silent.decisions.disabled, None);
+    assert_eq!(silent, round_trip(&silent));
+
+    let on =
+        parse_config(&format!("decisions {{\n    enabled #true\n{DECISION}}}\n")).expect("parses");
+    assert!(on.decisions.is_enabled());
+    assert_eq!(on.decisions.disabled, Some(false));
+    assert_eq!(on, round_trip(&on));
+
+    // `disabled #true` is the default state, but writing it is meaningful: it
+    // pins the feature off against a lower-priority layer that would turn it on.
+    let off =
+        parse_config(&format!("decisions {{\n    disabled #true\n{DECISION}}}\n")).expect("parses");
+    assert!(!off.decisions.is_enabled());
+    assert_eq!(off.decisions.disabled, Some(true));
+    assert_eq!(off, round_trip(&off));
+}
+
+/// A `decisions` section carrying only the switch is still worth writing back,
+/// and a bad switch is a loud error rather than a silent drop.
+#[test]
+fn the_decisions_switch_parses_strictly() {
+    let only_switch = parse_config("decisions {\n    enabled #true\n}\n").expect("parses");
+    assert!(only_switch.decisions.is_enabled());
+    assert_eq!(only_switch, round_trip(&only_switch));
+
+    for (kdl, expected) in [
+        (
+            "decisions {\n    enabled #true\n    enabled #true\n}",
+            "duplicate `enabled`",
+        ),
+        ("decisions {\n    enabled \"yes\"\n}", "a boolean"),
+        (
+            "decisions {\n    ranking #true\n}",
+            "expected `decision`, `enabled`, or `disabled`",
+        ),
+    ] {
+        let err = parse_config(kdl).expect_err("should fail");
+        assert!(err.to_string().contains(expected), "{kdl}: {err}");
+    }
+}
+
+/// `ranking` names the `decisions` entry that reorders a question's options —
+/// globally and per scene — and round-trips in both spellings of the switch.
+#[test]
+fn ranking_round_trips_at_top_level_and_per_scene() {
+    let config = parse_config(
+        r#"
+        decisions {
+            decision "option-fit" {
+                type "score"
+                instructions "How well does this option fit the intent?"
+                level "poor" { description "Does not address the intent" }
+                level "best"
+            }
+        }
+        ranking {
+            decision "option-fit"
+        }
+        scenes {
+            scene name="Plan" {
+                ranking {
+                    decision "option-fit"
+                }
+            }
+            scene name="Review" {
+                ranking {
+                    disabled #true
+                }
+            }
+        }
+        "#,
+    )
+    .expect("parses");
+
+    assert_eq!(config.ranking.decision.as_deref(), Some("option-fit"));
+    assert!(!config.ranking.disabled);
+
+    let plan = config.scenes.scene("Plan").expect("Plan");
+    assert_eq!(plan.ranking.decision.as_deref(), Some("option-fit"));
+    assert!(!plan.ranking.disabled);
+
+    let review = config.scenes.scene("Review").expect("Review");
+    assert_eq!(review.ranking.decision, None);
+    assert!(review.ranking.disabled);
+
+    // The scene layers resolve over the global block: a scene that names one
+    // wins, and a scene that is `disabled` turns ranking off.
+    assert_eq!(
+        RankingConfig::resolve(&config.ranking, Some(&review.ranking)),
+        None
+    );
+    assert_eq!(
+        RankingConfig::resolve(&config.ranking, Some(&plan.ranking)),
+        Some("option-fit")
+    );
+
+    assert_eq!(config, round_trip(&config));
+
+    // The switch round-trips at the top level too, in both spellings: written
+    // explicitly so it survives against a lower-priority layer.
+    let off = parse_config("ranking {\n    disabled #true\n    decision \"option-fit\"\n}\n")
+        .expect("parses");
+    assert!(off.ranking.disabled);
+    assert_eq!(off.ranking.decision.as_deref(), Some("option-fit"));
+    assert_eq!(off, round_trip(&off));
+
+    let on = parse_config("ranking {\n    enabled #true\n    decision \"option-fit\"\n}\n")
+        .expect("parses");
+    assert!(!on.ranking.disabled);
+    assert_eq!(on, round_trip(&on));
+
+    // An empty block is nothing to write back.
+    let empty = parse_config("ranking {\n    enabled #true\n}\n").expect("parses");
+    assert!(empty.ranking.is_empty());
+    assert_eq!(empty, round_trip(&empty));
+}
+
+/// A `ranking` block takes one name and the switch, and nothing else.
+#[test]
+fn ranking_errors_are_reported() {
+    for (kdl, expected) in [
+        (
+            "ranking {\n    option-fit \"fit\"\n}",
+            "unknown node `option-fit` in `ranking`",
+        ),
+        ("ranking \"option-fit\"", "takes no arguments"),
+        (
+            "ranking {\n    decision \"option-fit\"\n    decision \"other\"\n}",
+            "duplicate `decision`",
+        ),
+        ("ranking {\n    decision \"\"\n}", "must not be empty"),
+        ("ranking {\n    decision\n}", "requires a name"),
+        // A property on the name is not silently dropped, and neither is one on
+        // the block itself — the block takes no properties at all.
+        (
+            "ranking {\n    decision \"option-fit\" fit=#true\n}",
+            "not properties",
+        ),
+        (
+            "ranking fit=#true {\n    decision \"option-fit\"\n}",
+            "`ranking` takes no properties",
+        ),
+        (
+            "scenes { scene name=\"Plan\" { ranking { fit } } }",
+            "unknown node `fit` in `ranking`",
+        ),
+    ] {
+        let err = match parse_config(kdl) {
+            Ok(_) => panic!("expected an error for: {kdl}"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains(expected), "{kdl}: {err}");
+    }
+}
+#[test]
+fn shell_checks_parse_with_defaults_and_round_trip() {
+    let config = parse_config(
+        r#"
+        permissions {
+            shell-patterns {
+                allow-all
+                check-all { decision "shell-safety" }
+                check "rm" "sudo" pattern="regex" on-error="deny" threshold=0.9 {
+                    decision "shell-safety"
+                }
+            }
+        }
+        "#,
+    )
+    .expect("parses");
+
+    let checks = &config.permissions.checks;
+    assert_eq!(checks.len(), 2);
+    assert_eq!(
+        checks[0].source,
+        shuvarie_config::ShellCheckSource::Decision("shell-safety".into())
+    );
+    assert!(
+        checks[0].patterns.is_empty(),
+        "`check-all` covers everything"
+    );
+    // A check that cannot run must not silently widen access.
+    assert_eq!(checks[0].on_error, shuvarie_config::Verb::Ask);
+    assert_eq!(
+        checks[0].threshold,
+        shuvarie_config::DEFAULT_CHECK_THRESHOLD
+    );
+
+    assert_eq!(
+        checks[1].patterns,
+        vec!["rm".to_string(), "sudo".to_string()]
+    );
+    assert_eq!(checks[1].kind, shuvarie_config::ShellPatternKind::Regex);
+    assert_eq!(checks[1].on_error, shuvarie_config::Verb::Deny);
+    assert_eq!(checks[1].threshold, 0.9);
+
+    assert_eq!(config, round_trip(&config));
+}
+
+/// A check may name a `subagents` worker instead of a `decisions` entry. The two
+/// are different machinery, so the config says which and the round trip keeps
+/// them apart.
+#[test]
+fn worker_checks_parse_and_round_trip() {
+    let config = parse_config(
+        r#"
+        permissions {
+            shell-patterns {
+                check-all { worker "command-checker" }
+                check "rm" on-error="deny" { worker "command-checker" }
+            }
+        }
+        "#,
+    )
+    .expect("parses");
+
+    let checks = &config.permissions.checks;
+    assert_eq!(checks.len(), 2);
+    assert_eq!(
+        checks[0].source,
+        shuvarie_config::ShellCheckSource::Worker("command-checker".into())
+    );
+    assert!(!checks[0].source.is_decision());
+    assert_eq!(checks[0].source.name(), "command-checker");
+    assert!(
+        checks[0].patterns.is_empty(),
+        "`check-all` covers everything"
+    );
+
+    assert_eq!(checks[1].on_error, shuvarie_config::Verb::Deny);
+    assert_eq!(checks[1].patterns, vec!["rm".to_string()]);
+    assert_eq!(config, round_trip(&config));
+}
+
+/// A worker answers in prose, so there is no probability for a threshold to sit
+/// on: writing one would silently do nothing.
+#[test]
+fn a_worker_check_rejects_a_threshold() {
+    let err = parse_config(
+        "permissions {\n    shell-patterns {\n        check-all threshold=0.9 {\n            \
+         worker \"command-checker\"\n        }\n    }\n}",
+    )
+    .expect_err("a worker check takes no threshold");
+    assert!(
+        err.to_string()
+            .contains("`threshold` applies to a `decision` check"),
+        "{err}"
+    );
+}
+
+/// Naming both would leave it undefined which answer the verdict came from.
+#[test]
+fn a_check_asking_both_a_decision_and_a_worker_is_rejected() {
+    let err = parse_config(
+        "permissions {\n    shell-patterns {\n        check-all {\n            decision \
+         \"shell-safety\"\n            worker \"command-checker\"\n        }\n    }\n}",
+    )
+    .expect_err("a check asks one or the other");
+    assert!(err.to_string().contains("not both"), "{err}");
+}
+
+/// A worker name is as opaque as a decision name: nothing validates it against
+/// a registry, because there is none.
+#[test]
+fn a_worker_check_rejects_an_empty_name() {
+    let err = parse_config(
+        r#"
+        permissions {
+            shell-patterns {
+                check-all {
+                    worker ""
+                }
+            }
+        }
+        "#,
+    )
+    .expect_err("an empty worker name names nothing");
+    assert!(
+        err.to_string().contains("`worker` name must not be empty"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_config_without_checks_has_none() {
+    let config = parse_config("permissions {\n    shell-patterns {\n        allow-all\n    }\n}")
+        .expect("parses");
+    assert!(config.permissions.checks.is_empty());
+    assert_eq!(
+        config.permissions.shell.default,
+        Some(shuvarie_config::Verb::Allow)
+    );
+    // The section's rules survive untouched and re-serialize unchanged.
+    assert_eq!(config, round_trip(&config));
+}
+
+/// `permissions { tool-check { … } }` maps a `choice` decision's option labels
+/// to verbs, with the unmappable answer falling back to `on-error`.
+#[test]
+fn tool_checks_parse_with_defaults_and_round_trip() {
+    let config = parse_config(
+        r#"
+        permissions {
+            tool-check {
+                decision "tool-risk"
+                allow "safe"
+                ask "review"
+                deny "block" "dangerous"
+            }
+        }
+        "#,
+    )
+    .expect("parses");
+
+    let check = config.permissions.tool_check.as_ref().expect("tool check");
+    assert_eq!(check.decision, "tool-risk");
+    // A check that cannot run must not silently widen access.
+    assert_eq!(check.on_error, shuvarie_config::Verb::Ask);
+    assert_eq!(
+        check
+            .rules
+            .iter()
+            .map(|rule| (rule.verb, rule.label.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (shuvarie_config::Verb::Allow, "safe"),
+            (shuvarie_config::Verb::Ask, "review"),
+            // One node carries several labels, one rule per label.
+            (shuvarie_config::Verb::Deny, "block"),
+            (shuvarie_config::Verb::Deny, "dangerous"),
+        ]
+    );
+
+    assert_eq!(config, round_trip(&config));
+
+    // `on-error` is written only when it differs from the default, and the
+    // block round-trips either way.
+    let explicit = parse_config(
+        "permissions {\n    tool-check on-error=\"deny\" {\n        decision \"tool-risk\"\n        \
+         allow \"safe\"\n    }\n}\n",
+    )
+    .expect("parses");
+    let check = explicit
+        .permissions
+        .tool_check
+        .as_ref()
+        .expect("tool check");
+    assert_eq!(check.on_error, shuvarie_config::Verb::Deny);
+    assert_eq!(check.rules.len(), 1);
+    assert_eq!(explicit, round_trip(&explicit));
+
+    // Nothing configured: no tool check at all.
+    let plain = parse_config("permissions {\n    ask-all\n}\n").expect("parses");
+    assert!(plain.permissions.tool_check.is_none());
+    assert_eq!(plain, round_trip(&plain));
+}
+
+#[test]
+fn tool_check_errors_are_reported() {
+    for (kdl, expected) in [
+        // The node itself takes no arguments and one property.
+        (
+            "permissions {\n    tool-check \"tool-risk\"\n}",
+            "takes no arguments",
+        ),
+        (
+            "permissions {\n    tool-check decision=\"tool-risk\"\n}",
+            "unknown property `decision`",
+        ),
+        (
+            "permissions {\n    tool-check on-error=\"maybe\" {\n        decision \"a\"\n    \n}\n}",
+            "`on-error` must be `allow`, `ask`, or `deny`",
+        ),
+        (
+            "permissions {\n    tool-check {\n        allow \"safe\"\n    \n}\n}",
+            "requires a `decision` child",
+        ),
+        (
+            "permissions {\n    tool-check {\n        decision \"a\"\n        decision \"b\"\n    \n}\n}",
+            "duplicate `decision`",
+        ),
+        (
+            "permissions {\n    tool-check {\n        decision \"\"\n    \n}\n}",
+            "must not be empty",
+        ),
+        (
+            "permissions {\n    tool-check {\n        decision\n    \n}\n}",
+            "requires a `decision` child",
+        ),
+        // A positional name carrying properties is rejected, not silently read
+        // as the name.
+        (
+            "permissions {\n    tool-check {\n        decision \"a\" some-prop=#true\n    \n}\n}",
+            "not properties",
+        ),
+        (
+            "permissions {\n    tool-check {\n        decision \"a\" \"b\"\n    \n}\n}",
+            "takes a single argument",
+        ),
+        // Verb nodes take labels, never properties, and at least one label.
+        (
+            "permissions {\n    tool-check {\n        decision \"a\"\n        allow \"safe\" review=#true\n    \n}\n}",
+            "not properties",
+        ),
+        (
+            "permissions {\n    tool-check {\n        decision \"a\"\n        allow\n    \n}\n}",
+            "requires at least one option label",
+        ),
+        (
+            "permissions {\n    tool-check {\n        decision \"a\"\n        allow \"safe\"\n        \
+             deny \"safe\"\n    \n}\n}",
+            "duplicate option label",
+        ),
+        (
+            "permissions {\n    tool-check {\n        decision \"a\"\n        escalate \"high\"\n    \n}\n}",
+            "unknown node `escalate` in `tool-check`",
+        ),
+        // The block is a sibling of `shell-patterns`, not a check inside it.
+        (
+            "permissions {\n    shell-patterns {\n        tool-check {\n            decision \"a\"\n        \
+             \n    }\n}\n}",
+            "unknown node `tool-check` in `shell-patterns`",
+        ),
+        // And the section names it among its children.
+        (
+            "permissions {\n    tool-checks {\n        decision \"a\"\n    \n}\n}",
+            "expected `allow-all`",
+        ),
+    ] {
+        let err = parse_config(kdl).expect_err("should fail");
+        assert!(err.to_string().contains(expected), "{kdl}: {err}");
+    }
+}
+
+#[test]
+fn shell_check_errors_are_reported() {
+    for (kdl, expected) in [
+        (
+            "permissions {\n    shell-patterns {\n        check-all {\n            decision \
+                    \"a\"\n            \"x\"\n        }\n    }\n}",
+            "unknown node",
+        ),
+        (
+            "permissions {\n    shell-patterns {\n        check-all {\n        }\n    }\n}",
+            "requires a `decision` or `worker` child",
+        ),
+        (
+            "permissions {\n    shell-patterns {\n        check \"rm\" {\n        }\n    }\n}",
+            "requires a `decision` or `worker` child",
+        ),
+        (
+            "permissions {\n    shell-patterns {\n        check-all pattern=\"regex\" {\n            \
+                    decision \"a\"\n        }\n    }\n}",
+            "takes no `pattern` property",
+        ),
+        (
+            "permissions {\n    shell-patterns {\n        check-all on-error=\"maybe\" {\n            \
+                    decision \"a\"\n        }\n    }\n}",
+            "`on-error` must be `allow`, `ask`, or `deny`",
+        ),
+        (
+            "permissions {\n    shell-patterns {\n        check-all threshold=1.5 {\n            \
+                    decision \"a\"\n        }\n    }\n}",
+            "must be a probability between 0 and 1",
+        ),
+        (
+            "permissions {\n    shell-patterns {\n        check-all {\n            decision \
+                    \"a\"\n            \"x\"\n        }\n    }\n}",
+            "unknown node",
+        ),
+        (
+            "permissions {\n    paths {\n        check-all {\n            decision \"a\"\n        \
+                    }\n    }\n}",
+            "only `shell-patterns` takes decision checks",
+        ),
+    ] {
+        let err = parse_config(kdl).expect_err("should fail");
+        assert!(err.to_string().contains(expected), "{kdl}: {err}");
+    }
 }

@@ -1,3 +1,4 @@
+mod decide;
 mod delete_file;
 #[cfg(test)]
 mod e2e_tests;
@@ -32,6 +33,7 @@ use crate::question::QuestionGate;
 use crate::scenes::ToolScene;
 use crate::shell::Shell;
 
+use decide::Decide;
 use edit_file::EditFile;
 use glob::Glob;
 use grep::Grep;
@@ -315,6 +317,21 @@ pub fn all_tools(
     tools.extend(scene_tool("question", scene, &access, false, |_access| {
         Question::new(question_gate)
     }));
+    // The `decide` tool consults a decision model the config defines. It is
+    // offered only when decision models are enabled and at least one decision
+    // exists: naming a defined decision is its whole interface, so there is
+    // nothing to offer otherwise.
+    if let Some(decisions) = access.decisions()
+        && decisions.is_enabled()
+        && !decisions.definitions().is_empty()
+    {
+        let decisions = Arc::clone(decisions);
+        // Gated: the call authorizes through the permission engine, which is
+        // also where the configured `tool-check` tightens it.
+        tools.extend(scene_tool("decide", scene, &access, true, |access| {
+            Decide::new(decisions, access)
+        }));
+    }
     tools.extend(scene_tool(
         todos::Todo::NAME,
         scene,
@@ -484,6 +501,12 @@ mod tests {
 
     /// The full roster built for one scene, as the core task does per turn.
     fn roster_with(skills: &Skills, scene: &ToolScene) -> Vec<String> {
+        roster_for(crate::test_util::access(), skills, scene)
+    }
+
+    /// [`roster_with`] with an explicit access handle, for the rosters that
+    /// depend on what the access carries (the decision service, ...).
+    fn roster_for(access: Access, skills: &Skills, scene: &ToolScene) -> Vec<String> {
         let (question_tx, _question_rx) = tokio::sync::mpsc::channel(1);
         let (shell_tx, _shell_rx) = tokio::sync::mpsc::channel(1);
         let lsp = std::sync::Arc::new(tokio::sync::Mutex::new(shuvarie_lsp::LspManager::new(
@@ -498,7 +521,7 @@ mod tests {
             100,
             100,
             QuestionGate::new(question_tx),
-            crate::test_util::access(),
+            access,
             ShellOutputTx::new(shell_tx),
             crate::shell::resolve(None).shell,
             todos::TodoState::from_records(&[]),
@@ -570,6 +593,55 @@ mod tests {
         };
         let names = roster(&ToolScene::build(Some(&tools)));
         assert!(names.is_empty(), "roster: {names:?}");
+    }
+
+    #[test]
+    fn the_decide_tool_enters_the_roster_only_with_defined_decisions() {
+        // No decision service attached: there is nothing for the tool to
+        // consult, so it is not offered at all.
+        let names = roster(&ToolScene::default());
+        assert!(!names.contains(&"decide".into()), "roster: {names:?}");
+
+        let access = crate::test_util::access().with_decisions(std::sync::Arc::new(
+            crate::decisions::Decisions::build(&decisions_config(true), &Default::default()),
+        ));
+        let names = roster_for(access, &Skills::default(), &ToolScene::default());
+        assert!(names.contains(&"decide".into()), "roster: {names:?}");
+
+        // Enabled but with no decision defined: naming one is the tool's whole
+        // interface, so there is nothing to offer.
+        let access = crate::test_util::access().with_decisions(std::sync::Arc::new(
+            crate::decisions::Decisions::build(&decisions_config(false), &Default::default()),
+        ));
+        let names = roster_for(access, &Skills::default(), &ToolScene::default());
+        assert!(!names.contains(&"decide".into()), "roster: {names:?}");
+    }
+
+    /// A config whose `decisions` section defines one decision; `define` also
+    /// turns the feature on (it is off by default, so nothing else would be
+    /// compiled).
+    fn decisions_config(define: bool) -> shuvarie_config::Config {
+        let mut config = shuvarie_config::Config {
+            decisions: shuvarie_config::DecisionsConfig {
+                disabled: Some(false),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        if define {
+            config.decisions.decisions.insert(
+                "risk".to_string(),
+                shuvarie_config::DecisionConfig {
+                    kind: shuvarie_config::DecisionType::Noul,
+                    instructions: "Does this call carry a risk?".to_string(),
+                    yes: None,
+                    no: None,
+                    options: Vec::new(),
+                    levels: Vec::new(),
+                },
+            );
+        }
+        config
     }
 
     #[test]

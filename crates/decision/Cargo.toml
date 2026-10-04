@@ -1,6 +1,6 @@
 [package]
-name = "shuvarie-llm"
-description = "Blazingly fast AI coding TUI for chivalrous people (LLM module)"
+name = "shuvarie-decision"
+description = "Blazingly fast AI coding TUI for chivalrous people (decision module)"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -8,21 +8,16 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-base64.workspace = true
-futures-core = "0.3"
-futures-util.workspace = true
 http.workspace = true
-reqwest.workspace = true
 # Do NOT include `rig`. It has too many implicit dependencies.
-rig-agent = "0.43"
 rig-core.workspace = true
-serde.workspace = true
+# The System One decision wire (also served by Ollama and Cloudflare's Clef).
+# `reqwest` is not in its default features and gates the shared-client `Jev`
+# constructors used by `client::DecisionClient`.
+rig-typesafeai = { version = "0.43", features = ["reqwest"] }
 serde_json.workspace = true
-selune.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
 
 [dev-dependencies]
 httpmock = "0.8"
-rig-agent = { version = "0.43", features = ["test-utils"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

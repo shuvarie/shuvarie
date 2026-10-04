@@ -26,6 +26,7 @@ fn sample_connections() -> Connections {
             model: Some("gpt-5.5".to_string()),
             variant: None,
         }),
+        ..Connections::default()
     }
 }
 
@@ -43,6 +44,7 @@ fn missing_active_provider_has_no_connected_providers() {
             ProviderConfig::new("my-openai", "openai", Some("sk-test".to_string()), None),
         )]),
         active: None,
+        ..Connections::default()
     };
     assert!(!has_connected_providers(&connections));
 }
@@ -56,6 +58,7 @@ fn active_provider_missing_from_map_has_no_connected_providers() {
             model: None,
             variant: None,
         }),
+        ..Connections::default()
     };
     assert!(!has_connected_providers(&connections));
 }
@@ -72,6 +75,7 @@ fn active_provider_without_key_has_no_connected_providers() {
             model: None,
             variant: None,
         }),
+        ..Connections::default()
     };
     assert!(!has_connected_providers(&connections));
 }
@@ -94,6 +98,7 @@ fn ollama_without_key_is_connected() {
             model: None,
             variant: None,
         }),
+        ..Connections::default()
     };
     assert!(has_connected_providers(&connections));
 }
@@ -110,6 +115,7 @@ fn ollama_cloud_without_key_is_not_connected() {
             model: None,
             variant: None,
         }),
+        ..Connections::default()
     };
     assert!(!has_connected_providers(&connections));
 }
@@ -126,6 +132,7 @@ fn ollama_cloud_with_key_is_connected() {
             model: None,
             variant: None,
         }),
+        ..Connections::default()
     };
     assert!(has_connected_providers(&connections));
 }

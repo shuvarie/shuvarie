@@ -25,6 +25,7 @@ serde_json.workspace = true
 selune.workspace = true
 shuvarie-config.workspace = true
 shuvarie-db.workspace = true
+shuvarie-decision.workspace = true
 shuvarie-doc.workspace = true
 shuvarie-llm.workspace = true
 shuvarie-lsp.workspace = true
@@ -43,6 +44,7 @@ libc = "0.2"
 [dev-dependencies]
 base64.workspace = true
 http.workspace = true
+httpmock = "0.8"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 jiff.workspace = true
 shuvarie-lsp.workspace = true

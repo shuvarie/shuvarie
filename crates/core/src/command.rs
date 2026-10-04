@@ -11,6 +11,19 @@ pub enum Command {
         id: String,
         config: ProviderConfig,
     },
+    /// Register or overwrite a decision-model connection and make it the
+    /// active one. The two halves are written together —
+    /// `decision-providers { provider "<name>" { … } }` and
+    /// `decision { provider "<name>"; model "<model>" }` — because a decision
+    /// connection is unusable without a model. `connections.kdl` is the only
+    /// store: Selune has no decision-vendor registry, so `model` is free text
+    /// and nothing validates it until the first call.
+    SetDecisionProvider {
+        name: String,
+        api_key: Option<String>,
+        base_url: Option<String>,
+        model: String,
+    },
     /// Sign in to an OAuth-backed provider (`chatgpt`, `copilot`) through the
     /// device flow: the verification URL + user code surface as
     /// [`crate::Event::AuthPrompt`], and completion or failure arrives as

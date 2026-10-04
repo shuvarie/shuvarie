@@ -15,6 +15,42 @@ pub struct Active {
 pub struct Connections {
     pub providers: BTreeMap<String, ProviderConfig>,
     pub active: Option<Active>,
+
+    /// `decision-providers { … }` — decision-model connections, keyed by name.
+    /// Deliberately separate from `providers`: no decision vendor is a
+    /// `selune::ProviderType`, so a decision connection on the completion path
+    /// could only be misparsed.
+    pub decision_providers: BTreeMap<String, DecisionProviderConfig>,
+
+    /// `decision { … }` — the active decision connection and model.
+    pub decision: Option<DecisionActive>,
+}
+
+/// The `decision { provider "…"; model "…" }` selection. Both halves are
+/// required: unlike a chat provider, a decision connection is unusable without
+/// a model, and the dialog writes the two together.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DecisionActive {
+    /// The key of a `decision-providers` entry.
+    pub provider: String,
+    /// The provider's model id, free text — decision models are not
+    /// enumerable, so nothing here validates the name.
+    pub model: String,
+}
+
+/// One `decision-providers { provider "name" { … } }` entry: a System One
+/// endpoint for decision models. The map key is the connection name.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DecisionProviderConfig {
+    /// The wire protocol, always `systemone` today. Stored explicitly so a
+    /// second protocol is a new value rather than a reinterpretation of the
+    /// file.
+    pub kind: String,
+    /// Optional: local System One servers (Ollama) ignore authentication.
+    pub api_key: Option<String>,
+    /// The endpoint. A host root gains the protocol path
+    /// (`/v1/systemone`); a complete URL is used as written.
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -95,6 +131,17 @@ impl ProviderConfig {
     /// field, else `kind` (which held the catalog id in older configs).
     pub fn catalog_id(&self) -> Option<&str> {
         self.catalog.as_deref().or(Some(self.kind.as_str()))
+    }
+}
+
+impl DecisionProviderConfig {
+    /// A System One connection with an optional credential.
+    pub fn new(api_key: Option<String>, base_url: Option<String>) -> Self {
+        Self {
+            kind: "systemone".to_string(),
+            api_key,
+            base_url,
+        }
     }
 }
 
@@ -343,8 +390,123 @@ mod tests {
         let body: Vec<&str> = saved
             .lines()
             .skip_while(|l| !l.starts_with("providers"))
+            .take_while(|l| *l != "}")
+            .chain(std::iter::once("}"))
             .collect();
         assert_eq!(body, expected, "{saved}");
+    }
+
+    #[test]
+    fn parses_and_round_trips_decision_connections() {
+        let text = r#"
+            decision-providers {
+                provider "local-clef" {
+                    type "systemone"
+                    base-url "http://localhost:11434/v1/systemone"
+                }
+                provider "hosted-jev" {
+                    type "systemone"
+                    base-url "https://api.typesafe.ai"
+                    api-key "sk-secret"
+                }
+            }
+            decision {
+                provider "local-clef"
+                model "clef"
+            }
+        "#;
+        let parsed: Connections = connections_kdl::from_kdl(text).unwrap();
+        assert_eq!(parsed.decision_providers.len(), 2);
+        let local = parsed
+            .decision_providers
+            .get("local-clef")
+            .expect("local-clef");
+        assert_eq!(local.kind, "systemone");
+        assert_eq!(
+            local.base_url.as_deref(),
+            Some("http://localhost:11434/v1/systemone")
+        );
+        assert!(local.api_key.is_none());
+        let hosted = parsed
+            .decision_providers
+            .get("hosted-jev")
+            .expect("hosted-jev");
+        assert_eq!(hosted.api_key.as_deref(), Some("sk-secret"));
+        let decision = parsed.decision.as_ref().expect("decision");
+        assert_eq!(decision.provider, "local-clef");
+        assert_eq!(decision.model, "clef");
+
+        let saved = connections_kdl::to_kdl(&parsed).unwrap();
+        let reparsed: Connections = connections_kdl::from_kdl(&saved).unwrap();
+        assert_eq!(parsed, reparsed, "{saved}");
+    }
+
+    #[test]
+    fn decision_connection_children_are_strict() {
+        for (text, expected) in [
+            (
+                "decision-providers {\n    provider \"a\" {\n        type \"systemone\"\n        \
+                 baseurl \"http://x\"\n    }\n}",
+                "unknown node `baseurl`",
+            ),
+            (
+                "decision-providers {\n    provider \"a\" {\n        type \"jev\"\n    }\n}",
+                "unknown decision provider type",
+            ),
+            (
+                "decision-providers {\n    provider \"a\" {\n        base-url \"http://x\"\n    \
+                 }\n}",
+                "requires a `type` child",
+            ),
+            (
+                "decision-providers {\n    provider id=\"a\" {\n        type \"systemone\"\n    \
+                 }\n}",
+                "positional name",
+            ),
+            (
+                "decision-providers {\n    provider \"a\" {\n        type \"systemone\"\n        \
+                 type \"systemone\"\n    }\n}",
+                "duplicate `type`",
+            ),
+            (
+                "decision-providers {\n    provider \"a\" {\n        type \"systemone\"\n    \
+                 }\n    provider \"a\" {\n        type \"systemone\"\n    }\n}",
+                "duplicate decision provider name",
+            ),
+        ] {
+            let err = connections_kdl::from_kdl(text).unwrap_err();
+            assert!(err.to_string().contains(expected), "{text}: {err}");
+        }
+    }
+
+    #[test]
+    fn decision_requires_both_a_provider_and_a_model() {
+        for text in [
+            "decision {\n    provider \"a\"\n}",
+            "decision {\n    model \"clef\"\n}",
+            "decision",
+        ] {
+            let err = connections_kdl::from_kdl(text).unwrap_err();
+            assert!(
+                err.to_string().contains("`decision` requires"),
+                "{text}: {err}"
+            );
+        }
+        let err = connections_kdl::from_kdl(
+            "decision {\n    provider \"a\"\n    \
+             model \"m\"\n}\ndecision {\n    provider \"a\"\n    model \"m\"\n}",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("duplicate `decision`"));
+    }
+
+    #[test]
+    fn an_empty_decision_providers_block_round_trips() {
+        let saved = connections_kdl::to_kdl(&Connections::default()).unwrap();
+        assert!(saved.contains("decision-providers"), "{saved}");
+        assert!(!saved.contains("decision {"), "{saved}");
+        let reparsed: Connections = connections_kdl::from_kdl(&saved).unwrap();
+        assert_eq!(Connections::default(), reparsed);
     }
 
     #[test]

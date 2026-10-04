@@ -4,12 +4,20 @@ use std::path::PathBuf;
 mod config_kdl;
 mod connections;
 mod connections_kdl;
+mod decisions;
 mod error;
 mod kdl_util;
+mod ranking;
 mod trusts;
 mod trusts_kdl;
 
-pub use self::connections::{Active, Connections, ProviderConfig};
+pub use self::connections::{
+    Active, Connections, DecisionActive, DecisionProviderConfig, ProviderConfig,
+};
+pub use self::decisions::{
+    DecisionConfig, DecisionLevel, DecisionOption, DecisionType, DecisionsConfig,
+};
+pub use self::ranking::RankingConfig;
 pub use self::trusts::{Category, ScanItem, TrustFile, TrustGrants, WorkspaceScan, WorkspaceTrust};
 pub use error::{ConfigError, ConfigParseError, Result};
 
@@ -88,9 +96,10 @@ fn read_layer(path: &std::path::Path) -> Result<Option<ConfigLayer>> {
 /// not), so locally-set sections intentionally reset untouched fields of that
 /// section to defaults. `lsp.servers` merges key-by-key so a file adding one
 /// server doesn't shadow the rest; `registries` merges key-by-key per
-/// registry name for the same reason. `permissions`, `scenes`, and `themes`
-/// are stacked separately by [`stack_permissions`] / [`stack_scenes`] /
-/// [`stack_themes`] once the whole chain has been read.
+/// registry name for the same reason. `permissions`, `scenes`, `themes`, and
+/// `decisions` are stacked separately by [`stack_permissions`] /
+/// [`stack_scenes`] / [`stack_themes`] / [`stack_decisions`] once the whole
+/// chain has been read.
 fn merge_layer(config: &mut Config, layer: &ConfigLayer) {
     for section in &layer.sections {
         match section.as_str() {
@@ -138,12 +147,15 @@ fn merge_layer(config: &mut Config, layer: &ConfigLayer) {
 /// layer first: the top-level default verb and each scope's bare `-all` verb
 /// come from the highest-priority layer that sets them, rule lists keep every
 /// layer's rules in chain order so the highest-priority layer's rules match
-/// first, and the built-in rules sit at the deepest end.
+/// first, the tool check comes from the highest-priority layer that configures
+/// one, and the built-in rules sit at the deepest end.
 fn stack_permissions(layers: &[PermissionsConfig]) -> PermissionsConfig {
     let mut merged = PermissionsConfig {
         default: None,
         paths: RuleSet::default(),
         shell: RuleSet::default(),
+        checks: Vec::new(),
+        tool_check: None,
     };
     for layer in layers {
         merged.default = merged.default.or(layer.default);
@@ -151,11 +163,37 @@ fn stack_permissions(layers: &[PermissionsConfig]) -> PermissionsConfig {
         merged.shell.default = merged.shell.default.or(layer.shell.default);
         merged.paths.rules.extend(layer.paths.rules.iter().cloned());
         merged.shell.rules.extend(layer.shell.rules.iter().cloned());
+        merged.checks.extend(layer.checks.iter().cloned());
+        if merged.tool_check.is_none() {
+            merged.tool_check = layer.tool_check.clone();
+        }
     }
     let builtin = PermissionsConfig::builtin();
     merged.paths.rules.extend(builtin.paths.rules);
     merged.default = merged.default.or(builtin.default);
     merged.shell.default = merged.shell.default.or(builtin.shell.default);
+    merged
+}
+
+/// Stacks the chain's `decisions` sections into one config, highest-priority
+/// layer first: a decision name defined by several layers comes from the
+/// highest-priority one, and a name only a lower layer defines is kept.
+fn stack_decisions(layers: &[DecisionsConfig]) -> DecisionsConfig {
+    let mut merged = DecisionsConfig::default();
+    for layer in layers {
+        merged.stack(layer.clone());
+    }
+    merged
+}
+
+/// Stacks the chain's `ranking` sections into one config, highest-priority
+/// layer first: the decision name comes from the highest-priority layer that
+/// names one, and any layer that turns ranking off disables it.
+fn stack_ranking(layers: &[RankingConfig]) -> RankingConfig {
+    let mut merged = RankingConfig::default();
+    for layer in layers {
+        merged.stack(layer.clone());
+    }
     merged
 }
 
@@ -392,6 +430,22 @@ pub struct Config {
 
     pub tools: ToolsConfig,
 
+    /// `decisions { … }` — named, reusable questions for decision models,
+    /// already stacked across the config chain. A permission rule or a tool
+    /// names one of these instead of restating the question.
+    ///
+    /// The feature is off unless the section turns it on (`enabled #true`);
+    /// see [`DecisionsConfig::is_enabled`].
+    pub decisions: DecisionsConfig,
+
+    /// `ranking { … }` — which `decisions` entry ranks the options a
+    /// `question` asks about, already stacked across the config chain. A scene
+    /// may name its own entry (or turn ranking off) on top of this.
+    ///
+    /// Ranking is cosmetic: a decision that is missing, of the wrong kind, or
+    /// unreachable leaves the options exactly as the tool asked them.
+    pub ranking: RankingConfig,
+
     pub permissions: PermissionsConfig,
 
     /// `scenes { … }` — the named scenes defined by the config chain,
@@ -459,8 +513,9 @@ impl<R> Default for RuleSet<R> {
 }
 
 /// `permissions { … }` — how tool actions are gated: a top-level fallback
-/// verb, path rules for the file tools, and shell-pattern rules for
-/// `run_shell`. The default (section absent everywhere) is [`Self::builtin`].
+/// verb, path rules for the file tools, shell-pattern rules for `run_shell`,
+/// and an optional tool check for the tools that have neither a path nor a
+/// command line. The default (section absent everywhere) is [`Self::builtin`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct PermissionsConfig {
     /// The top-level bare verb; `None` falls back to `Ask`.
@@ -471,6 +526,16 @@ pub struct PermissionsConfig {
 
     /// `shell-patterns { … }` — rules matched against `run_shell` commands.
     pub shell: RuleSet<ShellRule>,
+
+    /// `shell-patterns { check … }` — decision checks run against a command
+    /// before the verdict above is acted on. Empty by default: a check costs a
+    /// model call per command, so it is opt-in.
+    pub checks: Vec<ShellCheck>,
+
+    /// `tool-check { … }` — a `choice` decision consulted about a generic tool
+    /// call before the verdict above is acted on. `None` by default: a check
+    /// costs a model call per tool call, so it is opt-in.
+    pub tool_check: Option<ToolCheck>,
 }
 
 impl Default for PermissionsConfig {
@@ -529,6 +594,8 @@ impl PermissionsConfig {
                 default: Some(Verb::Allow),
                 rules: vec![],
             },
+            checks: vec![],
+            tool_check: None,
         }
     }
 }
@@ -586,6 +653,106 @@ pub enum ShellPatternKind {
     Raw,
     /// A regular expression, matched as written against the command line.
     Regex,
+}
+
+/// The `noul` probability at or above which a command reads as suspicious.
+/// Deliberately explicit in config: the protocol returns a probability, not a
+/// verdict, and where the line falls is policy.
+pub const DEFAULT_CHECK_THRESHOLD: f64 = 0.5;
+
+/// One `shell-patterns { check "…" { … } }` rule: commands matching the
+/// patterns are put to a model before the permission verdict is acted on.
+/// Written without patterns (`check-all`) the check covers every command.
+///
+/// A check can only ever tighten: it turns an `allow` into an `ask` and never
+/// loosens an `ask` or a `deny`. An unusable answer follows `on_error`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShellCheck {
+    /// Which model answers this check: a configured `decisions { … }` entry, or
+    /// a `subagents { … }` worker.
+    pub source: ShellCheckSource,
+
+    /// The patterns whose commands are checked; empty means every command.
+    pub patterns: Vec<String>,
+
+    /// How the patterns match a command.
+    pub kind: ShellPatternKind,
+
+    /// What a failed, timed-out, or malformed answer means. Defaults to
+    /// `Ask`: a check that could not run must not silently widen access.
+    pub on_error: Verb,
+
+    /// The `noul` probability at or above which the command is suspicious.
+    /// Spelled for a [`ShellCheckSource::Decision`] check, whose answer is a
+    /// probability; a worker answers in prose, so its check reads the line's
+    /// verdict instead and this is unused.
+    pub threshold: f64,
+}
+
+/// Which model answers a shell check: a configured `decisions { … }` entry or a
+/// `subagents { … }` worker.
+///
+/// The two are different machinery — a decision is a System One question whose
+/// `noul` answer is a probability, a worker is a one-turn completion whose
+/// answer is prose — so the config says which one it means rather than leaving
+/// it to be inferred from whether a name happens to be defined.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ShellCheckSource {
+    /// `decision "name"`: the `decisions { … }` entry this check asks. Must be a
+    /// `noul` decision.
+    Decision(String),
+
+    /// `worker "name"`: the `subagents { … }` worker this check asks, resolved
+    /// in the scene the command runs under. The worker reasons about the command
+    /// with no tools over one turn, so a scene that does not define it cannot
+    /// check and the check follows `on_error`.
+    Worker(String),
+}
+
+impl ShellCheckSource {
+    /// The name the check is written with, whichever kind it is.
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Decision(name) | Self::Worker(name) => name,
+        }
+    }
+
+    /// Whether this asks a decision model (`decision "…"`) rather than a
+    /// worker.
+    pub fn is_decision(&self) -> bool {
+        matches!(self, Self::Decision(_))
+    }
+
+    /// What to call this kind when reporting it to the user.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Decision(_) => "decision",
+            Self::Worker(_) => "worker",
+        }
+    }
+}
+
+/// `permissions { tool-check { … } }`: a `choice` decision whose answer picks
+/// the verb a tool call gets.
+///
+/// The check is consulted about a generic tool call — the seam every tool that
+/// does not decide by path or shell text authorizes through — and can only ever
+/// tighten: an `allow` the rules granted becomes the verb its answer maps to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolCheck {
+    /// The `decisions { … }` entry this check asks. Must be a `choice` decision.
+    pub decision: String,
+    /// Option label -> verb, for the labels the config maps.
+    pub rules: Vec<ToolChoiceRule>,
+    /// What an answer that cannot be obtained, or names an unmapped option, means.
+    pub on_error: Verb,
+}
+
+/// One `allow|ask|deny "label"` mapping of a [`ToolCheck`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolChoiceRule {
+    pub verb: Verb,
+    pub label: String,
 }
 
 fn default_max_turns() -> usize {
@@ -1103,6 +1270,11 @@ pub struct SceneConfig {
     /// Per-worker overrides.
     pub subagents: SubagentsConfig,
 
+    /// How this scene ranks the `question` tool's options (see
+    /// [`RankingConfig`]): a scene that names a decision ranks with it, and a
+    /// scene that is `disabled` leaves the options as asked.
+    pub ranking: RankingConfig,
+
     /// System-prompt pieces injected around the conversation.
     pub system_prompts: SystemPromptsConfig,
 
@@ -1133,6 +1305,7 @@ impl SceneConfig {
         if higher.tool_concurrency.is_some() {
             self.tool_concurrency = higher.tool_concurrency;
         }
+        self.ranking.stack(higher.ranking);
         self.subagents.merge(higher.subagents);
         self.system_prompts.merge(higher.system_prompts);
         self.tools.merge(higher.tools);
@@ -3077,6 +3250,8 @@ impl Config {
     fn load_chain(paths: &[(PathBuf, bool)]) -> Result<Self> {
         let mut config = Self::default();
         let mut permissions = Vec::new();
+        let mut decisions = Vec::new();
+        let mut ranking = Vec::new();
         let mut scene_sources = Vec::new();
         let mut theme_sources = Vec::new();
         for (path, local) in paths {
@@ -3094,10 +3269,18 @@ impl Config {
                 if layer.sections.contains("permissions") {
                     permissions.push(layer.config.permissions.clone());
                 }
+                if layer.sections.contains("decisions") {
+                    decisions.push(layer.config.decisions.clone());
+                }
+                if layer.sections.contains("ranking") {
+                    ranking.push(layer.config.ranking.clone());
+                }
                 merge_layer(&mut config, &layer);
             }
         }
         config.permissions = stack_permissions(&permissions);
+        config.decisions = stack_decisions(&decisions);
+        config.ranking = stack_ranking(&ranking);
         let layers: Vec<ScenesConfig> = scene_sources.iter().map(|s| s.scenes.clone()).collect();
         config.scenes = stack_scenes(&layers);
         config.scene_sources = scene_sources;

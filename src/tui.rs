@@ -16,6 +16,7 @@ use crate::tui::event::Event;
 
 use self::app::{App, AppEffect, AppMessage};
 
+pub mod add_decision_provider;
 pub mod add_provider;
 mod app;
 mod assisted_by;

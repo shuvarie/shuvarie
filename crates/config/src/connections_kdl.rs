@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 
 use super::kdl_util::{autoformat, node_error, parse_document};
-use super::{Active, Connections, ProviderConfig};
+use super::{Active, Connections, DecisionActive, DecisionProviderConfig, ProviderConfig};
 use crate::Result;
 
 pub(crate) fn from_kdl(contents: &str) -> Result<Connections> {
@@ -112,14 +112,32 @@ fn from_document(doc: &KdlDocument, input: &str) -> Result<Connections> {
                     parse_provider(provider_node, input, &mut connections.providers)?;
                 }
             }
+            "decision-providers" => {
+                let children = node.children().ok_or_else(|| {
+                    node_error(input, node, "`decision-providers` has no children", None)
+                })?;
+                for provider_node in children.nodes() {
+                    parse_decision_provider(
+                        provider_node,
+                        input,
+                        &mut connections.decision_providers,
+                    )?;
+                }
+            }
+            "decision" => {
+                if connections.decision.is_some() {
+                    return Err(node_error(input, node, "duplicate `decision` node", None));
+                }
+                connections.decision = Some(parse_decision_active(node, input)?);
+            }
             _ => {
                 return Err(node_error(
                     input,
                     node,
                     format!("unknown node `{}`", node.name().value()),
                     Some(
-                        "expected `active` or `providers` (the legacy format is no longer \
-                         supported)"
+                        "expected `active`, `providers`, `decision-providers`, or `decision` \
+                         (the legacy format is no longer supported)"
                             .into(),
                     ),
                 ));
@@ -127,6 +145,250 @@ fn from_document(doc: &KdlDocument, input: &str) -> Result<Connections> {
         }
     }
     Ok(connections)
+}
+
+/// One `provider "name" { … }` inside `decision-providers`. Children are
+/// strict: an unrecognized child or property is an error rather than a silent
+/// drop, since a mistyped endpoint would otherwise look configured.
+fn parse_decision_provider(
+    node: &KdlNode,
+    input: &str,
+    providers: &mut BTreeMap<String, DecisionProviderConfig>,
+) -> Result<()> {
+    if node.name().value() != "provider" {
+        return Err(node_error(
+            input,
+            node,
+            format!("expected `provider`, found `{}`", node.name().value()),
+            None,
+        ));
+    }
+    let mut name = None;
+    for entry in node.entries() {
+        if entry.name().is_some() {
+            return Err(node_error(
+                input,
+                node,
+                "`provider` takes a positional name, not properties",
+                Some("expected: provider \"name\" { ... }".into()),
+            ));
+        }
+        match entry.value() {
+            KdlValue::String(value) if !value.trim().is_empty() => {
+                if name.is_some() {
+                    return Err(node_error(
+                        input,
+                        node,
+                        "`provider` takes exactly one name",
+                        None,
+                    ));
+                }
+                name = Some(value.clone());
+            }
+            KdlValue::String(_) => {
+                return Err(node_error(
+                    input,
+                    node,
+                    "decision provider name must not be empty",
+                    None,
+                ));
+            }
+            _ => {
+                return Err(node_error(
+                    input,
+                    node,
+                    "decision provider name must be a string",
+                    None,
+                ));
+            }
+        }
+    }
+    let Some(name) = name else {
+        return Err(node_error(
+            input,
+            node,
+            "`provider` requires a name argument",
+            Some("expected: provider \"name\" { type \"systemone\" }".into()),
+        ));
+    };
+    let children = node.children().ok_or_else(|| {
+        node_error(
+            input,
+            node,
+            "`provider` requires a block with a `type` child",
+            Some(
+                "expected: provider \"name\" { type \"systemone\" (base-url \"…\") (api-key \
+                 \"…\") }"
+                    .into(),
+            ),
+        )
+    })?;
+    let mut kind = None;
+    let mut api_key = None;
+    let mut base_url = None;
+    for child in children.nodes() {
+        let field = match child.name().value() {
+            "type" => &mut kind,
+            "api-key" => &mut api_key,
+            "base-url" => &mut base_url,
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!(
+                        "unknown node `{other}` in a decision provider (expected `type`, \
+                         `api-key`, or `base-url`)"
+                    ),
+                    None,
+                ));
+            }
+        };
+        if field.is_some() {
+            return Err(node_error(
+                input,
+                child,
+                format!(
+                    "duplicate `{}` in a decision provider",
+                    child.name().value()
+                ),
+                None,
+            ));
+        }
+        *field = Some(scalar_child(input, child)?);
+    }
+    let Some(kind) = kind else {
+        return Err(node_error(
+            input,
+            node,
+            "`provider` requires a `type` child",
+            Some("expected: type \"systemone\"".into()),
+        ));
+    };
+    if kind != "systemone" {
+        return Err(node_error(
+            input,
+            node,
+            format!("unknown decision provider type `{kind}`"),
+            Some("expected: type \"systemone\"".into()),
+        ));
+    }
+    let config = DecisionProviderConfig {
+        kind,
+        api_key,
+        base_url,
+    };
+    if providers.insert(name, config).is_some() {
+        return Err(node_error(
+            input,
+            node,
+            "duplicate decision provider name",
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// The active decision connection: both children are required, since a
+/// decision connection without a model cannot evaluate anything.
+fn parse_decision_active(node: &KdlNode, input: &str) -> Result<DecisionActive> {
+    if !node.entries().is_empty() {
+        return Err(node_error(
+            input,
+            node,
+            "`decision` takes no arguments",
+            Some("expected: decision { provider \"name\"; model \"id\" }".into()),
+        ));
+    }
+    let children = node.children().ok_or_else(|| {
+        node_error(
+            input,
+            node,
+            "`decision` requires a block",
+            Some("expected: decision { provider \"name\"; model \"id\" }".into()),
+        )
+    })?;
+    let mut provider = None;
+    let mut model = None;
+    for child in children.nodes() {
+        let field = match child.name().value() {
+            "provider" => &mut provider,
+            "model" => &mut model,
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!(
+                        "unknown node `{other}` in `decision` (expected `provider` or `model`)"
+                    ),
+                    None,
+                ));
+            }
+        };
+        if field.is_some() {
+            return Err(node_error(
+                input,
+                child,
+                format!("duplicate `{}` in `decision`", child.name().value()),
+                None,
+            ));
+        }
+        *field = Some(scalar_child(input, child)?);
+    }
+    let (Some(provider), Some(model)) = (provider, model) else {
+        return Err(node_error(
+            input,
+            node,
+            "`decision` requires both a `provider` and a `model` child",
+            Some("expected: decision { provider \"name\"; model \"id\" }".into()),
+        ));
+    };
+    Ok(DecisionActive { provider, model })
+}
+
+/// One node's single string argument, with no properties and no block.
+fn scalar_child(input: &str, node: &KdlNode) -> Result<String> {
+    if node.children().is_some() {
+        return Err(node_error(
+            input,
+            node,
+            format!("`{}` takes no children", node.name().value()),
+            None,
+        ));
+    }
+    if node.entries().iter().any(|entry| entry.name().is_some()) {
+        return Err(node_error(
+            input,
+            node,
+            format!("`{}` takes no properties", node.name().value()),
+            None,
+        ));
+    }
+    if node.entries().len() != 1 {
+        return Err(node_error(
+            input,
+            node,
+            format!(
+                "`{}` requires exactly one string argument",
+                node.name().value()
+            ),
+            None,
+        ));
+    }
+    match node.get(0) {
+        Some(KdlValue::String(value)) => Ok(value.clone()),
+        Some(_) => Err(node_error(
+            input,
+            node,
+            format!("`{}` must be a string", node.name().value()),
+            None,
+        )),
+        None => Err(node_error(
+            input,
+            node,
+            format!("`{}` requires a string argument", node.name().value()),
+            None,
+        )),
+    }
 }
 
 fn parse_provider(
@@ -332,6 +594,44 @@ pub(crate) fn to_kdl(connections: &Connections) -> Result<String> {
     }
     providers.set_children(body);
     doc.nodes_mut().push(providers);
+    // Emitted even when empty, like `providers`, so the file's shape stays
+    // stable and a hand-edit has a block to land in.
+    let mut decision_providers = KdlNode::new("decision-providers");
+    let mut body = KdlDocument::new();
+    for (name, config) in &connections.decision_providers {
+        let mut node = KdlNode::new("provider");
+        node.push(KdlEntry::new(name.as_str()));
+        let mut children = KdlDocument::new();
+        let mut kind = KdlNode::new("type");
+        kind.push(KdlEntry::new(config.kind.as_str()));
+        children.nodes_mut().push(kind);
+        if let Some(url) = &config.base_url {
+            let mut child = KdlNode::new("base-url");
+            child.push(KdlEntry::new(url.as_str()));
+            children.nodes_mut().push(child);
+        }
+        if let Some(key) = &config.api_key {
+            let mut child = KdlNode::new("api-key");
+            child.push(KdlEntry::new(key.as_str()));
+            children.nodes_mut().push(child);
+        }
+        node.set_children(children);
+        body.nodes_mut().push(node);
+    }
+    decision_providers.set_children(body);
+    doc.nodes_mut().push(decision_providers);
+    if let Some(decision) = &connections.decision {
+        let mut node = KdlNode::new("decision");
+        let mut body = KdlDocument::new();
+        let mut child = KdlNode::new("provider");
+        child.push(KdlEntry::new(decision.provider.as_str()));
+        body.nodes_mut().push(child);
+        let mut child = KdlNode::new("model");
+        child.push(KdlEntry::new(decision.model.as_str()));
+        body.nodes_mut().push(child);
+        node.set_children(body);
+        doc.nodes_mut().push(node);
+    }
     autoformat(&mut doc);
     Ok(format!("{FILE_HEADER}{doc}"))
 }

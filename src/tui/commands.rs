@@ -4,6 +4,7 @@ pub const TRIGGER_CHARS: [char; 2] = ['/', ':'];
 pub enum CommandAction {
     OpenModelSelect,
     AddProvider,
+    AddDecisionProvider,
     OpenSessionPicker,
     OpenTree,
     Images,
@@ -27,9 +28,10 @@ pub enum CommandAction {
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 22] = [
+    pub const ALL: [CommandAction; 23] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
+        CommandAction::AddDecisionProvider,
         CommandAction::OpenSessionPicker,
         CommandAction::OpenTree,
         CommandAction::Images,
@@ -56,6 +58,7 @@ impl CommandAction {
         match self {
             CommandAction::OpenModelSelect => "model",
             CommandAction::AddProvider => "provider",
+            CommandAction::AddDecisionProvider => "decision-provider",
             CommandAction::OpenSessionPicker => "sessions",
             CommandAction::OpenTree => "tree",
             CommandAction::Images => "images",
@@ -171,6 +174,11 @@ pub fn default_commands() -> Vec<CommandEntry> {
             "Add provider",
             "Add a new LLM provider",
             CommandAction::AddProvider,
+        ),
+        CommandEntry::builtin(
+            "Decision provider",
+            "Add or edit a decision-model connection",
+            CommandAction::AddDecisionProvider,
         ),
         CommandEntry::builtin(
             "Switch session",

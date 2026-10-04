@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use kdl::{KdlDocument, KdlEntry, KdlEntryFormat, KdlNode, KdlValue};
 
@@ -35,6 +35,8 @@ pub(crate) fn from_kdl_with_sections(contents: &str) -> Result<(Config, Vec<Stri
             "registries" => config.registries = parse_registries(node, contents)?,
             "tools" => config.tools = parse_tools(node, contents)?,
             "permissions" => config.permissions = parse_permissions(node, contents)?,
+            "decisions" => config.decisions = parse_decisions(node, contents)?,
+            "ranking" => config.ranking = parse_ranking(node, contents)?,
             "scenes" => config.scenes = parse_scenes(node, contents)?,
             "themes" => config.themes = parse_themes(node, contents)?,
             "retry" => config.retry = parse_retry(node, contents)?,
@@ -1843,10 +1845,31 @@ fn property_bool(input: &str, node: &KdlNode, name: &str) -> Result<Option<bool>
     Ok(found)
 }
 
+/// The value of a single named number property entry, when present. Integers
+/// are accepted for a float property so `threshold 1` reads naturally.
+fn property_float(input: &str, node: &KdlNode, name: &str) -> Result<Option<f64>> {
+    let mut found = None;
+    for entry in node.entries() {
+        if entry.name().is_some_and(|n| n.value() == name) {
+            if found.is_some() {
+                return Err(duplicate(input, node, name));
+            }
+            match entry.value() {
+                KdlValue::Float(value) => found = Some(*value),
+                KdlValue::Integer(value) => found = Some(*value as f64),
+                _ => return Err(type_error(input, node, "a number")),
+            }
+        }
+    }
+    Ok(found)
+}
+
 fn parse_permissions(node: &KdlNode, input: &str) -> Result<PermissionsConfig> {
     let mut default = None;
     let mut paths = None;
     let mut shell = None;
+    let mut checks = Vec::new();
+    let mut tool_check = None;
     for child in child_nodes(node) {
         match child.name().value() {
             "allow-all" | "deny-all" | "ask-all" => {
@@ -1857,13 +1880,28 @@ fn parse_permissions(node: &KdlNode, input: &str) -> Result<PermissionsConfig> {
                 input,
                 child,
                 &mut paths,
-                parse_scope(input, child, "paths", parse_path_rules).map(Some),
+                parse_scope(input, child, "paths", parse_path_rules, None).map(Some),
             )?,
             "shell-patterns" => set_once(
                 input,
                 child,
                 &mut shell,
-                parse_scope(input, child, "shell-patterns", parse_shell_rules).map(Some),
+                parse_scope(
+                    input,
+                    child,
+                    "shell-patterns",
+                    parse_shell_rules,
+                    Some(&mut checks),
+                )
+                .map(Some),
+            )?,
+            // The tool check is a `permissions`-level block, not a scope: it
+            // covers the tool calls the path and shell rules do not.
+            "tool-check" => set_once(
+                input,
+                child,
+                &mut tool_check,
+                parse_tool_check(input, child).map(Some),
             )?,
             other => {
                 return Err(node_error(
@@ -1871,7 +1909,7 @@ fn parse_permissions(node: &KdlNode, input: &str) -> Result<PermissionsConfig> {
                     child,
                     format!(
                         "unknown node `{other}` in `permissions` (expected `allow-all`, \
-                         `deny-all`, `ask-all`, `paths`, or `shell-patterns`)"
+                         `deny-all`, `ask-all`, `paths`, `shell-patterns`, or `tool-check`)"
                     ),
                     None,
                 ));
@@ -1882,6 +1920,8 @@ fn parse_permissions(node: &KdlNode, input: &str) -> Result<PermissionsConfig> {
         default,
         paths: paths.unwrap_or_default(),
         shell: shell.unwrap_or_default(),
+        checks,
+        tool_check,
     })
 }
 
@@ -1890,6 +1930,7 @@ fn parse_scope<T>(
     node: &KdlNode,
     section: &str,
     mut parse_rules: impl FnMut(&KdlNode, &str) -> Result<Vec<T>>,
+    mut checks: Option<&mut Vec<ShellCheck>>,
 ) -> Result<RuleSet<T>> {
     let mut default = None;
     let mut rules = Vec::new();
@@ -1900,6 +1941,23 @@ fn parse_scope<T>(
                 set_once(input, child, &mut default, Ok(Some(verb)))?;
             }
             "allow" | "deny" | "ask" => rules.extend(parse_rules(child, input)?),
+            // Decision checks are a `shell-patterns` surface; `paths` has no
+            // equivalent, so its scope rejects them below.
+            "check" | "check-all" => match checks.as_mut() {
+                Some(checks) => checks.push(parse_shell_check(input, child)?),
+                None => {
+                    return Err(node_error(
+                        input,
+                        child,
+                        format!(
+                            "unknown node `{}` in `{section}` (only `shell-patterns` takes \
+                             decision checks)",
+                            child.name().value()
+                        ),
+                        None,
+                    ));
+                }
+            },
             other => {
                 return Err(node_error(
                     input,
@@ -1913,6 +1971,640 @@ fn parse_scope<T>(
         }
     }
     Ok(RuleSet { default, rules })
+}
+
+/// One `check "…" { … }` (commands matching the patterns) or `check-all { … }`
+/// (every command) rule in `shell-patterns`.
+fn parse_shell_check(input: &str, node: &KdlNode) -> Result<ShellCheck> {
+    check_props(input, node, &["pattern", "on-error", "threshold"])?;
+    let kind = match property_string(input, node, "pattern")?.as_deref() {
+        None | Some("raw") => ShellPatternKind::Raw,
+        Some("regex") => ShellPatternKind::Regex,
+        Some(other) => {
+            return Err(node_error(
+                input,
+                node,
+                format!("`pattern` must be `raw` or `regex`, found `{other}`"),
+                None,
+            ));
+        }
+    };
+    let on_error = match property_string(input, node, "on-error")?.as_deref() {
+        None => Verb::Ask,
+        Some("allow") => Verb::Allow,
+        Some("ask") => Verb::Ask,
+        Some("deny") => Verb::Deny,
+        Some(other) => {
+            return Err(node_error(
+                input,
+                node,
+                format!("`on-error` must be `allow`, `ask`, or `deny`, found `{other}`"),
+                None,
+            ));
+        }
+    };
+    let given_threshold = property_float(input, node, "threshold")?;
+    let threshold = given_threshold.unwrap_or(DEFAULT_CHECK_THRESHOLD);
+    if !(0.0..=1.0).contains(&threshold) {
+        return Err(node_error(
+            input,
+            node,
+            format!("`threshold` must be a probability between 0 and 1, found {threshold}"),
+            None,
+        ));
+    }
+    let patterns = match node.name().value() {
+        "check-all" => {
+            if node.entries().iter().any(|entry| entry.name().is_none()) {
+                return Err(node_error(
+                    input,
+                    node,
+                    "`check-all` takes no arguments",
+                    Some("use `check \"pattern\"` to narrow the check".into()),
+                ));
+            }
+            if property_string(input, node, "pattern")?.is_some() {
+                return Err(node_error(
+                    input,
+                    node,
+                    "`check-all` takes no `pattern` property (it covers every command)",
+                    None,
+                ));
+            }
+            Vec::new()
+        }
+        _ => scalar_string_vec(input, node)?.ok_or_else(|| {
+            node_error(
+                input,
+                node,
+                "`check` requires at least one pattern argument",
+                Some("use `check-all` to check every command".into()),
+            )
+        })?,
+    };
+    let mut decision = None;
+    let mut worker = None;
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "decision" => set_once(input, child, &mut decision, leaf_string(input, child))?,
+            "worker" => set_once(input, child, &mut worker, leaf_string(input, child))?,
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!(
+                        "unknown node `{other}` in a shell check (expected `decision` or \
+                         `worker`)"
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    // A check asks exactly one of the two: naming both would leave it undefined
+    // which answer the verdict came from, and naming neither has nothing to ask.
+    let source = match (decision, worker) {
+        (Some(_), Some(_)) => {
+            return Err(node_error(
+                input,
+                node,
+                "a shell check takes a `decision` or a `worker`, not both",
+                None,
+            ));
+        }
+        (Some(name), None) => ShellCheckSource::Decision(name),
+        (None, Some(name)) => ShellCheckSource::Worker(name),
+        (None, None) => {
+            return Err(node_error(
+                input,
+                node,
+                "a shell check requires a `decision` or `worker` child",
+                Some("expected: check-all { decision \"name\" }".into()),
+            ));
+        }
+    };
+    if source.name().trim().is_empty() {
+        let what = if source.is_decision() {
+            "decision"
+        } else {
+            "worker"
+        };
+        return Err(node_error(
+            input,
+            node,
+            format!("the shell check's `{what}` name must not be empty"),
+            None,
+        ));
+    }
+    // A worker answers in prose, so there is no probability for a threshold to
+    // sit on: writing one would silently do nothing.
+    if !source.is_decision() && given_threshold.is_some() {
+        return Err(node_error(
+            input,
+            node,
+            "`threshold` applies to a `decision` check, not a `worker` one",
+            Some(
+                "a worker answers `safe` or `suspicious`, so there is no probability to \
+                 threshold"
+                    .into(),
+            ),
+        ));
+    }
+    Ok(ShellCheck {
+        source,
+        patterns,
+        kind,
+        on_error,
+        threshold,
+    })
+}
+
+/// One `tool-check { … }` in `permissions`: a `choice` decision consulted about
+/// a generic tool call, whose answer's option label picks the verb the call
+/// gets. Which decision and which labels is the config's policy; whether the
+/// names and labels exist is reported by the decision service.
+fn parse_tool_check(input: &str, node: &KdlNode) -> Result<ToolCheck> {
+    check_props(input, node, &["on-error"])?;
+    if node.entries().iter().any(|entry| entry.name().is_none()) {
+        return Err(node_error(
+            input,
+            node,
+            "`tool-check` takes no arguments (name the decision with a `decision` child)",
+            None,
+        ));
+    }
+    let on_error = match property_string(input, node, "on-error")?.as_deref() {
+        None => Verb::Ask,
+        Some("allow") => Verb::Allow,
+        Some("ask") => Verb::Ask,
+        Some("deny") => Verb::Deny,
+        Some(other) => {
+            return Err(node_error(
+                input,
+                node,
+                format!("`on-error` must be `allow`, `ask`, or `deny`, found `{other}`"),
+                None,
+            ));
+        }
+    };
+    let mut decision = None;
+    let mut rules: Vec<ToolChoiceRule> = Vec::new();
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "decision" => {
+                // A property here would otherwise be read as nothing at all:
+                // `leaf_string` takes the positional and ignores the rest.
+                if child.entries().iter().any(|entry| entry.name().is_some()) {
+                    return Err(node_error(
+                        input,
+                        child,
+                        "`decision` takes a positional name, not properties",
+                        Some("expected: decision \"name\"".into()),
+                    ));
+                }
+                set_once(input, child, &mut decision, leaf_string(input, child))?;
+            }
+            "allow" | "ask" | "deny" => {
+                let verb = rule_verb(input, child)?;
+                // A label list is positional: a property would name nothing.
+                if child.entries().iter().any(|entry| entry.name().is_some()) {
+                    return Err(node_error(
+                        input,
+                        child,
+                        format!(
+                            "`{}` takes option labels, not properties",
+                            child.name().value()
+                        ),
+                        Some(format!(
+                            "expected: {} \"label\" \"label\"",
+                            child.name().value()
+                        )),
+                    ));
+                }
+                let labels = scalar_string_vec(input, child)?.ok_or_else(|| {
+                    node_error(
+                        input,
+                        child,
+                        format!(
+                            "`{}` requires at least one option label",
+                            child.name().value()
+                        ),
+                        None,
+                    )
+                })?;
+                for label in labels {
+                    if label.trim().is_empty() {
+                        return Err(node_error(
+                            input,
+                            child,
+                            "an option label must not be empty",
+                            None,
+                        ));
+                    }
+                    // One label answers with one verb: a second mapping would
+                    // make the answer ambiguous.
+                    if rules.iter().any(|rule| rule.label == label) {
+                        return Err(node_error(
+                            input,
+                            child,
+                            format!("duplicate option label `{label}` in `tool-check`"),
+                            None,
+                        ));
+                    }
+                    rules.push(ToolChoiceRule { verb, label });
+                }
+            }
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!(
+                        "unknown node `{other}` in `tool-check` (expected `decision`, `allow`, \
+                         `ask`, or `deny`)"
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    let Some(decision) = decision else {
+        return Err(node_error(
+            input,
+            node,
+            "`tool-check` requires a `decision` child naming a `decisions` entry",
+            Some("expected: tool-check { decision \"name\" }".into()),
+        ));
+    };
+    if decision.trim().is_empty() {
+        return Err(node_error(
+            input,
+            node,
+            "the tool check's `decision` name must not be empty",
+            None,
+        ));
+    }
+    Ok(ToolCheck {
+        decision,
+        rules,
+        on_error,
+    })
+}
+
+/// A leaf node's single string argument: no children, at most one argument.
+fn leaf_string(input: &str, node: &KdlNode) -> Result<Option<String>> {
+    if node.children().is_some() {
+        return Err(node_error(
+            input,
+            node,
+            format!("`{}` takes no children", node.name().value()),
+            None,
+        ));
+    }
+    scalar_string(input, node)
+}
+
+/// An optional single `description` child.
+fn parse_optional_description(input: &str, node: &KdlNode) -> Result<Option<String>> {
+    let mut description = None;
+    for child in child_nodes(node) {
+        if child.name().value() != "description" {
+            return Err(node_error(
+                input,
+                child,
+                format!(
+                    "unknown node `{}` (expected `description`)",
+                    child.name().value()
+                ),
+                None,
+            ));
+        }
+        set_once(input, child, &mut description, leaf_string(input, child))?;
+    }
+    Ok(description)
+}
+
+/// `decisions { decision "name" { … } }` — named, reusable questions.
+fn parse_decisions(node: &KdlNode, input: &str) -> Result<DecisionsConfig> {
+    if !node.entries().is_empty() {
+        return Err(node_error(
+            input,
+            node,
+            "`decisions` takes no arguments",
+            None,
+        ));
+    }
+    let mut disabled = None;
+    let mut decisions = BTreeMap::new();
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "decision" => {
+                let (name, config) = parse_decision(child, input)?;
+                if decisions.insert(name.clone(), config).is_some() {
+                    return Err(node_error(
+                        input,
+                        child,
+                        format!("duplicate decision `{name}`"),
+                        None,
+                    ));
+                }
+            }
+            "disabled" | "enabled" => {
+                set_once(input, child, &mut disabled, toggle_flag(input, child))?
+            }
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!(
+                        "unknown node `{other}` in `decisions` (expected `decision`, `enabled`, \
+                         or `disabled`)"
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    Ok(DecisionsConfig {
+        disabled,
+        decisions,
+    })
+}
+
+/// `ranking { decision "name" }` — which `decisions` entry ranks the options a
+/// `question` asks about. The block is cosmetic, so a name that cannot rank is
+/// reported by the decision service rather than here.
+fn parse_ranking(node: &KdlNode, input: &str) -> Result<RankingConfig> {
+    if node.entries().iter().any(|entry| entry.name().is_none()) {
+        return Err(node_error(
+            input,
+            node,
+            "`ranking` takes no arguments (name the decision with a `decision` child)",
+            None,
+        ));
+    }
+    if node.entries().iter().any(|entry| entry.name().is_some()) {
+        return Err(node_error(
+            input,
+            node,
+            "`ranking` takes no properties",
+            None,
+        ));
+    }
+    let mut decision = None;
+    let mut disabled = None;
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "decision" => {
+                // A property here would otherwise be read as nothing at all:
+                // `leaf_string` takes the positional and ignores the rest.
+                if child.entries().iter().any(|entry| entry.name().is_some()) {
+                    return Err(node_error(
+                        input,
+                        child,
+                        "`decision` takes a positional name, not properties",
+                        Some("expected: decision \"name\"".into()),
+                    ));
+                }
+                let Some(name) = leaf_string(input, child)? else {
+                    return Err(node_error(
+                        input,
+                        child,
+                        "`decision` requires a name",
+                        Some("expected: decision \"name\"".into()),
+                    ));
+                };
+                if name.trim().is_empty() {
+                    return Err(node_error(
+                        input,
+                        child,
+                        "the ranking `decision` name must not be empty",
+                        None,
+                    ));
+                }
+                set_once(input, child, &mut decision, Ok(Some(name)))?;
+            }
+            "disabled" | "enabled" => {
+                set_once(input, child, &mut disabled, toggle_flag(input, child))?
+            }
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!(
+                        "unknown node `{other}` in `ranking` (expected `decision`, `enabled`, \
+                         or `disabled`)"
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    Ok(RankingConfig {
+        decision,
+        disabled: disabled.unwrap_or(false),
+    })
+}
+
+/// One `decision "name" { type …; instructions …; … }` entry. The children a
+/// definition takes depend on its declared type, and a child belonging to
+/// another type is an error rather than a silent drop.
+fn parse_decision(node: &KdlNode, input: &str) -> Result<(String, DecisionConfig)> {
+    if node.entries().iter().any(|entry| entry.name().is_some()) {
+        return Err(node_error(
+            input,
+            node,
+            "`decision` takes a positional name, not properties",
+            Some("expected: decision \"name\" { type \"noul\"; instructions \"…\" }".into()),
+        ));
+    }
+    let Some(name) = scalar_string(input, node)? else {
+        return Err(node_error(
+            input,
+            node,
+            "`decision` requires a name",
+            Some("expected: decision \"name\" { type \"noul\"; instructions \"…\" }".into()),
+        ));
+    };
+    if name.trim().is_empty() {
+        return Err(node_error(
+            input,
+            node,
+            "decision name must not be empty",
+            None,
+        ));
+    }
+    let mut kind = None;
+    let mut instructions = None;
+    let mut yes = None;
+    let mut no = None;
+    let mut options: Vec<DecisionOption> = Vec::new();
+    let mut levels: Vec<DecisionLevel> = Vec::new();
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "type" => {
+                let value = leaf_string(input, child)?
+                    .ok_or_else(|| node_error(input, child, "`type` requires an argument", None))?;
+                let parsed = DecisionType::parse(&value).ok_or_else(|| {
+                    node_error(
+                        input,
+                        child,
+                        format!("unknown decision type `{value}`"),
+                        Some("expected `noul`, `choice`, or `score`".into()),
+                    )
+                })?;
+                set_once(input, child, &mut kind, Ok(Some(parsed)))?;
+            }
+            "instructions" => set_once(input, child, &mut instructions, leaf_string(input, child))?,
+            "yes" => set_once(input, child, &mut yes, leaf_string(input, child))?,
+            "no" => set_once(input, child, &mut no, leaf_string(input, child))?,
+            "option" => {
+                let label = scalar_string(input, child)?
+                    .ok_or_else(|| node_error(input, child, "`option` requires a label", None))?;
+                if label.trim().is_empty() {
+                    return Err(node_error(
+                        input,
+                        child,
+                        "an `option` label must not be empty",
+                        None,
+                    ));
+                }
+                options.push(DecisionOption {
+                    label,
+                    description: parse_optional_description(input, child)?,
+                });
+            }
+            "level" => {
+                let text = scalar_string(input, child)?.ok_or_else(|| {
+                    node_error(
+                        input,
+                        child,
+                        "`level` requires a label or a description",
+                        None,
+                    )
+                })?;
+                if text.trim().is_empty() {
+                    return Err(node_error(
+                        input,
+                        child,
+                        "a `level` must not be empty",
+                        None,
+                    ));
+                }
+                levels.push(match parse_optional_description(input, child)? {
+                    // `level "poor" { description "…" }`: the argument is a
+                    // local label and the child is the wire text.
+                    Some(description) => DecisionLevel {
+                        name: Some(text),
+                        description,
+                    },
+                    // `level "…"`: the argument is the wire text itself.
+                    None => DecisionLevel {
+                        name: None,
+                        description: text,
+                    },
+                });
+            }
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!(
+                        "unknown node `{other}` in a decision (expected `type`, `instructions`, \
+                         `yes`, `no`, `option`, or `level`)"
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    let Some(kind) = kind else {
+        return Err(node_error(
+            input,
+            node,
+            "`decision` requires a `type` child",
+            Some("expected: type \"noul\" | \"choice\" | \"score\"".into()),
+        ));
+    };
+    let Some(instructions) = instructions else {
+        return Err(node_error(
+            input,
+            node,
+            "`decision` requires an `instructions` child",
+            Some("expected: instructions \"…\"".into()),
+        ));
+    };
+    if instructions.trim().is_empty() {
+        return Err(node_error(
+            input,
+            node,
+            "`instructions` must not be empty",
+            None,
+        ));
+    }
+    let mismatch = |what: &str, expected: &str| {
+        node_error(
+            input,
+            node,
+            format!("a `{what}` decision takes {expected}"),
+            None,
+        )
+    };
+    match kind {
+        DecisionType::Noul => {
+            if !options.is_empty() || !levels.is_empty() {
+                return Err(mismatch(
+                    "noul",
+                    "`yes`/`no` descriptions, not `option` or `level`",
+                ));
+            }
+            if yes.is_some() != no.is_some() {
+                return Err(node_error(
+                    input,
+                    node,
+                    "a `noul` decision needs both `yes` and `no`, or neither",
+                    None,
+                ));
+            }
+        }
+        DecisionType::Choice => {
+            if !levels.is_empty() || yes.is_some() || no.is_some() {
+                return Err(mismatch("choice", "`option` children"));
+            }
+            if options.is_empty() {
+                return Err(mismatch("choice", "at least one `option` child"));
+            }
+            let mut seen = BTreeSet::new();
+            for option in &options {
+                if !seen.insert(option.label.as_str()) {
+                    return Err(node_error(
+                        input,
+                        node,
+                        format!("duplicate `option` label `{}`", option.label),
+                        None,
+                    ));
+                }
+            }
+        }
+        DecisionType::Score => {
+            if !options.is_empty() || yes.is_some() || no.is_some() {
+                return Err(mismatch("score", "`level` children, lowest first"));
+            }
+            if levels.is_empty() {
+                return Err(mismatch("score", "at least one `level` child"));
+            }
+        }
+    }
+    Ok((
+        name,
+        DecisionConfig {
+            kind,
+            instructions,
+            yes,
+            no,
+            options,
+            levels,
+        },
+    ))
 }
 
 fn parse_all_verb(input: &str, node: &KdlNode) -> Result<Verb> {
@@ -2171,6 +2863,7 @@ fn parse_scene(node: &KdlNode, input: &str) -> Result<(String, SceneConfig)> {
 
     let mut description = None;
     let mut subagents = None;
+    let mut ranking = None;
     let mut system_prompts = None;
     let mut thinking = None;
     let mut tool_concurrency = None;
@@ -2183,6 +2876,12 @@ fn parse_scene(node: &KdlNode, input: &str) -> Result<(String, SceneConfig)> {
                 child,
                 &mut subagents,
                 parse_subagents(child, input).map(Some),
+            )?,
+            "ranking" => set_once(
+                input,
+                child,
+                &mut ranking,
+                parse_ranking(child, input).map(Some),
             )?,
             "system-prompts" => set_once(
                 input,
@@ -2209,8 +2908,8 @@ fn parse_scene(node: &KdlNode, input: &str) -> Result<(String, SceneConfig)> {
                     child,
                     format!(
                         "unknown node `{other}` in `scene` (expected `description`, \
-                         `subagents`, `system-prompts`, `thinking`, `tool-concurrency`, \
-                         or `tools`)"
+                         `subagents`, `ranking`, `system-prompts`, `thinking`, \
+                         `tool-concurrency`, or `tools`)"
                     ),
                     None,
                 ));
@@ -2222,6 +2921,7 @@ fn parse_scene(node: &KdlNode, input: &str) -> Result<(String, SceneConfig)> {
         SceneConfig {
             description,
             subagents: subagents.unwrap_or_default(),
+            ranking: ranking.unwrap_or_default(),
             system_prompts: system_prompts.unwrap_or_default(),
             thinking,
             tools: tools.unwrap_or_default(),
@@ -2753,6 +3453,8 @@ pub(crate) fn to_kdl(config: &Config) -> Result<String> {
         context_node(&config.context),
         shell_node(&config.shell),
         permissions_node(&config.permissions),
+        decisions_node(&config.decisions),
+        ranking_node(&config.ranking),
         tools_node(&config.tools),
         registries_node(&config.registries),
         scenes_node(&config.scenes),
@@ -3064,15 +3766,182 @@ fn permissions_node(cfg: &PermissionsConfig) -> Option<KdlNode> {
             path_rule_group,
         ));
     }
-    if cfg.shell.default.is_some() || !cfg.shell.rules.is_empty() {
-        children.push(scope_node(
-            "shell-patterns",
-            &cfg.shell,
-            |rule| (rule.verb, rule.kind),
-            shell_rule_group,
-        ));
+    if cfg.shell.default.is_some() || !cfg.shell.rules.is_empty() || !cfg.checks.is_empty() {
+        children.push(shell_scope_node(&cfg.shell, &cfg.checks));
+    }
+    if let Some(check) = &cfg.tool_check {
+        children.push(tool_check_node(check));
     }
     section_node("permissions", children)
+}
+
+/// The `tool-check` block: the decision plus one node per verb that has labels,
+/// written in label order. An empty verb node is never written — it would carry
+/// no labels for `parse_tool_check` to read back — and `on-error` is written
+/// only when it differs from the `Ask` default, so a round trip is exact.
+fn tool_check_node(check: &ToolCheck) -> KdlNode {
+    let mut node = KdlNode::new("tool-check");
+    if check.on_error != Verb::Ask {
+        node.push(KdlEntry::new_prop("on-error", check.on_error.as_str()));
+    }
+    let mut children = vec![value_node("decision", check.decision.as_str())];
+    let mut run: Vec<&ToolChoiceRule> = Vec::new();
+    for rule in &check.rules {
+        if run.first().is_some_and(|first| first.verb != rule.verb) {
+            children.push(tool_choice_node(&run));
+            run.clear();
+        }
+        run.push(rule);
+    }
+    if !run.is_empty() {
+        children.push(tool_choice_node(&run));
+    }
+    let mut body = KdlDocument::new();
+    body.nodes_mut().extend(children);
+    node.set_children(body);
+    node
+}
+
+/// One verb node of a `tool-check`: the labels sharing that verb, positional.
+fn tool_choice_node(rules: &[&ToolChoiceRule]) -> KdlNode {
+    let mut node = KdlNode::new(rules[0].verb.as_str());
+    for rule in rules {
+        node.push(KdlEntry::new(rule.label.as_str()));
+    }
+    node
+}
+
+/// The `shell-patterns` block: the verb rules plus the decision checks, which
+/// share the scope because both are written inside it.
+fn shell_scope_node(scope: &RuleSet<ShellRule>, checks: &[ShellCheck]) -> KdlNode {
+    let mut node = scope_node(
+        "shell-patterns",
+        scope,
+        |rule| (rule.verb, rule.kind),
+        shell_rule_group,
+    );
+    if !checks.is_empty() {
+        let mut body = node.children().cloned().unwrap_or_default();
+        for check in checks {
+            body.nodes_mut().push(shell_check_node(check));
+        }
+        node.set_children(body);
+    }
+    node
+}
+
+fn shell_check_node(check: &ShellCheck) -> KdlNode {
+    let mut node = KdlNode::new(if check.patterns.is_empty() {
+        "check-all"
+    } else {
+        "check"
+    });
+    // Only the narrowed form has patterns to match, so only it carries the
+    // matcher property (`check-all` rejects it on the way back in).
+    if !check.patterns.is_empty() && check.kind == ShellPatternKind::Regex {
+        node.push(KdlEntry::new_prop("pattern", "regex"));
+    }
+    if check.on_error != Verb::Ask {
+        node.push(KdlEntry::new_prop("on-error", check.on_error.as_str()));
+    }
+    if check.threshold != DEFAULT_CHECK_THRESHOLD {
+        node.push(KdlEntry::new_prop("threshold", check.threshold));
+    }
+    for pattern in &check.patterns {
+        node.push(KdlEntry::new(pattern.as_str()));
+    }
+    // The source is written as whichever child the config named, so a round
+    // trip keeps `decision "…"` and `worker "…"` distinct.
+    let mut body = KdlDocument::new();
+    let (name, value) = match &check.source {
+        ShellCheckSource::Decision(name) => ("decision", name),
+        ShellCheckSource::Worker(name) => ("worker", name),
+    };
+    body.nodes_mut().push(value_node(name, value.as_str()));
+    node.set_children(body);
+    node
+}
+
+/// The `ranking` block, written only when it carries something: the switch and
+/// the decision it names, in the order `parse_ranking` reads them back.
+fn ranking_node(cfg: &RankingConfig) -> Option<KdlNode> {
+    if cfg.is_empty() {
+        return None;
+    }
+    let mut children = Vec::new();
+    if cfg.disabled {
+        children.push(value_node("disabled", true));
+    }
+    if let Some(decision) = &cfg.decision {
+        children.push(value_node("decision", decision.as_str()));
+    }
+    section_node("ranking", children)
+}
+
+fn decisions_node(cfg: &DecisionsConfig) -> Option<KdlNode> {
+    if cfg.is_empty() {
+        return None;
+    }
+    let mut children = Vec::new();
+    // Written explicitly so the switch survives a round trip: `None` is the
+    // default (off) and needs no node.
+    match cfg.disabled {
+        Some(false) => children.push(value_node("enabled", true)),
+        Some(true) => children.push(value_node("disabled", true)),
+        None => {}
+    }
+    children.extend(
+        cfg.decisions
+            .iter()
+            .map(|(name, decision)| decision_node(name, decision)),
+    );
+    section_node("decisions", children)
+}
+
+fn decision_node(name: &str, cfg: &DecisionConfig) -> KdlNode {
+    let mut children = vec![
+        value_node("type", cfg.kind.as_str()),
+        value_node("instructions", cfg.instructions.as_str()),
+    ];
+    if let Some(yes) = &cfg.yes {
+        children.push(value_node("yes", yes.as_str()));
+    }
+    if let Some(no) = &cfg.no {
+        children.push(value_node("no", no.as_str()));
+    }
+    for option in &cfg.options {
+        let mut node = KdlNode::new("option");
+        node.push(KdlEntry::new(option.label.as_str()));
+        if let Some(description) = &option.description {
+            let mut body = KdlDocument::new();
+            body.nodes_mut()
+                .push(value_node("description", description.as_str()));
+            node.set_children(body);
+        }
+        children.push(node);
+    }
+    for level in &cfg.levels {
+        let mut node = KdlNode::new("level");
+        match &level.name {
+            // A named level keeps its label positional and the wire text in
+            // the `description` child, the form `parse_decision` reads back.
+            Some(label) => {
+                node.push(KdlEntry::new(label.as_str()));
+                let mut body = KdlDocument::new();
+                body.nodes_mut()
+                    .push(value_node("description", level.description.as_str()));
+                node.set_children(body);
+            }
+            None => node.push(KdlEntry::new(level.description.as_str())),
+        }
+        children.push(node);
+    }
+    let mut node = KdlNode::new("decision");
+    node.push(KdlEntry::new(name));
+    let mut body = KdlDocument::new();
+    body.nodes_mut().extend(children);
+    node.set_children(body);
+    node
 }
 
 fn scope_node<T, K: PartialEq>(
@@ -3391,6 +4260,7 @@ fn scene_node(name: &str, scene: &SceneConfig) -> KdlNode {
         children.push(prompt_node("description", description));
     }
     children.extend(subagents_node(&scene.subagents));
+    children.extend(ranking_node(&scene.ranking));
     children.extend(system_prompts_node(&scene.system_prompts));
     if let Some(thinking) = scene.thinking {
         children.push(value_node("thinking", thinking));

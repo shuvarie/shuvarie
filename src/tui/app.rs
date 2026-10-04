@@ -10,6 +10,9 @@ use tokio::sync::mpsc::Sender;
 use crate::tui::event::Event;
 use crate::tui::utils::ctrl;
 
+use super::add_decision_provider::{
+    AddDecisionProviderForm, AddDecisionProviderMessage, AddDecisionProviderOutcome,
+};
 use super::add_provider::{
     AddProviderForm, AddProviderMessage, AddProviderOutcome, AddProviderStage,
 };
@@ -46,6 +49,10 @@ pub enum Overlay {
     None,
     Welcome,
     AddProvider,
+    /// Register or edit a decision-model connection. A decision model is not a
+    /// generative LLM, so it has no Selune catalog entry, no transport list,
+    /// and no OAuth — just one System One endpoint and a free-text model name.
+    AddDecisionProvider,
     ModelPicker,
     CommandMenu,
     ConfirmQuit,
@@ -73,6 +80,7 @@ pub enum AppMessage {
     },
     Session(SessionMessage),
     AddProvider(AddProviderMessage),
+    AddDecisionProvider(AddDecisionProviderMessage),
     ModelPicker(ModelPickerMessage),
     CommandMenu(CommandMenuMessage),
     Welcome(WelcomeMessage),
@@ -205,6 +213,9 @@ pub struct App {
     pub welcome: Welcome,
     pub confirm_quit: ConfirmQuit,
     pub add_provider_form: Option<AddProviderForm>,
+    /// The decision-provider dialog. Its fields are plain strings, so the form
+    /// exists only while the overlay is open.
+    pub add_decision_provider_form: Option<AddDecisionProviderForm>,
     pub model_picker: ModelPicker,
     pub session_picker: SessionPicker,
     pub tree_popup: TreePopup,
@@ -346,6 +357,7 @@ impl App {
             welcome,
             confirm_quit: ConfirmQuit::new(),
             add_provider_form: None,
+            add_decision_provider_form: None,
             model_picker: ModelPicker::new(),
             session_picker: SessionPicker::new(),
             tree_popup: TreePopup::new(),
@@ -530,6 +542,13 @@ impl App {
                                 .as_ref()
                                 .and_then(|f| f.map_event(&key))
                                 .map(AppMessage::AddProvider);
+                        }
+                        Overlay::AddDecisionProvider => {
+                            return self
+                                .add_decision_provider_form
+                                .as_ref()
+                                .and_then(|f| f.map_event(&key))
+                                .map(AppMessage::AddDecisionProvider);
                         }
                         Overlay::ModelPicker => {
                             return self
@@ -979,6 +998,9 @@ impl App {
                 .add_provider_form
                 .as_ref()
                 .map(|_| AppMessage::AddProvider(AddProviderMessage::Paste(text.to_string()))),
+            Overlay::AddDecisionProvider => self.add_decision_provider_form.as_ref().map(|_| {
+                AppMessage::AddDecisionProvider(AddDecisionProviderMessage::Paste(text.to_string()))
+            }),
             Overlay::Welcome
             | Overlay::CommandMenu
             | Overlay::ConfirmQuit
@@ -1266,6 +1288,33 @@ impl App {
                     }
                 }
             }
+            AppMessage::AddDecisionProvider(m) => {
+                if let Some(form) = &mut self.add_decision_provider_form {
+                    match form.update(m) {
+                        AddDecisionProviderOutcome::Cancel => self.close_overlay(),
+                        AddDecisionProviderOutcome::Submit {
+                            name,
+                            base_url,
+                            api_key,
+                            model,
+                        } => {
+                            // The connection and the active selection are
+                            // written together: a decision connection is
+                            // unusable without a model, so a half-saved
+                            // selection would leave the shell checks with
+                            // nothing to ask.
+                            self.ctx.send(shuvarie_core::Command::SetDecisionProvider {
+                                name,
+                                api_key,
+                                base_url: Some(base_url),
+                                model,
+                            });
+                            self.close_overlay();
+                        }
+                        AddDecisionProviderOutcome::None => {}
+                    }
+                }
+            }
             AppMessage::ModelPicker(m) => {
                 if let Some(effect) = self.model_picker.update(m) {
                     match effect {
@@ -1390,6 +1439,9 @@ impl App {
                             }
                         }
                     }
+                    // The decision-provider dialog is a fixed-size form with
+                    // no list, so a resize needs no viewport recalculation.
+                    Overlay::AddDecisionProvider => {}
                     Overlay::SessionPicker => {
                         if let Some(h) = session_picker_list_height(area) {
                             self.session_picker
@@ -1754,6 +1806,36 @@ impl App {
         self.overlay = Overlay::AddProvider;
     }
 
+    /// Opens the decision-provider dialog. When a decision connection is
+    /// already active the form is seeded from it, so the dialog edits that
+    /// connection in place — with no registry to pick from, re-running the form
+    /// is the only way to change a model or endpoint.
+    fn open_add_decision_provider(&mut self) {
+        let names: Vec<String> = self
+            .ctx
+            .connections
+            .decision_providers
+            .keys()
+            .cloned()
+            .collect();
+        let mut form = AddDecisionProviderForm::new(&names);
+        if let Some(active) = &self.ctx.connections.decision {
+            let provider = self
+                .ctx
+                .connections
+                .decision_providers
+                .get(&active.provider);
+            form = form.prefill(
+                &active.provider,
+                provider.and_then(|p| p.base_url.as_deref()),
+                provider.and_then(|p| p.api_key.as_deref()),
+                &active.model,
+            );
+        }
+        self.add_decision_provider_form = Some(form);
+        self.overlay = Overlay::AddDecisionProvider;
+    }
+
     /// Opens the model selector popup over every configured provider.
     /// Catalog-less providers whose models are not cached yet get a live
     /// `ListModels` fetch.
@@ -1944,6 +2026,9 @@ impl App {
             }
             CommandAction::AddProvider => {
                 self.open_add_provider();
+            }
+            CommandAction::AddDecisionProvider => {
+                self.open_add_decision_provider();
             }
             CommandAction::OpenSessionPicker => {
                 self.session_picker.open(self.session.session_id);
@@ -2183,6 +2268,7 @@ impl App {
         self.overlay = Overlay::None;
         self.command_menu.close();
         self.add_provider_form = None;
+        self.add_decision_provider_form = None;
         self.model_picker.close();
         self.session_picker.close();
         self.tree_popup.close();
@@ -2265,6 +2351,9 @@ impl App {
         let stacked = self.auth.open || self.warning.open;
         self.welcome.view(frame, area, stacked);
         if let Some(form) = &self.add_provider_form {
+            form.view(frame, area, stacked);
+        }
+        if let Some(form) = &self.add_decision_provider_form {
             form.view(frame, area, stacked);
         }
         self.model_picker.view(frame, area, stacked);

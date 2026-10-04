@@ -2284,6 +2284,10 @@ async fn resume_ctx(store: Store, session: Session) -> (CoreCtx, Receiver<Event>
         stream_done_tx,
         question_tx,
         access: crate::test_util::access(),
+        decisions: std::sync::Arc::new(crate::decisions::Decisions::build(
+            &config,
+            &Connections::default(),
+        )),
         config,
         trust: shuvarie_config::TrustGrants::none(),
         workspace_root,

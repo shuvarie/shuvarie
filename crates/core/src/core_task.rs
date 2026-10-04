@@ -198,6 +198,11 @@ struct CoreCtx {
     stream_done_tx: Sender<StreamOutcome>,
     question_tx: Sender<QuestionRequest>,
     access: Access,
+    /// The decision service: the configured decisions and shell checks, plus
+    /// the System One connection that answers them. Held here as well as on
+    /// `Access` so option ranking and the `decide` tool can reach it without
+    /// going through the permission engine.
+    decisions: std::sync::Arc<crate::decisions::Decisions>,
     config: Config,
     /// The workspace trust decision made at startup: which categories load.
     trust: TrustGrants,
@@ -263,11 +268,26 @@ pub async fn run(
     let (permission_tx, mut permission_rx) = tokio::sync::mpsc::channel::<PermissionRequest>(8);
     let mut pending_permissions: HashMap<u64, oneshot::Sender<PermissionAnswer>> = HashMap::new();
     let mut next_permission_id: u64 = 0;
+    // Decision models sit beside the completion path, not on it: compile the
+    // configured decisions, the shell checks that consult them, and their own
+    // System One connection once. Anything that would stop a check from
+    // running is surfaced as a startup warning and leaves the check following
+    // its own `on-error` policy — a configured check must not silently
+    // disappear, since that would quietly widen access.
+    let decisions = std::sync::Arc::new(crate::decisions::Decisions::build(&config, &connections));
+    for problem in decisions.problems() {
+        let _ = event_tx
+            .send(Event::ShellWarning {
+                message: format!("decision models: {problem}"),
+            })
+            .await;
+    }
     let access = Access::new(
         permissions,
         PermissionGate::new(permission_tx),
         DenyCut::default(),
-    );
+    )
+    .with_decisions(std::sync::Arc::clone(&decisions));
 
     // Bash-mode (`!`) runs, routed back to the TUI by id.
     let mut next_bash_id: u64 = 0;
@@ -408,6 +428,7 @@ pub async fn run(
         stream_done_tx,
         question_tx,
         access,
+        decisions,
         config,
         trust,
         workspace_root,
@@ -525,6 +546,45 @@ pub async fn run(
                     Command::AddProvider { id, config: pc } => {
                         ctx.connections.providers.insert(id.clone(), pc);
                         ctx.clients.remove(&id);
+                        persist(
+                            &ctx.config,
+                            &ctx.connections,
+                            config_path.as_deref(),
+                            connections_path.as_deref(),
+                            &ctx.event_tx,
+                        )
+                        .await;
+                    }
+                    Command::SetDecisionProvider {
+                        name,
+                        api_key,
+                        base_url,
+                        model,
+                    } => {
+                        // The dialog owns both halves of the selection, so a
+                        // re-run over an existing name edits that connection in
+                        // place rather than adding a second one.
+                        ctx.connections.decision_providers.insert(
+                            name.clone(),
+                            shuvarie_config::DecisionProviderConfig::new(api_key, base_url),
+                        );
+                        ctx.connections.decision = Some(shuvarie_config::DecisionActive {
+                            provider: name,
+                            model,
+                        });
+                        // Point the running service at the new connection, so a
+                        // shell check starts working without a restart. A
+                        // connection that cannot be used clears the live client
+                        // and says why, rather than waiting to be discovered by
+                        // the first command.
+                        if let Err(error) = ctx.decisions.set_connection(&ctx.connections) {
+                            let _ = ctx
+                                .event_tx
+                                .send(Event::ShellWarning {
+                                    message: format!("decision models: {error}"),
+                                })
+                                .await;
+                        }
                         persist(
                             &ctx.config,
                             &ctx.connections,
@@ -1511,11 +1571,22 @@ pub async fn run(
                 let id = next_question_id;
                 next_question_id = next_question_id.wrapping_add(1);
                 pending_questions.insert(id, req.respond);
+                // A scene may rank the options before they are shown. Ranking
+                // is presentation that fails open: anything that stops the
+                // decision model leaves the question exactly as the tool asked
+                // it. The session's scene name is copied out first, so no lock
+                // guard is held across the request.
+                let scene_name = match &ctx.session {
+                    Some(session) => session.lock().await.scene.clone(),
+                    None => None,
+                };
+                let scene_ranking = scene_name
+                    .as_deref()
+                    .and_then(|name| ctx.scenes.scene(name))
+                    .map(|scene| &scene.ranking);
+                let questions = ctx.decisions.rank(req.questions, scene_ranking).await;
                 let _ = ctx.event_tx
-                    .send(Event::QuestionAsked {
-                        id,
-                        questions: req.questions,
-                    })
+                    .send(Event::QuestionAsked { id, questions })
                     .await;
             }
             permission = permission_rx.recv() => {
@@ -2622,6 +2693,14 @@ impl CoreCtx {
             crate::attachments::collect_blobs(&mut self.store, &prior, &prompt_attachments).await;
         let budget = context_budget(&self.config, catalog_provider.as_ref(), &model)
             .map(|b| b.with_preamble_tokens(shuvarie_llm::estimate_text_tokens(&preamble)));
+        // Point `worker` shell checks at this turn's model and scene: unlike a
+        // decision check, whose connection the config fixes once, a worker check
+        // runs on the completion path and names a worker the active scene
+        // defines. Refreshed every turn because either can change under it.
+        if self.decisions.is_enabled() {
+            self.decisions
+                .set_worker_connection(&client, &model, &scene);
+        }
         let mut worker_set = crate::agents::build_workers(
             client.clone(),
             &model,

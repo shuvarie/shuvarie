@@ -333,9 +333,11 @@ pub enum Event {
         commands: Vec<crate::custom_commands::CustomCommand>,
         warnings: Vec<crate::custom_commands::CustomCommandWarning>,
     },
-    /// A startup warning surfaced as a dismissible popup — currently: the
-    /// `shell.path` configured in config.kdl was not found, so `run_shell`
-    /// falls back to the platform default shell.
+    /// A warning surfaced as a dismissible popup: the `shell.path` configured
+    /// in config.kdl was not found (so `run_shell` falls back to the platform
+    /// default shell), or a decision-model shell check is configured but
+    /// cannot run (no decision provider selected, an unknown decision name, a
+    /// rubric the protocol rejects).
     ShellWarning {
         message: String,
     },

@@ -299,13 +299,36 @@ struct CompiledShellRule {
     matcher: ShellMatcher,
 }
 
+/// How a shell pattern matches text: the compiled form shared by the
+/// `shell-patterns` rules and the decision checks.
 #[derive(Clone)]
-enum ShellMatcher {
+pub(crate) enum ShellMatcher {
     /// Literal text with word boundaries, matched against the command line
     /// with whitespace runs collapsed.
     Raw(String),
     /// A regular expression, matched as written against the command line.
     Regex(Regex),
+}
+
+impl ShellMatcher {
+    /// Compile one pattern into its matcher.
+    pub(crate) fn compile(pattern: &str, kind: ShellPatternKind) -> Result<Self, String> {
+        match kind {
+            ShellPatternKind::Raw => Ok(Self::Raw(collapse_whitespace(pattern))),
+            ShellPatternKind::Regex => Regex::new(pattern)
+                .map(Self::Regex)
+                .map_err(|e| format!("invalid regex in shell-patterns rule \"{pattern}\": {e}")),
+        }
+    }
+
+    /// Match `command`, with its whitespace-collapsed form passed alongside so
+    /// a caller matching several patterns collapses once.
+    pub(crate) fn matches(&self, command: &str, collapsed: &str) -> bool {
+        match self {
+            Self::Raw(needle) => contains_word(collapsed, needle),
+            Self::Regex(re) => re.is_match(command),
+        }
+    }
 }
 
 /// Compiled `permissions` rules, built once at startup from config (or the
@@ -415,12 +438,55 @@ impl Permissions {
 
     /// The decision for an agent-facing tool call (`tool`-defined and MCP
     /// tools). No dedicated tool-name rules exist yet — a rule scope for
-    /// tools can be added later — so the top-level default verb decides.
+    /// tools can be added later — so the top-level default verb decides; a
+    /// configured `tool-check` can tighten it before
+    /// [`Self::settle_tool`] acts on the verdict (see
+    /// [`Access::authorize_tool`]).
     pub fn check_tool(&self, _tool: &str) -> Decision {
         verb_decision(
             self.default,
             format!("permissions default: {}-all", self.default.as_str()),
         )
+    }
+
+    /// The tool verdict before any decision check: the rules' verdict with the
+    /// scene's ask overlay composed in. [`Self::settle_tool`] acts on it.
+    pub(crate) fn compose_tool(&self, tool: &str, scene_ask: Option<&str>) -> Decision {
+        compose_scene_ask(scene_ask, self.check_tool(tool))
+    }
+
+    /// Acts on a settled tool verdict: allows it, or asks through the gate and
+    /// denies on rejection. Split from [`Self::compose_tool`] so the tool check
+    /// can tighten the verdict in between.
+    pub(crate) async fn settle_tool(
+        &self,
+        gate: &PermissionGate,
+        cut: &DenyCut,
+        tool: &str,
+        detail: &str,
+        decision: Decision,
+    ) -> Result<(), String> {
+        match decision {
+            Decision::Allow => Ok(()),
+            Decision::Deny { reason } => {
+                cut.trigger();
+                Err(format!("permission denied: {reason}"))
+            }
+            Decision::Ask { reason } => {
+                let description = format!("Allow tool `{tool}`?\n{detail}\n{reason}");
+                match gate
+                    .request(description, Some(AskScope::Tool(tool.to_string())))
+                    .await
+                {
+                    Ok(true) => Ok(()),
+                    Ok(false) => {
+                        cut.trigger();
+                        Err(format!("permission denied by the user: {reason}"))
+                    }
+                    Err(err) => Err(err),
+                }
+            }
+        }
     }
 
     /// Runs a permission check and, for `ask` decisions, pauses on `gate`
@@ -477,15 +543,22 @@ impl Permissions {
         }
     }
 
-    /// The `ask`-aware version of [`Self::check_shell`].
-    pub async fn authorize_shell(
+    /// The shell verdict before any decision check: the rules' verdict with
+    /// the scene's ask overlay composed in. [`Self::settle_shell`] acts on it.
+    pub(crate) fn compose_shell(&self, command: &str, scene_ask: Option<&str>) -> Decision {
+        compose_scene_ask(scene_ask, self.check_shell(command))
+    }
+
+    /// Acts on a settled shell verdict: allows it, or asks through the gate
+    /// and denies on rejection. Split from [`Self::compose_shell`] so the
+    /// decision checks can tighten the verdict in between.
+    pub(crate) async fn settle_shell(
         &self,
         gate: &PermissionGate,
         cut: &DenyCut,
         command: &str,
-        scene_ask: Option<&str>,
+        decision: Decision,
     ) -> Result<(), String> {
-        let decision = compose_scene_ask(scene_ask, self.check_shell(command));
         match decision {
             Decision::Allow => Ok(()),
             Decision::Deny { reason } => {
@@ -507,9 +580,31 @@ impl Permissions {
         }
     }
 
+    /// The `ask`-aware version of [`Self::check_shell`], with no decision
+    /// checks (see [`Access::authorize_shell`] for the checked path).
+    pub async fn authorize_shell(
+        &self,
+        gate: &PermissionGate,
+        cut: &DenyCut,
+        command: &str,
+        scene_ask: Option<&str>,
+    ) -> Result<(), String> {
+        let decision = self.compose_shell(command, scene_ask);
+        self.settle_shell(gate, cut, command, decision).await
+    }
+
     /// The ask-aware authorization of a configured (`tool`) or MCP tool call:
     /// `tool` is the agent-facing name, `detail` the human-facing summary of
     /// this specific call (rendered command line or arguments).
+    ///
+    /// This is the generic tool seam — the tools that have neither a path nor a
+    /// command line of their own: the configured `tool` tools and the MCP
+    /// tools. The file tools are covered by their own path rules and
+    /// `run_shell` by the shell rules plus the `noul` shell check, so each
+    /// class of tool already has its own check and this seam is not meant to
+    /// double-ask them. No decision check runs here: [`Access::authorize_tool`]
+    /// is the checked path, so a caller reaching a provider can tighten the
+    /// verdict before it is acted on.
     pub async fn authorize_tool(
         &self,
         gate: &PermissionGate,
@@ -518,28 +613,8 @@ impl Permissions {
         detail: &str,
         scene_ask: Option<&str>,
     ) -> Result<(), String> {
-        let decision = compose_scene_ask(scene_ask, self.check_tool(tool));
-        match decision {
-            Decision::Allow => Ok(()),
-            Decision::Deny { reason } => {
-                cut.trigger();
-                Err(format!("permission denied: {reason}"))
-            }
-            Decision::Ask { reason } => {
-                let description = format!("Allow tool `{tool}`?\n{detail}\n{reason}");
-                match gate
-                    .request(description, Some(AskScope::Tool(tool.to_string())))
-                    .await
-                {
-                    Ok(true) => Ok(()),
-                    Ok(false) => {
-                        cut.trigger();
-                        Err(format!("permission denied by the user: {reason}"))
-                    }
-                    Err(err) => Err(err),
-                }
-            }
-        }
+        let decision = self.compose_tool(tool, scene_ask);
+        self.settle_tool(gate, cut, tool, detail, decision).await
     }
 
     /// The output watcher for `deny` shell rules: reports the first rule
@@ -610,22 +685,10 @@ impl CompiledPathRule {
 
 impl CompiledShellRule {
     fn build(rule: &ShellRuleConfig) -> Result<Self, String> {
-        let matcher = match rule.kind {
-            ShellPatternKind::Raw => ShellMatcher::Raw(collapse_whitespace(&rule.pattern)),
-            ShellPatternKind::Regex => {
-                let re = Regex::new(&rule.pattern).map_err(|e| {
-                    format!(
-                        "invalid regex in shell-patterns rule \"{}\": {e}",
-                        rule.pattern
-                    )
-                })?;
-                ShellMatcher::Regex(re)
-            }
-        };
         Ok(Self {
             verb: rule.verb,
             raw: rule.pattern.clone(),
-            matcher,
+            matcher: ShellMatcher::compile(&rule.pattern, rule.kind)?,
         })
     }
 
@@ -690,6 +753,10 @@ pub struct Access {
     permissions: std::sync::Arc<Permissions>,
     gate: PermissionGate,
     deny_cut: DenyCut,
+    /// The decision checks that tighten verdicts: the shell checks for
+    /// `run_shell` and the tool check for the generic tool seam. `None` = the
+    /// rules alone decide; set once at startup ([`Access::with_decisions`]).
+    decisions: Option<crate::decisions::SharedDecisions>,
     /// The scene's force-ask overlay for one tool: `Some(reason)` turns an
     /// `allow` verdict into an ask before it is granted. Set per tool at
     /// roster-build time (`Access::for_tool`); `None` = no scene overlay.
@@ -706,8 +773,17 @@ impl Access {
             permissions,
             gate,
             deny_cut,
+            decisions: None,
             scene_ask: None,
         }
+    }
+
+    /// Attach the decision service, whose configured shell checks tighten
+    /// `run_shell` verdicts and whose tool check tightens the generic tool
+    /// seam. Without it the rules alone decide.
+    pub fn with_decisions(mut self, decisions: crate::decisions::SharedDecisions) -> Self {
+        self.decisions = Some(decisions);
+        self
     }
 
     /// Clones the access for one tool, applying the scene's ask overlay: a
@@ -727,6 +803,13 @@ impl Access {
     /// engine).
     pub fn scene_ask_reason(&self) -> Option<&str> {
         self.scene_ask.as_deref()
+    }
+
+    /// The decision service attached to this access, when one is configured:
+    /// the `decide` tool reaches the definitions and connection through it.
+    /// `None` = decision models are not wired into this access at all.
+    pub fn decisions(&self) -> Option<&std::sync::Arc<crate::decisions::Decisions>> {
+        self.decisions.as_ref()
     }
 
     /// Authorizes a canonicalized file path (see
@@ -752,28 +835,41 @@ impl Access {
     /// Authorizes a `run_shell` command line (see
     /// [`Permissions::authorize_shell`]).
     pub async fn authorize_shell(&self, command: &str) -> Result<(), String> {
+        let verdict = self
+            .permissions
+            .compose_shell(command, self.scene_ask.as_deref());
+        // The decision checks run last and can only tighten: an `allow` the
+        // rules granted becomes an `ask` when a decision reads the command as
+        // suspicious. A command already denied never reaches a provider.
+        let verdict = match &self.decisions {
+            Some(decisions) => decisions.check_shell(command, verdict).await,
+            None => verdict,
+        };
         self.permissions
-            .authorize_shell(
-                &self.gate,
-                &self.deny_cut,
-                command,
-                self.scene_ask.as_deref(),
-            )
+            .settle_shell(&self.gate, &self.deny_cut, command, verdict)
             .await
     }
 
     /// Authorizes a configured (`tool`) or MCP tool call by its agent-facing
     /// name, with a human-readable summary of this call (see
     /// [`Permissions::authorize_tool`]).
+    ///
+    /// The configured `tool-check` is consulted here, between the rules'
+    /// verdict (with the scene's ask overlay) and acting on it, so a call the
+    /// rules already deny is never spent on a provider. This is the seam the
+    /// MCP tools and the configured `tool` tools authorize through; the file
+    /// tools are covered by their path rules and `run_shell` by the shell rules
+    /// plus the `noul` shell check, so no class of tool is asked twice.
     pub async fn authorize_tool(&self, tool: &str, detail: &str) -> Result<(), String> {
+        let verdict = self
+            .permissions
+            .compose_tool(tool, self.scene_ask.as_deref());
+        let verdict = match &self.decisions {
+            Some(decisions) => decisions.check_tool(tool, detail, verdict).await,
+            None => verdict,
+        };
         self.permissions
-            .authorize_tool(
-                &self.gate,
-                &self.deny_cut,
-                tool,
-                detail,
-                self.scene_ask.as_deref(),
-            )
+            .settle_tool(&self.gate, &self.deny_cut, tool, detail, verdict)
             .await
     }
 
@@ -802,9 +898,9 @@ impl Access {
     }
 }
 
-/// Collapses whitespace runs to single spaces so multi-word raw patterns
-/// tolerate the command's own spacing.
-fn collapse_whitespace(text: &str) -> String {
+/// Collapses every whitespace run to a single space, so a multi-word pattern
+/// matches however the command happened to be spaced.
+pub(crate) fn collapse_whitespace(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut pending_space = false;
     for c in text.chars() {
@@ -908,6 +1004,8 @@ mod tests {
                     default: paths_default,
                     rules: paths,
                 },
+                checks: Vec::new(),
+                tool_check: None,
                 shell: RuleSet {
                     default: shell_default,
                     rules: shell,
@@ -1194,6 +1292,8 @@ mod tests {
             &PermissionsConfig {
                 default: Some(Verb::Allow),
                 paths: RuleSet::default(),
+                checks: Vec::new(),
+                tool_check: None,
                 shell: RuleSet {
                     default: None,
                     rules: vec![ShellRule {
@@ -1224,6 +1324,8 @@ mod tests {
             &PermissionsConfig {
                 default: None,
                 paths: RuleSet::default(),
+                checks: Vec::new(),
+                tool_check: None,
                 shell: RuleSet {
                     default: None,
                     rules: vec![ShellRule {
@@ -1793,6 +1895,8 @@ mod tests {
             &PermissionsConfig {
                 default: Some(Verb::Allow),
                 paths: RuleSet::default(),
+                checks: Vec::new(),
+                tool_check: None,
                 shell: RuleSet {
                     default: None,
                     rules: vec![
@@ -1837,5 +1941,53 @@ mod tests {
         assert_eq!(normalize(Path::new("a/../../b")), PathBuf::from("../b"));
         assert_eq!(normalize(Path::new("../a")), PathBuf::from("../a"));
         assert_eq!(normalize(Path::new("/..")), PathBuf::from("/"));
+    }
+
+    /// A decision check is invisible unless its reason reaches the user: the
+    /// verdict only tightens an `allow` into an `ask`, so the prompt is the one
+    /// place the decision, the probability it read, and the threshold are
+    /// reported. (The check reads a `noul` probability and never the answer's
+    /// `confidence`, which measures distribution concentration rather than the
+    /// chance the answer is right.)
+    #[tokio::test]
+    async fn a_decision_reason_is_shown_in_the_permission_prompt() {
+        let (tx, mut rx) = mpsc::channel::<PermissionRequest>(8);
+        let gate = PermissionGate::new(tx);
+        let cut = DenyCut::default();
+        // The command the rules alone would have allowed.
+        let perms =
+            std::sync::Arc::new(config_scoped(Some(Verb::Allow), None, vec![], None, vec![]));
+        let reason =
+            "decision `safety` reads this command as suspicious (0.97 \u{2265} 0.50)".to_string();
+
+        let asking = {
+            let perms = perms.clone();
+            let gate = gate.clone();
+            let cut = cut.clone();
+            let reason = reason.clone();
+            tokio::spawn(async move {
+                perms
+                    .settle_shell(&gate, &cut, "rm -rf /", Decision::Ask { reason })
+                    .await
+            })
+        };
+        let request = rx.recv().await.unwrap();
+        assert!(
+            request.description.contains("Allow running this command?"),
+            "{}",
+            request.description
+        );
+        assert!(
+            request.description.contains("rm -rf /"),
+            "{}",
+            request.description
+        );
+        assert!(
+            request.description.contains(&reason),
+            "the decision's reason must reach the prompt: {}",
+            request.description
+        );
+        request.respond.send(PermissionAnswer::Allow).ok();
+        assert!(asking.await.unwrap().is_ok());
     }
 }
