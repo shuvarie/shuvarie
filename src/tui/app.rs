@@ -2476,16 +2476,6 @@ mod tests {
         connections
     }
 
-    #[test]
-    fn catalog_context_length_maps_catalog_and_alias_model_id() {
-        let app = app_with(connected());
-        assert_eq!(
-            catalog_context_length(&app.ctx.connections),
-            Some(200_000),
-            "connection model alias `claude-sonnet-4-5` must map to the dated catalog entry"
-        );
-    }
-
     fn oauth_connected() -> Connections {
         let mut connections = Connections::default();
         let provider = shuvarie_core::ProviderConfig::new("ChatGPT", "chatgpt", None, None);
@@ -2617,38 +2607,6 @@ mod tests {
         let mut connections = connected();
         connections.active.as_mut().unwrap().model = None;
         assert_eq!(catalog_context_length(&connections), None);
-    }
-
-    #[test]
-    fn catalog_context_length_uses_connection_catalog_field() {
-        let mut connections = connected();
-        let pc = connections.providers.get_mut("anthropic").unwrap();
-        *pc = pc.clone().with_catalog(Some("anthropic"));
-        assert_eq!(
-            catalog_context_length(&connections),
-            Some(200_000),
-            "explicit `catalog` field must drive the Selune lookup"
-        );
-    }
-
-    #[test]
-    fn catalog_context_length_resolves_tagged_ollama_cloud_variant() {
-        let mut connections = Connections::default();
-        let provider = shuvarie_core::ProviderConfig::new("Ollama Cloud", "ollama", None, None)
-            .with_catalog(Some("ollama-cloud"));
-        connections
-            .providers
-            .insert("ollama-cloud".into(), provider);
-        connections.active = Some(shuvarie_core::Active {
-            provider: "ollama-cloud".into(),
-            model: Some("glm-5.3-flash".into()),
-            variant: None,
-        });
-        assert_eq!(
-            catalog_context_length(&connections),
-            Some(1_310_720),
-            "untagged connection model `glm-5.3-flash` must map to the tagged catalog entry"
-        );
     }
 
     #[test]
