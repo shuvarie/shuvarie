@@ -1,4 +1,6 @@
-# <p align="center">⚔️⚜️ シュヴァリエ ⚜️⚔️
+### <p align="center">⚔️⚜️ シュヴァリエ ⚜️⚔️
+
+# Shuvarie
 
 *Haiku:*
 > *白き騎士*<br>
@@ -9,16 +11,19 @@
 
 [![Demo screenshot](./docs/images/shuvarie-screenshot-demo.png)](./docs/demo-spec.md)
 
-Let me tell you a story, True Soul.
+> Let me tell you a story, True Soul.
+> 
+> Long ago the sages of Candlekeep foretold that a knight would come who keeps no castle of stone — his keep would be one of light, square and humming, ever-waiting behind the glass. And when the age of the terminal dawned, the prophecy stirred.
+>
+> **Shuvarie** — シュヴァリエ, *the Chevalier* — is that knight: an AI companion sworn to your terminal. Armored in Rust, it rides wherever you point the quest — through the dungeons of legacy code, across the plains of half-written features, down into the Underdark of the build system. It reads the old scrolls, drafts new ones, mends what is broken; and it asks your leave before it strikes, for it fights by the code of chivalry.
+>
+> In the plain tongue of innkeepers — the one that runs without dice — Shuvarie is a terminal-based AI coding agent: a Rust TUI around an agentic loop that edits files, runs commands, scrys your codebase, keeps its own chronicles, and gates every spell behind your permission wards.
 
-Long ago the sages of Candlekeep foretold that a knight would come who keeps no castle of stone — his keep would be one of light, square and humming, ever-waiting behind the glass. And when the age of the terminal dawned, the prophecy stirred.
+## Features
 
-**Shuvarie** — シュヴァリエ, *the Chevalier* — is that knight: an AI companion sworn to your terminal. Armored in Rust, it rides wherever you point the quest — through the dungeons of legacy code, across the plains of half-written features, down into the Underdark of the build system. It reads the old scrolls, drafts new ones, mends what is broken; and it asks your leave before it strikes, for it fights by the code of chivalry.
+> *With Shuvarie, we can:*
 
-In the plain tongue of innkeepers — the one that runs without dice — Shuvarie is a terminal-based AI coding agent: a Rust TUI around an agentic loop that edits files, runs commands, scrys your codebase, keeps its own chronicles, and gates every spell behind your permission wards.
-
-*With Shuvarie, we can:*
-
+- **Summon your knights in millis** — never awaits.
 - **Bind any patron** — OpenAI, Anthropic, Gemini, Ollama, or another OpenAI-compatible plane. One grimoire (`connections.kdl`) holds every pact, and its secrets live nowhere else.
 - **Send a fully armed knight** — it reads and writes scrolls (files), forges patches, scrys with grep and glob, consults the LSP oracles for diagnostics, fetches tomes from the far webs, and lights the ritual circle (your shell) when the quest demands.
 - **Rule by the code of chivalry** — every tool call passes the permission wards: allowed, denied, or brought before your seat. A denied incantation cuts the turn; a questionable one waits for your seal.
@@ -35,7 +40,9 @@ In the plain tongue of innkeepers — the one that runs without dice — Shuvari
 - **Cast your own spells** — defining and using your own commands.
 - **Summon your stdio and MCP** — letting your knights use stdio commands and MCP servers like a druid.
 
-*In order to introduce the knights into our barracks, we should:*
+## Install
+
+> *In order to introduce the knights into our barracks, we should:*
 
 With [Nix](https://nixos.org) (flakes enabled), from a checkout:
 
@@ -51,7 +58,11 @@ Or with a Rust toolchain:
 cargo install --path .
 ```
 
-*In order to give our knights the souls, we should:*
+## Usage
+
+### Connect
+
+> *In order to give our knights the souls, we should:*
 
 A knight unbound to a patron is steel and silence. Offer it a pact in `~/.config/shuvarie/connections.kdl` (debug builds keep their own hall at `~/.config/shuvarie-dev/` — the two never share). That file holds your API keys; the knight marks it with a warning, and so should you: share it with no one.
 
@@ -68,9 +79,11 @@ providers {
 }
 ```
 
-Then launch `shuvarie` and choose your steed — provider and model — from the selectors. A hall without pacts greets you with the Welcome overlay: the knight waits at the gate.
+> Then launch `shuvarie` and choose your steed — provider and model — from the selectors. A hall without pacts greets you with the Welcome overlay: the knight waits at the gate.
 
-*Words of command the knight obeys:*
+### Commands
+
+> *Words of command the knight obeys:*
 
 - `!command` — speak to your local spirits; no word of it reaches the patron
 - `/scene [name]` — swear another oath
@@ -80,4 +93,4 @@ Then launch `shuvarie` and choose your steed — provider and model — from the
 - `/reload` — re-read the scrolls and spellbooks without leaving the saddle
 - `/skill:<name> [args]` — cast a learned spell
 
-The wards are set, the pact is sworn, the dice are cast. Ride forth, True Soul — the dungeon awaits. ⚔️
+> The wards are set, the pact is sworn, the dice are cast. Ride forth, True Soul — the dungeon awaits. ⚔️
