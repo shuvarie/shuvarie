@@ -1,6 +1,6 @@
 ### <p align="center">⚔️⚜️ シュヴァリエ ⚜️⚔️
 
-# Shuvarie
+# <p align="center">Shuvarie
 
 *Haiku:*
 > *白き騎士*<br>
