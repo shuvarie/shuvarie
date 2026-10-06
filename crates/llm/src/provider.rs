@@ -193,9 +193,24 @@ fn openai_client(
     key: &str,
     base_url: Option<&str>,
 ) -> openai::OpenAI {
+    openai_client_with_route(dialect, key, base_url, None)
+}
+
+/// Like [`openai_client`], forcing the completion route when one is given.
+/// A generic OpenAI-compatible server (no vendor dialect) serves Chat
+/// Completions, not OpenAI's Responses endpoint.
+fn openai_client_with_route(
+    dialect: &openai::wire::Dialect,
+    key: &str,
+    base_url: Option<&str>,
+    route: Option<openai::Route>,
+) -> openai::OpenAI {
     let mut config = openai::OpenAIConfig::with_key(dialect, key);
     if let Some(url) = base_url {
         config = config.with_base_url(url);
+    }
+    if let Some(route) = route {
+        config = config.with_route(route);
     }
     config.client()
 }
@@ -384,12 +399,24 @@ impl ProviderClient {
             }
             ProviderType::OpenaiCompat => {
                 // The vendor dialect selects the wire (endpoints, quirks); a
-                // missing dialect is the generic OpenAI-compatible surface.
+                // missing dialect is the generic OpenAI-compatible surface,
+                // which serves Chat Completions rather than the OpenAI
+                // dialect's Responses endpoint.
+                let key = api_key.ok_or(LlmError::Provider("API key required".into()))?;
+                let route = kind.dialect.is_none().then_some(openai::Route::Chat);
                 let dialect = kind
                     .dialect
                     .map(wire_dialect)
                     .unwrap_or(&openai::wire::OPENAI);
-                openai_vendor_client!(*dialect)
+                (
+                    ListImpl::OpenAi(Box::new(openai_client_with_route(
+                        dialect,
+                        key,
+                        base_url.as_deref(),
+                        route,
+                    ))),
+                    None,
+                )
             }
             ProviderType::Openrouter => openai_vendor_client!(openai::wire::OPENROUTER),
             ProviderType::Anthropic => {
@@ -1430,6 +1457,40 @@ mod tests {
                 "{d:?} embedding support"
             );
         }
+    }
+
+    #[test]
+    fn generic_openai_compat_serves_chat_completions_not_responses() {
+        let client = ProviderClient::build(
+            kind(selune::ProviderType::OpenaiCompat),
+            Some("k"),
+            Some("http://localhost:8080/v1"),
+        )
+        .unwrap();
+        let ListImpl::OpenAi(openai) = &client.list else {
+            panic!("openai-compat builds an OpenAI client");
+        };
+        assert_eq!(
+            openai.config().completion_route(),
+            openai::Route::Chat,
+            "a dialect-less OpenAI-compatible server only serves Chat Completions"
+        );
+
+        // A vendor dialect keeps its own Chat route.
+        let deepseek =
+            ProviderClient::build(vendor(selune::Dialect::Deepseek), Some("k"), None).unwrap();
+        let ListImpl::OpenAi(openai) = &deepseek.list else {
+            panic!("a dialect builds an OpenAI client");
+        };
+        assert_eq!(openai.config().completion_route(), openai::Route::Chat);
+
+        // Official OpenAI keeps the Responses route.
+        let native =
+            ProviderClient::build(kind(selune::ProviderType::Openai), Some("k"), None).unwrap();
+        let ListImpl::OpenAi(openai) = &native.list else {
+            panic!("openai builds an OpenAI client");
+        };
+        assert_eq!(openai.config().completion_route(), openai::Route::Responses);
     }
 
     #[test]
