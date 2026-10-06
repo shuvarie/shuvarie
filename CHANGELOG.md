@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.1] - 2026-10-06
+
+### 🐛 Bug Fixes
+
+- *(llm)* Query generic OpenAI-compatible servers over Chat Completions (#97)
 ## [0.3.0] - 2026-10-04
 
 ### 🚀 Features
@@ -67,18 +72,6 @@
 - Lint against entire workspace
 - Add cargo publish
 - Changelog dedup with shell script
-
-### ◀️ Revert
-
-- "build: update debug version display"
-- "ci: changelog dedup with shell script"
-
-### 💼 Other
-
-- *(version)* Update version display for debug build
-- *(nsis)* Make version parameter required
-- *(cliff)* Update changelog generation logic
-- *(cliff)* Add shell file for changelog extraction
 ## [0.2.4] - 2026-10-03
 
 ### 🐛 Bug Fixes
@@ -98,15 +91,6 @@
 ### ⚙️ Miscellaneous Tasks
 
 - *(cliff)* Use branch tags
-
-### ◀️ Revert
-
-- "chore(cliff): use branch tags"
-
-### 💼 Other
-
-- Update changelog
-- Add branch changelog
 ## [0.2.1] - 2026-09-22
 
 ### 🚀 Features
@@ -152,14 +136,6 @@
 - Allow publishing release with git-cliff changelog
 - Remove inaccurate changelog
 - Add musl build
-
-### 💼 Other
-
-- Update debug version display
-- Introduce git-cliff
-- Configure git-cliff
-- Prepare for trunk-based development
-- Replace gnu make with just
 ## [0.1.1] - 2026-09-18
 
 ### 🚀 Features
