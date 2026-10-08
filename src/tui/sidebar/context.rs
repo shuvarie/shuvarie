@@ -90,8 +90,19 @@ impl ContextDisplay {
     /// one request's usage. Used to restore the metrics from a loaded
     /// session's persisted request usage; a zero footprint (or `None`) clears
     /// instead.
+    ///
+    /// A footprint larger than the window cannot describe one request — rows
+    /// written before the reply row carried a per-request payload stored the
+    /// run's aggregate, which a multi-call turn sums past the window — so it
+    /// is treated as unknown rather than pinning the occupancy at the
+    /// ceiling. The window is unknown before the model is resolved; without
+    /// it the value is taken as-is.
     pub fn set_request(&mut self, usage: Option<&TokenUsage>) {
-        let usage = usage.filter(|u| shuvarie_llm::context_footprint(u) > 0);
+        let window = self.context_length.as_ref().map(|length| length.num());
+        let usage = usage.filter(|u| {
+            let footprint = shuvarie_llm::context_footprint(u);
+            footprint > 0 && window.is_none_or(|window| footprint <= window)
+        });
         match usage {
             Some(usage) => {
                 self.context_tokens = Some(shuvarie_llm::context_footprint(usage).into());

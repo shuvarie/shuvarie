@@ -705,9 +705,12 @@ impl ProviderClient {
         // main request, so the first call of this run is anchored on real
         // usage instead of a chars/4 estimate. A fresh session has no seed
         // and stays estimate-only until its first call reports usage; a
-        // zero-usage seed is ignored by `record`.
-        if let Some(seed) = seed_usage {
-            tracker.record(seed);
+        // zero-usage seed is ignored, and one larger than the model's window
+        // (a row written before the per-request payload, holding the whole
+        // run's aggregate) is dropped rather than arming the stop against a
+        // conversation that never existed.
+        if let (Some(seed), Some(budget)) = (seed_usage, context_budget.as_ref()) {
+            tracker.seed(seed, budget.context_length);
         }
         let tracker_for_hook = tracker.clone();
         let mut prompt_msg = ChatMsg::user(prompt.to_string());

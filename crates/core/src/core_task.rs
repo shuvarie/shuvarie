@@ -1357,7 +1357,8 @@ pub async fn run(
                                     .event_tx
                                     .send(Event::SessionError {
                                         error:
-                                            "nothing to compact — the session history is too short"
+                                            "nothing to compact — everything before the kept \
+                                             recent messages is already summarized"
                                                 .into(),
                                     })
                                     .await;
@@ -3196,6 +3197,13 @@ async fn stream_stream_to_events(
     // items queued behind it (a slow subagent's final tool results) are
     // delivered to the TUI before the turn is committed.
     let mut done: Option<(String, TokenUsage)> = None;
+    // The turn's last main-stream request usage, recorded from each
+    // `StreamItem::Usage` the main stream reports (one per completed provider
+    // call). This — not the `Done` item's usage, which rig aggregates across
+    // every call the run made — is what describes the request the next turn
+    // has to fit in the context window, so it is the value persisted on the
+    // reply row and restored as the session's usage anchor.
+    let mut main_request_usage: Option<TokenUsage> = None;
     // Which turn action the main stream is in. Worker-internal activity and
     // bookkeeping items (usage) never move it, so steering can only cut in
     // between the agent's own actions.
@@ -3509,8 +3517,10 @@ async fn stream_stream_to_events(
                     // Keep the session's live anchor in step with the last
                     // completed main request: the next turn seeds its
                     // measured compaction trigger and the sidebar's restored
-                    // context anchor from it.
+                    // context anchor from it, and the reply row persists it
+                    // as the turn's request usage.
                     if footprint > 0 {
+                        main_request_usage = Some(usage);
                         session.lock().await.last_usage = Some(usage);
                     }
                     (footprint > 0).then_some(footprint)
@@ -3641,6 +3651,14 @@ async fn stream_stream_to_events(
             let worker_usage = worker_usage.lock().unwrap();
             usage + *worker_usage
         };
+        // The row's request payload is the turn's last main-stream request,
+        // not the run's aggregated usage (`usage`, which sums every call the
+        // run made and is what `combined` — the per-row session totals —
+        // wants). Restoring an aggregate as the session's usage anchor would
+        // over-state the context a loaded session occupies, sometimes many
+        // times over the window. A run that reported no per-call usage leaves
+        // the payload empty so the reader falls back to the row's columns.
+        let request_usage = main_request_usage.unwrap_or_default();
         guard.push_assistant(text.clone());
         let cost = catalog_provider
             .as_ref()
@@ -3685,7 +3703,7 @@ async fn stream_stream_to_events(
                         false,
                         combined,
                         cost,
-                        &usage,
+                        &request_usage,
                         &attribution,
                     )
                     .await;
@@ -3716,7 +3734,7 @@ async fn stream_stream_to_events(
                         false,
                         combined,
                         cost,
-                        &usage,
+                        &request_usage,
                         &attribution,
                     )
                     .await

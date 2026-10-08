@@ -389,6 +389,98 @@ async fn committed_turn_records_model_use_and_broadcasts() {
     assert_eq!(stored.messages[0].scene.as_deref(), Some("Plan"));
 }
 
+/// A multi-call turn commits the *last* main-stream request's usage on its
+/// reply row, not rig's run-aggregate. The aggregate sums every call the run
+/// made and can dwarf the context window; restoring it as the session's usage
+/// anchor stops the next turn's first call — and every resumption after it,
+/// since each reloads the same row — against a conversation that never
+/// existed.
+#[tokio::test]
+async fn committed_turn_persists_the_last_main_request_usage() {
+    let client =
+        ProviderClient::build(ProviderKind::new(ProviderType::Ollama, None), None, None).unwrap();
+    let session = Arc::new(Mutex::new(Session::new()));
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+
+    // Two completed calls (a tool turn, then the reply): the stream reports
+    // each call's own usage, then `Done` carries rig's aggregate of both.
+    let call_one = TokenUsage {
+        input_tokens: Some(40_000),
+        output_tokens: Some(500),
+        total_tokens: Some(40_500),
+        ..TokenUsage::default()
+    };
+    let call_two = TokenUsage {
+        input_tokens: Some(50_000),
+        output_tokens: Some(600),
+        total_tokens: Some(50_600),
+        ..TokenUsage::default()
+    };
+    let stream: shuvarie_llm::StreamStream = Box::pin(futures_util::stream::iter(vec![
+        StreamItem::Usage {
+            usage: call_one,
+            worker: None,
+        },
+        StreamItem::Usage {
+            usage: call_two,
+            worker: None,
+        },
+        StreamItem::Done {
+            text: "done".into(),
+            usage: call_one + call_two,
+        },
+    ]));
+
+    let session_shared = session.clone();
+    let mut store = Store::open_in_memory().await.unwrap();
+    let store_shared = store.clone();
+    let id = store.create_session("t", None, None, None).await.unwrap();
+    session.lock().await.id = Some(id);
+    let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
+    let turn_state = Arc::new(Mutex::new(TurnState::default()));
+    let (stream_done_tx, _stream_done_rx) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(async move {
+        stream_stream_to_events(
+            stream,
+            session_shared,
+            client,
+            None,
+            store_shared,
+            "ollama-model".into(),
+            shuvarie_db::Attribution::default(),
+            20_000,
+            worker_usage,
+            None,
+            event_tx,
+            turn_state,
+            stream_done_tx,
+            SteerSignal::default(),
+            DenyCut::default(),
+        )
+        .await;
+    });
+
+    while event_rx.recv().await.is_some() {}
+
+    let stored = store.load_session(id).await.unwrap();
+    let row = &stored.messages[0];
+    assert_eq!(
+        row.request.total_tokens,
+        Some(50_600),
+        "the reply row carries the last call's usage, not the run's sum"
+    );
+    assert_eq!(row.request.input_tokens, Some(50_000));
+    assert_eq!(
+        row.total_tokens, 91_100,
+        "the row's columns still hold the turn's combined totals"
+    );
+    // What a reload restores is the same measurement the live anchor holds.
+    assert_eq!(
+        session.lock().await.last_usage.unwrap().total_tokens,
+        Some(50_600)
+    );
+}
+
 #[tokio::test]
 async fn stream_error_schedules_turn_retry_and_leaves_session_clean() {
     let client =

@@ -965,6 +965,38 @@ mod tests {
         assert!(!rendered.contains("R84k"), "body: {rendered}");
     }
 
+    /// A restored footprint larger than the window cannot describe one request
+    /// — rows written before the reply carried a per-request payload stored the
+    /// run's aggregate — so it restores as unknown instead of pinning the
+    /// occupancy at the ceiling.
+    #[test]
+    fn context_section_set_context_request_drops_a_footprint_past_the_window() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateConfig {
+            context_length: Some(200_000),
+        });
+        sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage {
+                total_tokens: Some(84_000),
+                ..Default::default()
+            },
+            cost: 0.0,
+            context_tokens: Some(84_000),
+        });
+        sidebar.update(SidebarMessage::SetContextRequest {
+            usage: Some(TokenUsage {
+                input_tokens: Some(900_000),
+                output_tokens: Some(1_000),
+                total_tokens: Some(901_000),
+                ..Default::default()
+            }),
+        });
+        let rendered = text(sidebar.rendered_lines());
+        assert!(rendered.contains("200k"), "the window stays: {rendered}");
+        assert!(!rendered.contains('%'), "no occupancy: {rendered}");
+        assert!(!rendered.contains("R900k"), "no read metrics: {rendered}");
+    }
+
     fn lsp_status(name: &str, status: ServerStatus, diagnostics: usize) -> LspStatus {
         LspStatus {
             name: name.to_string(),

@@ -4,11 +4,12 @@
 //!
 //! Modeled on OpenCode/Pi-style compaction: keep a token-budgeted verbatim
 //! "tail" of recent messages (`keep_recent_tokens` from `[context]`, floored
-//! at a minimum message count), summarize everything before it, and on
-//! repeated compactions resume the summarized span from the previous summary
-//! message — folding it in as prior context instead of summarizing a
-//! summary-of-a-summary. The serialized transcript includes tool activity
-//! (name, args, truncated output) and ends with ground-truth
+//! at a minimum message count only when the budget keeps nothing), summarize
+//! everything before it, and on repeated compactions resume the summarized
+//! span from the previous summary message — folding it in as prior context
+//! instead of summarizing a summary-of-a-summary. The serialized transcript
+//! includes tool activity (name, args, truncated output) and ends with
+//! ground-truth
 //! `<read-files>`/`<modified-files>` lists derived from the tool records of
 //! the span. The summary is persisted as a `summary`-flagged assistant
 //! message; subsequent turns send `[summary, tail]` instead of the full
@@ -70,10 +71,13 @@ pub struct CompactionPlan {
 
 /// Select the split point: keep the most recent messages verbatim within the
 /// `keep_recent_tokens` tail budget and summarize everything before it. The
-/// tail is floored at `MIN_TAIL_MESSAGES` messages so a small-history
-/// overflow still has something to summarize, and the head resumes from the
-/// previous summary message when one exists. `None` when there is no
-/// summarizable span (too few messages, or nothing new since the previous
+/// head resumes from the previous summary message when one exists (folding it
+/// in as prior context so its coverage carries into the new summary), else
+/// from the session start. When the whole span fits the budget the tail is
+/// floored at `MIN_TAIL_MESSAGES` messages so a small-history overflow still
+/// has a head to summarize; a span that reaches the budget keeps whatever the
+/// budget affords, even fewer messages than the floor. `None` when there is
+/// no summarizable span (too few messages, or nothing new since the previous
 /// summary before the tail).
 pub fn select_plan(messages: &[StoredMessage], keep_recent_tokens: u64) -> Option<CompactionPlan> {
     let len = messages.len();
@@ -95,7 +99,18 @@ pub fn select_plan(messages: &[StoredMessage], keep_recent_tokens: u64) -> Optio
             break;
         }
     }
-    let cut = cut.min(len - MIN_TAIL_MESSAGES);
+    // The floor only governs the case where the budget kept nothing. When the
+    // walk reached the budget its cut stands even if it keeps fewer than
+    // `MIN_TAIL_MESSAGES` messages: flooring it back up would hold a tail the
+    // budget cannot afford, and once a compaction has left the previous
+    // summary exactly `MIN_TAIL_MESSAGES` messages back — what the floor does
+    // on a heavy tail — the floored cut lands on that summary and the head is
+    // empty. Every later overflow, and every `/compact`, would then report
+    // nothing to compact while the session sat over budget and unable to
+    // shrink.
+    if cut == len {
+        cut = len - MIN_TAIL_MESSAGES;
+    }
     (start < cut).then_some(CompactionPlan { start, cut })
 }
 
@@ -447,6 +462,36 @@ mod tests {
             select_plan(&msgs, 20_000).is_none(),
             "nothing new to summarize before the tail"
         );
+    }
+
+    #[test]
+    fn select_plan_shrinks_a_tail_the_budget_cannot_afford() {
+        // The state a compaction leaves behind when the tail budget is met by
+        // the newest message alone: the previous summary sits exactly
+        // `MIN_TAIL_MESSAGES` messages from the end. The tail already exceeds
+        // the budget, so the walk's cut must stand — the head folds the
+        // summary and the two messages the budget cannot keep. Flooring the
+        // cut back to the summary would leave an empty head, and every later
+        // compaction of this session (auto and `/compact` alike) would report
+        // nothing to compact while the session sat over budget.
+        let len = MIN_TAIL_MESSAGES + 3;
+        let big = "x".repeat(400_000); // 100k tokens each
+        let mut msgs: Vec<StoredMessage> = (0..len)
+            .map(|i| msg(MsgRole::User, &format!("m{i}")))
+            .collect();
+        for slot in &mut msgs[len - 3..] {
+            slot.content = big.clone();
+        }
+        msgs[len - MIN_TAIL_MESSAGES] = summary_msg("prior summary");
+
+        let plan = select_plan(&msgs, 20_000).expect("a heavy tail still compacts");
+        assert_eq!(plan.start, len - MIN_TAIL_MESSAGES);
+        assert_eq!(
+            plan.cut,
+            len - 1,
+            "the budget keeps only the newest message"
+        );
+        assert!(plan.cut > plan.start, "the head folds the summary in");
     }
 
     #[test]

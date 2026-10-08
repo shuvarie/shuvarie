@@ -210,6 +210,27 @@ impl UsageTracker {
         }
     }
 
+    /// Seed the anchor from a usage restored off a stored session — the
+    /// previous turn's last main request — bounded by the model's context
+    /// window.
+    ///
+    /// One request can never read more than the window, so a larger stored
+    /// value cannot describe a single request: rows written before the reply
+    /// row carried a per-request payload stored the run's *aggregated* usage
+    /// instead, and a multi-call turn's sum dwarfs the window. Seeding from
+    /// such a value arms the measured stop against a conversation that never
+    /// existed, and every resumption reloads the same row and stops again —
+    /// the session can never make a call. Out-of-range seeds are dropped so
+    /// the run stays estimate-anchored until its first call reports real
+    /// usage; a genuine overflow still surfaces reactively when the provider
+    /// rejects the request.
+    pub fn seed(&self, usage: Usage, context_length: u64) {
+        let tokens = request_tokens(&usage);
+        if tokens > 0 && tokens <= context_length {
+            self.last_request_tokens.store(tokens, Ordering::Relaxed);
+        }
+    }
+
     pub fn input(&self) -> u64 {
         self.last_request_tokens.load(Ordering::Relaxed)
     }
@@ -494,6 +515,39 @@ mod tests {
         let zero = Usage::default();
         tracker.record(zero);
         assert_eq!(tracker.input(), 48_000);
+    }
+
+    #[test]
+    fn seed_accepts_a_stored_request_inside_the_window() {
+        let tracker = UsageTracker::new();
+        tracker.seed(usage_of(50_000, 2_000), 128_000);
+        assert_eq!(tracker.input(), 48_000);
+        // Exactly at the window is still one request's worth.
+        tracker.seed(usage_of(128_000, 0), 128_000);
+        assert_eq!(tracker.input(), 128_000);
+    }
+
+    #[test]
+    fn seed_drops_a_stored_usage_past_the_window() {
+        // Rows written before the reply carried a per-request payload stored
+        // the run's aggregate, so a multi-call turn restores a value no single
+        // request could have read. Seeding from it would stop the run before
+        // its first call — and again after every compaction reloads the same
+        // row — leaving the session unable to make a call.
+        let tracker = UsageTracker::new();
+        tracker.seed(usage_of(900_000, 1_000), 128_000);
+        assert_eq!(tracker.input(), 0);
+        let budget = ContextBudget::new(128_000, 20_000);
+        let hook = ContextHook::new(budget, Arc::clone(&tracker));
+        let decision = hook.decide(&user_msg("x"), &[user_msg("recent")]);
+        assert!(!matches!(decision, ContextDecision::Stop), "{decision:?}");
+    }
+
+    #[test]
+    fn seed_of_zero_usage_leaves_the_anchor_unset() {
+        let tracker = UsageTracker::new();
+        tracker.seed(Usage::default(), 128_000);
+        assert_eq!(tracker.input(), 0);
     }
 
     #[test]

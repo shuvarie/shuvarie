@@ -2016,7 +2016,9 @@ mod tests {
 
         screen.update(SessionMessage::CompactionStarted);
         screen.update(SessionMessage::ShowError {
-            error: "nothing to compact — the session history is too short".into(),
+            error: "nothing to compact — everything before the kept recent messages is already \
+                    summarized"
+                .into(),
         });
 
         let rendered = text(screen.sidebar.rendered_lines());
