@@ -66,6 +66,7 @@ tokio.workspace = true
 unicode-width.workspace = true
 uuid.workspace = true
 
+
 [dev-dependencies]
 # `test-util` lets the update regressions drive tokio's clock (`start_paused`)
 # instead of sleeping through real retry backoff.
@@ -78,6 +79,9 @@ tar = "0.4"
 zip = { version = "8.6", default-features = false, features = [
     "deflate-flate2-zlib-rs",
 ] }
+
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = "0.1"
 
 [workspace]
 resolver = "3"

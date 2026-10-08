@@ -8,6 +8,10 @@ mod update;
 
 use crate::cli::{init_default_store, show_resume_hint};
 
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
     let args = cli::Cli::parse();

@@ -6844,6 +6844,7 @@ dependencies = [
  "futures-util",
  "gix",
  "image",
+ "mimalloc",
  "notify",
  "nucleo",
  "ratatui",
