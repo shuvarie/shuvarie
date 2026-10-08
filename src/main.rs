@@ -1,7 +1,7 @@
 use clap::Parser;
-use tokio::sync::mpsc::channel;
 #[cfg(target_env = "musl")]
 use mimalloc_safe::MiMalloc;
+use tokio::sync::mpsc::channel;
 
 mod cli;
 mod trust;

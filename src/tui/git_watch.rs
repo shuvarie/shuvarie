@@ -5,7 +5,7 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher, event::EventKind};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// A live watch on the workspace's git `HEAD` file, handing out unit
@@ -52,14 +52,9 @@ fn watch_head(head: &Path, tx: UnboundedSender<()>) -> Option<RecommendedWatcher
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         // The subscription covers the containing directory, so most git
         // activity (lockfiles, the index, gc …) streams through; only
-        // events that actually touch `HEAD` wake the TUI. The app re-reads
+        // events that actually rewrite `HEAD` wake the TUI. The app re-reads
         // the file anyway, so repeats collapse cheaply.
-        let touched = res.ok().is_some_and(|ev| {
-            ev.paths
-                .iter()
-                .any(|p| p.file_name() == Some(OsStr::new("HEAD")))
-        });
-        if touched {
+        if res.ok().is_some_and(|ev| head_rewritten(&ev)) {
             let _ = tx.send(());
         }
     })
@@ -71,6 +66,26 @@ fn watch_head(head: &Path, tx: UnboundedSender<()>) -> Option<RecommendedWatcher
     let dir = head.parent()?;
     watcher.watch(dir, RecursiveMode::NonRecursive).ok()?;
     Some(watcher)
+}
+
+/// Whether an event means the git `HEAD` file was *rewritten*.
+///
+/// Reads must not count. The inotify backend subscribes to `IN_OPEN` and
+/// `IN_CLOSE_NOWRITE` on top of the change masks, so every read of `HEAD`
+/// raises an event — and the TUI reads `HEAD` (through `gix`, which opens the
+/// repository config on the way) whenever a wake says the label may have
+/// changed. Waking on those closes a loop: the read wakes the watch, the wake
+/// makes the app read again, thousands of times a second, for as long as the
+/// TUI runs (measured: both the render loop and the watcher thread pinned a
+/// core while the app sat at an idle prompt). Only rewrites wake us: a checkout
+/// writes `HEAD` in place (a modify) or replaces it through the lockfile
+/// rename (create, rename, remove).
+fn head_rewritten(event: &notify::Event) -> bool {
+    !matches!(event.kind, EventKind::Access(_))
+        && event
+            .paths
+            .iter()
+            .any(|p| p.file_name() == Some(OsStr::new("HEAD")))
 }
 
 /// The git `HEAD` file whose rewrites change the branch label, resolved
@@ -86,8 +101,94 @@ fn head_file(workspace: &Path) -> Option<PathBuf> {
 mod tests {
     use std::time::Duration;
 
-    use super::{BranchWatch, head_file};
+    use notify::event::{
+        AccessKind, AccessMode, CreateKind, DataChange, EventKind, ModifyKind, RemoveKind,
+        RenameMode,
+    };
+
+    use super::{BranchWatch, head_file, head_rewritten};
     use crate::tui::workspace::testing::seed_git_repo;
+
+    fn event(kind: EventKind, path: &str) -> notify::Event {
+        notify::Event::new(kind).add_path(std::path::PathBuf::from(path))
+    }
+
+    #[test]
+    fn branch_watch_wakes_on_rewrites_of_head() {
+        let head = "/repo/.git/HEAD";
+
+        // A checkout rewriting `HEAD` in place, or swapping it in through the
+        // lockfile rename, is what the label refresh is for.
+        assert!(head_rewritten(&event(
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            head
+        )));
+        assert!(head_rewritten(&event(
+            EventKind::Modify(ModifyKind::Name(RenameMode::To)),
+            head
+        )));
+        assert!(head_rewritten(&event(
+            EventKind::Create(CreateKind::File),
+            head
+        )));
+        assert!(head_rewritten(&event(
+            EventKind::Remove(RemoveKind::File),
+            head
+        )));
+    }
+
+    #[test]
+    fn branch_watch_ignores_reads_of_head() {
+        // The app's own re-read of `HEAD` — the first thing a wake makes it do —
+        // raises these. Waking on them re-arms the watch from the read itself,
+        // which is the loop that burned ~120% CPU at an idle prompt.
+        assert!(!head_rewritten(&event(
+            EventKind::Access(AccessKind::Open(AccessMode::Any)),
+            "/repo/.git/HEAD"
+        )));
+        assert!(!head_rewritten(&event(
+            EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            "/repo/.git/HEAD"
+        )));
+        assert!(!head_rewritten(&event(
+            EventKind::Access(AccessKind::Close(AccessMode::Write)),
+            "/repo/.git/HEAD"
+        )));
+    }
+
+    #[test]
+    fn branch_watch_ignores_git_churn_that_is_not_head() {
+        // The watch covers the whole git directory, so the index, the lockfiles
+        // and gc traffic all stream through it; none of it moves the branch
+        // label.
+        assert!(!head_rewritten(&event(
+            EventKind::Modify(ModifyKind::Name(RenameMode::To)),
+            "/repo/.git/index"
+        )));
+        assert!(!head_rewritten(&event(
+            EventKind::Create(CreateKind::File),
+            "/repo/.git/HEAD.lock"
+        )));
+        assert!(!head_rewritten(&event(
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            "/repo/.git/HEAD.lock"
+        )));
+        // The overflow rescan notify emits carries no paths at all.
+        assert!(!head_rewritten(&notify::Event::new(EventKind::Other)));
+    }
+
+    #[test]
+    fn branch_watch_matches_head_by_name_not_by_path() {
+        // The match is on the file name, not on the watched path: the backends
+        // that report a subtree (macOS FSEvents) hand over canonicalized paths
+        // that no longer equal the one `watch` was given. A ref log named
+        // `HEAD` therefore wakes the watch as well — a label refresh, not the
+        // read loop, since the app never reads the log.
+        assert!(head_rewritten(&event(
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            "/repo/.git/logs/HEAD"
+        )));
+    }
 
     #[test]
     fn head_file_resolves_at_the_workspace_git_dir() {
