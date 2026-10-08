@@ -8,6 +8,22 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = "s"
+strip = true
+
+# `cargo test` builds every test target with the `test` profile. With full
+# DWARF each test binary was ~1 GB (~85% of it debug info) and every
+# concurrent link cost ~1.4 GB of linker RSS, which is what made
+# whole-workspace test runs spike RAM/CPU and stall the machine. Line tables
+# keep `file:line` in panic backtraces while cutting link cost by an order of
+# magnitude. `cargo build` / `cargo run` keep the unmodified `dev` profile, so
+# the TUI stays fully debuggable.
+[profile.test]
+debug = "line-tables-only"
+
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
 color-eyre = "0.6.5"
@@ -49,22 +65,6 @@ tui-scrollbar = "0.2.8"
 tokio.workspace = true
 unicode-width.workspace = true
 uuid.workspace = true
-
-[profile.release]
-codegen-units = 1
-lto = "thin"
-opt-level = "s"
-strip = true
-
-# `cargo test` builds every test target with the `test` profile. With full
-# DWARF each test binary was ~1 GB (~85% of it debug info) and every
-# concurrent link cost ~1.4 GB of linker RSS, which is what made
-# whole-workspace test runs spike RAM/CPU and stall the machine. Line tables
-# keep `file:line` in panic backtraces while cutting link cost by an order of
-# magnitude. `cargo build` / `cargo run` keep the unmodified `dev` profile, so
-# the TUI stays fully debuggable.
-[profile.test]
-debug = "line-tables-only"
 
 [dev-dependencies]
 # `test-util` lets the update regressions drive tokio's clock (`start_paused`)
