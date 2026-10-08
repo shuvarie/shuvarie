@@ -75,7 +75,7 @@ zip = { version = "8.6", default-features = false, features = [
 ] }
 
 [target.'cfg(target_env = "musl")'.dependencies]
-mimalloc = "0.1"
+mimalloc-safe = "0.1"
 
 [dev-dependencies]
 # `test-util` lets the update regressions drive tokio's clock (`start_paused`)
