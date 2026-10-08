@@ -475,9 +475,9 @@ fn spawn_mock_openai_recording(
                     .push(String::from_utf8_lossy(&buf[end..]).into_owned());
             }
             let sse = format!(
-                "data: {{\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"sequence_number\":1,\"delta\":\"{reply}\"}}\n\n
-data: {{\"type\":\"response.completed\",\"sequence_number\":2,\"response\":{{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"test-model\",\"output\":[],\"tools\":[]}}}}\n\n
-data: [DONE]\n\n"
+                "data: {{\"object\":\"chat.completion.chunk\",\"id\":\"c\",\"model\":\"test-model\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{reply}\"}}}}]}}\n\n\
+                 data: {{\"object\":\"chat.completion.chunk\",\"id\":\"c\",\"model\":\"test-model\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n\
+                 data: [DONE]\n\n"
             );
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -2119,7 +2119,7 @@ async fn the_interlude_announces_a_mid_session_switch_once() {
     fn chat_bodies(bodies: &[String]) -> Vec<&str> {
         bodies
             .iter()
-            .filter(|b| b.contains("\"instructions\""))
+            .filter(|b| b.contains("\"messages\""))
             .map(|b| b.as_str())
             .collect()
     }
@@ -2192,7 +2192,7 @@ async fn the_interlude_announces_a_mid_session_switch_once() {
         let bodies = bodies.lock().unwrap();
         // The mock also serves the embedding requests that index each
         // message; only the chat-completions bodies (they carry the
-        // `instructions` preamble) assert the interlude.
+        // `messages` array) assert the interlude.
         let chat = chat_bodies(&bodies);
         assert_eq!(chat.len(), 2, "one chat request per turn");
         assert!(
@@ -3128,7 +3128,7 @@ async fn an_image_send_to_a_text_only_transport_reports_the_capability() {
     );
     for body in bodies.lock().expect("bodies").iter() {
         assert!(
-            !body.contains("input_image") && !body.contains("instructions"),
+            !body.contains("input_image") && !body.contains("\"messages\""),
             "a chat-shaped request reached the mock: {}",
             &body[..body.len().min(240)]
         );
