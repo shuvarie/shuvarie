@@ -4,9 +4,10 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use notify::{RecommendedWatcher, RecursiveMode, Watcher, event::EventKind};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use notify::{event::EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 /// A live watch on the workspace's git `HEAD` file, handing out unit
 /// wakeups that mean "the label may have changed". The receiver only ever
@@ -49,15 +50,18 @@ impl BranchWatch {
 /// Subscribes `tx` to changes of the `HEAD` file at `head`. `None` when the
 /// platform watcher or the subscription itself fails.
 fn watch_head(head: &Path, tx: UnboundedSender<()>) -> Option<RecommendedWatcher> {
-    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        // The subscription covers the containing directory, so most git
-        // activity (lockfiles, the index, gc …) streams through; only
-        // events that actually rewrite `HEAD` wake the TUI. The app re-reads
-        // the file anyway, so repeats collapse cheaply.
-        if res.ok().is_some_and(|ev| head_rewritten(&ev)) {
-            let _ = tx.send(());
-        }
-    })
+    let mut watcher = RecommendedWatcher::new(
+        move |res: notify::Result<notify::Event>| {
+            // The subscription covers the containing directory, so most git
+            // activity (lockfiles, the index, gc …) streams through; only
+            // events that actually rewrite `HEAD` wake the TUI. The app re-reads
+            // the file anyway, so repeats collapse cheaply.
+            if res.ok().is_some_and(|ev| head_rewritten(&ev)) {
+                let _ = tx.send(());
+            }
+        },
+        notify::Config::default().with_poll_interval(Duration::from_secs(5)),
+    )
     .ok()?;
     // Watch the directory, not the file, because a checkout replaces `HEAD`
     // atomically (lockfile + rename): a watch pinned to the replaced file's
@@ -106,7 +110,7 @@ mod tests {
         RenameMode,
     };
 
-    use super::{BranchWatch, head_file, head_rewritten};
+    use super::{head_file, head_rewritten, BranchWatch};
     use crate::tui::workspace::testing::seed_git_repo;
 
     fn event(kind: EventKind, path: &str) -> notify::Event {
