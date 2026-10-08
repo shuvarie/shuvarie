@@ -118,6 +118,30 @@ pub struct Session {
     pub scroll: StoredScroll,
 }
 
+/// The request that resumes the active path's last turn after a failed
+/// attempt: a turn retry (a connection drop, a worker failure) or an overflow
+/// auto-continue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnResume {
+    /// The attempt produced no reply to continue from: the turn's stored
+    /// prompt is replayed as the request's prompt, with the
+    /// summary-truncated history before it. The prompt's node is not part of
+    /// `prior`, so re-sending its attachments is the caller's to arrange.
+    Replay { prompt: String, prior: Vec<ChatMsg> },
+    /// The attempt left a reply row on the active path after the turn's
+    /// prompt: everything before the tip — the prompt node included — rides
+    /// the request's history, so the model continues the interrupted turn
+    /// instead of replaying it from its prompt. A replay redid the work the
+    /// attempt had already finished and, for a session whose turn is its
+    /// first prompt (the common single-task session), re-sent the whole task
+    /// with no history at all — the model read it as a fresh request and
+    /// started the task over. A tip that wrote text is the request's last
+    /// history message; a tip that wrote none (a reasoning- or tool-only
+    /// attempt) is dropped, since a blank assistant message carries nothing.
+    /// The caller prompts with the resume cue.
+    Continue { prior: Vec<ChatMsg> },
+}
+
 impl Session {
     pub fn new() -> Self {
         Self::default()
@@ -343,22 +367,42 @@ impl Session {
             .find(|n| n.on_path && n.role == Role::User)
     }
 
-    /// The prompt and preceding history to re-stream when a failed turn is
-    /// retried: the active path's last user prompt becomes the retried
-    /// request's content, the summary-truncated history before it the prior
-    /// ([`Self::history_for_send_until`]). The assistant tip after it — the
-    /// interrupted partial the retried attempt continues after — is
-    /// deliberately left out of the request. `None` when the active path
-    /// has no user prompt to replay.
-    pub fn last_turn_replay(&self) -> Option<(String, Vec<ChatMsg>)> {
-        let end = self
-            .messages
-            .iter()
-            .rposition(|m| m.role == shuvarie_llm::Role::User)?;
-        Some((
-            self.messages[end].content.clone(),
-            self.history_for_send_until(end),
-        ))
+    /// The request that resumes a failed turn: the attempt's own output must
+    /// reach the retried request — leaving it out is what makes a retried
+    /// turn replay from its prompt and redo work the attempt had already
+    /// finished.
+    ///
+    /// An assistant tip is the failed attempt's own reply row — the model's
+    /// progress log for the turn — and empty when the attempt reasoned or
+    /// called tools but never wrote text. Either way the request continues
+    /// the turn ([`TurnResume::Continue`]): the whole active path —
+    /// summary-truncated, prompt node included, an empty tip dropped — rides
+    /// the history, so the model picks the work already on the branch back up
+    /// instead of reading the turn's prompt as a fresh request. Only a path
+    /// whose tip is the user prompt itself — the attempt left no reply row at
+    /// all — replays that prompt ([`TurnResume::Replay`]) with the history
+    /// before it ([`Self::history_for_send_until`]). `None` when the path has
+    /// no user prompt to resume from.
+    pub fn last_turn_resume(&self) -> Option<TurnResume> {
+        if let Some(tip) = self.messages.last()
+            && tip.role == Role::Assistant
+        {
+            let end = if tip.content.is_empty() {
+                self.messages.len() - 1
+            } else {
+                self.messages.len()
+            };
+            let prior = self.history_for_send_until(end);
+            // A lone empty assistant row has no turn behind it to resume.
+            if prior.iter().any(|m| m.role == Role::User) {
+                return Some(TurnResume::Continue { prior });
+            }
+        }
+        let end = self.messages.iter().rposition(|m| m.role == Role::User)?;
+        Some(TurnResume::Replay {
+            prompt: self.messages[end].content.clone(),
+            prior: self.history_for_send_until(end),
+        })
     }
 
     /// The active path's first user prompt (root → tip): the source for LLM
@@ -857,7 +901,7 @@ mod tests {
     }
 
     #[test]
-    fn last_turn_replay_streams_the_turn_prompt_before_a_partial() {
+    fn last_turn_resume_continues_the_interrupted_reply() {
         let mut stored = stored_session(vec![
             stored_message(0, MsgRole::User, "u1"),
             stored_message(1, MsgRole::Assistant, "a1"),
@@ -869,20 +913,19 @@ mod tests {
         stored.leaf_id = Some(stored.messages[3].id);
 
         let session = Session::from_stored(stored);
-        let (content, prior) = session
-            .last_turn_replay()
-            .expect("the partial's turn replays from its prompt");
-        assert_eq!(content, "u2");
+        let Some(TurnResume::Continue { prior }) = session.last_turn_resume() else {
+            panic!("the partial tip is continued, not replayed");
+        };
         let prior: Vec<String> = prior.iter().map(|m| m.content.clone()).collect();
         assert_eq!(
             prior,
-            vec!["u1", "a1"],
-            "the partial tip stays out of the retried request"
+            vec!["u1", "a1", "u2", "a2 partial"],
+            "the whole path rides the request, the interrupted reply included"
         );
     }
 
     #[test]
-    fn last_turn_replay_truncates_at_the_newest_summary() {
+    fn last_turn_resume_truncates_the_continuation_at_the_newest_summary() {
         let mut stored = stored_session(vec![
             stored_message(0, MsgRole::User, "u1"),
             stored_message(1, MsgRole::Assistant, "a1"),
@@ -897,24 +940,101 @@ mod tests {
         stored.leaf_id = Some(stored.messages[5].id);
 
         let session = Session::from_stored(stored);
-        let (content, prior) = session.last_turn_replay().expect("replay request");
-        assert_eq!(content, "u3");
+        let Some(TurnResume::Continue { prior }) = session.last_turn_resume() else {
+            panic!("the partial tip is continued, not replayed");
+        };
         let prior: Vec<String> = prior.iter().map(|m| m.content.clone()).collect();
         assert_eq!(
             prior,
-            vec!["summary"],
-            "the summary replaces the history before the turn's prompt"
+            vec!["summary", "u3", "a3 partial"],
+            "the summary replaces the history before it; the turn's prompt stays"
         );
     }
 
     #[test]
-    fn last_turn_replay_without_a_user_prompt_is_none() {
-        let mut stored = stored_session(vec![stored_message(0, MsgRole::Assistant, "orphan")]);
+    fn last_turn_resume_replays_the_prompt_when_nothing_streamed() {
+        let mut stored = stored_session(vec![
+            stored_message(0, MsgRole::User, "u1"),
+            stored_message(1, MsgRole::Assistant, "a1"),
+            stored_message(2, MsgRole::User, "u2"),
+        ]);
+        chain(&mut stored.messages);
+        stored.leaf_id = Some(stored.messages[2].id);
+
+        let session = Session::from_stored(stored);
+        let Some(TurnResume::Replay { prompt, prior }) = session.last_turn_resume() else {
+            panic!("a prompt with no reply replays");
+        };
+        assert_eq!(prompt, "u2");
+        let prior: Vec<String> = prior.iter().map(|m| m.content.clone()).collect();
+        assert_eq!(prior, vec!["u1", "a1"]);
+    }
+
+    #[test]
+    fn last_turn_resume_continues_after_an_empty_reply() {
+        // A turn cut off after its tool batch but before any text leaves an
+        // empty assistant tip. There is no reply of its own to continue, but
+        // the tip must not push the retry down the replay path: for a turn
+        // that is the session's first prompt, replaying re-sends the task with
+        // no history and the model starts the task over. The empty row is
+        // dropped from the request and the path before it carries the turn.
+        let mut stored = stored_session(vec![
+            stored_message(0, MsgRole::User, "u1"),
+            stored_message(1, MsgRole::Assistant, ""),
+        ]);
+        chain(&mut stored.messages);
+        stored.leaf_id = Some(stored.messages[1].id);
+
+        let session = Session::from_stored(stored);
+        let Some(TurnResume::Continue { prior }) = session.last_turn_resume() else {
+            panic!("an empty reply still continues the turn");
+        };
+        let prior: Vec<String> = prior.iter().map(|m| m.content.clone()).collect();
+        assert_eq!(
+            prior,
+            vec!["u1"],
+            "the empty tip is dropped, the turn stays"
+        );
+    }
+
+    #[test]
+    fn last_turn_resume_keeps_the_earlier_partial_after_an_empty_retry() {
+        // The reported failure: the retried attempt reasoned or called tools
+        // and dropped before writing text, so the branch tip is an empty
+        // assistant row. The retry that follows must still carry the first
+        // attempt's partial reply — not fall back to replaying the turn's
+        // prompt, which (for the session's only prompt) would re-send the bare
+        // task and start it over.
+        let mut stored = stored_session(vec![
+            stored_message(0, MsgRole::User, "do the task"),
+            stored_message(1, MsgRole::Assistant, "halfway through the task"),
+            stored_message(2, MsgRole::Assistant, ""),
+        ]);
+        chain(&mut stored.messages);
+        stored.messages[1].interrupted = true;
+        stored.messages[2].interrupted = true;
+        stored.leaf_id = Some(stored.messages[2].id);
+
+        let session = Session::from_stored(stored);
+        let Some(TurnResume::Continue { prior }) = session.last_turn_resume() else {
+            panic!("an empty retry tip must not replay the task prompt");
+        };
+        let prior: Vec<String> = prior.iter().map(|m| m.content.clone()).collect();
+        assert_eq!(
+            prior,
+            vec!["do the task", "halfway through the task"],
+            "the earlier partial survives on the request's history"
+        );
+    }
+
+    #[test]
+    fn last_turn_resume_without_a_prompt_or_a_reply_is_none() {
+        let mut stored = stored_session(vec![stored_message(0, MsgRole::Assistant, "")]);
         chain(&mut stored.messages);
         stored.leaf_id = Some(stored.messages[0].id);
 
         let session = Session::from_stored(stored);
-        assert!(session.last_turn_replay().is_none());
+        assert!(session.last_turn_resume().is_none());
     }
 
     #[test]

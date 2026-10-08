@@ -3235,3 +3235,218 @@ async fn directive_probe_and_completions_reply_in_order() {
     drop(cmd_tx);
     let _ = handle.await;
 }
+
+/// A chat-completions mock whose first connection drops mid-turn: it streams a
+/// text delta carrying `partial`, then the wire's in-band error envelope (a
+/// 200-status terminal failure). Every later connection answers normally with
+/// `reply`. All request bodies are recorded in order, so a test can assert what
+/// a retried request carried.
+fn spawn_flaky_openai(
+    partial: &'static str,
+    reply: &'static str,
+    bodies: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) -> std::net::SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let mut dropped = false;
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else {
+                break;
+            };
+            use std::io::{Read, Write};
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let mut header_end = None;
+            while header_end.is_none() {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(_) => break,
+                }
+                header_end = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4);
+            }
+            if let Some(end) = header_end {
+                let head = String::from_utf8_lossy(&buf[..end]).to_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        if name.trim() == "content-length" {
+                            value.trim().parse::<usize>().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0);
+                while buf.len() < end + length {
+                    match stream.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        Err(_) => break,
+                    }
+                }
+                bodies
+                    .lock()
+                    .expect("request sink poisoned")
+                    .push(String::from_utf8_lossy(&buf[end..]).into_owned());
+            }
+            let body = String::from_utf8_lossy(&buf).into_owned();
+            // Only chat completions are scripted; the session's background
+            // embedding call (no `messages`) gets a plain (ignored) reply.
+            let chat = body.contains("\"messages\"");
+            let (content_type, sse) = if !chat {
+                ("application/json", "{}".to_string())
+            } else if !dropped {
+                // The interrupted turn: part of a reply, then the wire's
+                // in-band error envelope — a 200-status mid-stream failure.
+                dropped = true;
+                (
+                    "text/event-stream",
+                    format!(
+                        "data: {{\"object\":\"chat.completion.chunk\",\"id\":\"c\",\"model\":\"test-model\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{partial}\"}}}}]}}\n\n\
+                         data: {{\"error\":\"the connection dropped\"}}\n\n"
+                    ),
+                )
+            } else {
+                // The retry: a normal completion.
+                (
+                    "text/event-stream",
+                    format!(
+                        "data: {{\"object\":\"chat.completion.chunk\",\"id\":\"c\",\"model\":\"test-model\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{reply}\"}}}}]}}\n\n\
+                         data: {{\"object\":\"chat.completion.chunk\",\"id\":\"c\",\"model\":\"test-model\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n\
+                         data: [DONE]\n\n"
+                    ),
+                )
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{sse}",
+                sse.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    addr
+}
+
+/// A mid-turn connection failure must not make the retried request replay the
+/// turn from its prompt. For a session whose turn is its first prompt — the
+/// common single-task session — that re-sent the bare task with no history at
+/// all, so the model read it as a fresh request and started the whole task
+/// over. The retry carries the interrupted reply as the history above the
+/// resume cue instead, and the turn finishes.
+#[tokio::test]
+async fn a_retried_turn_carries_the_interrupted_reply() {
+    let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let addr = spawn_flaky_openai(
+        "HALFWAY-THROUGH-THE-TASK",
+        "the finished reply",
+        bodies.clone(),
+    );
+
+    let mut connections = empty_connections();
+    connections.providers.insert(
+        "mock".into(),
+        ProviderConfig::new(
+            "mock",
+            "openai-compat",
+            Some("sk-test".into()),
+            Some(format!("http://{addr}/v1")),
+        ),
+    );
+    connections.active = Some(Active {
+        provider: "mock".into(),
+        model: Some("test-model".into()),
+        variant: None,
+    });
+
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let handle = tokio::spawn(run(
+        empty_config(),
+        connections,
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        Default::default(),
+        cmd_rx,
+        event_tx,
+    ));
+    recv_skills_loaded(&mut event_rx).await;
+
+    cmd_tx
+        .send(Command::SendMessage {
+            content: "carry out the task".into(),
+            attachments: Vec::new(),
+            model: None,
+        })
+        .await
+        .unwrap();
+
+    // The first attempt drops mid-stream; the retry waits out its backoff and
+    // then finishes the turn.
+    let mut saw_retry = false;
+    let mut finished = false;
+    let mut seen: Vec<String> = Vec::new();
+    for _ in 0..64 {
+        match tokio::time::timeout(std::time::Duration::from_secs(30), event_rx.recv()).await {
+            Ok(Some(Event::RetryScheduled { .. })) => {
+                seen.push("RetryScheduled".into());
+                saw_retry = true;
+            }
+            Ok(Some(Event::StreamDone { .. })) => {
+                seen.push("StreamDone".into());
+                finished = true;
+                break;
+            }
+            Ok(Some(other)) => seen.push(format!("{other:?}")),
+            Ok(None) => {
+                seen.push("<closed>".into());
+                break;
+            }
+            Err(_) => {
+                seen.push("<timeout>".into());
+                break;
+            }
+        }
+    }
+    let bodies = bodies.lock().expect("request sink poisoned");
+    let chats: Vec<&str> = bodies
+        .iter()
+        .map(String::as_str)
+        .filter(|body| body.contains("\"messages\""))
+        .collect();
+    assert!(
+        saw_retry,
+        "the failed attempt must schedule a turn retry: {seen:?} chat requests: {chats:?}"
+    );
+    assert!(finished, "the retried attempt must finish the turn");
+    assert_eq!(
+        chats.len(),
+        2,
+        "the interrupted attempt and its retry: {chats:?}"
+    );
+    assert!(
+        !chats[0].contains("HALFWAY-THROUGH-THE-TASK"),
+        "the interrupted attempt could not have known its own reply: {}",
+        chats[0]
+    );
+    assert!(
+        chats[1].contains("carry out the task"),
+        "the retried request still carries the turn's prompt: {}",
+        chats[1]
+    );
+    assert!(
+        chats[1].contains("HALFWAY-THROUGH-THE-TASK"),
+        "the retried request must carry the interrupted reply instead of replaying \
+         the turn from its prompt: {}",
+        chats[1]
+    );
+    drop(bodies);
+
+    drop(cmd_tx);
+    let _ = handle.await;
+}

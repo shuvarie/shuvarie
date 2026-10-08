@@ -2397,10 +2397,9 @@ async fn turn_retry_resume_keeps_the_interrupted_partial_branch() {
     // output in the same branch, after the partial.
     assert_eq!(stored.leaf_id, Some(partial.id));
 
-    // The reloaded in-memory path keeps the partial: the retried request's
-    // history comes from `last_turn_replay` (the turn's prompt plus
-    // everything before it) while the partial stays part of the
-    // conversation.
+    // The reloaded in-memory path keeps the partial: the retried request is
+    // the resume `last_turn_resume` builds (the whole path, the interrupted
+    // partial included) while the partial stays part of the conversation.
     let guard = ctx.session.as_ref().unwrap().lock().await;
     assert_eq!(
         guard
@@ -2495,10 +2494,11 @@ async fn turn_retry_resume_does_not_rewind_past_a_user_tip() {
 }
 
 #[tokio::test]
-async fn turn_retry_resume_replays_the_last_turn_after_a_partial() {
+async fn turn_retry_resume_continues_the_interrupted_reply() {
     // A failed turn deeper in the session: the retry starts at the final
-    // branch node (the partial tip — the leaf never moves) and replays that
-    // turn's prompt with the history before it, not the first prompt.
+    // branch node (the partial tip — the leaf never moves) and continues the
+    // turn's reply — not the first prompt, and not the turn from its prompt
+    // again.
     let mut store = Store::open_in_memory().await.unwrap();
     let sid = store
         .create_session("retry", None, None, None)
@@ -2564,12 +2564,97 @@ async fn turn_retry_resume_replays_the_last_turn_after_a_partial() {
                 .map(|m| m.content.as_str())
                 .collect();
             assert_eq!(contents, vec!["one", "r1", "two", "r2*"]);
-            // The retried request: the failed turn's prompt with the history
-            // before it — the same shape a fresh send of "two" gets.
-            let replayed = session.last_turn_replay().expect("replay request");
-            assert_eq!(replayed.0, "two");
-            let prior: Vec<&str> = replayed.1.iter().map(|m| m.content.as_str()).collect();
-            assert_eq!(prior, vec!["one", "r1"]);
+            // The retried request continues the interrupted reply: the whole
+            // path is the history and the cue is the prompt, so the model
+            // picks up where it was cut off instead of replaying the turn.
+            let Some(TurnResume::Continue { prior }) = session.last_turn_resume() else {
+                panic!("the partial tip is continued, not replayed");
+            };
+            let prior: Vec<&str> = prior.iter().map(|m| m.content.as_str()).collect();
+            assert_eq!(prior, vec!["one", "r1", "two", "r2*"]);
+        }
+        other => panic!("expected Forked first, got: {other:?}"),
+    }
+    let second = event_rx.recv().await.expect("replay guard error");
+    assert!(
+        matches!(second, Event::StreamError { ref error } if error == "no active provider"),
+        "unexpected event: {second:?}"
+    );
+}
+
+#[tokio::test]
+async fn turn_retry_resume_keeps_the_turn_after_an_empty_retry_tip() {
+    // The reported restart: a long single-prompt turn drops mid-way, the
+    // retried attempt reasons or calls tools and drops again before writing
+    // any text, so the branch tip is an empty assistant row. The next retry
+    // must still carry the first attempt's partial reply — the old fallback
+    // replayed the turn's prompt with an empty prior, so the model read the
+    // bare task as a fresh request and started the whole task over.
+    let mut store = Store::open_in_memory().await.unwrap();
+    let sid = store
+        .create_session("retry", None, None, None)
+        .await
+        .unwrap();
+    let prompt = store
+        .append_message(sid, None, shuvarie_llm::Role::User, "do the task")
+        .await
+        .unwrap();
+    let partial = store
+        .append_assistant_message(
+            sid,
+            Some(prompt.id),
+            "halfway through the task",
+            &[],
+            &[],
+            true,
+            TokenUsage::default(),
+            0.0,
+            &TokenUsage::default(),
+            &shuvarie_db::Attribution::default(),
+        )
+        .await
+        .unwrap();
+    // The retried attempt: reasoning and a tool call, no text at all.
+    let empty = store
+        .append_assistant_message(
+            sid,
+            Some(partial.id),
+            "",
+            &[],
+            &[],
+            true,
+            TokenUsage::default(),
+            0.0,
+            &TokenUsage::default(),
+            &shuvarie_db::Attribution::default(),
+        )
+        .await
+        .unwrap();
+    let session = Session::from_stored(store.load_session(sid).await.unwrap());
+    assert_eq!(session.leaf_id, Some(empty.id));
+    let (mut ctx, mut event_rx) = resume_ctx(store, session).await;
+
+    ctx.resume_last_turn().await;
+
+    let stored = ctx.store.load_session(sid).await.unwrap();
+    assert_eq!(
+        stored.leaf_id,
+        Some(empty.id),
+        "the tip (with its tool records) stays the active branch node"
+    );
+    let first = event_rx.recv().await.expect("Forked event");
+    match first {
+        Event::Forked { session, prompt } => {
+            assert!(prompt.is_none(), "a retry resume recalls nothing");
+            let Some(TurnResume::Continue { prior }) = session.last_turn_resume() else {
+                panic!("an empty retry tip replayed the task prompt — the task would restart");
+            };
+            let prior: Vec<&str> = prior.iter().map(|m| m.content.as_str()).collect();
+            assert_eq!(
+                prior,
+                vec!["do the task", "halfway through the task"],
+                "the request continues the turn from the first partial"
+            );
         }
         other => panic!("expected Forked first, got: {other:?}"),
     }
