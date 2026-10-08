@@ -88,7 +88,7 @@ members = ["crates/*"]
 exclude = ["vendor/frameplay", "vendor/selune"]
 
 [workspace.package]
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 authors = ["Charles Dong <chardon_cs@proton.me>"]
 license = "MIT"
