@@ -1663,10 +1663,11 @@ async fn steered_prompt_cuts_mid_stream_when_armed_between_actions() {
         })
         .await;
     // The interrupted-turn persist broadcasts the model use before the
-    // cancellation surfaces; skip it.
+    // cancellation surfaces, and the turn's metadata just ahead of it; skip
+    // both.
     let cancellation = loop {
         match event_rx.recv().await {
-            Some(Event::ModelUsed { .. }) => continue,
+            Some(Event::ModelUsed { .. } | Event::TurnMeta { .. }) => continue,
             other => break other,
         }
     };
@@ -1733,6 +1734,11 @@ async fn interrupted_turn_persists_pending_tools_as_killed() {
             worker: None,
             started: std::time::Instant::now(),
         }],
+        attribution: shuvarie_db::Attribution {
+            model_code: Some("acme/model-x".into()),
+            scene: Some("Plan".into()),
+        },
+        started: Some(std::time::Instant::now() - std::time::Duration::from_millis(1_500)),
         ..TurnState::default()
     }));
 
@@ -1762,6 +1768,27 @@ async fn interrupted_turn_persists_pending_tools_as_killed() {
     assert!(guard.tool_records[1].killed);
     assert_eq!(guard.tool_records[1].message_seq, 1);
     assert_eq!(guard.tool_records[1].name, "run_shell");
+
+    // The cut turn keeps the clock it started with and the model that ran it,
+    // on the row and in the session's per-turn map.
+    let duration_ms = stored.messages[1].duration_ms.expect("a measured duration");
+    assert!(
+        (1_500..30_000).contains(&duration_ms),
+        "duration {duration_ms} covers the turn's clock"
+    );
+    assert_eq!(
+        stored.messages[1].model_code.as_deref(),
+        Some("acme/model-x")
+    );
+    assert_eq!(stored.messages[1].scene.as_deref(), Some("Plan"));
+    assert_eq!(
+        guard.message_meta.get(&1),
+        Some(&crate::MessageMeta {
+            model_code: Some("acme/model-x".into()),
+            scene: Some("Plan".into()),
+            duration_ms: Some(duration_ms),
+        })
+    );
 }
 
 #[tokio::test]
@@ -1818,6 +1845,126 @@ async fn tool_result_clears_the_pending_call() {
     let guard = session.lock().await;
     assert_eq!(guard.tool_records.len(), 1);
     assert!(!guard.tool_records[0].killed);
+}
+
+/// The commit path reports the turn's metadata just before its terminal event
+/// and records it both on the reply row and in the session's per-turn map, so
+/// a reloaded turn wears the same footer a live one did.
+#[tokio::test]
+async fn committed_turn_reports_and_persists_its_meta() {
+    let client =
+        ProviderClient::build(ProviderKind::new(ProviderType::Ollama, None), None, None).unwrap();
+    let session = Arc::new(Mutex::new(Session::new()));
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store
+        .create_session("timing", None, None, None)
+        .await
+        .unwrap();
+    {
+        let mut guard = session.lock().await;
+        guard.id = Some(id);
+        guard.push_user("go");
+        guard.leaf_id = Some(
+            store
+                .append_message(id, None, shuvarie_llm::Role::User, "go")
+                .await
+                .unwrap()
+                .id,
+        );
+    }
+    let stream: shuvarie_llm::StreamStream = Box::pin(futures_util::stream::iter(vec![
+        StreamItem::Delta {
+            text: "done".into(),
+        },
+        StreamItem::Done {
+            text: "done".into(),
+            usage: TokenUsage::default(),
+        },
+    ]));
+    let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage::default()));
+    // The spawned task owns the store; a clone shares the same database, so the
+    // committed row can be read back here.
+    let mut verify = store.clone();
+    // The turn's attribution rides both the commit argument and the turn state
+    // (the interrupted path reads the latter), like the spawn site wires it.
+    let attribution = shuvarie_db::Attribution {
+        model_code: Some("acme/model-x".into()),
+        scene: Some("Plan".into()),
+    };
+    let turn_state = Arc::new(Mutex::new(TurnState {
+        attribution: attribution.clone(),
+        started: Some(std::time::Instant::now() - std::time::Duration::from_millis(1_500)),
+        ..TurnState::default()
+    }));
+    let (stream_done_tx, _stream_done_rx) = tokio::sync::mpsc::channel(1);
+    let session_shared = session.clone();
+    let turn_state_shared = turn_state.clone();
+    tokio::spawn(async move {
+        stream_stream_to_events(
+            stream,
+            session_shared,
+            client,
+            None,
+            store,
+            "ollama-model".into(),
+            attribution,
+            20_000,
+            worker_usage,
+            None,
+            event_tx,
+            turn_state_shared,
+            stream_done_tx,
+            SteerSignal::default(),
+            DenyCut::default(),
+        )
+        .await;
+    });
+
+    let mut reported = None;
+    let mut order: Vec<&'static str> = Vec::new();
+    while let Some(event) = event_rx.recv().await {
+        match event {
+            Event::TurnMeta { meta } => {
+                order.push("meta");
+                reported = Some(meta);
+            }
+            Event::StreamDone { .. } => {
+                order.push("done");
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        order,
+        vec!["meta", "done"],
+        "the metadata precedes the terminal event"
+    );
+
+    let meta = reported.expect("TurnMeta broadcast");
+    assert_eq!(meta.model_code.as_deref(), Some("acme/model-x"));
+    assert_eq!(meta.scene.as_deref(), Some("Plan"));
+    let duration_ms = meta.duration_ms.expect("a measured duration");
+    assert!(
+        (1_500..30_000).contains(&duration_ms),
+        "duration {duration_ms} covers the turn's clock"
+    );
+
+    let loaded = verify.load_session(id).await.unwrap();
+    assert_eq!(loaded.messages[1].duration_ms, Some(duration_ms));
+    assert_eq!(
+        loaded.messages[1].model_code.as_deref(),
+        Some("acme/model-x")
+    );
+    assert_eq!(loaded.messages[1].scene.as_deref(), Some("Plan"));
+    assert_eq!(loaded.messages[0].duration_ms, None, "prompts stay untimed");
+
+    let guard = session.lock().await;
+    assert_eq!(
+        guard.message_meta.get(&1).and_then(|m| m.duration_ms),
+        Some(duration_ms)
+    );
 }
 
 #[tokio::test]
@@ -2372,6 +2519,7 @@ async fn resume_ctx(store: Store, session: Session) -> (CoreCtx, Receiver<Event>
         mcp: crate::mcp_manager::mcp_manager(&config.tools.mcp),
         active_stream: None,
         turn_state: None,
+        turn_started: None,
         event_tx,
         stream_done_tx,
         question_tx,
@@ -2423,6 +2571,7 @@ async fn failed_turn_state() -> (Store, uuid::Uuid, shuvarie_db::StoredMessage) 
             0.0,
             &TokenUsage::default(),
             &shuvarie_db::Attribution::default(),
+            None,
         )
         .await
         .unwrap();
@@ -2612,6 +2761,7 @@ async fn turn_retry_resume_continues_the_interrupted_reply() {
             0.0,
             &TokenUsage::default(),
             &shuvarie_db::Attribution::default(),
+            None,
         )
         .await
         .unwrap();
@@ -2631,6 +2781,7 @@ async fn turn_retry_resume_continues_the_interrupted_reply() {
             0.0,
             &TokenUsage::default(),
             &shuvarie_db::Attribution::default(),
+            None,
         )
         .await
         .unwrap();
@@ -2703,6 +2854,7 @@ async fn turn_retry_resume_keeps_the_turn_after_an_empty_retry_tip() {
             0.0,
             &TokenUsage::default(),
             &shuvarie_db::Attribution::default(),
+            None,
         )
         .await
         .unwrap();
@@ -2719,6 +2871,7 @@ async fn turn_retry_resume_keeps_the_turn_after_an_empty_retry_tip() {
             0.0,
             &TokenUsage::default(),
             &shuvarie_db::Attribution::default(),
+            None,
         )
         .await
         .unwrap();

@@ -55,7 +55,11 @@ async fn build_source_session(store: &mut Store) -> shuvarie_db::StoredSession {
                 cached_input_tokens: Some(11_000),
                 ..TokenUsage::default()
             },
-            &shuvarie_db::Attribution::default(),
+            &shuvarie_db::Attribution {
+                model_code: Some("acme/model-x".into()),
+                scene: Some("Plan".into()),
+            },
+            Some(12_400),
         )
         .await
         .unwrap();
@@ -132,6 +136,12 @@ async fn export_import_round_trips_between_stores() {
     assert_eq!(loaded.messages[1].reasoning_tokens, 0);
     assert!((loaded.messages[1].cost - 0.25).abs() < f64::EPSILON);
     assert_eq!(loaded.messages[1].request, stored.messages[1].request);
+    assert_eq!(
+        loaded.messages[1].model_code, stored.messages[1].model_code,
+        "attribution rides the interchange file"
+    );
+    assert_eq!(loaded.messages[1].scene.as_deref(), Some("Plan"));
+    assert_eq!(loaded.messages[1].duration_ms, Some(12_400));
 
     assert_eq!(
         loaded.tool_calls.len(),
@@ -211,6 +221,9 @@ async fn import_of_a_file_without_a_leaf_falls_back_to_none() {
             cost: 0.0,
             summary: false,
             request: TokenUsage::default(),
+            model_code: None,
+            scene: None,
+            duration_ms: None,
             attachments: Vec::new(),
         }],
         tool_calls: Vec::new(),

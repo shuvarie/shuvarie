@@ -194,6 +194,12 @@ struct CoreCtx {
     mcp: shuvarie_mcp::SharedMcpManager,
     active_stream: Option<AbortHandle>,
     turn_state: Option<Arc<Mutex<TurnState>>>,
+    /// Wall clock of the turn being dispatched: set when a new user turn is
+    /// accepted ([`CoreCtx::start_user_turn`]) so the spawned turn's
+    /// [`TurnState`] records the whole turn's duration — and deliberately left
+    /// in place across a retry's resume, so a retried turn's reply row still
+    /// covers the attempts that failed before it.
+    turn_started: Option<std::time::Instant>,
     event_tx: Sender<Event>,
     stream_done_tx: Sender<StreamOutcome>,
     question_tx: Sender<QuestionRequest>,
@@ -424,6 +430,7 @@ pub async fn run(
         mcp,
         active_stream: None,
         turn_state: None,
+        turn_started: None,
         event_tx,
         stream_done_tx,
         question_tx,
@@ -1417,6 +1424,9 @@ pub async fn run(
                                             attachment_metas,
                                         )
                                         .await;
+                                    // A replayed turn is a fresh turn: its
+                                    // clock starts here.
+                                    ctx.turn_started = Some(std::time::Instant::now());
                                     ctx
                                         .self_replay_send(
                                             content, attachments, true, None, None,
@@ -1772,6 +1782,31 @@ struct TurnState {
     /// Tool calls started but not yet finished, in start order: when the turn
     /// is cut they persist as killed records so a reload keeps their blocks.
     pending_tools: Vec<PendingToolCall>,
+    /// When the turn's wall clock started — the prompt being accepted. Kept
+    /// across a retry's resume ([`CoreCtx::resume_last_turn`] re-sends on the
+    /// same start) so the committed reply row records the whole turn: failed
+    /// attempts, compaction pauses, and tool calls all inside it. `None` when
+    /// the caller had no start to hand over (tests).
+    started: Option<std::time::Instant>,
+}
+
+impl TurnState {
+    /// How long the turn has been running, or `None` when its clock is
+    /// unknown.
+    fn elapsed_ms(&self) -> Option<u64> {
+        self.started
+            .map(|started| started.elapsed().as_millis() as u64)
+    }
+
+    /// The turn's display metadata for its reply row: which model and scene it
+    /// ran under, and how long it took.
+    fn meta(&self) -> crate::MessageMeta {
+        crate::MessageMeta {
+            model_code: self.attribution.model_code.clone(),
+            scene: self.attribution.scene.clone(),
+            duration_ms: self.elapsed_ms(),
+        }
+    }
 }
 
 /// A tool call whose result has not arrived yet: the serialized args plus the
@@ -2362,6 +2397,10 @@ impl CoreCtx {
             .last()
             .map(|message| message.attachments.clone())
             .unwrap_or_default();
+        // The turn's clock starts here — the moment the prompt is accepted —
+        // so the duration the reply row records covers everything the turn
+        // does, compaction pauses and tool calls included.
+        self.turn_started = Some(std::time::Instant::now());
         let _ = self
             .event_tx
             .send(Event::TurnStarted {
@@ -2762,6 +2801,11 @@ impl CoreCtx {
         let embedding_shared = self.embedding_setup.clone();
         let turn_state_shared = Arc::new(Mutex::new(TurnState {
             attribution: attribution.clone(),
+            // The turn's clock: the prompt's accept time when the run loop has
+            // one (and across a retry's resume, the original attempt's), else
+            // now — a turn dispatched outside the send path still times
+            // itself.
+            started: Some(self.turn_started.unwrap_or_else(std::time::Instant::now)),
             ..TurnState::default()
         }));
         let stream_done = self.stream_done_tx.clone();
@@ -3646,6 +3690,12 @@ async fn stream_stream_to_events(
     }
 
     if let Some((text, usage)) = done {
+        // The turn's own timing and attribution, read before the commit so the
+        // reply row and the TUI's footer carry the same value. Taken from the
+        // turn state rather than the clock here: a retried turn's clock starts
+        // at its prompt's accept, not at this attempt's.
+        let meta = turn_state.lock().await.meta();
+        let duration_ms = meta.duration_ms;
         let mut guard = session.lock().await;
         let combined = {
             let worker_usage = worker_usage.lock().unwrap();
@@ -3682,6 +3732,9 @@ async fn stream_stream_to_events(
                 .insert(seq as u64, text_segments.clone());
         }
         guard.tool_records.append(&mut turn_tool_records);
+        if !meta.is_empty() {
+            guard.message_meta.insert(seq as u64, meta.clone());
+        }
         let parent = guard.leaf_id;
         drop(guard);
         if let Some(id) = id {
@@ -3705,6 +3758,7 @@ async fn stream_stream_to_events(
                         cost,
                         &request_usage,
                         &attribution,
+                        duration_ms,
                     )
                     .await;
                 if let Some(setup) = &embedding_setup {
@@ -3736,6 +3790,7 @@ async fn stream_stream_to_events(
                         cost,
                         &request_usage,
                         &attribution,
+                        duration_ms,
                     )
                     .await
                 {
@@ -3768,6 +3823,7 @@ async fn stream_stream_to_events(
                 }
             }
         }
+        let _ = event_tx.send(Event::TurnMeta { meta }).await;
         let _ = event_tx.send(Event::StreamDone { text, usage }).await;
         let _ = event_tx
             .send(Event::UsageSnapshot {
@@ -3836,6 +3892,9 @@ async fn ensure_assistant_row(
             0.0,
             &shuvarie_llm::TokenUsage::default(),
             attribution,
+            // The row is a placeholder the commit overwrites (timing and all);
+            // a turn cut before it settles keeps no duration.
+            None,
         )
         .await
     {
@@ -3909,22 +3968,32 @@ async fn persist_interrupted_turn(
     session: &Option<Arc<Mutex<Session>>>,
     event_tx: &Sender<Event>,
 ) {
-    let (text_segments, reasoning, msg_id, tool_records, pending_tools, assistant_seq, attribution) =
-        match turn_state {
-            Some(ts_arc) => {
-                let ts = ts_arc.lock().await;
-                (
-                    ts.text_segments.clone(),
-                    ts.pending_reasoning.clone(),
-                    ts.assistant_message_id,
-                    ts.tool_records.clone(),
-                    ts.pending_tools.clone(),
-                    ts.assistant_seq,
-                    ts.attribution.clone(),
-                )
-            }
-            None => return,
-        };
+    let (
+        text_segments,
+        reasoning,
+        msg_id,
+        tool_records,
+        pending_tools,
+        assistant_seq,
+        attribution,
+        meta,
+    ) = match turn_state {
+        Some(ts_arc) => {
+            let ts = ts_arc.lock().await;
+            (
+                ts.text_segments.clone(),
+                ts.pending_reasoning.clone(),
+                ts.assistant_message_id,
+                ts.tool_records.clone(),
+                ts.pending_tools.clone(),
+                ts.assistant_seq,
+                ts.attribution.clone(),
+                ts.meta(),
+            )
+        }
+        None => return,
+    };
+    let duration_ms = meta.duration_ms;
     let text = shuvarie_db::join_text_segments(&text_segments);
     // Whether this turn actually used the model: a pre-created row or
     // partial content means something streamed before the cut; an immediate
@@ -3952,6 +4021,7 @@ async fn persist_interrupted_turn(
                 0.0,
                 &shuvarie_llm::TokenUsage::default(),
                 &attribution,
+                duration_ms,
             )
             .await;
         let killed = killed_records(&pending_tools, msg_id, assistant_seq);
@@ -3986,6 +4056,9 @@ async fn persist_interrupted_turn(
             g.interrupted.insert(seq as u64, true);
             g.tool_records.extend(tool_records);
             g.tool_records.extend(killed);
+            if !meta.is_empty() {
+                g.message_meta.insert(seq as u64, meta.clone());
+            }
         }
     } else if !text.is_empty() || !reasoning.is_empty() {
         let parent = { s.lock().await.leaf_id };
@@ -4001,6 +4074,7 @@ async fn persist_interrupted_turn(
                 0.0,
                 &shuvarie_llm::TokenUsage::default(),
                 &attribution,
+                duration_ms,
             )
             .await
         {
@@ -4015,12 +4089,18 @@ async fn persist_interrupted_turn(
                 g.text_segments.insert(seq as u64, text_segments);
             }
             g.interrupted.insert(seq as u64, true);
+            if !meta.is_empty() {
+                g.message_meta.insert(seq as u64, meta.clone());
+            }
         }
     }
     // Only a turn that produced something (a pre-created row or partial
     // content) actually used the model; an immediate cancel records nothing.
     if produced {
         record_and_broadcast_model_use(s, &attribution, event_tx).await;
+        // The turn's footer rides ahead of the terminal event, so the view's
+        // in-flight turn still owns it when the cancellation commits it.
+        let _ = event_tx.send(Event::TurnMeta { meta }).await;
     }
 }
 
@@ -4186,6 +4266,10 @@ async fn persist_stream_error(
                 0.0,
                 &shuvarie_llm::TokenUsage::default(),
                 attribution,
+                // A stream error leaves the turn to its retry: the resumed
+                // attempt records the whole turn's duration, so this partial
+                // row carries none.
+                None,
             )
             .await;
     } else if !text.is_empty() {
@@ -4202,6 +4286,7 @@ async fn persist_stream_error(
                 0.0,
                 &shuvarie_llm::TokenUsage::default(),
                 attribution,
+                None,
             )
             .await
         {

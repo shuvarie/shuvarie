@@ -14,3 +14,8 @@ snapshot_name = "20260924_071435_snapshot.toml"
 id = 2629918063807711886
 name = "20261002_084046_message_attachments.sql"
 snapshot_name = "20261002_084046_snapshot.toml"
+
+[[migrations]]
+id = 6338662329438534151
+name = "20261008_113627_message_duration.sql"
+snapshot_name = "20261008_113627_snapshot.toml"

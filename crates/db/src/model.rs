@@ -271,6 +271,12 @@ pub struct Message {
     /// Scene name under which the model produced this assistant message;
     /// `None` for the built-in Default scene (and for user rows).
     pub scene: Option<String>,
+    /// Wall-clock duration of the turn that produced this assistant message:
+    /// prompt accepted → reply committed, so retries, compaction summarizer
+    /// pauses, and tool calls are all inside it. `None` for user rows,
+    /// summaries, imported sessions, and rows written before this column
+    /// existed — distinct from a real `0`.
+    pub duration_ms: Option<u64>,
     #[has_many]
     pub embeddings: toasty::Deferred<Vec<MessageEmbedding>>,
     #[has_many]

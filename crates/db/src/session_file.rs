@@ -99,6 +99,18 @@ pub struct FileMessage {
     /// Usage of the turn's last main-stream request.
     #[serde(default)]
     pub request: TokenUsage,
+    /// Model code (`org/model`) that produced this assistant message; `None`
+    /// for user rows, summaries, and pre-attribution data.
+    #[serde(default)]
+    pub model_code: Option<String>,
+    /// Scene name under which the model produced this assistant message;
+    /// `None` for the built-in Default scene (and for user rows).
+    #[serde(default)]
+    pub scene: Option<String>,
+    /// Wall-clock duration of the turn that produced this assistant message;
+    /// `None` when it is not known (user rows, summaries, pre-column data).
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
     /// The message's attachment metadata (+ exported blob bytes when the
     /// exporter hydrated them), in attachment order.
     #[serde(default)]
@@ -216,6 +228,9 @@ impl From<&StoredMessage> for FileMessage {
             cost: m.cost,
             summary: m.summary,
             request: m.request,
+            model_code: m.model_code.clone(),
+            scene: m.scene.clone(),
+            duration_ms: m.duration_ms,
             attachments: m
                 .attachments
                 .iter()
