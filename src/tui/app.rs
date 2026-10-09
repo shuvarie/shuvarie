@@ -38,6 +38,7 @@ use super::spinner::SpinnerKind;
 use super::theme;
 use super::theme_picker::{ThemePicker, ThemePickerEffect, ThemePickerMessage};
 use super::title::{TitleEffect, TitleMessage, TitlePopup};
+use super::todo::{TodoEffect, TodoMessage, TodoPopup};
 use super::variant;
 use super::viewer::{MediaViewer, MediaViewerMessage, ViewerItem};
 use super::warning::{WarningMessage, WarningPopup};
@@ -65,6 +66,7 @@ pub enum Overlay {
     ThemePicker,
     AssistedBy,
     MediaViewer,
+    Todos,
 }
 
 pub enum AppMessage {
@@ -92,6 +94,8 @@ pub enum AppMessage {
     AssistedBy(AssistedByMessage),
     /// The media viewer overlay: navigation and dismiss.
     MediaViewer(MediaViewerMessage),
+    /// The `/todo` popup: walking the session's todo list.
+    Todos(TodoMessage),
     /// Attachment blob bytes arrived from core (the chat pane's media and
     /// the viewer's display cache share this channel). Mapped from
     /// `CoreEvent::AttachmentMedia`.
@@ -225,6 +229,7 @@ pub struct App {
     pub title_popup: TitlePopup,
     pub assisted_by: AssistedByPopup,
     pub theme_picker: ThemePicker,
+    pub todo_popup: TodoPopup,
     pub warning: WarningPopup,
     pub auth: AuthPopup,
     pub models: HashMap<String, Vec<Model>>,
@@ -367,6 +372,7 @@ impl App {
             title_popup: TitlePopup::new(),
             assisted_by: AssistedByPopup::new(),
             theme_picker: ThemePicker::new(),
+            todo_popup: TodoPopup::new(),
             media_view: MediaViewer::new(image_cell, image_protocol),
             theme_choices,
             current_theme_pref,
@@ -597,6 +603,9 @@ impl App {
                         }
                         Overlay::MediaViewer => {
                             return self.media_view.map_event(&key).map(AppMessage::MediaViewer);
+                        }
+                        Overlay::Todos => {
+                            return self.todo_popup.map_event(&key).map(AppMessage::Todos);
                         }
                         Overlay::None => {}
                     }
@@ -1013,7 +1022,8 @@ impl App {
             | Overlay::Variant
             | Overlay::ThemePicker
             | Overlay::AssistedBy
-            | Overlay::MediaViewer => None,
+            | Overlay::MediaViewer
+            | Overlay::Todos => None,
             Overlay::ModelPicker => {
                 let flat = super::components::flatten_newlines(text);
                 let mut msg = None;
@@ -1235,6 +1245,13 @@ impl App {
                             return Some(AppEffect::CopyToClipboard(content));
                         }
                         AssistedByEffect::Close => self.close_overlay(),
+                    }
+                }
+            }
+            AppMessage::Todos(m) => {
+                if let Some(effect) = self.todo_popup.update(m) {
+                    match effect {
+                        TodoEffect::Close => self.close_overlay(),
                     }
                 }
             }
@@ -1466,7 +1483,8 @@ impl App {
                     | Overlay::Variant
                     | Overlay::ThemePicker
                     | Overlay::AssistedBy
-                    | Overlay::MediaViewer => {}
+                    | Overlay::MediaViewer
+                    | Overlay::Todos => {}
                 }
             }
             AppMessage::ConfigSaved => {
@@ -2161,6 +2179,10 @@ impl App {
                 self.assisted_by.open(self.session.models_used.clone());
                 self.overlay = Overlay::AssistedBy;
             }
+            CommandAction::OpenTodos => {
+                self.todo_popup.open(self.session.todos().to_vec());
+                self.overlay = Overlay::Todos;
+            }
             CommandAction::Images => {
                 let effect = self
                     .session
@@ -2281,6 +2303,7 @@ impl App {
         self.assisted_by.close();
         self.variant_picker.close();
         self.theme_picker.close();
+        self.todo_popup.close();
         // Walking away from the theme picker repaints with the palette
         // active at open (already cleared to `None` by a selection).
         if let Some(colors) = self.theme_backup.take() {
@@ -2370,6 +2393,7 @@ impl App {
         self.command_menu.view(frame, area, stacked);
         self.title_popup.view(frame, area, stacked);
         self.assisted_by.view(frame, area, stacked);
+        self.todo_popup.view(frame, area, stacked);
         self.confirm_quit.view(frame, area, stacked);
         self.auth.view(frame, area, self.warning.open);
         self.warning.view(frame, area, false);
@@ -2861,6 +2885,40 @@ mod tests {
             !app.session.sidebar.collapsed_at(200),
             "manual override sticks across widths"
         );
+    }
+
+    #[test]
+    fn todo_command_opens_the_popup_and_escape_closes_it() {
+        let (mut app, _rx) = app_with_rx(connected());
+        active_session(&mut app);
+        app.session
+            .update(SessionMessage::Chat(ChatMessage::ToolFinished {
+                name: "todo".into(),
+                ok: true,
+                output: "Todos (0/2 done)\n  #1 [ ] plan it\n  #2 [~] write tests".into(),
+                worker: None,
+                spawn: None,
+                file_change: None,
+                streams: None,
+                duration_ms: 0,
+                call_id: None,
+            }));
+
+        app.run_command(CommandAction::OpenTodos, None);
+        assert!(matches!(app.overlay, Overlay::Todos));
+        assert!(
+            app.todo_popup.open,
+            "the popup snapshots the session's list"
+        );
+
+        let key = termina::event::KeyEvent::new(KeyCode::Escape, termina::event::Modifiers::NONE);
+        let msg = app
+            .map_event(Event::Terminal(TermEvent::Key(key)))
+            .expect("the overlay captures the key");
+        assert!(matches!(msg, AppMessage::Todos(TodoMessage::Close)));
+        app.update(msg);
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(!app.todo_popup.open);
     }
 
     #[test]

@@ -3450,3 +3450,605 @@ async fn a_retried_turn_carries_the_interrupted_reply() {
     drop(cmd_tx);
     let _ = handle.await;
 }
+
+/// Read one HTTP request off `stream`: the head, then the body its
+/// `Content-Length` announces. `None` when the peer went away before the head
+/// arrived.
+fn read_http_request(stream: &mut std::net::TcpStream) -> Option<String> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let mut header_end = None;
+    while header_end.is_none() {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(_) => break,
+        }
+        header_end = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4);
+    }
+    let end = header_end?;
+    let head = String::from_utf8_lossy(&buf[..end]).to_lowercase();
+    let length = head
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.trim() == "content-length" {
+                value.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+    while buf.len() < end + length {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(_) => break,
+        }
+    }
+    Some(String::from_utf8_lossy(&buf[end..]).into_owned())
+}
+
+/// Write a one-delta `text/event-stream` reply carrying `content`.
+fn write_sse_reply(stream: &mut std::net::TcpStream, content: &str) {
+    use std::io::Write;
+    let sse = format!(
+        "data: {{\"object\":\"chat.completion.chunk\",\"id\":\"c\",\"model\":\"test-model\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{content}\"}}}}]}}\n\n\
+         data: {{\"object\":\"chat.completion.chunk\",\"id\":\"c\",\"model\":\"test-model\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n\
+         data: [DONE]\n\n"
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{sse}",
+        sse.len()
+    );
+    let _ = stream.write_all(response.as_bytes());
+}
+
+/// A recording OpenAI-compatible mock, one thread per connection. Chat
+/// requests are answered with `reply-<n>` (`n` counting them), so a test can
+/// tell which turn's reply a later request carries; when `hang_first` is set
+/// the first chat request streams it as its only delta and then holds the
+/// connection open, leaving the turn in flight for the test to cancel.
+/// Non-chat requests — the session's background embedding call — get an empty
+/// JSON reply.
+fn spawn_recording_openai(
+    hang_first: Option<&'static str>,
+) -> (
+    std::net::SocketAddr,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let counter = std::sync::Arc::new(AtomicUsize::new(0));
+    let sink = bodies.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let bodies = sink.clone();
+            let counter = counter.clone();
+            std::thread::spawn(move || {
+                let Some(body) = read_http_request(&mut stream) else {
+                    return;
+                };
+                let chat = body.contains("\"messages\"");
+                bodies.lock().expect("request sink poisoned").push(body);
+                if !chat {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                    );
+                    return;
+                }
+                let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                if n == 1
+                    && let Some(partial) = hang_first
+                {
+                    // The interrupted turn: a partial delta and no reply end.
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n",
+                    );
+                    let chunk = format!(
+                        "data: {{\"object\":\"chat.completion.chunk\",\"id\":\"c\",\"model\":\"test-model\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{partial}\"}}}}]}}\n\n"
+                    );
+                    let _ = stream.write_all(chunk.as_bytes());
+                    let _ = stream.flush();
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    return;
+                }
+                write_sse_reply(&mut stream, &format!("reply-{n}"));
+            });
+        }
+    });
+    (addr, bodies)
+}
+
+/// The chat request bodies the mock recorded, in order.
+fn recorded_chats(bodies: &std::sync::Mutex<Vec<String>>) -> Vec<String> {
+    bodies
+        .lock()
+        .expect("request sink poisoned")
+        .iter()
+        .filter(|body| body.contains("\"messages\""))
+        .cloned()
+        .collect()
+}
+
+/// The core running against `addr` as its active `openai-compat` provider, on
+/// a fresh in-memory store and with no startup session.
+async fn core_with_mock(
+    addr: std::net::SocketAddr,
+) -> (
+    tokio::sync::mpsc::Sender<Command>,
+    tokio::sync::mpsc::Receiver<Event>,
+    tokio::task::JoinHandle<()>,
+) {
+    core_with_mock_store(
+        addr,
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+    )
+    .await
+}
+
+/// The core running against `addr` on `store`, opening `startup`. The caller
+/// keeps its own handle on the store, so it can seed the sessions the core
+/// starts from or inspect the rows it wrote — the handle is shared, so a second
+/// core over the same store is a restart over the same database.
+async fn core_with_mock_store(
+    addr: std::net::SocketAddr,
+    store: Store,
+    startup: StartupSession,
+) -> (
+    tokio::sync::mpsc::Sender<Command>,
+    tokio::sync::mpsc::Receiver<Event>,
+    tokio::task::JoinHandle<()>,
+) {
+    let mut connections = empty_connections();
+    connections.providers.insert(
+        "mock".into(),
+        ProviderConfig::new(
+            "mock",
+            "openai-compat",
+            Some("sk-test".into()),
+            Some(format!("http://{addr}/v1")),
+        ),
+    );
+    connections.active = Some(Active {
+        provider: "mock".into(),
+        model: Some("test-model".into()),
+        variant: None,
+    });
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let handle = tokio::spawn(run(
+        empty_config(),
+        connections,
+        store,
+        startup,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        Default::default(),
+        cmd_rx,
+        event_tx,
+    ));
+    (cmd_tx, event_rx, handle)
+}
+
+/// Drain events until the session loads, returning the loaded snapshot: the
+/// startup load and `Command::LoadSession` both answer with exactly this.
+async fn recv_session_loaded(event_rx: &mut tokio::sync::mpsc::Receiver<Event>) -> Session {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let ev = tokio::time::timeout(deadline - tokio::time::Instant::now(), event_rx.recv())
+            .await
+            .expect("timed out waiting for SessionLoaded")
+            .expect("core task ended");
+        match ev {
+            Event::SessionLoaded { session, .. } => return session,
+            Event::SessionError { error } => panic!("the session failed to load: {error}"),
+            _ => {}
+        }
+    }
+}
+
+/// Run one compaction pass and wait for its `SessionCompacted`.
+async fn compact_and_wait(
+    cmd_tx: &tokio::sync::mpsc::Sender<Command>,
+    event_rx: &mut tokio::sync::mpsc::Receiver<Event>,
+) {
+    cmd_tx
+        .send(Command::CompactSession { instruction: None })
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let ev = tokio::time::timeout(deadline - tokio::time::Instant::now(), event_rx.recv())
+            .await
+            .expect("timed out waiting for SessionCompacted")
+            .expect("core task ended");
+        match ev {
+            Event::SessionCompacted { .. } => return,
+            Event::SessionError { error } => panic!("compaction errored: {error}"),
+            _ => {}
+        }
+    }
+}
+
+/// Send one user prompt and wait out its turn.
+async fn send_and_drain(
+    cmd_tx: &tokio::sync::mpsc::Sender<Command>,
+    event_rx: &mut tokio::sync::mpsc::Receiver<Event>,
+    prompt: &str,
+) {
+    cmd_tx
+        .send(Command::SendMessage {
+            content: prompt.into(),
+            attachments: Vec::new(),
+            model: None,
+        })
+        .await
+        .unwrap();
+    drain_until_stream_done(event_rx).await;
+}
+
+/// A new user prompt's request is built from the active path, so every earlier
+/// turn's assistant reply rides the history — the reply immediately before the
+/// pending prompt included, which is neither replayed as the request's prompt
+/// nor left out of it.
+#[tokio::test]
+async fn a_new_prompt_carries_the_previous_turns_replies() {
+    let (addr, bodies) = spawn_recording_openai(None);
+    let (cmd_tx, mut event_rx, handle) = core_with_mock(addr).await;
+    recv_skills_loaded(&mut event_rx).await;
+
+    send_and_drain(&cmd_tx, &mut event_rx, "first task").await;
+    send_and_drain(&cmd_tx, &mut event_rx, "second task").await;
+    drop(cmd_tx);
+    let _ = handle.await;
+
+    let chats = recorded_chats(&bodies);
+    assert_eq!(chats.len(), 2, "the session's two turns: {chats:?}");
+    assert!(
+        chats[0].contains("first task") && !chats[0].contains("reply-1"),
+        "the first turn could not have known its own reply: {}",
+        chats[0]
+    );
+    assert!(
+        chats[1].contains("first task"),
+        "the first prompt stays in the next request's history: {}",
+        chats[1]
+    );
+    assert!(
+        chats[1].contains("reply-1"),
+        "the first turn's assistant reply rides the next request instead of being \
+         left out: {}",
+        chats[1]
+    );
+    assert!(
+        chats[1].contains("second task"),
+        "the pending prompt is the request's own prompt: {}",
+        chats[1]
+    );
+}
+
+/// Compaction is the one thing that may leave earlier assistant replies out of
+/// a later prompt's request: the summary replaces the head it covers, while the
+/// kept tail — assistant replies included — still rides along.
+#[tokio::test]
+async fn a_new_prompt_after_a_compaction_keeps_the_tail_replies() {
+    let (addr, bodies) = spawn_recording_openai(None);
+    let (cmd_tx, mut event_rx, handle) = core_with_mock(addr).await;
+    recv_skills_loaded(&mut event_rx).await;
+
+    for prompt in ["first task", "second task", "third task"] {
+        send_and_drain(&cmd_tx, &mut event_rx, prompt).await;
+    }
+    // The compacted history: six messages, so the plan keeps the last four and
+    // summarizes the first turn. The summarizer is the mock's fourth chat
+    // request, so its reply becomes the summary text.
+    cmd_tx
+        .send(Command::CompactSession { instruction: None })
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let ev = tokio::time::timeout(deadline - tokio::time::Instant::now(), event_rx.recv())
+            .await
+            .expect("timed out waiting for SessionCompacted")
+            .expect("core task ended");
+        match ev {
+            Event::SessionCompacted { .. } => break,
+            Event::SessionError { error } => panic!("compaction errored: {error}"),
+            _ => {}
+        }
+    }
+    send_and_drain(&cmd_tx, &mut event_rx, "fourth task").await;
+    drop(cmd_tx);
+    let _ = handle.await;
+
+    let chats = recorded_chats(&bodies);
+    assert_eq!(
+        chats.len(),
+        5,
+        "three turns, the summarizer, and the new turn: {chats:?}"
+    );
+    let request = &chats[4];
+    assert!(
+        request.contains("reply-4"),
+        "the summary replaces the history it covers: {request}"
+    );
+    for compacted in ["first task", "reply-1"] {
+        assert!(
+            !request.contains(compacted),
+            "the summarized {compacted:?} is compacted away: {request}"
+        );
+    }
+    for kept in [
+        "second task",
+        "reply-2",
+        "third task",
+        "reply-3",
+        "fourth task",
+    ] {
+        assert!(
+            request.contains(kept),
+            "the kept tail's {kept:?} rides the new prompt's request: {request}"
+        );
+    }
+}
+
+/// Cancelling a turn must not leave the assistant's partial reply out of the
+/// conversation: the next prompt's request carries it above the prompt, so the
+/// model continues from what the interrupted turn had already produced.
+#[tokio::test]
+async fn a_new_prompt_after_an_interrupted_turn_keeps_the_partial_reply() {
+    let (addr, bodies) = spawn_recording_openai(Some("HALFWAY-THROUGH-THE-TASK"));
+    let (cmd_tx, mut event_rx, handle) = core_with_mock(addr).await;
+    recv_skills_loaded(&mut event_rx).await;
+
+    cmd_tx
+        .send(Command::SendMessage {
+            content: "first task".into(),
+            attachments: Vec::new(),
+            model: None,
+        })
+        .await
+        .unwrap();
+    // The turn streams its partial reply and then holds: interrupt it once the
+    // partial is in.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let ev = tokio::time::timeout(deadline - tokio::time::Instant::now(), event_rx.recv())
+            .await
+            .expect("timed out waiting for the partial reply")
+            .expect("core task ended");
+        match ev {
+            Event::TokenReceived { content } => {
+                assert_eq!(content, "HALFWAY-THROUGH-THE-TASK");
+                break;
+            }
+            Event::StreamError { error } => panic!("the turn errored: {error}"),
+            _ => {}
+        }
+    }
+    cmd_tx.send(Command::CancelStream).await.unwrap();
+    send_and_drain(&cmd_tx, &mut event_rx, "second task").await;
+    drop(cmd_tx);
+    let _ = handle.await;
+
+    let chats = recorded_chats(&bodies);
+    assert_eq!(
+        chats.len(),
+        2,
+        "the interrupted turn and the next: {chats:?}"
+    );
+    assert!(
+        chats[1].contains("first task") && chats[1].contains("HALFWAY-THROUGH-THE-TASK"),
+        "the interrupted turn's prompt and partial reply stay in the next request's \
+         history: {}",
+        chats[1]
+    );
+    assert!(
+        chats[1].contains("second task"),
+        "the pending prompt is the request's own prompt: {}",
+        chats[1]
+    );
+}
+
+/// A session the core did not build in this process — an app restart resuming
+/// the most recent session — is rebuilt from its stored rows, so the next
+/// prompt's request still carries every earlier turn's replies. The reload is
+/// the one place a reply could fall out of the active path without any turn
+/// having been compacted, cancelled or redone.
+#[tokio::test]
+async fn a_new_prompt_after_a_restart_carries_the_loaded_sessions_replies() {
+    let (addr, bodies) = spawn_recording_openai(None);
+    let store = Store::open_in_memory().await.unwrap();
+
+    let (cmd_tx, mut event_rx, handle) =
+        core_with_mock_store(addr, store.clone(), StartupSession::None).await;
+    recv_skills_loaded(&mut event_rx).await;
+    send_and_drain(&cmd_tx, &mut event_rx, "first task").await;
+    send_and_drain(&cmd_tx, &mut event_rx, "second task").await;
+    drop(cmd_tx);
+    let _ = handle.await;
+
+    // Restart over the same store: the core loads the session back from its
+    // rows before the third prompt is sent.
+    let (cmd_tx, mut event_rx, handle) =
+        core_with_mock_store(addr, store.clone(), StartupSession::MostRecent).await;
+    recv_skills_loaded(&mut event_rx).await;
+    let loaded = recv_session_loaded(&mut event_rx).await;
+    assert_eq!(
+        loaded
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["first task", "reply-1", "second task", "reply-2"],
+        "the reload rebuilds the active path, the replies included"
+    );
+    send_and_drain(&cmd_tx, &mut event_rx, "third task").await;
+    drop(cmd_tx);
+    let _ = handle.await;
+
+    let chats = recorded_chats(&bodies);
+    assert_eq!(
+        chats.len(),
+        3,
+        "the first run's two turns and the restarted core's one: {chats:?}"
+    );
+    let request = &chats[2];
+    for carried in [
+        "first task",
+        "reply-1",
+        "second task",
+        "reply-2",
+        "third task",
+    ] {
+        assert!(
+            request.contains(carried),
+            "the loaded session's {carried:?} rides the new prompt's request: {request}"
+        );
+    }
+}
+
+/// Switching to a stored session reloads its path; the next prompt's request is
+/// the loaded session's history — its earlier replies included — and not the
+/// session that was active a moment ago.
+#[tokio::test]
+async fn a_new_prompt_after_switching_to_a_stored_session_carries_its_replies() {
+    let (addr, bodies) = spawn_recording_openai(None);
+    let store = Store::open_in_memory().await.unwrap();
+    let (cmd_tx, mut event_rx, handle) =
+        core_with_mock_store(addr, store.clone(), StartupSession::None).await;
+    recv_skills_loaded(&mut event_rx).await;
+
+    send_and_drain(&cmd_tx, &mut event_rx, "first task").await;
+    send_and_drain(&cmd_tx, &mut event_rx, "second task").await;
+    let mut probe = store.clone();
+    let first = probe
+        .most_recent_session()
+        .await
+        .unwrap()
+        .expect("the first session's row")
+        .id;
+
+    // A second session, so the switch has something to load away from.
+    cmd_tx.send(Command::NewSession).await.unwrap();
+    send_and_drain(&cmd_tx, &mut event_rx, "other task").await;
+
+    cmd_tx
+        .send(Command::LoadSession { id: first })
+        .await
+        .unwrap();
+    let loaded = recv_session_loaded(&mut event_rx).await;
+    assert_eq!(loaded.id, Some(first));
+    assert_eq!(
+        loaded
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["first task", "reply-1", "second task", "reply-2"],
+        "the switch loads the stored session's path, the replies included"
+    );
+
+    send_and_drain(&cmd_tx, &mut event_rx, "third task").await;
+    drop(cmd_tx);
+    let _ = handle.await;
+
+    let chats = recorded_chats(&bodies);
+    assert_eq!(
+        chats.len(),
+        4,
+        "two turns, the other session's turn, and the switched turn: {chats:?}"
+    );
+    let request = &chats[3];
+    for carried in [
+        "first task",
+        "reply-1",
+        "second task",
+        "reply-2",
+        "third task",
+    ] {
+        assert!(
+            request.contains(carried),
+            "the loaded session's {carried:?} rides the new prompt's request: {request}"
+        );
+    }
+    for other in ["other task", "reply-3"] {
+        assert!(
+            !request.contains(other),
+            "the left session's {other:?} stays out of the loaded one's request: {request}"
+        );
+    }
+}
+
+/// Compaction has to survive the store round-trip: the reloaded path rebuilds
+/// the summary marker, so a prompt sent after a restart still sends
+/// `[summary, kept tail]` — the summarized head stays away, the kept tail's
+/// replies ride along. A reload that lost the marker would quietly re-send the
+/// whole compacted head on the next request.
+#[tokio::test]
+async fn a_new_prompt_after_a_restart_on_a_compacted_session_keeps_the_tail() {
+    let (addr, bodies) = spawn_recording_openai(None);
+    let store = Store::open_in_memory().await.unwrap();
+
+    let (cmd_tx, mut event_rx, handle) =
+        core_with_mock_store(addr, store.clone(), StartupSession::None).await;
+    recv_skills_loaded(&mut event_rx).await;
+    for prompt in ["first task", "second task", "third task"] {
+        send_and_drain(&cmd_tx, &mut event_rx, prompt).await;
+    }
+    compact_and_wait(&cmd_tx, &mut event_rx).await;
+    drop(cmd_tx);
+    let _ = handle.await;
+
+    let (cmd_tx, mut event_rx, handle) =
+        core_with_mock_store(addr, store.clone(), StartupSession::MostRecent).await;
+    recv_skills_loaded(&mut event_rx).await;
+    let loaded = recv_session_loaded(&mut event_rx).await;
+    assert!(
+        !loaded.summaries.is_empty(),
+        "the reload marks the summary node, or the compacted head would be sent again"
+    );
+    send_and_drain(&cmd_tx, &mut event_rx, "fourth task").await;
+    drop(cmd_tx);
+    let _ = handle.await;
+
+    let chats = recorded_chats(&bodies);
+    assert_eq!(
+        chats.len(),
+        5,
+        "three turns, the summarizer, and the restarted core's turn: {chats:?}"
+    );
+    // The summarizer is the fourth chat request, so its reply is the summary
+    // text that stands in for the compacted head.
+    let request = &chats[4];
+    for compacted in ["first task", "reply-1"] {
+        assert!(
+            !request.contains(compacted),
+            "the summarized {compacted:?} stays compacted away across the restart: {request}"
+        );
+    }
+    for kept in [
+        "reply-4",
+        "second task",
+        "reply-2",
+        "third task",
+        "reply-3",
+        "fourth task",
+    ] {
+        assert!(
+            request.contains(kept),
+            "the summary and the kept tail's {kept:?} ride the new prompt's request: {request}"
+        );
+    }
+}

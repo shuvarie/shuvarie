@@ -1,4 +1,6 @@
 use clap::Parser;
+#[cfg(target_env = "musl")]
+use mimalloc_safe::MiMalloc;
 use tokio::sync::mpsc::channel;
 
 mod cli;
@@ -10,7 +12,7 @@ use crate::cli::{init_default_store, show_resume_hint};
 
 #[cfg(target_env = "musl")]
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: MiMalloc = MiMalloc;
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
