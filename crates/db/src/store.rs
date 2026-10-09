@@ -123,6 +123,10 @@ pub struct StoredMessage {
     /// Scene name under which the model produced this assistant message;
     /// `None` for the built-in Default scene (and for user rows).
     pub scene: Option<String>,
+    /// Wall-clock duration of the turn that produced this assistant message
+    /// (prompt accepted → reply committed); `None` for user rows, summaries,
+    /// imports, and pre-column data.
+    pub duration_ms: Option<u64>,
     /// Metadata of the message's attachments (images, documents), in
     /// attachment order; hydrated from `message_attachments` rows when the
     /// session is loaded, always empty in rows freshly appended by the
@@ -207,6 +211,7 @@ impl From<Message> for StoredMessage {
             request: serde_json::from_str(&m.request_json).unwrap_or_default(),
             model_code: m.model_code,
             scene: m.scene,
+            duration_ms: m.duration_ms,
             attachments: Vec::new(),
         }
     }
@@ -643,6 +648,7 @@ impl Store {
             request_json: String::new(),
             model_code: None,
             scene: None,
+            duration_ms: None,
         })
         .exec(&mut self.db)
         .await
@@ -665,6 +671,7 @@ impl Store {
         cost: f64,
         request: &TokenUsage,
         attribution: &Attribution,
+        duration_ms: Option<u64>,
     ) -> Result<StoredMessage> {
         let seq = self.next_seq(session_id).await?;
         let msg = toasty::create!(Message {
@@ -686,6 +693,7 @@ impl Store {
             request_json: serde_json::to_string(request).unwrap_or_default(),
             model_code: attribution.model_code.clone(),
             scene: attribution.scene.clone(),
+            duration_ms,
         })
         .exec(&mut self.db)
         .await
@@ -707,6 +715,7 @@ impl Store {
         cost: f64,
         request: &TokenUsage,
         attribution: &Attribution,
+        duration_ms: Option<u64>,
     ) -> Result<()> {
         Message::update_by_id(message_id)
             .content(content.to_string())
@@ -722,6 +731,7 @@ impl Store {
             .request_json(serde_json::to_string(request).unwrap_or_default())
             .model_code(attribution.model_code.clone())
             .scene(attribution.scene.clone())
+            .duration_ms(duration_ms)
             .exec(&mut self.db)
             .await
             .map_err(|e| DbError::Query(e.to_string()))?;
@@ -754,6 +764,7 @@ impl Store {
             request_json: String::new(),
             model_code: None,
             scene: None,
+            duration_ms: None,
         })
         .exec(&mut self.db)
         .await
@@ -848,8 +859,9 @@ impl Store {
                 cost: m.cost,
                 summary: m.summary,
                 request_json: serde_json::to_string(&m.request).unwrap_or_default(),
-                model_code: None,
-                scene: None,
+                model_code: m.model_code.clone(),
+                scene: m.scene.clone(),
+                duration_ms: m.duration_ms,
             })
             .exec(&mut self.db)
             .await

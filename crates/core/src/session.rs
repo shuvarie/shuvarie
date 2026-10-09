@@ -35,6 +35,38 @@ fn request_usage_of(m: &StoredMessage) -> Option<TokenUsage> {
     (usage.total_tokens.unwrap_or(0) > 0).then_some(usage)
 }
 
+/// The turn's display metadata on the active path: which model produced the
+/// reply, under which scene, and how long the turn took. Keyed by dense
+/// message index (like `reasoning` / `text_segments`) and rendered by the TUI
+/// as the dimmed footer under an assistant turn. Rebuilt from the stored rows
+/// on load and extended by live commits, so a reloaded session's turns keep
+/// their footer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MessageMeta {
+    /// Model code (`org/model`); `None` when the model is not in the catalog
+    /// (or the row predates attribution).
+    pub model_code: Option<String>,
+    /// Scene name; `None` = the built-in Default scene. Only meaningful
+    /// alongside a `model_code`.
+    pub scene: Option<String>,
+    /// Wall-clock turn duration in milliseconds (prompt accepted → reply
+    /// committed); `None` when the turn's timing is not known.
+    pub duration_ms: Option<u64>,
+}
+
+impl MessageMeta {
+    /// Nothing is known about the turn, so there is no footer to render: a
+    /// scene with no model code annotates nothing.
+    pub fn is_empty(&self) -> bool {
+        self.model_code.is_none() && self.duration_ms.is_none()
+    }
+
+    /// The scene name as displayed: an empty scene is the Default one.
+    pub fn scene_name(&self) -> Option<&str> {
+        self.scene.as_deref().filter(|scene| !scene.is_empty())
+    }
+}
+
 /// One tool call attached to a tree node (popup display).
 #[derive(Debug, Clone)]
 pub struct TreeNodeTool {
@@ -76,6 +108,9 @@ pub struct Session {
     /// positions they streamed at; drives the reload interleave.
     pub text_segments: HashMap<u64, Vec<TextSegment>>,
     pub interrupted: HashMap<u64, bool>,
+    /// Per-turn display metadata of the active path's messages (model, scene,
+    /// duration), keyed by dense message index.
+    pub message_meta: HashMap<u64, MessageMeta>,
     /// Tool calls belonging to the active path, keyed by dense message index.
     pub tool_records: Vec<ToolRecord>,
     pub tokens: u64,
@@ -278,6 +313,14 @@ impl Session {
             }
             if !m.summary {
                 s.record_model_use(m.model_code.as_deref(), m.scene.as_deref());
+                let meta = MessageMeta {
+                    model_code: m.model_code.clone(),
+                    scene: m.scene.clone(),
+                    duration_ms: m.duration_ms,
+                };
+                if !meta.is_empty() {
+                    s.message_meta.insert(idx, meta);
+                }
             }
         }
         s.tool_records = stored
@@ -301,6 +344,7 @@ impl Session {
         self.reasoning.clear();
         self.text_segments.clear();
         self.interrupted.clear();
+        self.message_meta.clear();
         self.tool_records.clear();
         self.tokens = 0;
         self.cost = 0.0;
@@ -509,6 +553,7 @@ mod tests {
             request: TokenUsage::default(),
             model_code: None,
             scene: None,
+            duration_ms: None,
             attachments: Vec::new(),
         }
     }
@@ -1075,6 +1120,61 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn from_stored_rebuilds_the_per_turn_meta_of_the_active_path() {
+        let mut stored = stored_session(vec![
+            stored_message(0, MsgRole::User, "u1"),
+            stored_message(1, MsgRole::Assistant, "a1"),
+            stored_message(2, MsgRole::Assistant, "summary"),
+            stored_message(3, MsgRole::User, "u2"),
+            stored_message(4, MsgRole::Assistant, "a2"),
+            stored_message(5, MsgRole::Assistant, "abandoned"),
+        ]);
+        chain(&mut stored.messages);
+        stored.leaf_id = Some(stored.messages[4].id);
+        // A timed, attributed reply; a reply the catalog never named; a
+        // compaction summary (metadata is not the summary's to wear); and an
+        // off-path row (no footer to show).
+        stored.messages[1].model_code = Some("zai-org/glm-5.3-flash".into());
+        stored.messages[1].scene = Some("Review".into());
+        stored.messages[1].duration_ms = Some(12_400);
+        stored.messages[2].summary = true;
+        stored.messages[2].model_code = Some("anthropic/claude-summarizer".into());
+        stored.messages[2].duration_ms = Some(900);
+        stored.messages[4].duration_ms = Some(1_500);
+        stored.messages[5].model_code = Some("off-path/model".into());
+
+        let session = Session::from_stored(stored);
+        assert_eq!(
+            session.message_meta.get(&1),
+            Some(&MessageMeta {
+                model_code: Some("zai-org/glm-5.3-flash".into()),
+                scene: Some("Review".into()),
+                duration_ms: Some(12_400),
+            })
+        );
+        assert_eq!(
+            session.message_meta.get(&4),
+            Some(&MessageMeta {
+                model_code: None,
+                scene: None,
+                duration_ms: Some(1_500),
+            }),
+            "a turn outside the catalog still keeps its timing"
+        );
+        assert_eq!(
+            session.message_meta.get(&0),
+            None,
+            "prompts carry no footer"
+        );
+        assert_eq!(
+            session.message_meta.get(&2),
+            None,
+            "a summary is not a turn"
+        );
+        assert_eq!(session.message_meta.len(), 2, "off-path rows stay out");
     }
 
     #[test]

@@ -1,18 +1,19 @@
 use std::collections::BTreeSet;
 
 use ratatui::prelude::*;
-use shuvarie_core::Role;
 use shuvarie_core::tool_record::ToolRecord;
 use shuvarie_core::tools::todos::parse_items;
+use shuvarie_core::{MessageMeta, Role};
 use shuvarie_db::TextSegment;
 use shuvarie_llm::{FileChange, PatchFileKind};
 use unicode_width::UnicodeWidthStr;
 
 use super::blocks::{
     Block, BlockMessage, ChatEnv, ReasoningBlock, ReasoningMessage, TextBlock, TextMessage,
-    ToolMessage, hides_output_when_collapsed, shows_elapsed,
+    ToolMessage, format_duration_ms, hides_output_when_collapsed, shows_elapsed,
 };
 use super::segment::{BLOCK_PADDING, BlockAddr, HitRegion, Segment, TEXT_PADDING};
+use crate::tui::theme;
 
 /// Estimated row counters of one turn. Collected once (from stored session
 /// data at load, or from block state at materialization/mutation) so heights
@@ -27,6 +28,13 @@ pub struct TurnEst {
     pub reasoning_rows: u32,
     pub deco_rows: u32,
     pub padding_rows: u32,
+    /// The turn's metadata footer: its source rows (1 or 0) and rendered
+    /// width, folded in the way body text is so a narrow viewport's wrap is
+    /// predicted instead of guessed. `0`/`0` when the turn has no footer. The
+    /// prediction wraps greedily, like the body-text counters: a word wider
+    /// than the viewport can cost the rendered footer one row more.
+    pub meta_rows: u32,
+    pub meta_width: u32,
 }
 
 impl TurnEst {
@@ -39,6 +47,8 @@ impl TurnEst {
         self.reasoning_rows += other.reasoning_rows;
         self.deco_rows += other.deco_rows;
         self.padding_rows += other.padding_rows;
+        self.meta_rows += other.meta_rows;
+        self.meta_width += other.meta_width;
     }
 
     pub fn deco(rows: u32) -> Self {
@@ -62,18 +72,25 @@ impl TurnEst {
         let inner = w.saturating_sub(2 * u32::from(BLOCK_PADDING.0)).max(1);
         let text_wrap = self.text_lines.max(self.text_width.div_ceil(w));
         let tool_wrap = self.tool_count.max(self.tool_header_width.div_ceil(inner));
+        let meta_wrap = if self.meta_rows == 0 {
+            0
+        } else {
+            self.meta_rows.max(self.meta_width.div_ceil(w))
+        };
         self.padding_rows
             .saturating_add(text_wrap)
             .saturating_add(tool_wrap)
             .saturating_add(self.tool_rows)
             .saturating_add(self.reasoning_rows)
             .saturating_add(self.deco_rows)
+            .saturating_add(meta_wrap)
     }
 
     /// Build the estimate of a stored session message from its raw data —
     /// the lazy path: blocks are not materialized yet. Text runs interleave
     /// with the tools at their `after_tool` positions, mirroring
     /// `materialize_blocks`.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_session_parts(
         role: Role,
         content: &str,
@@ -82,6 +99,7 @@ impl TurnEst {
         text_runs: &[TextSegment],
         summary_marker: bool,
         interrupted_marker: bool,
+        meta: Option<&MessageMeta>,
     ) -> Self {
         let mut est = Self::default();
         match role {
@@ -140,6 +158,7 @@ impl TurnEst {
                 if interrupted_marker {
                     est.deco_rows += 1;
                 }
+                add_meta_est(&mut est, meta);
             }
         }
         est.deco_rows += 1;
@@ -211,6 +230,50 @@ pub(super) fn file_change_row_est(change: &FileChange) -> u32 {
     }
 }
 
+/// The dimmed metadata footer under an assistant turn: how long the turn took
+/// and which model — under which scene — produced it, e.g.
+/// `Took 12.4s · anthropic/claude-sonnet-4-5 (plan)`. `None` when neither is
+/// known (a user row, an imported session, pre-attribution data), so nothing
+/// renders; a turn that knows only one of the two shows just that one. The
+/// label is muted and the values dim — the tool `Took …` meta row's shape — so
+/// timing never competes with the turn's content.
+pub fn meta_line(meta: &MessageMeta) -> Option<Line<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if let Some(ms) = meta.duration_ms {
+        spans.push(Span::raw("Took ").fg(theme::text_muted()).italic());
+        spans.push(
+            Span::raw(format_duration_ms(ms))
+                .fg(theme::text_dim())
+                .italic(),
+        );
+    }
+    if let Some(code) = meta.model_code.as_deref() {
+        if !spans.is_empty() {
+            spans.push(Span::raw(" · ").fg(theme::text_muted()).italic());
+        }
+        let label = match meta.scene_name() {
+            Some(scene) => format!("{code} ({scene})"),
+            None => code.to_string(),
+        };
+        spans.push(Span::raw(label).fg(theme::text_dim()).italic());
+    }
+    (!spans.is_empty()).then(|| Line::from(spans))
+}
+
+/// Fold a turn's footer into an estimate, mirroring the single unpadded row
+/// [`meta_line`] renders.
+fn add_meta_est(est: &mut TurnEst, meta: Option<&MessageMeta>) {
+    let Some(line) = meta.and_then(meta_line) else {
+        return;
+    };
+    est.meta_rows = 1;
+    est.meta_width = line
+        .spans
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()) as u32)
+        .sum();
+}
+
 /// One projected segment of a turn with its measured height and the row
 /// offset at which it starts within the turn.
 pub struct TurnSeg {
@@ -277,6 +340,12 @@ pub struct TurnData {
     pub role: Role,
     pub blocks: Option<Vec<Block>>,
     pub est: TurnEst,
+    /// The turn's footer metadata — the model and scene it ran under, and how
+    /// long it took. `None` for user turns, rows without attribution, and a
+    /// live turn until the core reports its own just before the turn's
+    /// terminal event. Held here (not in the blocks) so it survives a lazy
+    /// slot's materialization and eviction.
+    pub meta: Option<MessageMeta>,
     pub cache: Option<TurnCache>,
     /// Last exactly measured layout height at a given content width. Kept
     /// across cache invalidation and eviction so a turn's layout height never
@@ -293,6 +362,7 @@ impl TurnData {
             role,
             blocks: Some(Vec::new()),
             est: TurnEst::default(),
+            meta: None,
             cache: None,
             measured: None,
             rev: 0,
@@ -301,16 +371,31 @@ impl TurnData {
     }
 
     /// A lazy slot backed by the stored session: no blocks, height from the
-    /// precomputed estimate.
-    pub fn lazy(role: Role, est: TurnEst) -> Self {
+    /// precomputed estimate, footer metadata straight from the session's
+    /// per-turn map.
+    pub fn lazy(role: Role, est: TurnEst, meta: Option<MessageMeta>) -> Self {
         Self {
             role,
             blocks: None,
             env_relevant: est.tool_count > 0,
             est,
+            meta,
             cache: None,
             measured: None,
             rev: 0,
+        }
+    }
+
+    /// Install the turn's footer metadata. The live path lands this just
+    /// before the turn's terminal event, while the turn is still in flight;
+    /// the commit's own `refresh_est` folds it into the height, and a lazy
+    /// slot is built with it already inside `est` — so a turn without blocks
+    /// is never re-estimated from blocks it does not have.
+    pub fn set_meta(&mut self, meta: Option<MessageMeta>) {
+        self.meta = meta;
+        if self.blocks.is_some() {
+            self.rev += 1;
+            self.refresh_est(false);
         }
     }
 
@@ -359,6 +444,9 @@ impl TurnData {
             est.deco_rows += 1;
         }
         est.deco_rows += 1;
+        if self.role == Role::Assistant {
+            add_meta_est(&mut est, self.meta.as_ref());
+        }
         self.est = est;
         self.env_relevant = est.tool_count > 0;
     }
@@ -638,6 +726,11 @@ pub fn render_turn_cache(
             y = push_measured(&mut segs, segment, y, width);
         }
     }
+    if turn.role == Role::Assistant
+        && let Some(line) = turn.meta.as_ref().and_then(meta_line)
+    {
+        y = push_measured(&mut segs, Segment::plain(vec![line]), y, width);
+    }
     y = push_measured(&mut segs, Segment::spacer(), y, width);
     Some(TurnCache {
         width,
@@ -795,8 +888,98 @@ mod tests {
 
     #[test]
     fn refresh_spinners_without_cache_is_a_noop() {
-        let mut turn = TurnData::lazy(Role::User, TurnEst::default());
+        let mut turn = TurnData::lazy(Role::User, TurnEst::default(), None);
         turn.refresh_spinners(&env());
         assert!(turn.cache().is_none());
+    }
+
+    fn meta(model: Option<&str>, scene: Option<&str>, duration_ms: Option<u64>) -> MessageMeta {
+        MessageMeta {
+            model_code: model.map(str::to_string),
+            scene: scene.map(str::to_string),
+            duration_ms,
+        }
+    }
+
+    fn meta_text(meta: &MessageMeta) -> Option<String> {
+        meta_line(meta).map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+    }
+
+    #[test]
+    fn meta_line_joins_duration_and_model() {
+        assert_eq!(
+            meta_text(&meta(
+                Some("anthropic/claude-sonnet-4-5"),
+                Some("plan"),
+                Some(12_400)
+            ))
+            .as_deref(),
+            Some("Took 12.4s · anthropic/claude-sonnet-4-5 (plan)")
+        );
+        // The Default scene annotates nothing.
+        assert_eq!(
+            meta_text(&meta(
+                Some("anthropic/claude-sonnet-4-5"),
+                None,
+                Some(12_400)
+            ))
+            .as_deref(),
+            Some("Took 12.4s · anthropic/claude-sonnet-4-5")
+        );
+        // A long turn reads in minutes, like every other duration label.
+        assert_eq!(
+            meta_text(&meta(Some("acme/worker"), None, Some(133_000))).as_deref(),
+            Some("Took 2m 13s · acme/worker")
+        );
+    }
+
+    #[test]
+    fn meta_line_shows_whatever_it_knows() {
+        // Imported and pre-attribution rows keep their timing.
+        assert_eq!(
+            meta_text(&meta(None, None, Some(4_500))).as_deref(),
+            Some("Took 4.5s")
+        );
+        // A model recorded without timing still names itself.
+        assert_eq!(
+            meta_text(&meta(Some("zai-org/glm-5"), Some("plan"), None)).as_deref(),
+            Some("zai-org/glm-5 (plan)")
+        );
+        // Nothing known: nothing renders, and a scene alone annotates nothing
+        // — a model name is what a scene qualifies.
+        assert_eq!(meta_text(&meta(None, None, None)), None);
+        assert_eq!(
+            meta_text(&meta(Some("m"), Some(""), None)).as_deref(),
+            Some("m")
+        );
+    }
+
+    #[test]
+    fn meta_est_wraps_a_narrow_footer_like_the_rendered_row() {
+        let meta = meta(
+            Some("anthropic/claude-sonnet-4-5"),
+            Some("plan"),
+            Some(12_400),
+        );
+        let mut est = TurnEst::default();
+        add_meta_est(&mut est, Some(&meta));
+        assert_eq!(est.meta_rows, 1);
+        let footer_width = 47;
+        assert_eq!(est.meta_width, footer_width);
+        assert_eq!(est.height(80), 1, "one row where it fits");
+        assert_eq!(
+            est.height(24),
+            footer_width.div_ceil(24),
+            "the estimate predicts the narrow wrap"
+        );
+        // A turn without metadata keeps its height untouched.
+        let mut bare = TurnEst::default();
+        add_meta_est(&mut bare, None);
+        assert_eq!(bare, TurnEst::default());
     }
 }

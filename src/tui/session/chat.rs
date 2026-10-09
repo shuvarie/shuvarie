@@ -268,6 +268,12 @@ pub enum ChatMessage {
         call_id: Option<String>,
     },
     StreamDone,
+    /// The turn's display metadata (model, scene, wall-clock duration), which
+    /// the core sends just before the turn's terminal event: it lands on the
+    /// in-flight turn so the committed reply renders its footer.
+    TurnMeta {
+        meta: shuvarie_core::MessageMeta,
+    },
     StreamError {
         error: String,
     },
@@ -781,6 +787,11 @@ impl Chat {
                     },
                 );
                 self.touch_in_flight();
+            }
+            ChatMessage::TurnMeta { meta } => {
+                if let Some(turn) = self.in_flight.borrow_mut().as_mut() {
+                    turn.set_meta(Some(meta));
+                }
             }
             ChatMessage::StreamDone => self.commit_done(),
             ChatMessage::StreamError { .. } | ChatMessage::StreamCancelled => {
@@ -1730,9 +1741,12 @@ impl Chat {
         *self.turns.borrow_mut() = session
             .messages
             .iter()
-            .map(|message| message.role)
+            .enumerate()
             .zip(ests)
-            .map(|(role, est)| TurnData::lazy(role, est))
+            .map(|((idx, message), est)| {
+                let meta = session.message_meta.get(&(idx as u64)).cloned();
+                TurnData::lazy(message.role, est, meta)
+            })
             .collect();
         *self.in_flight.borrow_mut() = None;
         let saved_scroll = session.scroll;
@@ -2378,6 +2392,7 @@ fn build_turn_ests(session: &shuvarie_core::Session, interrupted: bool) -> Vec<T
                 text_runs,
                 summary,
                 interrupted && idx == last && message.role == Role::Assistant,
+                session.message_meta.get(&(idx as u64)),
             );
             add_media_est(&mut est, &message.attachments);
             est
@@ -3187,6 +3202,7 @@ pub(crate) mod tests {
             &runs,
             false,
             false,
+            None,
         );
         assert_eq!(est.tool_count, 2);
         assert_eq!(est.text_lines, 3, "one line per run");
@@ -3208,6 +3224,7 @@ pub(crate) mod tests {
             &[],
             false,
             false,
+            None,
         );
         assert_eq!(est.text_lines, 1);
         assert_eq!(
@@ -5130,6 +5147,228 @@ pub(crate) mod tests {
             "only the viewport's matches are counted: {visible}"
         );
         assert!(visible > 0, "the sticky-bottom viewport shows matches");
+    }
+
+    /// The dimmed footer the core reports for a finished turn.
+    const FOOTER: &str = "Took 12.4s · anthropic/claude-sonnet-4-5 (plan)";
+
+    fn footer_meta(ms: u64) -> shuvarie_core::MessageMeta {
+        shuvarie_core::MessageMeta {
+            model_code: Some("anthropic/claude-sonnet-4-5".into()),
+            scene: Some("plan".into()),
+            duration_ms: Some(ms),
+        }
+    }
+
+    /// A session whose single reply carries a footer.
+    fn session_with_footer() -> shuvarie_core::Session {
+        let mut session = shuvarie_core::Session::new();
+        session.push_user("go");
+        session.push_assistant("done");
+        session.message_meta.insert(1, footer_meta(12_400));
+        session
+    }
+
+    #[test]
+    fn live_reply_renders_its_footer() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "go".into(),
+            attachments: Vec::new(),
+        });
+        chat.update(ChatMessage::TokenReceived {
+            content: "done".into(),
+        });
+        // The core reports the turn's metadata just before its terminal event.
+        chat.update(ChatMessage::TurnMeta {
+            meta: footer_meta(12_400),
+        });
+        chat.update(ChatMessage::StreamDone);
+        let reply = render_turn_lines(&chat, Some(1), 80).unwrap();
+        assert!(reply.contains(FOOTER), "{reply}");
+        assert!(
+            reply.trim_end().ends_with(FOOTER),
+            "the footer closes the turn: {reply}"
+        );
+        let prompt = render_turn_lines(&chat, Some(0), 80).unwrap();
+        assert!(
+            !prompt.contains("Took"),
+            "user turns carry no footer: {prompt}"
+        );
+    }
+
+    #[test]
+    fn footer_renders_only_under_the_turn_that_reported_it() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "first".into(),
+            attachments: Vec::new(),
+        });
+        chat.update(ChatMessage::TokenReceived {
+            content: "one".into(),
+        });
+        chat.update(ChatMessage::StreamDone);
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "second".into(),
+            attachments: Vec::new(),
+        });
+        chat.update(ChatMessage::TokenReceived {
+            content: "two".into(),
+        });
+        chat.update(ChatMessage::TurnMeta {
+            meta: footer_meta(12_400),
+        });
+        chat.update(ChatMessage::StreamDone);
+
+        assert!(
+            !render_turn_lines(&chat, Some(1), 80)
+                .unwrap()
+                .contains("Took"),
+            "the first reply reports nothing"
+        );
+        assert!(
+            render_turn_lines(&chat, Some(3), 80)
+                .unwrap()
+                .contains(FOOTER),
+            "the second reply wears the footer"
+        );
+    }
+
+    #[test]
+    fn reloaded_session_renders_the_stored_footer() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::Load {
+            session: session_with_footer(),
+        });
+        // The lazy slot's metadata must survive materialization.
+        draw(&chat, 80, 20);
+        let reply = render_turn_lines(&chat, Some(1), 79).unwrap();
+        assert!(reply.contains(FOOTER), "{reply}");
+        assert!(
+            !render_turn_lines(&chat, Some(0), 79)
+                .unwrap()
+                .contains("Took"),
+            "the prompt's stored row has no footer"
+        );
+    }
+
+    #[test]
+    fn interrupted_turn_keeps_its_footer() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "go".into(),
+            attachments: Vec::new(),
+        });
+        chat.update(ChatMessage::TokenReceived {
+            content: "half".into(),
+        });
+        chat.update(ChatMessage::TurnMeta {
+            meta: footer_meta(12_400),
+        });
+        chat.update(ChatMessage::StreamCancelled);
+        assert!(chat.interrupted, "the cut marks the turn");
+        let reply = render_turn_lines(&chat, Some(1), 80).unwrap();
+        assert!(reply.contains(FOOTER), "{reply}");
+
+        // `render_turn_lines` never draws the marker; render the turn's cache
+        // with it to pin the footer below it.
+        let diags = BTreeMap::new();
+        let env = ChatEnv {
+            lsp_diagnostics: &diags,
+            rev: 0,
+            media: &chat.media,
+        };
+        let turns = chat.turns.borrow();
+        let cache = render_turn_cache(
+            &turns[1],
+            1,
+            TurnFlags {
+                in_flight: false,
+                interrupted_marker: true,
+            },
+            80,
+            &env,
+            chat.env_rev,
+        )
+        .unwrap();
+        let rows: Vec<String> = cache
+            .segs
+            .iter()
+            .flat_map(|seg| seg.segment.flattened())
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        let marker = rows
+            .iter()
+            .position(|row| row.contains("(interrupted)"))
+            .expect("the marker renders");
+        let footer = rows
+            .iter()
+            .position(|row| row.contains("Took"))
+            .expect("the footer renders");
+        assert!(marker < footer, "marker over timing: {rows:?}");
+    }
+
+    #[test]
+    fn footerless_turn_reports_nothing() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::TokenReceived {
+            content: "done".into(),
+        });
+        // An all-unknown report (a model outside the catalog, a turn whose
+        // clock never started) renders nothing rather than a blank line.
+        chat.update(ChatMessage::TurnMeta {
+            meta: shuvarie_core::MessageMeta::default(),
+        });
+        chat.update(ChatMessage::StreamDone);
+        let reply = render_turn_lines(&chat, Some(0), 80).unwrap();
+        assert!(!reply.contains("Took"), "{reply}");
+        assert!(
+            chat.turns.borrow()[0].meta.is_some(),
+            "reported, just empty"
+        );
+        assert_eq!(chat.turns.borrow()[0].est.meta_rows, 0);
+    }
+
+    #[test]
+    fn footer_estimate_matches_the_measured_height() {
+        for width in [80u16, 60, 40] {
+            let mut chat = Chat::new();
+            chat.update(ChatMessage::Load {
+                session: session_with_footer(),
+            });
+            draw(&chat, width, 40);
+            let measured = chat.turns.borrow()[1].height(width - 1, chat.env_rev);
+            let est = chat.turns.borrow()[1].est.height(width - 1);
+            assert_eq!(
+                est, measured,
+                "width {width}: the footer's rows must be in the estimate too"
+            );
+        }
+    }
+
+    #[test]
+    fn footer_wrap_stays_inside_the_turn() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::Load {
+            session: session_with_footer(),
+        });
+        // 24 content columns cannot hold `anthropic/claude-sonnet-4-5` (27
+        // columns) on one row, so the footer wraps over several.
+        draw(&chat, 25, 40);
+        let measured = chat.turns.borrow()[1].height(24, chat.env_rev);
+        let est = chat.turns.borrow()[1].est.height(24);
+        // The estimate wraps greedily, so a word wider than the viewport can
+        // cost the rendered line one row more; it never costs fewer.
+        assert!(
+            measured == est || measured == est + 1,
+            "measured {measured} vs estimate {est} at width 24"
+        );
+        assert!(measured > chat.turns.borrow()[0].height(24, chat.env_rev));
     }
 }
 

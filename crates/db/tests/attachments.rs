@@ -261,6 +261,9 @@ async fn metadata_only_import_attaches_without_a_blob() {
             cost: 0.0,
             summary: false,
             request: TokenUsage::default(),
+            model_code: None,
+            scene: None,
+            duration_ms: None,
             attachments: vec![FileAttachment {
                 seq: 0,
                 kind: AttachmentKind::Image,
@@ -323,6 +326,9 @@ async fn import_drops_blob_content_that_fails_the_hash_check() {
             cost: 0.0,
             summary: false,
             request: TokenUsage::default(),
+            model_code: None,
+            scene: None,
+            duration_ms: None,
             attachments: vec![
                 FileAttachment {
                     seq: 0,

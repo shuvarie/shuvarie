@@ -205,6 +205,7 @@ async fn append_and_load_messages_in_order() {
                 ..Default::default()
             },
             &shuvarie_db::Attribution::default(),
+            None,
         )
         .await
         .unwrap();
@@ -317,6 +318,7 @@ async fn reasoning_segments_round_trip_with_positions() {
             0.0,
             &TokenUsage::default(),
             &shuvarie_db::Attribution::default(),
+            None,
         )
         .await
         .unwrap();
@@ -336,6 +338,7 @@ async fn reasoning_segments_round_trip_with_positions() {
             0.0,
             &TokenUsage::default(),
             &shuvarie_db::Attribution::default(),
+            None,
         )
         .await
         .unwrap();
@@ -377,6 +380,7 @@ async fn text_segments_round_trip_with_positions() {
             0.0,
             &TokenUsage::default(),
             &shuvarie_db::Attribution::default(),
+            None,
         )
         .await
         .unwrap();
@@ -396,6 +400,7 @@ async fn text_segments_round_trip_with_positions() {
             0.0,
             &TokenUsage::default(),
             &shuvarie_db::Attribution::default(),
+            None,
         )
         .await
         .unwrap();
@@ -606,6 +611,7 @@ async fn search_finds_messages_across_sessions_ranked() {
             0.0,
             &TokenUsage::default(),
             &shuvarie_db::Attribution::default(),
+            None,
         )
         .await
         .unwrap();
@@ -990,6 +996,7 @@ async fn tree_messages_round_trip_with_parents_and_leaf() {
             0.0,
             &TokenUsage::default(),
             &shuvarie_db::Attribution::default(),
+            None,
         )
         .await
         .unwrap();
@@ -1054,6 +1061,7 @@ async fn delete_branch_removes_subtree_with_tool_calls() {
             0.0,
             &TokenUsage::default(),
             &shuvarie_db::Attribution::default(),
+            None,
         )
         .await
         .unwrap();
@@ -1073,6 +1081,7 @@ async fn delete_branch_removes_subtree_with_tool_calls() {
             0.0,
             &TokenUsage::default(),
             &shuvarie_db::Attribution::default(),
+            None,
         )
         .await
         .unwrap();
@@ -1162,6 +1171,7 @@ async fn appends_advance_the_active_leaf() {
             0.0,
             &TokenUsage::default(),
             &shuvarie_db::Attribution::default(),
+            None,
         )
         .await
         .unwrap();
@@ -1191,4 +1201,92 @@ async fn set_scene_persists_and_clears() {
     store.set_scene(id, None).await.unwrap();
     let loaded = store.load_session(id).await.unwrap();
     assert_eq!(loaded.scene, None, "the built-in default stores NULL");
+}
+
+/// A reply row's wall-clock duration and attribution survive a write, a
+/// rewrite, and a reload; a user row and a rewrite that carries neither stay
+/// `None` (distinct from a real 0).
+#[tokio::test]
+async fn message_duration_and_attribution_round_trip_as_optional() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store
+        .create_session("timing", None, None, None)
+        .await
+        .unwrap();
+    let user = store
+        .append_message(id, None, Role::User, "go")
+        .await
+        .unwrap();
+    assert_eq!(user.duration_ms, None, "user rows are untimed");
+    assert_eq!(user.model_code, None);
+
+    let attribution = shuvarie_db::Attribution {
+        model_code: Some("acme/model-x".into()),
+        scene: Some("Plan".into()),
+    };
+    let reply = store
+        .append_assistant_message(
+            id,
+            Some(user.id),
+            "done",
+            &[],
+            &[],
+            false,
+            TokenUsage::default(),
+            0.0,
+            &TokenUsage::default(),
+            &attribution,
+            Some(12_400),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reply.duration_ms, Some(12_400));
+    assert_eq!(reply.model_code.as_deref(), Some("acme/model-x"));
+    assert_eq!(reply.scene.as_deref(), Some("Plan"));
+
+    let loaded = store.load_session(id).await.unwrap();
+    assert_eq!(loaded.messages[1].duration_ms, Some(12_400));
+    assert_eq!(
+        loaded.messages[1].model_code.as_deref(),
+        Some("acme/model-x")
+    );
+
+    // A rewrite replaces the timing it carries — an interrupted retry's row
+    // records its own, and one that knows nothing stores NULL instead of 0.
+    store
+        .update_message(
+            reply.id,
+            "done edited",
+            &[],
+            &[],
+            false,
+            TokenUsage::default(),
+            0.0,
+            &TokenUsage::default(),
+            &shuvarie_db::Attribution::default(),
+            Some(900),
+        )
+        .await
+        .unwrap();
+    let loaded = store.load_session(id).await.unwrap();
+    assert_eq!(loaded.messages[1].duration_ms, Some(900));
+    assert_eq!(loaded.messages[1].model_code, None);
+
+    store
+        .update_message(
+            reply.id,
+            "done again",
+            &[],
+            &[],
+            false,
+            TokenUsage::default(),
+            0.0,
+            &TokenUsage::default(),
+            &shuvarie_db::Attribution::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    let loaded = store.load_session(id).await.unwrap();
+    assert_eq!(loaded.messages[1].duration_ms, None, "NULL, not a real 0");
 }

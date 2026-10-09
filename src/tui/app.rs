@@ -801,6 +801,9 @@ impl App {
                 CoreEvent::StreamDone { .. } => Some(AppMessage::Session(SessionMessage::Chat(
                     ChatMessage::StreamDone,
                 ))),
+                CoreEvent::TurnMeta { meta } => Some(AppMessage::Session(SessionMessage::Chat(
+                    ChatMessage::TurnMeta { meta },
+                ))),
                 CoreEvent::PromptSteered { content } => Some(AppMessage::Session(
                     SessionMessage::Chat(ChatMessage::SteeredQueued { content }),
                 )),

@@ -330,6 +330,7 @@ mod tests {
             request: TokenUsage::default(),
             model_code: None,
             scene: None,
+            duration_ms: None,
             attachments: Vec::new(),
         }
     }

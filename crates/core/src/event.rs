@@ -121,6 +121,14 @@ pub enum Event {
         text: String,
         usage: TokenUsage,
     },
+    /// The turn's display metadata, sent immediately before its terminal event
+    /// ([`Event::StreamDone`] / [`Event::StreamCancelled`]) so the TUI's
+    /// in-flight turn still owns it when the reply is committed: the model and
+    /// scene the turn ran under, and how long it took. The TUI renders it as
+    /// the dimmed footer under the assistant turn.
+    TurnMeta {
+        meta: crate::session::MessageMeta,
+    },
     /// The agent is busy, so a submitted prompt was queued (steered) instead
     /// of starting a new turn; it will be sent as the next user turn once the
     /// agent finishes its current action (tool call, thinking, or text
