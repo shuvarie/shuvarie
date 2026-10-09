@@ -234,7 +234,7 @@ where
         // draw that delivered a payload is immediately followed by one
         // empty-diff draw: the terminal then re-renders its grid with the
         // now-transmitted graphic in place.
-        if app.after_frame(rat)? {
+        if app.after_frame(frame.area, rat.backend_mut().terminal_mut())? {
             continue;
         }
 

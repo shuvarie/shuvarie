@@ -411,11 +411,11 @@ impl App {
     /// place.
     pub fn after_frame(
         &mut self,
-        rat: &mut ratatui::Terminal<TerminaBackend<PlatformTerminal>>,
+        frame_area: Rect,
+        term: &mut PlatformTerminal,
     ) -> io::Result<bool> {
         self.session.chat.ensure_media_renders();
         if self.media_view.is_open() {
-            let frame_area = rat.get_frame().area();
             self.media_view.after_frame(frame_area);
         }
         let mut writes = self.session.chat.take_media_writes();
@@ -424,11 +424,10 @@ impl App {
             return Ok(false);
         }
 
-        let terminal = rat.backend_mut().terminal_mut();
         for write in writes {
-            super::session::media::write_media_write(terminal, write)?;
+            super::session::media::write_media_write(term, write)?;
         }
-        terminal.flush()?;
+        term.flush()?;
         Ok(true)
     }
 
