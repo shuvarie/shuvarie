@@ -6,8 +6,8 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use notify::{event::EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher, event::EventKind};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// A live watch on the workspace's git `HEAD` file, handing out unit
 /// wakeups that mean "the label may have changed". The receiver only ever
@@ -110,7 +110,7 @@ mod tests {
         RenameMode,
     };
 
-    use super::{head_file, head_rewritten, BranchWatch};
+    use super::{BranchWatch, head_file, head_rewritten};
     use crate::tui::workspace::testing::seed_git_repo;
 
     fn event(kind: EventKind, path: &str) -> notify::Event {
