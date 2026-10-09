@@ -307,6 +307,8 @@ pub struct SessionScreen {
     pub(crate) retry: Option<RetryWait>,
     last_escape: Option<Instant>,
     working_todos: Vec<shuvarie_core::tools::todos::TodoItem>,
+    /// The session's full todo list (`/todo` reads it at open).
+    todos: Vec<shuvarie_core::tools::todos::TodoItem>,
     skills: Vec<Skill>,
     custom_commands: Vec<shuvarie_core::CustomCommand>,
     /// Last painted layout rects, for mouse zone routing between frames.
@@ -349,6 +351,7 @@ impl SessionScreen {
             retry: None,
             last_escape: None,
             working_todos: Vec::new(),
+            todos: Vec::new(),
             skills: Vec::new(),
             custom_commands: Vec::new(),
             input_area: Cell::new(Rect::default()),
@@ -1244,9 +1247,17 @@ impl SessionScreen {
         self.sidebar
             .update(SidebarMessage::SetTodos { done, total });
         self.working_todos = items
-            .into_iter()
+            .iter()
             .filter(|item| item.status == shuvarie_core::tools::todos::TodoStatus::InProgress)
+            .cloned()
             .collect();
+        self.todos = items;
+    }
+
+    /// The session's full todo list, replayed from its `todo` tool records —
+    /// what the `/todo` popup snapshots at open.
+    pub fn todos(&self) -> &[shuvarie_core::tools::todos::TodoItem] {
+        &self.todos
     }
 
     /// Parse the finished `todo` tool call's list output. A successful call
@@ -1943,6 +1954,32 @@ mod tests {
         assert_eq!(screen.working_todos.len(), 1);
         assert_eq!(screen.working_todos[0].id, 2);
         assert_eq!(screen.working_todos[0].text, "write tests");
+    }
+
+    #[test]
+    fn todo_tool_finish_retains_the_full_list_for_the_popup() {
+        let mut screen = SessionScreen::new();
+        screen.update(todo_finish(
+            "Todos (1/3 done)\n  #1 [x] plan it\n  #2 [~] write tests\n  #3 [ ] ship it",
+        ));
+        let todos = screen.todos();
+        assert_eq!(todos.len(), 3, "every item, not just the working ones");
+        assert_eq!(
+            todos[0].status,
+            shuvarie_core::tools::todos::TodoStatus::Done
+        );
+        assert_eq!(todos[2].text, "ship it");
+        assert_eq!(
+            screen.working_todos.len(),
+            1,
+            "the strip stays in-progress only"
+        );
+
+        screen.update(todo_finish("Todos (none)"));
+        assert!(
+            screen.todos().is_empty(),
+            "an emptied list clears the snapshot"
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@ pub enum CommandAction {
     AddDecisionProvider,
     OpenSessionPicker,
     OpenTree,
+    OpenTodos,
     Images,
     OpenScenePicker,
     OpenVariantPicker,
@@ -28,12 +29,13 @@ pub enum CommandAction {
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 23] = [
+    pub const ALL: [CommandAction; 24] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::AddDecisionProvider,
         CommandAction::OpenSessionPicker,
         CommandAction::OpenTree,
+        CommandAction::OpenTodos,
         CommandAction::Images,
         CommandAction::OpenScenePicker,
         CommandAction::OpenVariantPicker,
@@ -61,6 +63,7 @@ impl CommandAction {
             CommandAction::AddDecisionProvider => "decision-provider",
             CommandAction::OpenSessionPicker => "sessions",
             CommandAction::OpenTree => "tree",
+            CommandAction::OpenTodos => "todo",
             CommandAction::Images => "images",
             CommandAction::OpenScenePicker => "scene",
             CommandAction::OpenVariantPicker => "variant",
@@ -194,6 +197,11 @@ pub fn default_commands() -> Vec<CommandEntry> {
             "Session tree",
             "Walk the tree, fork from a node",
             CommandAction::OpenTree,
+        ),
+        CommandEntry::builtin(
+            "Todos",
+            "Show the session todo list",
+            CommandAction::OpenTodos,
         ),
         CommandEntry::builtin(
             "Switch scene",

@@ -48,6 +48,7 @@ mod spinner;
 mod theme;
 mod theme_picker;
 mod title;
+mod todo;
 pub mod trust;
 mod utils;
 mod variant;
