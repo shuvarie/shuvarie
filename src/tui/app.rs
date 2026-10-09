@@ -432,6 +432,65 @@ impl App {
         Ok(true)
     }
 
+    /// Pushes the frame's area into whichever overlay owns a scrollable list.
+    ///
+    /// Resize events only arrive on SIGWINCH, so a popup opened before the
+    /// first one — or since the last one — would otherwise keep a zero-height
+    /// viewport: its list offsets would never accumulate, pinning the selected
+    /// row to the bottom of the page for the whole scroll. The render loop
+    /// hands over the area it just painted; the popups only recompute when the
+    /// height actually changed, so this is cheap enough for every frame.
+    pub fn set_viewport(&mut self, area: Rect) {
+        match self.overlay {
+            Overlay::CommandMenu => {
+                if let Some(h) = command_menu_list_height(area) {
+                    self.command_menu
+                        .update(CommandMenuMessage::Resize { viewport_height: h });
+                }
+            }
+            Overlay::ModelPicker => {
+                if let Some(h) = model_picker_list_height(area) {
+                    self.model_picker
+                        .update(ModelPickerMessage::Resize { viewport_height: h });
+                }
+            }
+            Overlay::AddProvider => {
+                if let Some(form) = &mut self.add_provider_form
+                    && let Some(h) = add_provider_list_height(area, form.stage)
+                {
+                    form.update(AddProviderMessage::Resize { viewport_height: h });
+                }
+            }
+            Overlay::SessionPicker => {
+                if let Some(h) = session_picker_list_height(area) {
+                    self.session_picker
+                        .update(SessionPickerMessage::Resize { viewport_height: h });
+                }
+            }
+            Overlay::HistorySearch => {
+                if let Some(h) = history_search_list_height(area) {
+                    self.history_search
+                        .update(HistorySearchMessage::Resize { viewport_height: h });
+                }
+            }
+            // The decision-provider dialog is a fixed-size form with no list,
+            // so it needs no viewport recalculation; the rest paint no
+            // `scroll_offset_for` list at all.
+            Overlay::None
+            | Overlay::Welcome
+            | Overlay::AddDecisionProvider
+            | Overlay::ConfirmQuit
+            | Overlay::TitleEdit
+            | Overlay::Tree
+            | Overlay::Scene
+            | Overlay::Variant
+            | Overlay::ThemePicker
+            | Overlay::AssistedBy
+            | Overlay::MediaViewer
+            | Overlay::Todos => {}
+        }
+    }
+
     /// Delete every kitty image the chat pane and viewer transmitted — the
     /// shutdown hop empties the terminal's image cache.
     pub fn write_kitty_shutdown_deletes<W: io::Write>(
@@ -1431,61 +1490,7 @@ impl App {
                 self.session
                     .sidebar
                     .update(SidebarMessage::SetWidth { cols });
-                let area = Rect::new(0, 0, cols, rows);
-                match self.overlay {
-                    Overlay::CommandMenu => {
-                        if let Some(h) = command_menu_list_height(area) {
-                            self.command_menu
-                                .update(CommandMenuMessage::Resize { viewport_height: h });
-                        }
-                    }
-                    Overlay::ModelPicker => {
-                        if let Some(h) = model_picker_list_height(area) {
-                            self.model_picker
-                                .update(ModelPickerMessage::Resize { viewport_height: h });
-                        }
-                    }
-                    Overlay::AddProvider => {
-                        if let Some(form) = &mut self.add_provider_form {
-                            let heading_len = match form.stage {
-                                AddProviderStage::Select => Some(3),
-                                AddProviderStage::KindList => Some(1),
-                                AddProviderStage::Details => None,
-                            };
-                            if let Some(h) =
-                                heading_len.and_then(|h| add_provider_list_height(area, h))
-                            {
-                                form.update(AddProviderMessage::Resize { viewport_height: h });
-                            }
-                        }
-                    }
-                    // The decision-provider dialog is a fixed-size form with
-                    // no list, so a resize needs no viewport recalculation.
-                    Overlay::AddDecisionProvider => {}
-                    Overlay::SessionPicker => {
-                        if let Some(h) = session_picker_list_height(area) {
-                            self.session_picker
-                                .update(SessionPickerMessage::Resize { viewport_height: h });
-                        }
-                    }
-                    Overlay::HistorySearch => {
-                        if let Some(h) = history_search_list_height(area) {
-                            self.history_search
-                                .update(HistorySearchMessage::Resize { viewport_height: h });
-                        }
-                    }
-                    Overlay::None
-                    | Overlay::Welcome
-                    | Overlay::ConfirmQuit
-                    | Overlay::TitleEdit
-                    | Overlay::Tree
-                    | Overlay::Scene
-                    | Overlay::Variant
-                    | Overlay::ThemePicker
-                    | Overlay::AssistedBy
-                    | Overlay::MediaViewer
-                    | Overlay::Todos => {}
-                }
+                self.set_viewport(Rect::new(0, 0, cols, rows));
             }
             AppMessage::ConfigSaved => {
                 self.reload_config();
@@ -2408,46 +2413,52 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     Rect::new(x, y, pop_w, pop_h)
 }
 
+/// The height of the list an overlay dialog paints: the dialog's inner area
+/// minus the `fixed_rows` its layout spends on everything but the list (a
+/// search input, a status line, the hint bar).
 fn overlay_inner_list_height(
     area: Rect,
     percent_x: u16,
     percent_y: u16,
-    heading_len: u16,
+    fixed_rows: u16,
 ) -> Option<u16> {
     let popup = centered_rect(percent_x, percent_y, area);
     if popup.width < 2 || popup.height < 2 {
         return None;
     }
-    let inner = Rect::new(
-        popup.x + 1,
-        popup.y + 1,
-        popup.width.saturating_sub(2),
-        popup.height.saturating_sub(2),
-    );
-    if inner.height <= heading_len + 1 {
-        return None;
-    }
-    Some(inner.height.saturating_sub(heading_len + 1))
+    let inner_height = popup.height - 2;
+    (inner_height > fixed_rows).then(|| inner_height - fixed_rows)
 }
 
 fn command_menu_list_height(area: Rect) -> Option<u16> {
-    overlay_inner_list_height(area, 60, 40, 1)
+    // Search input + hint bar.
+    overlay_inner_list_height(area, 60, 40, 2)
 }
 
 fn model_picker_list_height(area: Rect) -> Option<u16> {
     overlay_inner_list_height(area, 60, 60, 2)
 }
 
-fn add_provider_list_height(area: Rect, heading_len: u16) -> Option<u16> {
-    overlay_inner_list_height(area, 50, 55, heading_len)
+/// The add-provider dialog's list height for its stage: the select stage
+/// spends a search input and a hint bar outside the list, the transport picker
+/// only the hint bar, and the details form paints no list at all.
+fn add_provider_list_height(area: Rect, stage: AddProviderStage) -> Option<u16> {
+    let fixed_rows = match stage {
+        AddProviderStage::Select => 2,
+        AddProviderStage::KindList => 1,
+        AddProviderStage::Details => return None,
+    };
+    overlay_inner_list_height(area, 50, 55, fixed_rows)
 }
 
 fn session_picker_list_height(area: Rect) -> Option<u16> {
+    // Hint bar.
     overlay_inner_list_height(area, 64, 36, 1)
 }
 
 fn history_search_list_height(area: Rect) -> Option<u16> {
-    overlay_inner_list_height(area, 64, 40, 2)
+    // Query input + status line + hint bar.
+    overlay_inner_list_height(area, 64, 40, 3)
 }
 
 #[cfg(test)]
@@ -2885,6 +2896,60 @@ mod tests {
             !app.session.sidebar.collapsed_at(200),
             "manual override sticks across widths"
         );
+    }
+
+    #[test]
+    fn provider_popup_scrolls_only_once_the_highlight_leaves_the_page() {
+        let mut app = app_with(Connections::default());
+        let area = Rect::new(0, 0, 120, 40);
+        let viewport = usize::from(
+            add_provider_list_height(area, AddProviderStage::Select).expect("room for a list"),
+        );
+        let providers: Vec<_> = shuvarie_core::catalog::providers()
+            .into_iter()
+            .take(viewport + 4)
+            .collect();
+        assert!(
+            providers.len() > viewport + 1,
+            "the embedded catalog must overflow the dialog: {} providers",
+            providers.len()
+        );
+        // Show the online source, so the snapshot below is the whole list and
+        // the test knows exactly how long it is.
+        app.registries.entries.insert(
+            shuvarie_core::catalog::SELUNE_REGISTRY.to_string(),
+            shuvarie_core::RegistryEntry {
+                remote_first: true,
+                ..Default::default()
+            },
+        );
+        app.open_add_provider();
+        // The render loop's per-frame sync, standing in for the SIGWINCH event
+        // a freshly opened popup never saw.
+        app.set_viewport(area);
+        app.update(AppMessage::RegistryLoaded {
+            registry: shuvarie_core::catalog::SELUNE_REGISTRY.to_string(),
+            providers,
+        });
+
+        // Walking down, the highlight stays inside the page until it reaches
+        // the last visible row...
+        for _ in 0..viewport - 2 {
+            app.update(AppMessage::AddProvider(AddProviderMessage::Next));
+            let form = app.add_provider_form.as_ref().unwrap();
+            assert_eq!(form.offset, 0, "the highlight is still on the first page");
+        }
+        assert_eq!(
+            app.add_provider_form.as_ref().unwrap().selected,
+            viewport - 1,
+            "the highlight reached the last row of the first page"
+        );
+
+        // ...and the next step scrolls the list on by one row instead of
+        // pinning the highlight to the bottom of a stale page.
+        app.update(AppMessage::AddProvider(AddProviderMessage::Next));
+        let form = app.add_provider_form.as_ref().unwrap();
+        assert_eq!((form.selected, form.offset), (viewport, 1));
     }
 
     #[test]

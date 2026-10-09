@@ -211,8 +211,11 @@ where
             &app.window_title(),
         )?;
 
-        // Draw frame.
-        rat.draw(|frame| app.view(frame, frame.area()))?;
+        // Draw frame, then hand the painted area to the overlays: resize
+        // events only arrive on SIGWINCH, so a popup opened before the first
+        // one would otherwise scroll its list against a zero-height viewport.
+        let frame = rat.draw(|frame| app.view(frame, frame.area()))?;
+        app.set_viewport(frame.area);
         last_draw = Instant::now();
 
         // Spinners advance on wall-clock time, so waking at each earliest

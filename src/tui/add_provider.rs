@@ -1196,6 +1196,48 @@ mod tests {
         );
     }
 
+    /// A select-stage list long enough to overflow a small viewport.
+    fn crowded_form() -> AddProviderForm {
+        let providers: Vec<Provider> = (0..20)
+            .map(|i| {
+                catalog_provider(
+                    &format!("p{i}"),
+                    &format!("Provider {i}"),
+                    selune::ProviderType::OpenaiCompat,
+                )
+            })
+            .collect();
+        AddProviderForm::with_registries(
+            RegistryManager::from_config(&shuvarie_core::RegistriesConfig::default())
+                .with_state_providers(shuvarie_core::catalog::SELUNE_REGISTRY, providers),
+            &[],
+            &[],
+        )
+    }
+
+    #[test]
+    fn navigation_walks_the_page_before_the_list_scrolls() {
+        let mut form = crowded_form();
+        // A five-row viewport over twenty providers, a group header, and the
+        // pinned custom row.
+        form.update(AddProviderMessage::Resize { viewport_height: 5 });
+        assert_eq!((form.selected, form.offset), (1, 0), "the first provider");
+
+        // Down: the highlight walks down the page, and the list only follows
+        // once it reaches the last visible row.
+        for expected in [(2, 0), (3, 0), (4, 0), (5, 1), (6, 2)] {
+            form.update(AddProviderMessage::Next);
+            assert_eq!((form.selected, form.offset), expected);
+        }
+
+        // Up: the list holds its position while the highlight climbs back up
+        // the page, then follows it so the top row stays visible.
+        for expected in [(5, 2), (4, 2), (3, 2), (2, 2), (1, 1)] {
+            form.update(AddProviderMessage::Prev);
+            assert_eq!((form.selected, form.offset), expected);
+        }
+    }
+
     #[test]
     fn query_filters_providers_and_the_custom_row_stays_last() {
         let mut form = form();
