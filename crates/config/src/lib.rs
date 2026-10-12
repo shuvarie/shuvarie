@@ -2595,6 +2595,107 @@ impl Default for TitleConfig {
     }
 }
 
+// The default notification sounds are per-platform, because the useful sound
+// on each is the one the system itself ships: the desktop sound themes on Unix,
+// the built-in alert tones on macOS, and the `Media` wavs on Windows. Each is a
+// *preference list* rather than a single path, because more than one theme can
+// provide a given event and a host need have only one of them installed. A
+// platform with none of these lists nothing, which plays nothing, and the
+// player skips any path that is not an existing file — so a default that
+// guesses wrong is silent rather than an error, and never a failed turn.
+
+/// The audio files `ui.notify` plays for a completed turn by default on Unix
+/// systems other than macOS: the FreeDesktop sound theme's "complete" event,
+/// shipped by `sound-theme-freedesktop` and installed by most desktops.
+///
+/// A single entry, but a list to match [`DEFAULT_NOTIFY_ERROR_SOUNDS`], so both
+/// halves of a [`NotifyPrefs`] are read the same way.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub const DEFAULT_NOTIFY_SOUNDS: &[&str] = &["/usr/share/sounds/freedesktop/stereo/complete.oga"];
+
+/// The audio files `ui.notify` plays for a failed turn by default on Unix
+/// systems other than macOS, in the order they are tried.
+///
+/// KDE's Ocean theme comes first: its "dialog-error" is the sound a Plasma
+/// desktop actually plays for an error, and `ocean-sound-theme` installs it on
+/// any distribution with Plasma. The FreeDesktop theme's error event follows,
+/// for the many desktops that have that theme and not Ocean.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub const DEFAULT_NOTIFY_ERROR_SOUNDS: &[&str] = &[
+    "/usr/share/sounds/ocean/stereo/dialog-error.oga",
+    "/usr/share/sounds/freedesktop/stereo/dialog-error.oga",
+];
+
+/// macOS keeps its alert tones in `/System/Library/Sounds`, so it uses
+/// "Glass" for a completed turn — the classic alert — instead of a desktop
+/// sound theme, which is not a thing there.
+#[cfg(target_os = "macos")]
+pub const DEFAULT_NOTIFY_SOUNDS: &[&str] = &["/System/Library/Sounds/Glass.aiff"];
+
+/// macOS's counterpart to [`DEFAULT_NOTIFY_SOUNDS`]: "Basso", the classic
+/// system error tone.
+#[cfg(target_os = "macos")]
+pub const DEFAULT_NOTIFY_ERROR_SOUNDS: &[&str] = &["/System/Library/Sounds/Basso.aiff"];
+
+/// Windows uses the wav Windows itself plays for a generic notification
+/// (Windows 10 and 11). Older releases ship `notify.wav` alongside it instead,
+/// which a config can point `sound-file` at.
+#[cfg(windows)]
+pub const DEFAULT_NOTIFY_SOUNDS: &[&str] = &[r"C:\Windows\Media\Windows Notify System Generic.wav"];
+
+/// Windows's counterpart to [`DEFAULT_NOTIFY_SOUNDS`]: the "Critical Stop"
+/// event sound, which is the system error tone.
+#[cfg(windows)]
+pub const DEFAULT_NOTIFY_ERROR_SOUNDS: &[&str] = &[r"C:\Windows\Media\Windows Critical Stop.wav"];
+
+/// A platform with no known system sound (neither Unix nor Windows) prefers
+/// nothing: the notification is silent until a config names a file.
+#[cfg(not(any(unix, windows)))]
+pub const DEFAULT_NOTIFY_SOUNDS: &[&str] = &[];
+
+/// See [`DEFAULT_NOTIFY_SOUNDS`] on platforms with no known system sound.
+#[cfg(not(any(unix, windows)))]
+pub const DEFAULT_NOTIFY_ERROR_SOUNDS: &[&str] = &[];
+
+/// Turn-finished notifications (`ui.notify`). When an agent turn ends the TUI
+/// shows a desktop notification through the terminal (OSC 9) and may play an
+/// audio file.
+///
+/// The toast is on by default and turned off with `disabled #true`. The sound
+/// is off by default and opted into with the `sound` switch; `sound-file` and
+/// `error-sound-file` only pick the files, they do not turn the sound on, so
+/// `sound` alone plays the defaults. Those defaults are per-platform preference
+/// lists (see [`DEFAULT_NOTIFY_SOUNDS`]), tried in order until one of them
+/// exists; naming a file in the config replaces its list rather than adding to
+/// it, and a file that does not exist is silently skipped — so a host without
+/// the sound stays quiet rather than failing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotifyPrefs {
+    /// Show the desktop notification when a turn finishes (the `disabled`
+    /// toggle, stored inverted in the file: `disabled #true` turns it off).
+    pub toast: bool,
+    /// Play a sound when a turn finishes (the `sound` switch).
+    pub sound: bool,
+    /// The audio file played when a turn completes (`sound-file`). `None`
+    /// keeps the platform's own list ([`DEFAULT_NOTIFY_SOUNDS`]); setting it
+    /// pins exactly one file to play instead.
+    pub sound_file: Option<PathBuf>,
+    /// The audio file played when a turn fails (`error-sound-file`). `None`
+    /// keeps the platform's own list ([`DEFAULT_NOTIFY_ERROR_SOUNDS`]).
+    pub error_sound_file: Option<PathBuf>,
+}
+
+impl Default for NotifyPrefs {
+    fn default() -> Self {
+        Self {
+            toast: true,
+            sound: false,
+            sound_file: None,
+            error_sound_file: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiPrefs {
     /// Target frames per second for the TUI render loop. `0` disables the cap
@@ -2622,6 +2723,10 @@ pub struct UiPrefs {
 
     /// Attachment-image display prefs for the chat pane.
     pub image: ImagePrefs,
+
+    /// Turn-finished notifications (toast and optional sound); see
+    /// [`NotifyPrefs`].
+    pub notify: NotifyPrefs,
 }
 
 impl Default for UiPrefs {
@@ -2633,6 +2738,7 @@ impl Default for UiPrefs {
             theme: None,
             title: TitleConfig::default(),
             image: ImagePrefs::default(),
+            notify: NotifyPrefs::default(),
         }
     }
 }
@@ -3896,6 +4002,142 @@ mod tests {
                 .unwrap()
                 .contains("copy-on-select")
         );
+    }
+
+    #[test]
+    fn ui_notify_defaults_to_toast_on_and_sound_off() {
+        for text in ["", "ui { notify }", "ui { notify { } }"] {
+            let parsed = config_kdl::from_kdl(text).unwrap();
+            assert_eq!(parsed.ui.notify, NotifyPrefs::default(), "text: {text:?}");
+        }
+        let notify = NotifyPrefs::default();
+        assert!(notify.toast, "the toast is on unless `disabled #true`");
+        assert!(!notify.sound, "sound is opt-in");
+        assert!(
+            notify.sound_file.is_none(),
+            "an unset file keeps the platform's own list"
+        );
+        assert!(notify.error_sound_file.is_none());
+    }
+
+    /// A platform's preferred sounds are ordered: the failure sound is the
+    /// one its desktop would play, with the FreeDesktop theme behind it.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn the_linux_error_sound_prefers_ocean_then_freedesktop() {
+        let position = |path: &str| DEFAULT_NOTIFY_ERROR_SOUNDS.iter().position(|p| *p == path);
+        assert_eq!(
+            position("/usr/share/sounds/ocean/stereo/dialog-error.oga"),
+            Some(0),
+            "KDE's Ocean error sound is tried first"
+        );
+        assert_eq!(
+            position("/usr/share/sounds/freedesktop/stereo/dialog-error.oga"),
+            Some(1),
+            "the FreeDesktop error sound is the fallback"
+        );
+    }
+
+    /// Every preferred sound is an absolute path: a relative one would be
+    /// resolved against whatever working directory the TUI was started in.
+    #[test]
+    fn preferred_sounds_are_absolute_paths() {
+        for path in DEFAULT_NOTIFY_SOUNDS
+            .iter()
+            .chain(DEFAULT_NOTIFY_ERROR_SOUNDS)
+        {
+            let path = std::path::Path::new(path);
+            assert!(path.is_absolute(), "not absolute: {}", path.display());
+        }
+    }
+
+    #[test]
+    fn ui_notify_round_trips() {
+        let text = r#"
+            ui {
+                notify {
+                    disabled #true
+                    sound
+                    sound-file "~/.local/share/sounds/complete.oga"
+                    error-sound-file "/opt/sounds/error.oga"
+                }
+            }
+        "#;
+        let parsed = config_kdl::from_kdl(text).unwrap();
+        assert!(!parsed.ui.notify.toast);
+        assert!(parsed.ui.notify.sound);
+        assert_eq!(
+            parsed.ui.notify.sound_file,
+            Some(PathBuf::from("~/.local/share/sounds/complete.oga"))
+        );
+        assert_eq!(
+            parsed.ui.notify.error_sound_file,
+            Some(PathBuf::from("/opt/sounds/error.oga"))
+        );
+
+        let text = config_kdl::to_kdl(&parsed).unwrap();
+        assert!(text.contains("disabled #true"), "body: {text}");
+        assert!(text.contains("sound\n"), "body: {text}");
+        assert!(
+            text.contains("sound-file \"~/.local/share/sounds/complete.oga\""),
+            "body: {text}"
+        );
+        assert!(
+            text.contains("error-sound-file \"/opt/sounds/error.oga\""),
+            "body: {text}"
+        );
+        let reparsed = config_kdl::from_kdl(&text).unwrap();
+        assert_eq!(parsed.ui.notify, reparsed.ui.notify);
+
+        // an all-default settings block serializes to nothing
+        assert!(
+            !config_kdl::to_kdl(&Config::default())
+                .unwrap()
+                .contains("notify")
+        );
+    }
+
+    #[test]
+    fn ui_notify_sound_switch_keeps_the_toast() {
+        let parsed = config_kdl::from_kdl("ui { notify { sound } }").unwrap();
+        assert!(parsed.ui.notify.sound);
+        assert!(parsed.ui.notify.toast, "`sound` alone keeps the toast on");
+        let text = config_kdl::to_kdl(&parsed).unwrap();
+        assert!(text.contains("sound\n"), "body: {text}");
+        assert!(!text.contains("disabled"), "body: {text}");
+        // The switch is on but no path was configured: the defaults stand.
+        assert!(!text.contains("sound-file"), "body: {text}");
+    }
+
+    #[test]
+    fn ui_notify_parses_toggle_spellings() {
+        let toast = |text: &str| config_kdl::from_kdl(text).unwrap().ui.notify.toast;
+        assert!(toast("ui { notify { disabled #false } }"));
+        assert!(!toast("ui { notify { disabled #true } }"));
+        assert!(!toast("ui { notify { enabled #false } }"));
+        assert!(toast("ui { notify { enabled #true } }"));
+        // The bare form is inert and keeps the default.
+        assert!(toast("ui { notify { disabled } }"));
+    }
+
+    #[test]
+    fn ui_notify_rejects_bad_values() {
+        for text in [
+            "ui { notify \"x\" }",
+            "ui { notify { nope } }",
+            "ui { notify { sound #true } }",
+            "ui { notify { sound { x } } }",
+            "ui { notify { sound-file 3 } }",
+            "ui { notify { sound-file \"  \" } }",
+            "ui { notify { error-sound-file \"\" } }",
+            "ui { notify { sound-file \"a\" sound-file \"b\" } }",
+            "ui { notify { disabled #true enabled #true } }",
+        ] {
+            assert!(
+                config_kdl::from_kdl(text).is_err(),
+                "expected an error for: {text}"
+            );
+        }
     }
 
     #[test]

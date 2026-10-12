@@ -1,8 +1,12 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
+use std::path::PathBuf;
 
 use ratatui::prelude::*;
-use shuvarie_core::{Connections, Event as CoreEvent, Model, RegistriesConfig, UiPrefs};
+use shuvarie_core::{
+    Connections, DEFAULT_NOTIFY_ERROR_SOUNDS, DEFAULT_NOTIFY_SOUNDS, Event as CoreEvent, Model,
+    NotifyPrefs, RegistriesConfig, UiPrefs,
+};
 use termina::event::{KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use termina::{Event as TermEvent, PlatformTerminal};
 use tokio::sync::mpsc::Sender;
@@ -25,6 +29,7 @@ use super::confirm_quit::{ConfirmQuit, ConfirmQuitEffect, ConfirmQuitMessage};
 use super::context::UpdateCtx;
 use super::history_search::{HistorySearch, HistorySearchEffect, HistorySearchMessage};
 use super::model_picker::{ModelPicker, ModelPickerEffect, ModelPickerMessage};
+use super::notify;
 use super::scene;
 use super::search::SearchMessage;
 use super::session::media::MediaBytes;
@@ -207,6 +212,16 @@ pub enum AppEffect {
     CopyToClipboard(String),
     /// Launch the OAuth verification URL in the platform browser.
     OpenBrowser(String),
+    /// A turn finished: tell the user through the terminal's desktop
+    /// notification (`body`) and/or by playing an audio file (`sounds`: the
+    /// candidates to try, in order, of which the first that exists is played;
+    /// empty plays nothing). Either half may be absent when its prefs are off.
+    /// The render loop, which owns the terminal, emits it — see
+    /// [`App::take_pending_effects`].
+    Notify {
+        body: Option<String>,
+        sounds: Vec<PathBuf>,
+    },
 }
 
 pub struct App {
@@ -250,6 +265,13 @@ pub struct App {
     /// The fullscreen media viewer overlay (the `/images` slash command, or
     /// a click on an image region).
     pub media_view: MediaViewer,
+    /// The turn-finished notification prefs (`ui.notify`).
+    notify: NotifyPrefs,
+    /// Notifications `update` queued for the render loop. Kept out of the
+    /// single `AppEffect` return slot so a completion note is never dropped by
+    /// a competing effect (the media load a stream end can carry); the render
+    /// loop drains them with [`App::take_pending_effects`].
+    pending_effects: Vec<AppEffect>,
     quit: bool,
 }
 
@@ -283,6 +305,19 @@ fn catalog_variants(connections: &Connections) -> Option<Vec<String>> {
     let entry = shuvarie_core::catalog::find_model(provider, model)?;
     let variants = shuvarie_core::catalog::model_variants(entry);
     (!variants.is_empty()).then(|| variants.to_vec())
+}
+
+/// Cap on the characters taken from a failure message for a notification
+/// body: enough for the gist, short of a wall of text in the toast (and well
+/// inside the terminals' notification-length limits).
+const NOTIFY_ERROR_CHARS: usize = 160;
+
+/// The first line of `text`, trimmed and capped for a notification body. A
+/// failure message is often several lines of provider detail; the toast only
+/// carries its opening line.
+fn first_line(text: &str) -> String {
+    let line = text.lines().next().unwrap_or_default().trim();
+    line.chars().take(NOTIFY_ERROR_CHARS).collect()
 }
 
 impl App {
@@ -328,6 +363,7 @@ impl App {
             .cell_size
             .map(|(width, height)| ratatui_image::FontSize::new(width, height))
             .unwrap_or_else(|| ratatui_image::FontSize::new(8, 16));
+        let notify = ui.notify.clone();
         Self {
             ctx: UpdateCtx::new(connections, cmd_tx),
             overlay: if welcome.open {
@@ -385,6 +421,8 @@ impl App {
             scene_entries: Vec::new(),
             scene_default: None,
             current_scene: None,
+            notify,
+            pending_effects: Vec::new(),
             quit: false,
         }
     }
@@ -392,6 +430,61 @@ impl App {
     /// Record that the app should quit (set when `update` returns `Quit`).
     pub fn mark_quit(&mut self) {
         self.quit = true;
+    }
+
+    /// Notifications queued by `update` that have to reach the terminal: a
+    /// turn-finished note is emitted even when the same message also produces
+    /// an effect (a media load), so it travels on this channel of its own
+    /// rather than competing for `update`'s single effect slot. The render
+    /// loop drains it right after each update.
+    pub fn take_pending_effects(&mut self) -> Vec<AppEffect> {
+        std::mem::take(&mut self.pending_effects)
+    }
+
+    /// The notification a session message calls for: a desktop toast and/or an
+    /// audio file when a turn finished, `None` for every other message and
+    /// while both prefs are off.
+    ///
+    /// Only the two turn-end events notify. A retryable failure never does:
+    /// the core reports `RetryScheduled` for those and reserves `StreamError`
+    /// for retries it gave up on (or a wait the user cancelled).
+    fn finished_turn_notice(&self, msg: &SessionMessage) -> Option<AppEffect> {
+        if !self.notify.toast && !self.notify.sound {
+            return None;
+        }
+        let SessionMessage::Chat(chat) = msg else {
+            return None;
+        };
+        let (body, file, defaults) = match chat {
+            ChatMessage::StreamDone => (
+                self.finished_turn_body(),
+                self.notify.sound_file.as_deref(),
+                DEFAULT_NOTIFY_SOUNDS,
+            ),
+            ChatMessage::StreamError { error } => (
+                format!("Shuvarie — agent error: {}", first_line(error)),
+                self.notify.error_sound_file.as_deref(),
+                DEFAULT_NOTIFY_ERROR_SOUNDS,
+            ),
+            _ => return None,
+        };
+        Some(AppEffect::Notify {
+            body: self.notify.toast.then_some(body),
+            sounds: if self.notify.sound {
+                notify::candidates(file, defaults)
+            } else {
+                Vec::new()
+            },
+        })
+    }
+
+    /// The toast text for a completed turn: the app and the session, when the
+    /// session has a usable title.
+    fn finished_turn_body(&self) -> String {
+        match self.session_title_line() {
+            Some(title) => format!("Shuvarie — agent completed: {title}"),
+            None => "Shuvarie".to_string(),
+        }
     }
 
     /// Whether the render loop should terminate.
@@ -511,14 +604,7 @@ impl App {
     /// (first line only) once a session exists, otherwise the app name with
     /// the active provider/model when one is configured.
     pub fn window_title(&self) -> String {
-        let session = self
-            .session
-            .session_title
-            .as_deref()
-            .and_then(|t| t.lines().next())
-            .map(str::trim)
-            .filter(|t| !t.is_empty());
-        if let Some(session) = session {
+        if let Some(session) = self.session_title_line() {
             return format!("Shuvarie — {session}");
         }
         let active = self.ctx.connections.active.as_ref();
@@ -532,6 +618,17 @@ impl App {
             (None, Some(provider)) => format!("Shuvarie — {provider}"),
             (None, None) => "Shuvarie".to_string(),
         }
+    }
+
+    /// The active session's title, first line only, when it has one: the tab
+    /// title and the turn-finished toast both name the session this way.
+    fn session_title_line(&self) -> Option<&str> {
+        self.session
+            .session_title
+            .as_deref()
+            .and_then(|t| t.lines().next())
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
     }
 
     pub fn map_event(&self, ev: Event) -> Option<AppMessage> {
@@ -1131,6 +1228,11 @@ impl App {
                 };
             }
             AppMessage::Session(m) => {
+                // Detected before the session applies it: the notice only reads
+                // the session title, which no session message mutates.
+                if let Some(effect) = self.finished_turn_notice(&m) {
+                    self.pending_effects.push(effect);
+                }
                 let effect = self.session.update(m);
                 if self.tree_popup.open {
                     self.tree_popup.set_busy(self.session.is_busy());
@@ -2725,6 +2827,141 @@ mod tests {
             Some(catalog_context_window("ollama-cloud", "glm-5.3-flash")),
             "untagged connection model `glm-5.3-flash` must map to the tagged catalog entry"
         );
+    }
+
+    /// The one effect a finished turn queued, or a panic naming what came back
+    /// instead.
+    fn sole_notice(app: &mut App) -> (Option<String>, Vec<PathBuf>) {
+        let effects = app.take_pending_effects();
+        assert_eq!(effects.len(), 1, "expected one effect, got {effects:?}");
+        match effects.into_iter().next() {
+            Some(AppEffect::Notify { body, sounds }) => (body, sounds),
+            other => panic!("expected a Notify effect, got {other:?}"),
+        }
+    }
+
+    fn done(app: &mut App) {
+        assert!(
+            app.update(AppMessage::Session(SessionMessage::Chat(
+                ChatMessage::StreamDone
+            )))
+            .is_none(),
+            "a finished turn returns no app effect"
+        );
+    }
+
+    #[test]
+    fn a_finished_turn_queues_a_desktop_notification() {
+        let mut app = app_with(connected());
+        active_session(&mut app);
+        app.session.session_title = Some("Fix the login bug".into());
+        done(&mut app);
+        let (body, sounds) = sole_notice(&mut app);
+        assert_eq!(
+            body.as_deref(),
+            Some("Shuvarie — agent completed: Fix the login bug")
+        );
+        assert!(sounds.is_empty(), "sound is off by default");
+    }
+
+    #[test]
+    fn a_finished_turn_without_a_session_title_names_the_app() {
+        let mut app = app_with(connected());
+        app.session.session_title = Some("\n".into());
+        done(&mut app);
+        assert_eq!(sole_notice(&mut app).0.as_deref(), Some("Shuvarie"));
+    }
+
+    #[test]
+    fn a_failed_turn_notifies_with_the_error_and_its_sound() {
+        let mut app = app_with(connected());
+        active_session(&mut app);
+        app.notify.sound = true;
+        app.notify.error_sound_file = Some(PathBuf::from("~/.local/share/sounds/error.oga"));
+        app.update(AppMessage::Session(SessionMessage::Chat(
+            ChatMessage::StreamError {
+                error: "provider returned 500\nretry later".into(),
+            },
+        )));
+        let (body, sounds) = sole_notice(&mut app);
+        assert_eq!(
+            body.as_deref(),
+            Some("Shuvarie — agent error: provider returned 500"),
+            "the toast carries the first line of the failure"
+        );
+        assert_eq!(
+            sounds,
+            [PathBuf::from("~/.local/share/sounds/error.oga")],
+            "a named error sound is played alone, unexpanded (the player expands it)"
+        );
+    }
+
+    /// With no error sound of its own named, a failure plays the platform's
+    /// preference order — on Linux, KDE's Ocean theme before the FreeDesktop
+    /// one — and the player picks the first of them the host has.
+    #[test]
+    fn a_failed_turn_with_no_named_sound_plays_the_platform_list() {
+        let mut app = app_with(connected());
+        active_session(&mut app);
+        app.notify.sound = true;
+        app.update(AppMessage::Session(SessionMessage::Chat(
+            ChatMessage::StreamError {
+                error: "connection reset".into(),
+            },
+        )));
+        assert_eq!(
+            sole_notice(&mut app).1,
+            notify::candidates(None, DEFAULT_NOTIFY_ERROR_SOUNDS),
+            "the whole list travels, in order"
+        );
+    }
+
+    #[test]
+    fn turning_the_toast_off_leaves_a_sound_only_notification() {
+        let mut app = app_with(connected());
+        active_session(&mut app);
+        app.notify.toast = false;
+        app.notify.sound = true;
+        done(&mut app);
+        let (body, sounds) = sole_notice(&mut app);
+        assert!(body.is_none(), "`disabled #true` drops the toast");
+        assert_eq!(
+            sounds,
+            notify::candidates(None, DEFAULT_NOTIFY_SOUNDS),
+            "with no sound named, the platform's own list is played"
+        );
+    }
+
+    #[test]
+    fn notifications_off_queue_nothing() {
+        let mut app = app_with(connected());
+        active_session(&mut app);
+        app.notify.toast = false;
+        done(&mut app);
+        assert!(app.take_pending_effects().is_empty());
+    }
+
+    #[test]
+    fn a_scheduled_retry_does_not_notify() {
+        let mut app = app_with(connected());
+        active_session(&mut app);
+        app.update(AppMessage::Session(SessionMessage::RetryScheduled {
+            reason: "connection reset".into(),
+            attempt: 1,
+            max_attempts: 3,
+            delay_ms: 500,
+        }));
+        assert!(app.take_pending_effects().is_empty());
+    }
+
+    #[test]
+    fn a_cancelled_stream_does_not_notify() {
+        let mut app = app_with(connected());
+        active_session(&mut app);
+        app.update(AppMessage::Session(SessionMessage::Chat(
+            ChatMessage::StreamCancelled,
+        )));
+        assert!(app.take_pending_effects().is_empty());
     }
 
     #[test]

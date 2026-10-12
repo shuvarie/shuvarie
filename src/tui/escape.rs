@@ -3,6 +3,7 @@ use termina::escape::csi::{
     XtermKeyModifierResource,
 };
 use termina::escape::osc::{ColorOrQuery, DynamicColorNumber, Osc, Selection};
+use termina::escape::{OSC, ST};
 
 pub const ENTER_ALTERNATE_SCREEN: Csi = Csi::Mode(Mode::SetDecPrivateMode(DecPrivateMode::Code(
     DecPrivateModeCode::ClearAndEnableAlternateScreen,
@@ -111,6 +112,39 @@ pub const ENABLE_BRACKETED_PASTE: Csi = Csi::Mode(Mode::SetDecPrivateMode(DecPri
 pub const DISABLE_BRACKETED_PASTE: Csi = Csi::Mode(Mode::ResetDecPrivateMode(
     DecPrivateMode::Code(DecPrivateModeCode::BracketedPaste),
 ));
+
+// OSC 9: show a desktop notification whose text is the payload. iTerm2
+// introduced the form and most notification-capable terminals follow it —
+// kitty and Ghostty (both of which also answer `OSC 99`), WezTerm, foot,
+// Konsole, Windows Terminal — while terminals without it ignore the
+// sequence. termina's `Osc` enum has no notification variant, so the escape
+// is hand-written like the query constants above; the introducer and the
+// string terminator (`ESC \`) are termina's own `OSC`/`ST`, the pair every
+// `Osc` rendering is built from.
+//
+// The body is sanitized rather than escaped: a BEL or ESC inside it would
+// terminate the sequence early or smuggle another control sequence into the
+// stream, and an embedded newline would break the single-line toast, so
+// control characters are dropped and line breaks collapse to spaces.
+pub fn notify(text: &str) -> String {
+    let mut body = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\n' | '\r' | '\t' => body.push(' '),
+            ch if ch.is_control() => {}
+            ch => body.push(ch),
+        }
+    }
+    // ConEmu laid `9;4` (progress) and `9;9` (cwd) over OSC 9, so a terminal
+    // that understands both reads a payload beginning with a digit as one of
+    // those rather than as a toast. Everything we build here starts with the
+    // app name, which makes this inert; the space keeps the sequence
+    // unambiguous even if a future caller passes text that does begin so.
+    if body.starts_with(|ch: char| ch.is_ascii_digit()) {
+        body.insert(0, ' ');
+    }
+    format!("{OSC}9;{body}{ST}")
+}
 
 // Push/pop the window title on the title stack (CSI 22;2t / 23;2t) so the
 // pre-existing tab title is restored on exit. Terminals without a title stack

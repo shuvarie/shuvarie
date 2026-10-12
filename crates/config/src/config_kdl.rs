@@ -254,6 +254,7 @@ fn parse_ui(node: &KdlNode, input: &str) -> Result<UiPrefs> {
     let mut theme = None;
     let mut title = None;
     let mut image = None;
+    let mut notify = None;
     for child in child_nodes(node) {
         match child.name().value() {
             "frame-rate" => set_once(input, child, &mut frame_rate, scalar_u32(input, child))?,
@@ -268,6 +269,12 @@ fn parse_ui(node: &KdlNode, input: &str) -> Result<UiPrefs> {
                 child,
                 &mut image,
                 parse_image(child, input).map(Some),
+            )?,
+            "notify" => set_once(
+                input,
+                child,
+                &mut notify,
+                parse_notify(child, input).map(Some),
             )?,
             _ => {}
         }
@@ -285,7 +292,84 @@ fn parse_ui(node: &KdlNode, input: &str) -> Result<UiPrefs> {
     prefs.theme = theme;
     prefs.title = title.unwrap_or_default();
     prefs.image = image.unwrap_or_default();
+    prefs.notify = notify.unwrap_or_default();
     Ok(prefs)
+}
+
+/// `notify { … }` — the turn-finished notification. The `disabled` toggle
+/// turns the desktop toast off (it is on by default), the `sound` switch opts
+/// into playing an audio file (off by default), and `sound-file` /
+/// `error-sound-file` pick the files played for a completed / failed turn.
+/// The file nodes only pick a file — `sound` alone plays the platform's own
+/// sounds — and a file named here replaces those defaults rather than adding
+/// to them.
+fn parse_notify(node: &KdlNode, input: &str) -> Result<NotifyPrefs> {
+    if node.entries().iter().any(|entry| entry.name().is_none()) {
+        return Err(node_error(
+            input,
+            node,
+            "`notify` takes no positional arguments",
+            None,
+        ));
+    }
+    let mut disabled = None;
+    let mut sound = None;
+    let mut sound_file = None;
+    let mut error_sound_file = None;
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "disabled" | "enabled" => {
+                set_once(input, child, &mut disabled, toggle_flag(input, child))?
+            }
+            "sound" => set_once(input, child, &mut sound, switch_flag(input, child))?,
+            "sound-file" => set_once(input, child, &mut sound_file, scalar_string(input, child))?,
+            "error-sound-file" => set_once(
+                input,
+                child,
+                &mut error_sound_file,
+                scalar_string(input, child),
+            )?,
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!(
+                        "unknown node `{other}` in `notify` (expected `disabled`, `sound`, \
+                         `sound-file`, or `error-sound-file`)"
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    let mut prefs = NotifyPrefs::default();
+    if let Some(disabled) = disabled {
+        prefs.toast = !disabled;
+    }
+    if let Some(sound) = sound {
+        prefs.sound = sound;
+    }
+    if let Some(path) = sound_file {
+        prefs.sound_file = Some(sound_file_value(input, node, "sound-file", path)?);
+    }
+    if let Some(path) = error_sound_file {
+        prefs.error_sound_file = Some(sound_file_value(input, node, "error-sound-file", path)?);
+    }
+    Ok(prefs)
+}
+
+/// A notification audio file path: a blank one has nothing to play, so it is
+/// rejected instead of silently never sounding.
+fn sound_file_value(input: &str, node: &KdlNode, field: &str, path: String) -> Result<PathBuf> {
+    if path.trim().is_empty() {
+        return Err(node_error(
+            input,
+            node,
+            format!("`{field}` takes the path to an audio file"),
+            None,
+        ));
+    }
+    Ok(PathBuf::from(path))
 }
 
 /// `image { … }` — how the chat pane renders attached images. The optional
@@ -3529,7 +3613,33 @@ fn ui_node(cfg: &UiPrefs) -> Option<KdlNode> {
     if cfg.image != defaults.image {
         children.push(image_node(&cfg.image));
     }
+    if let Some(notify) = notify_node(&cfg.notify) {
+        children.push(notify);
+    }
     section_node("ui", children)
+}
+
+/// Builds `notify { … }`; omitted entirely when every field is at its default
+/// (the toast on, no sound, no file named).
+fn notify_node(cfg: &NotifyPrefs) -> Option<KdlNode> {
+    let defaults = NotifyPrefs::default();
+    let mut children = Vec::new();
+    if cfg.toast != defaults.toast {
+        // Stored inverted: `disabled #true` is the off spelling.
+        children.push(value_node("disabled", !cfg.toast));
+    }
+    if cfg.sound != defaults.sound {
+        children.push(KdlNode::new("sound"));
+    }
+    // A named file is always written: the defaults name none, so a file here is
+    // never the default value.
+    if let Some(path) = &cfg.sound_file {
+        children.push(value_node("sound-file", path.display().to_string()));
+    }
+    if let Some(path) = &cfg.error_sound_file {
+        children.push(value_node("error-sound-file", path.display().to_string()));
+    }
+    section_node("notify", children)
 }
 
 /// Builds `image { … }`; only called with a non-default config, so it always

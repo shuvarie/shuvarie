@@ -34,6 +34,7 @@ mod git_watch;
 mod history_search;
 mod list;
 mod model_picker;
+mod notify;
 mod permission;
 mod popup;
 mod question;
@@ -354,7 +355,8 @@ where
 
 /// Apply a mapped message, recording a quit request on `AppEffect::Quit`,
 /// writing `AppEffect::CopyToClipboard` as OSC 52 (the render loop owns the
-/// terminal), and launching the browser for `AppEffect::OpenBrowser`.
+/// terminal), and launching the browser for `AppEffect::OpenBrowser`. The
+/// queued turn-finished notifications are drained afterwards.
 fn apply_msg(app: &mut App, terminal: &mut PlatformTerminal, msg: Option<AppMessage>) -> bool {
     if let Some(msg) = msg {
         match app.update(msg) {
@@ -364,7 +366,20 @@ fn apply_msg(app: &mut App, terminal: &mut PlatformTerminal, msg: Option<AppMess
                 let _ = terminal.flush();
             }
             Some(AppEffect::OpenBrowser(url)) => auth::open_in_browser(&url),
-            None => {}
+            // Notifications never travel through the return slot; they are
+            // drained below.
+            Some(AppEffect::Notify { .. }) | None => {}
+        }
+        for effect in app.take_pending_effects() {
+            if let AppEffect::Notify { body, sounds } = effect {
+                if let Some(body) = body {
+                    let _ = write!(terminal, "{}", escape::notify(&body));
+                    let _ = terminal.flush();
+                }
+                // An empty list is a turn with no sound to play; the first
+                // candidate that exists is the one heard.
+                notify::play_sound(&sounds);
+            }
         }
         true
     } else {
@@ -613,6 +628,24 @@ mod tests {
         sync_window_title(&mut out, &mut last, "Shuvarie — fix the bug").unwrap();
         assert!(out.len() > unchanged);
         assert_eq!(last, "Shuvarie — fix the bug");
+    }
+
+    #[test]
+    fn notify_escape_carries_the_body_and_drops_control_characters() {
+        assert_eq!(
+            escape::notify("Shuvarie — Fix the login bug"),
+            "\x1b]9;Shuvarie — Fix the login bug\x1b\\"
+        );
+        // A BEL or ESC would end the sequence early (or smuggle another one
+        // in) and a line break would split the single-line toast, so control
+        // characters go and line breaks become spaces.
+        assert_eq!(
+            escape::notify("a\x07b\x1bc\nde\rfg\thi"),
+            "\x1b]9;abc de fg hi\x1b\\"
+        );
+        // ConEmu's `9;4`/`9;9` share OSC 9, so a payload that starts with a
+        // digit is made unambiguous rather than parsed as progress or cwd.
+        assert_eq!(escape::notify("4;50%"), "\x1b]9; 4;50%\x1b\\");
     }
 
     #[test]
