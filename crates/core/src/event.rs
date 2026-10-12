@@ -307,7 +307,7 @@ pub enum Event {
     /// marks asks the user can grant for the rest of the session (paths and
     /// commands; scene confirmations are one-shot), and `allow_dir` marks
     /// path asks the user can additionally widen to everything in the asked
-    /// file's folder for the session.
+    /// file's directory for the session.
     PermissionRequested {
         id: u64,
         description: String,
