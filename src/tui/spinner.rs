@@ -31,6 +31,25 @@ const GENERATING_FRAMES: [&str; 18] = [
 
 const WAIT_FRAMES: [&str; 2] = ["⣿⣿⣿⣿⣿⣿⣿⣿⣿", "         "];
 
+const INITIALIZING_FRAMES: [&str; 16] = [
+    " ⣿⣿⣿⣿    ",
+    " ⢸⣿⣿⣿⡇   ",
+    "  ⣿⣿⣿⣿   ",
+    "  ⢸⣿⣿⣿⡇  ",
+    "   ⣿⣿⣿⣿  ",
+    "   ⢸⣿⣿⣿⡇ ",
+    "    ⣿⣿⣿⣿ ",
+    "⡇   ⢸⣿⣿⣿⡇",
+    "⣿    ⣿⣿⣿⣿",
+    "⣿⡇   ⢸⣿⣿⣿",
+    "⣿⣿    ⣿⣿⣿",
+    "⣿⣿⡇   ⢸⣿⣿",
+    "⣿⣿⣿    ⣿⣿",
+    "⣿⣿⣿⡇   ⢸⣿",
+    "⣿⣿⣿⣿    ⣿",
+    "⢸⣿⣿⣿⡇   ⢸",
+];
+
 const TOOL_FRAMES: [&str; 28] = [
     "         ",
     "⡀       ⢀",
@@ -69,6 +88,9 @@ const TOOL_FRAMES: [&str; 28] = [
 pub enum SpinnerKind {
     /// The narrow inline spinner (block headers, sidebar, overlays).
     Inline,
+    /// The wide status-row spinner shown while a sent turn waits for the
+    /// model's first output — nothing has streamed back yet.
+    Initializing,
     /// The wide status-row spinner shown while the model is generating.
     Generating,
     /// The wide status-row spinner shown while a tool is running.
@@ -87,12 +109,16 @@ fn spinner_options(frame_rate: u32) -> FrameplayOptions {
 
 fn frameplay(kind: SpinnerKind) -> &'static Frameplay<&'static str> {
     static INLINE: OnceLock<Frameplay<&'static str>> = OnceLock::new();
+    static INITIALIZING: OnceLock<Frameplay<&'static str>> = OnceLock::new();
     static GENERATING: OnceLock<Frameplay<&'static str>> = OnceLock::new();
     static TOOL: OnceLock<Frameplay<&'static str>> = OnceLock::new();
     static WAITING: OnceLock<Frameplay<&'static str>> = OnceLock::new();
 
     match kind {
         SpinnerKind::Inline => INLINE.get_or_init(|| Frameplay::new(FRAMES, spinner_options(14))),
+        SpinnerKind::Initializing => {
+            INITIALIZING.get_or_init(|| Frameplay::new(INITIALIZING_FRAMES, spinner_options(14)))
+        }
         SpinnerKind::Generating => {
             GENERATING.get_or_init(|| Frameplay::new(GENERATING_FRAMES, spinner_options(14)))
         }
@@ -123,6 +149,12 @@ pub fn spinner() -> Span<'static> {
     Span::raw(spinner_frame()).fg(theme::accent())
 }
 
+/// The wide status-row spinner shown while a turn was sent but the model has
+/// not produced its first output yet.
+pub fn initializing_spinner() -> Span<'static> {
+    Span::raw(*frameplay(SpinnerKind::Initializing).get_frame()).fg(theme::accent())
+}
+
 /// The wide status-row spinner shown while the model is generating.
 pub fn generating_spinner() -> Span<'static> {
     Span::raw(*frameplay(SpinnerKind::Generating).get_frame()).fg(theme::accent())
@@ -137,4 +169,38 @@ pub fn tool_spinner() -> Span<'static> {
 /// user (e.g. an open `question` prompt).
 pub fn wait_spinner() -> Span<'static> {
     Span::raw(*frameplay(SpinnerKind::Waiting).get_frame()).fg(theme::accent())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every wide status-row spinner pads its frames to one fixed width: a
+    /// short or long frame would shove the status text sideways on each tick.
+    #[test]
+    fn wide_status_row_frames_keep_a_fixed_width() {
+        for (name, frames) in [
+            ("initializing", &INITIALIZING_FRAMES[..]),
+            ("generating", &GENERATING_FRAMES[..]),
+            ("tool", &TOOL_FRAMES[..]),
+            ("waiting", &WAIT_FRAMES[..]),
+        ] {
+            let width = frames[0].chars().count();
+            for frame in frames {
+                assert_eq!(
+                    frame.chars().count(),
+                    width,
+                    "{name} frame {frame:?} breaks the {width}-cell width"
+                );
+            }
+        }
+    }
+
+    /// The narrow inline spinner is one cell wide.
+    #[test]
+    fn inline_frames_are_one_cell_wide() {
+        for frame in FRAMES {
+            assert_eq!(frame.chars().count(), 1, "inline frame {frame:?}");
+        }
+    }
 }

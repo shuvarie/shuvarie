@@ -39,6 +39,9 @@ pub use bash::BashMessage;
 pub use chat::ChatMessage;
 pub use search::{SearchMessage, SearchPrompt};
 
+/// Status shown while a sent turn waits for the model's first output (no
+/// token, reasoning chunk, or tool call has arrived yet).
+const INITIALIZING_STATUS: &str = "Initializing...";
 /// Status shown while a compaction summarizer call runs (auto overflow and
 /// manual `/compact` alike).
 const COMPACTING_STATUS: &str = "Compacting context...";
@@ -264,6 +267,8 @@ pub enum SessionMessage {
 enum BusyKind {
     #[default]
     Idle,
+    /// A turn is sent and the status row waits on the model's first output.
+    Initializing,
     Generating,
     Tool,
     Waiting,
@@ -396,6 +401,7 @@ impl SessionScreen {
     pub(crate) fn busy_spinner(&self) -> Option<SpinnerKind> {
         match self.busy_kind {
             BusyKind::Idle => None,
+            BusyKind::Initializing => Some(SpinnerKind::Initializing),
             BusyKind::Generating => Some(SpinnerKind::Generating),
             BusyKind::Tool => Some(SpinnerKind::Tool),
             BusyKind::Waiting => Some(SpinnerKind::Waiting),
@@ -1199,8 +1205,8 @@ impl SessionScreen {
                 self.observe_chat(&turn_message);
                 self.chat.update(turn_message);
                 let media = self.drain_media();
-                self.busy_kind = BusyKind::Generating;
-                self.status = Some("Thinking...".to_string());
+                self.busy_kind = BusyKind::Initializing;
+                self.status = Some(INITIALIZING_STATUS.to_string());
                 self.retry = None;
                 self.last_escape = None;
                 self.sync_slash();
@@ -1526,6 +1532,7 @@ impl SessionScreen {
             let mut spans = Vec::new();
             let spinner_span = match kind {
                 BusyKind::Idle => None,
+                BusyKind::Initializing => Some(super::spinner::initializing_spinner()),
                 BusyKind::Generating => Some(super::spinner::generating_spinner()),
                 BusyKind::Tool => Some(super::spinner::tool_spinner()),
                 BusyKind::Waiting => Some(super::spinner::wait_spinner()),
@@ -2907,9 +2914,33 @@ mod tests {
             steered: false,
         });
         assert!(screen.is_busy());
-        assert_eq!(screen.busy_kind, BusyKind::Generating);
-        assert_eq!(screen.status.as_deref(), Some("Thinking..."));
+        assert_eq!(screen.busy_kind, BusyKind::Initializing);
+        assert_eq!(screen.status.as_deref(), Some("Initializing..."));
         assert!(screen.chat.has_messages());
+    }
+
+    #[test]
+    fn turn_started_status_row_leads_with_the_initializing_spinner() {
+        let mut screen = SessionScreen::new();
+        screen.update(SessionMessage::TurnStarted {
+            content: "hello".into(),
+            attachments: Vec::new(),
+            steered: false,
+        });
+        let buf = draw(&screen, 80, 24);
+        let (y, _) = find_row(&buf, "Initializing...");
+        let status = content_row_text(&buf, y);
+        assert!(!status.contains("Thinking..."), "status row: {status:?}");
+        let spinner = super::super::spinner::initializing_spinner();
+        assert!(
+            status.starts_with(spinner.content.as_ref()),
+            "status row must lead with the initializing spinner: {status:?}"
+        );
+        assert_eq!(
+            buf[(31, y)].fg,
+            theme::accent(),
+            "the spinner renders in the accent color"
+        );
     }
 
     #[test]
