@@ -3,17 +3,12 @@
 
   inputs = {
     nixpkgs.url = "git+https://github.com/NixOS/nixpkgs?ref=nixos-unstable";
-    selune = {
-      url = "git+https://github.com/chardoncs/selune?ref=main";
-      flake = false;
-    };
   };
 
   outputs =
     {
       self,
       nixpkgs,
-      selune,
     }:
     let
       systems = [
@@ -47,11 +42,6 @@
               "shuvarie"
             ];
 
-            postUnpack = ''
-              rm -rf "$sourceRoot/vendor/selune"
-              mkdir -p "$sourceRoot/vendor"
-              cp -rL ${selune} "$sourceRoot/vendor/selune"
-            '';
             meta = {
               description = "Blazingly fast AI coding TUI for chivalrous people";
               homepage = "https://github.com/shuvarie/shuvarie";

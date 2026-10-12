@@ -18,25 +18,7 @@
     },
     "root": {
       "inputs": {
-        "nixpkgs": "nixpkgs",
-        "selune": "selune"
-      }
-    },
-    "selune": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1789200267,
-        "narHash": "sha256-UjktZjDXdhSZHAEsE8m+o4vyo1J6/LptsPfq8MgFJDc=",
-        "ref": "main",
-        "rev": "5074a81f65c64055b08442dc7cbc429a9768185d",
-        "revCount": 32,
-        "type": "git",
-        "url": "https://github.com/chardoncs/selune"
-      },
-      "original": {
-        "ref": "main",
-        "type": "git",
-        "url": "https://github.com/chardoncs/selune"
+        "nixpkgs": "nixpkgs"
       }
     }
   },
