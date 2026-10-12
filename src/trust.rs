@@ -87,28 +87,63 @@ pub async fn resolve(explicit_config: Option<&PathBuf>) -> color_eyre::Result<Op
         }
     };
 
+    Ok(Some(load_under(&cwd, explicit_config, grants)?))
+}
+
+/// The grants a headless `run` starts under when `--trust` is absent: the
+/// recorded decision for this workspace when `trusts.kdl` has a record, else
+/// none. Never prompts, never scans, never writes.
+pub fn default_run_grants() -> color_eyre::Result<TrustGrants> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let file = TrustFile::load()?;
+    Ok(file
+        .lookup_record(&cwd)
+        .map(|record| record.grants.clone())
+        .unwrap_or_else(TrustGrants::none))
+}
+
+/// Loads the config chain, scenes, and themes under a fixed trust decision —
+/// the headless `run` path, which takes its grants from `--trust` (or the
+/// recorded grants when the flag is absent) instead of prompting. Never
+/// touches `/dev/tty`, so it works with a piped or absent terminal.
+pub fn resolve_with_grants(
+    explicit_config: Option<&PathBuf>,
+    grants: TrustGrants,
+) -> color_eyre::Result<Resolved> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    load_under(&cwd, explicit_config, grants)
+}
+
+/// Loads the config chain under `grants` and resolves the scenes and theme
+/// sets for it. Shared by the interactive [`resolve`] and the headless
+/// [`resolve_with_grants`].
+fn load_under(
+    cwd: &std::path::Path,
+    explicit_config: Option<&PathBuf>,
+    grants: TrustGrants,
+) -> color_eyre::Result<Resolved> {
     let config = match explicit_config {
         Some(path) => Config::load_explicit(path)?,
-        None => Config::load_trusted(&cwd, &grants)?,
+        None => Config::load_trusted(cwd, &grants)?,
     };
     let scenes = Config::load_scenes(
         &config,
-        &cwd,
+        cwd,
         &grants,
         explicit_config.as_ref().map(|p| p.as_path()),
     )?;
     let theme_set = Config::load_themes(
         &config,
-        &cwd,
+        cwd,
         &grants,
         explicit_config.as_ref().map(|p| p.as_path()),
     )?;
-    Ok(Some(Resolved {
+    Ok(Resolved {
         config,
         grants,
         scenes,
         theme_set,
-    }))
+    })
 }
 
 /// The scan items a recorded workspace still needs a decision for: categories
@@ -182,5 +217,17 @@ mod tests {
         let followup = follow_up_scan(&scan, &grants, &Default::default()).unwrap();
         assert_eq!(followup.len(), 1);
         assert_eq!(followup[0].category, Category::Configs);
+    }
+
+    #[test]
+    fn resolve_with_grants_loads_under_the_given_grants() {
+        // An explicit config path sidesteps the workspace chain, so this is
+        // deterministic regardless of the process's working directory.
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.kdl");
+        std::fs::write(&config_path, "").unwrap();
+        let grants = TrustGrants::from_categories([Category::Skills]);
+        let resolved = resolve_with_grants(Some(&config_path), grants.clone()).unwrap();
+        assert_eq!(resolved.grants, grants);
     }
 }

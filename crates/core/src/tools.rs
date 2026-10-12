@@ -250,7 +250,9 @@ pub fn all_tools(
     read_cache: ReadCache,
     max_output_chars: usize,
     max_output_bytes: usize,
-    question_gate: QuestionGate,
+    // The `question` tool's gate; `None` in headless (`run`) mode, where the
+    // tool is dropped from the roster so the model never sees it.
+    question_gate: Option<QuestionGate>,
     access: Access,
     shell_tx: ShellOutputTx,
     shell: Shell,
@@ -314,9 +316,11 @@ pub fn all_tools(
     tools.extend(scene_tool("webfetch", scene, &access, false, |_access| {
         WebFetch::new(max_output_chars)
     }));
-    tools.extend(scene_tool("question", scene, &access, false, |_access| {
-        Question::new(question_gate)
-    }));
+    if let Some(question_gate) = question_gate {
+        tools.extend(scene_tool("question", scene, &access, false, |_access| {
+            Question::new(question_gate)
+        }));
+    }
     // The `decide` tool consults a decision model the config defines. It is
     // offered only when decision models are enabled and at least one decision
     // exists: naming a defined decision is its whole interface, so there is
@@ -507,6 +511,17 @@ mod tests {
     /// [`roster_with`] with an explicit access handle, for the rosters that
     /// depend on what the access carries (the decision service, ...).
     fn roster_for(access: Access, skills: &Skills, scene: &ToolScene) -> Vec<String> {
+        roster_full(access, skills, scene, false)
+    }
+
+    /// The roster as the core task builds it, with `headless` dropping the
+    /// `question` tool from the set (as `Command::SetHeadless` does).
+    fn roster_full(
+        access: Access,
+        skills: &Skills,
+        scene: &ToolScene,
+        headless: bool,
+    ) -> Vec<String> {
         let (question_tx, _question_rx) = tokio::sync::mpsc::channel(1);
         let (shell_tx, _shell_rx) = tokio::sync::mpsc::channel(1);
         let lsp = std::sync::Arc::new(tokio::sync::Mutex::new(shuvarie_lsp::LspManager::new(
@@ -520,7 +535,7 @@ mod tests {
             ReadCache::new(),
             100,
             100,
-            QuestionGate::new(question_tx),
+            (!headless).then(|| QuestionGate::new(question_tx)),
             access,
             ShellOutputTx::new(shell_tx),
             crate::shell::resolve(None).shell,
@@ -566,6 +581,20 @@ mod tests {
                 "missing {expected}: {names:?}"
             );
         }
+    }
+
+    #[test]
+    fn headless_drops_the_question_tool() {
+        let names = roster_full(
+            crate::test_util::access(),
+            &Skills::default(),
+            &ToolScene::default(),
+            true,
+        );
+        assert!(!names.contains(&"question".into()), "{names:?}");
+        // Every other tool is unaffected.
+        assert!(names.contains(&"read_file".into()), "{names:?}");
+        assert!(names.contains(&"todo".into()), "{names:?}");
     }
 
     #[test]

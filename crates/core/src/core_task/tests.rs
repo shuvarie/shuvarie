@@ -2525,6 +2525,7 @@ async fn resume_ctx(store: Store, session: Session) -> (CoreCtx, Receiver<Event>
         max_output_chars,
         max_output_bytes,
         steer: SteerSignal::default(),
+        headless: false,
         scenes: shuvarie_config::Config::default().scenes,
     };
     (ctx, event_rx)
@@ -2892,4 +2893,19 @@ async fn turn_retry_resume_keeps_the_turn_after_an_empty_retry_tip() {
         matches!(second, Event::StreamError { ref error } if error == "no active provider"),
         "unexpected event: {second:?}"
     );
+}
+
+#[test]
+fn headless_preamble_note_is_appended() {
+    let base = preamble_notes("Base".to_string(), false, false);
+    assert_eq!(base, "Base");
+
+    let headless = preamble_notes("Base".to_string(), false, true);
+    assert!(headless.starts_with("Base\n\n"), "{headless}");
+    assert!(headless.contains(HEADLESS_NOTE), "{headless}");
+
+    // Both notes can coexist (web search available and headless).
+    let both = preamble_notes("Base".to_string(), true, true);
+    assert!(both.contains("Web search is available"), "{both}");
+    assert!(both.contains(HEADLESS_NOTE), "{both}");
 }

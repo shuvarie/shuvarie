@@ -80,6 +80,12 @@ pub enum Command {
         attachments: Vec<String>,
         model: Option<String>,
     },
+    /// Switch the core into headless (non-interactive) mode, as `shuvarie run`
+    /// does: the `question` tool is dropped from every turn's roster and the
+    /// system preamble tells the model nobody can answer, so it picks the
+    /// option it judges best and proceeds. Sent before the first
+    /// [`Command::SendMessage`]; one-way for the lifetime of the core task.
+    SetHeadless,
     /// Run a bash-mode (`!`-prefixed) command through the resolved shell.
     /// Display-only: the output never persists or reaches the model.
     RunBash {

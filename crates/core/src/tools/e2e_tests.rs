@@ -56,7 +56,7 @@ fn roster(
         ReadCache::new(),
         100,
         100,
-        QuestionGate::new(question_tx),
+        Some(QuestionGate::new(question_tx)),
         access,
         ShellOutputTx::new(shell_tx),
         crate::shell::resolve(None).shell,

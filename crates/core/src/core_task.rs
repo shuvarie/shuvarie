@@ -225,6 +225,10 @@ struct CoreCtx {
     max_output_chars: usize,
     max_output_bytes: usize,
     steer: SteerSignal,
+    /// Headless (non-interactive) mode, set by [`Command::SetHeadless`] for
+    /// `shuvarie run`: the `question` tool is dropped from every turn's roster
+    /// and the system preamble tells the model to pick the best option itself.
+    headless: bool,
     /// The configured scene set (config chain + `scene.d` drop-ins).
     scenes: shuvarie_config::ScenesConfig,
 }
@@ -449,6 +453,7 @@ pub async fn run(
         max_output_chars,
         max_output_bytes,
         steer,
+        headless: false,
         scenes: scene_set.scenes,
     };
     load_startup_session(
@@ -468,6 +473,9 @@ pub async fn run(
                 match cmd {
                     Command::Ping => {
                         let _ = ctx.event_tx.send(Event::Pong).await;
+                    }
+                    Command::SetHeadless => {
+                        ctx.headless = true;
                     }
                     Command::FetchRegistry { registry } => {
                         let registry_id = registry.clone();
@@ -1793,6 +1801,31 @@ a todo per step, keep exactly one in_progress while you work on it, and mark eac
 as it is finished. Todos are surfaced to the user in the chat pane and the sidebar, so keep \
 the list current.";
 
+/// Appended to the system preamble in headless (`run`) mode, where the
+/// `question` tool is dropped from the roster and nobody can answer.
+const HEADLESS_NOTE: &str = "\
+You are running headlessly, in non-interactive `run` mode: no user is watching and there is no \
+`question` tool. When you would otherwise ask which option to take, pick the one you judge best \
+and proceed.";
+
+/// Appends the per-turn capability notes to the base preamble: the web-search
+/// note when the tool is available, and the headless note in `run` mode.
+fn preamble_notes(base: String, web_search: bool, headless: bool) -> String {
+    let mut base = base;
+    if web_search {
+        base.push_str(
+            "\n\nWeb search is available through the `web_search` tool: use it for current \
+             information and documentation beyond your training data, then read a specific \
+             result page with `webfetch`.",
+        );
+    }
+    if headless {
+        base.push_str("\n\n");
+        base.push_str(HEADLESS_NOTE);
+    }
+    base
+}
+
 #[derive(Debug, Default)]
 struct TurnState {
     assistant_message_id: Option<u64>,
@@ -2333,7 +2366,7 @@ impl CoreCtx {
                         // upgrades it only while no manual rename has
                         // landed meanwhile. Fire-and-forget — a failed or
                         // empty generation keeps the provisional title.
-                        if title_cfg.auto_gen {
+                        if title_cfg.auto_gen && !self.headless {
                             let _ = spawn_title_draft(
                                 &mut self.clients,
                                 &mut self.connections,
@@ -2653,17 +2686,9 @@ impl CoreCtx {
         };
         let web_search_config = self.config.tools.effective_web_search();
         let web_search = web_search_config.as_ref();
-        let base = if web_search.is_some() {
-            format!(
-                "{base}\n\nWeb search is available through the `web_search` tool: use it for \
-                 current information and documentation beyond your training data, then read a \
-                 specific result page with `webfetch`."
-            )
-        } else {
-            base
-        };
+        let base = preamble_notes(base, web_search.is_some(), self.headless);
         let preamble = crate::context::build_preamble(&base, &loaded_context);
-        let question_gate = QuestionGate::new(self.question_tx.clone());
+        let question_gate = (!self.headless).then(|| QuestionGate::new(self.question_tx.clone()));
         let (shell_tx, shell_rx) = tokio::sync::mpsc::channel::<crate::tools::ShellChunk>(64);
         let file_locks = crate::tools::FileLocks::new();
         let tool_scene = scene.tools();
