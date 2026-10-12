@@ -1,6 +1,7 @@
 //! Shared helpers for the zip-container and XML-backed formats (docx, pptx,
 //! odt, odp, epub): a minimal XML element tree and zip member access.
 
+use std::borrow::Cow;
 use std::io::{Cursor, Read};
 
 use crate::ConvertError;
@@ -16,6 +17,21 @@ pub(crate) fn open_zip(bytes: &[u8]) -> Result<zip::ZipArchive<Cursor<&[u8]>>, C
         part: Some("zip"),
         detail: error.to_string(),
     })
+}
+
+/// Every member name in the archive, in central-directory order. In zip 9 this
+/// iterator is fallible and yields `Cow<str>`; names the reader fails to decode
+/// are skipped, since they can never match the structural ASCII names these
+/// callers look for.
+pub(crate) fn member_names<R>(archive: &zip::ZipArchive<R>) -> Vec<String>
+where
+    R: std::io::Read + std::io::Seek,
+{
+    archive
+        .file_names()
+        .filter_map(Result::ok)
+        .map(Cow::into_owned)
+        .collect()
 }
 
 /// Reads one decompressed member, returning `None` when absent or empty.

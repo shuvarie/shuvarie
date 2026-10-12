@@ -292,7 +292,13 @@ fn extract_binary(archive: &Archive, data: &[u8]) -> color_eyre::Result<Vec<u8>>
             let mut entry = zip
                 .by_index(index)
                 .wrap_err("failed to read the zip entry")?;
-            let name = entry.name().rsplit('/').next().unwrap_or_default();
+            let name = entry
+                .name()
+                .wrap_err("failed to read the zip entry name")?
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_owned();
             if name == archive.binary {
                 let mut buffer = Vec::new();
                 entry

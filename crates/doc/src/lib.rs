@@ -189,7 +189,7 @@ fn zip_signature(bytes: &[u8]) -> Option<SourceFormat> {
     let Ok(mut archive) = xml::open_zip(bytes) else {
         return None;
     };
-    let members: Vec<String> = archive.file_names().map(str::to_string).collect();
+    let members = xml::member_names(&archive);
     let has = |name: &str| members.iter().any(|member| member == name);
     // EPUB first: it carries an explicit manifest pointer.
     if has("META-INF/container.xml") {

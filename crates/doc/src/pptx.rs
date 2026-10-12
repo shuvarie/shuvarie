@@ -5,7 +5,10 @@ use crate::{ConvertError, md, xml};
 
 pub(crate) fn to_markdown(bytes: &[u8]) -> Result<String, ConvertError> {
     let mut archive = xml::open_zip(bytes)?;
-    let mut slides: Vec<(u32, String)> = archive.file_names().filter_map(slide_member).collect();
+    let mut slides: Vec<(u32, String)> = xml::member_names(&archive)
+        .iter()
+        .filter_map(|name| slide_member(name))
+        .collect();
     slides.sort_by_key(|(number, _)| *number);
     let total = slides.len();
     if total == 0 {
