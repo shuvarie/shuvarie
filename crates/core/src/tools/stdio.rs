@@ -514,9 +514,10 @@ mod tests {
             .resolve_call(&json!({"query": "hi", "limit": 2}))
             .expect("resolve");
         assert_eq!(argv, vec!["cat"]);
+        let stdin = String::from_utf8(stdin.expect("stdin")).unwrap();
         assert_eq!(
-            String::from_utf8(stdin.expect("stdin")).unwrap(),
-            r#"{"limit":2,"query":"hi"}"#
+            serde_json::from_str::<serde_json::Value>(&stdin).unwrap(),
+            json!({"query": "hi", "limit": 2})
         );
     }
 
@@ -584,7 +585,10 @@ mod tests {
             .run(json!({"query": "hi", "limit": 2}))
             .await
             .expect("run");
-        assert_eq!(output_text(out).trim(), r#"{"limit":2,"query":"hi"}"#);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(output_text(out).trim()).unwrap(),
+            json!({"query": "hi", "limit": 2})
+        );
     }
 
     #[cfg(unix)]

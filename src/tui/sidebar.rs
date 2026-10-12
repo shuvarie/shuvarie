@@ -571,12 +571,10 @@ mod tests {
     fn context_section_shows_tokens_and_cost() {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateUsage {
-            usage: TokenUsage {
-                total_tokens: Some(22_400),
-                input_tokens: Some(10_100),
-                output_tokens: Some(12_300),
-                ..Default::default()
-            },
+            usage: TokenUsage::new()
+                .total_tokens(Some(22_400))
+                .input_tokens(Some(10_100))
+                .output_tokens(Some(12_300)),
             cost: 0.125,
             context_tokens: None,
         });
@@ -593,14 +591,12 @@ mod tests {
     fn context_section_shows_think_and_cache_when_present() {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateUsage {
-            usage: TokenUsage {
-                total_tokens: Some(11_756),
-                input_tokens: Some(10_100),
-                output_tokens: Some(1_656),
-                reasoning_tokens: Some(12_000),
-                cached_input_tokens: Some(456),
-                ..Default::default()
-            },
+            usage: TokenUsage::new()
+                .total_tokens(Some(11_756))
+                .input_tokens(Some(10_100))
+                .output_tokens(Some(1_656))
+                .reasoning_tokens(Some(12_000))
+                .cached_input_tokens(Some(456)),
             cost: 0.0,
             context_tokens: None,
         });
@@ -616,10 +612,7 @@ mod tests {
             context_length: Some(200_000),
         });
         sidebar.update(SidebarMessage::UpdateUsage {
-            usage: TokenUsage {
-                output_tokens: Some(12_300),
-                ..Default::default()
-            },
+            usage: TokenUsage::new().output_tokens(Some(12_300)),
             cost: 0.0,
             context_tokens: Some(84_000),
         });
@@ -632,13 +625,11 @@ mod tests {
     fn context_section_shows_read_and_cache_hit() {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateUsage {
-            usage: TokenUsage {
-                total_tokens: Some(20_200),
-                input_tokens: Some(600),
-                output_tokens: Some(200),
-                cached_input_tokens: Some(19_400),
-                ..Default::default()
-            },
+            usage: TokenUsage::new()
+                .total_tokens(Some(20_200))
+                .input_tokens(Some(600))
+                .output_tokens(Some(200))
+                .cached_input_tokens(Some(19_400)),
             cost: 0.0,
             context_tokens: Some(20_200),
         });
@@ -653,13 +644,11 @@ mod tests {
             context_length: Some(200_000),
         });
         sidebar.update(SidebarMessage::UpdateUsage {
-            usage: TokenUsage {
-                total_tokens: Some(20_200),
-                input_tokens: Some(600),
-                output_tokens: Some(200),
-                cached_input_tokens: Some(19_400),
-                ..Default::default()
-            },
+            usage: TokenUsage::new()
+                .total_tokens(Some(20_200))
+                .input_tokens(Some(600))
+                .output_tokens(Some(200))
+                .cached_input_tokens(Some(19_400)),
             cost: 0.5,
             context_tokens: Some(20_200),
         });
@@ -682,12 +671,10 @@ mod tests {
     fn context_section_hides_cache_hit_without_cached_tokens() {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateUsage {
-            usage: TokenUsage {
-                total_tokens: Some(20_200),
-                input_tokens: Some(20_000),
-                output_tokens: Some(200),
-                ..Default::default()
-            },
+            usage: TokenUsage::new()
+                .total_tokens(Some(20_200))
+                .input_tokens(Some(20_000))
+                .output_tokens(Some(200)),
             cost: 0.0,
             context_tokens: Some(20_200),
         });
@@ -700,11 +687,9 @@ mod tests {
     fn context_section_hides_read_and_cache_when_worker_only() {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateUsage {
-            usage: TokenUsage {
-                input_tokens: Some(10_100),
-                output_tokens: Some(200),
-                ..Default::default()
-            },
+            usage: TokenUsage::new()
+                .input_tokens(Some(10_100))
+                .output_tokens(Some(200)),
             cost: 0.0,
             context_tokens: None,
         });
@@ -717,13 +702,11 @@ mod tests {
     fn context_section_cache_hit_caps_at_100_percent() {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateUsage {
-            usage: TokenUsage {
-                total_tokens: Some(20_200),
-                input_tokens: Some(20_000),
-                output_tokens: Some(200),
-                cached_input_tokens: Some(21_000),
-                ..Default::default()
-            },
+            usage: TokenUsage::new()
+                .total_tokens(Some(20_200))
+                .input_tokens(Some(20_000))
+                .output_tokens(Some(200))
+                .cached_input_tokens(Some(21_000)),
             cost: 0.0,
             context_tokens: Some(20_200),
         });
@@ -738,11 +721,9 @@ mod tests {
             context_length: Some(200_000),
         });
         sidebar.update(SidebarMessage::UpdateUsage {
-            usage: TokenUsage {
-                input_tokens: Some(10_100),
-                output_tokens: Some(12_300),
-                ..Default::default()
-            },
+            usage: TokenUsage::new()
+                .input_tokens(Some(10_100))
+                .output_tokens(Some(12_300)),
             cost: 0.0,
             context_tokens: Some(84_000),
         });
@@ -775,10 +756,7 @@ mod tests {
             context_length: Some(1_048_576),
         });
         sidebar.update(SidebarMessage::UpdateUsage {
-            usage: TokenUsage {
-                output_tokens: Some(5_000_000),
-                ..Default::default()
-            },
+            usage: TokenUsage::new().output_tokens(Some(5_000_000)),
             cost: 0.0,
             context_tokens: Some(5_000_000),
         });
@@ -791,20 +769,16 @@ mod tests {
     fn context_section_live_updates_accumulate_then_snapshot_replaces() {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateUsage {
-            usage: TokenUsage {
-                input_tokens: Some(1_000),
-                output_tokens: Some(500),
-                ..Default::default()
-            },
+            usage: TokenUsage::new()
+                .input_tokens(Some(1_000))
+                .output_tokens(Some(500)),
             cost: 0.01,
             context_tokens: Some(2_500),
         });
         sidebar.update(SidebarMessage::UpdateUsage {
-            usage: TokenUsage {
-                input_tokens: Some(2_000),
-                output_tokens: Some(1_000),
-                ..Default::default()
-            },
+            usage: TokenUsage::new()
+                .input_tokens(Some(2_000))
+                .output_tokens(Some(1_000)),
             cost: 0.02,
             context_tokens: None,
         });
@@ -812,11 +786,9 @@ mod tests {
         assert!(rendered.contains("↑3k ↓1.5k"), "body: {rendered}");
         assert!(rendered.contains("Cost $0.03"), "body: {rendered}");
         sidebar.update(SidebarMessage::SetUsage {
-            usage: TokenUsage {
-                input_tokens: Some(10),
-                output_tokens: Some(20),
-                ..Default::default()
-            },
+            usage: TokenUsage::new()
+                .input_tokens(Some(10))
+                .output_tokens(Some(20)),
             cost: 0.5,
         });
         let rendered = text(sidebar.rendered_lines());
@@ -828,20 +800,16 @@ mod tests {
     fn context_section_set_usage_replaces_totals() {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateUsage {
-            usage: TokenUsage {
-                total_tokens: Some(50_000),
-                input_tokens: Some(50_000),
-                ..Default::default()
-            },
+            usage: TokenUsage::new()
+                .total_tokens(Some(50_000))
+                .input_tokens(Some(50_000)),
             cost: 1.0,
             context_tokens: Some(84_000),
         });
         sidebar.update(SidebarMessage::SetUsage {
-            usage: TokenUsage {
-                total_tokens: Some(10_000),
-                input_tokens: Some(10_000),
-                ..Default::default()
-            },
+            usage: TokenUsage::new()
+                .total_tokens(Some(10_000))
+                .input_tokens(Some(10_000)),
             cost: 0.2,
         });
         let rendered = text(sidebar.rendered_lines());
@@ -861,18 +829,12 @@ mod tests {
             context_length: Some(200_000),
         });
         sidebar.update(SidebarMessage::UpdateUsage {
-            usage: TokenUsage {
-                total_tokens: Some(84_000),
-                ..Default::default()
-            },
+            usage: TokenUsage::new().total_tokens(Some(84_000)),
             cost: 0.0,
             context_tokens: Some(84_000),
         });
         sidebar.update(SidebarMessage::UpdateUsage {
-            usage: TokenUsage {
-                total_tokens: Some(8_000),
-                ..Default::default()
-            },
+            usage: TokenUsage::new().total_tokens(Some(8_000)),
             cost: 0.0,
             context_tokens: None,
         });
@@ -894,10 +856,7 @@ mod tests {
             context_length: Some(200_000),
         });
         sidebar.update(SidebarMessage::UpdateUsage {
-            usage: TokenUsage {
-                total_tokens: Some(84_000),
-                ..Default::default()
-            },
+            usage: TokenUsage::new().total_tokens(Some(84_000)),
             cost: 0.0,
             context_tokens: Some(84_000),
         });
@@ -919,13 +878,13 @@ mod tests {
             cost: 0.0,
         });
         sidebar.update(SidebarMessage::SetContextRequest {
-            usage: Some(TokenUsage {
-                input_tokens: Some(500),
-                output_tokens: Some(200),
-                total_tokens: Some(20_200),
-                cached_input_tokens: Some(19_400),
-                ..Default::default()
-            }),
+            usage: Some(
+                TokenUsage::new()
+                    .input_tokens(Some(500))
+                    .output_tokens(Some(200))
+                    .total_tokens(Some(20_200))
+                    .cached_input_tokens(Some(19_400)),
+            ),
         });
         let rendered = text(sidebar.rendered_lines());
         assert!(
@@ -950,10 +909,7 @@ mod tests {
             context_length: Some(200_000),
         });
         sidebar.update(SidebarMessage::UpdateUsage {
-            usage: TokenUsage {
-                total_tokens: Some(84_000),
-                ..Default::default()
-            },
+            usage: TokenUsage::new().total_tokens(Some(84_000)),
             cost: 0.0,
             context_tokens: Some(84_000),
         });
@@ -976,20 +932,17 @@ mod tests {
             context_length: Some(200_000),
         });
         sidebar.update(SidebarMessage::UpdateUsage {
-            usage: TokenUsage {
-                total_tokens: Some(84_000),
-                ..Default::default()
-            },
+            usage: TokenUsage::new().total_tokens(Some(84_000)),
             cost: 0.0,
             context_tokens: Some(84_000),
         });
         sidebar.update(SidebarMessage::SetContextRequest {
-            usage: Some(TokenUsage {
-                input_tokens: Some(900_000),
-                output_tokens: Some(1_000),
-                total_tokens: Some(901_000),
-                ..Default::default()
-            }),
+            usage: Some(
+                TokenUsage::new()
+                    .input_tokens(Some(900_000))
+                    .output_tokens(Some(1_000))
+                    .total_tokens(Some(901_000)),
+            ),
         });
         let rendered = text(sidebar.rendered_lines());
         assert!(rendered.contains("200k"), "the window stays: {rendered}");
@@ -1081,11 +1034,9 @@ mod tests {
             context_length: Some(200_000),
         });
         sidebar.update(SidebarMessage::UpdateUsage {
-            usage: TokenUsage {
-                input_tokens: Some(10_100),
-                output_tokens: Some(12_300),
-                ..Default::default()
-            },
+            usage: TokenUsage::new()
+                .input_tokens(Some(10_100))
+                .output_tokens(Some(12_300)),
             cost: 0.125,
             context_tokens: Some(84_000),
         });
@@ -1128,13 +1079,11 @@ mod tests {
             context_length: Some(200_000),
         });
         sidebar.update(SidebarMessage::UpdateUsage {
-            usage: TokenUsage {
-                total_tokens: Some(20_200),
-                input_tokens: Some(600),
-                output_tokens: Some(200),
-                cached_input_tokens: Some(19_400),
-                ..Default::default()
-            },
+            usage: TokenUsage::new()
+                .total_tokens(Some(20_200))
+                .input_tokens(Some(600))
+                .output_tokens(Some(200))
+                .cached_input_tokens(Some(19_400)),
             cost: 0.125,
             context_tokens: Some(84_000),
         });
@@ -1420,12 +1369,10 @@ mod scene_tests {
 
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateUsage {
-            usage: TokenUsage {
-                total_tokens: Some(22_400),
-                input_tokens: Some(10_100),
-                output_tokens: Some(12_300),
-                ..Default::default()
-            },
+            usage: TokenUsage::new()
+                .total_tokens(Some(22_400))
+                .input_tokens(Some(10_100))
+                .output_tokens(Some(12_300)),
             cost: 0.125,
             context_tokens: None,
         });

@@ -24,14 +24,12 @@ fn request_usage_of(m: &StoredMessage) -> Option<TokenUsage> {
     if m.request.total_tokens.unwrap_or(0) > 0 {
         return Some(m.request);
     }
-    let usage = TokenUsage {
-        input_tokens: Some(m.input_tokens),
-        output_tokens: Some(m.output_tokens),
-        total_tokens: Some(m.total_tokens),
-        cached_input_tokens: Some(m.cached_input_tokens),
-        reasoning_tokens: Some(m.reasoning_tokens),
-        ..TokenUsage::default()
-    };
+    let usage = TokenUsage::new()
+        .input_tokens(Some(m.input_tokens))
+        .output_tokens(Some(m.output_tokens))
+        .total_tokens(Some(m.total_tokens))
+        .cached_input_tokens(Some(m.cached_input_tokens))
+        .reasoning_tokens(Some(m.reasoning_tokens));
     (usage.total_tokens.unwrap_or(0) > 0).then_some(usage)
 }
 
@@ -491,14 +489,12 @@ impl Session {
 
     /// The session's cumulative usage as a [`TokenUsage`], for usage snapshots.
     pub fn usage(&self) -> TokenUsage {
-        TokenUsage {
-            total_tokens: Some(self.tokens),
-            input_tokens: Some(self.input_tokens),
-            output_tokens: Some(self.output_tokens),
-            cached_input_tokens: Some(self.cached_tokens),
-            reasoning_tokens: Some(self.reasoning_tokens),
-            ..TokenUsage::default()
-        }
+        TokenUsage::new()
+            .total_tokens(Some(self.tokens))
+            .input_tokens(Some(self.input_tokens))
+            .output_tokens(Some(self.output_tokens))
+            .cached_input_tokens(Some(self.cached_tokens))
+            .reasoning_tokens(Some(self.reasoning_tokens))
     }
 
     /// Build the chat history to send to the LLM for a new turn: everything
@@ -584,13 +580,11 @@ mod tests {
         stored.messages[1].output_tokens = 200;
         stored.messages[1].total_tokens = 12_200;
         stored.messages[1].cached_input_tokens = 11_000;
-        stored.messages[1].request = TokenUsage {
-            input_tokens: Some(20_000),
-            output_tokens: Some(200),
-            total_tokens: Some(20_200),
-            cached_input_tokens: Some(19_400),
-            ..TokenUsage::default()
-        };
+        stored.messages[1].request = TokenUsage::new()
+            .input_tokens(Some(20_000))
+            .output_tokens(Some(200))
+            .total_tokens(Some(20_200))
+            .cached_input_tokens(Some(19_400));
 
         let session = Session::from_stored(stored);
         let last = session.last_usage.expect("request usage restored");
@@ -620,16 +614,10 @@ mod tests {
         chain(&mut stored.messages);
         stored.leaf_id = Some(stored.messages[2].id);
         stored.messages[0].total_tokens = 30;
-        stored.messages[0].request = TokenUsage {
-            total_tokens: Some(30),
-            ..TokenUsage::default()
-        };
+        stored.messages[0].request = TokenUsage::new().total_tokens(Some(30));
         stored.messages[1].summary = true;
         stored.messages[1].total_tokens = 9_999;
-        stored.messages[1].request = TokenUsage {
-            total_tokens: Some(9_999),
-            ..TokenUsage::default()
-        };
+        stored.messages[1].request = TokenUsage::new().total_tokens(Some(9_999));
 
         let session = Session::from_stored(stored);
         // Both usable rows predate the newest summary: the head they measured
@@ -647,15 +635,9 @@ mod tests {
         ]);
         chain(&mut stored.messages);
         stored.leaf_id = Some(stored.messages[2].id);
-        stored.messages[0].request = TokenUsage {
-            total_tokens: Some(99_000),
-            ..TokenUsage::default()
-        };
+        stored.messages[0].request = TokenUsage::new().total_tokens(Some(99_000));
         stored.messages[1].summary = true;
-        stored.messages[2].request = TokenUsage {
-            total_tokens: Some(3_000),
-            ..TokenUsage::default()
-        };
+        stored.messages[2].request = TokenUsage::new().total_tokens(Some(3_000));
 
         let session = Session::from_stored(stored);
         let last = session.last_usage.expect("post-summary request restored");
@@ -680,15 +662,9 @@ mod tests {
         ]);
         chain(&mut stored.messages);
         stored.leaf_id = Some(stored.messages[4].id);
-        stored.messages[1].request = TokenUsage {
-            total_tokens: Some(30_000),
-            ..TokenUsage::default()
-        };
+        stored.messages[1].request = TokenUsage::new().total_tokens(Some(30_000));
         stored.messages[2].summary = true;
-        stored.messages[4].request = TokenUsage {
-            total_tokens: Some(32_000),
-            ..TokenUsage::default()
-        };
+        stored.messages[4].request = TokenUsage::new().total_tokens(Some(32_000));
 
         let session = Session::from_stored(stored);
         let last = session.last_usage.expect("kept-tail request restored");

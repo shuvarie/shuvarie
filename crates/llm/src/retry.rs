@@ -1,4 +1,3 @@
-use rig_agent::agent::StreamingError;
 use rig_agent::completion::PromptError;
 use rig_core::error::ProviderError;
 
@@ -9,7 +8,7 @@ pub struct ConnectionFailure {
     pub reason: String,
 }
 
-/// Label a rig streaming error for the turn-retry status row.
+/// Label a rig agent-run error for the turn-retry status row.
 ///
 /// Transport failures (reqwest timeouts, connect failures, resets, broken
 /// pipes, HTTP 408/429/5xx) get a specific label (`Connection reset`, ...).
@@ -20,14 +19,10 @@ pub struct ConnectionFailure {
 /// Mid-stream SSE transport failures that lose their typed error (rig
 /// flattens them to a `ProviderError` string) are recognized by the
 /// `"Http client error: "` display prefix of `http_client::Error::Instance`.
-pub fn classify_connection_error(err: &StreamingError) -> Option<ConnectionFailure> {
+pub fn classify_connection_error(err: &PromptError) -> Option<ConnectionFailure> {
     match err {
-        StreamingError::Completion(e) => classify_provider_error(e),
-        StreamingError::Prompt(e) => match e {
-            PromptError::CompletionError(e) => classify_provider_error(e),
-            _ => None,
-        },
-        StreamingError::Report(_) => None,
+        PromptError::Provider(e) => classify_provider_error(e),
+        _ => None,
     }
 }
 
@@ -182,20 +177,16 @@ mod tests {
         assert!(!is_context_length_error("connection reset by peer"));
     }
 
-    fn completion_err(err: ProviderError) -> StreamingError {
-        StreamingError::Completion(err)
+    fn completion_err(err: ProviderError) -> PromptError {
+        PromptError::Provider(err)
     }
 
-    fn prompt_err(err: ProviderError) -> StreamingError {
-        StreamingError::Prompt(rig_agent::completion::PromptError::CompletionError(err))
-    }
-
-    fn max_turns_err() -> StreamingError {
-        StreamingError::Prompt(rig_agent::completion::PromptError::MaxTurnsError {
+    fn max_turns_err() -> PromptError {
+        PromptError::MaxTurns {
             max_turns: 1,
             chat_history: Vec::new(),
             prompt: rig_core::message::Message::user("x"),
-        })
+        }
     }
 
     /// A synthetic error whose source is an `io::Error` of `kind`, standing in
@@ -216,7 +207,7 @@ mod tests {
         }
     }
 
-    fn status_err(status: http::StatusCode) -> StreamingError {
+    fn status_err(status: http::StatusCode) -> PromptError {
         completion_err(ProviderError::Http(Arc::new(
             rig_core::http_client::Error::InvalidStatusCodeWithDetails {
                 status,
@@ -226,7 +217,7 @@ mod tests {
         )))
     }
 
-    fn transport_err(inner: Box<dyn StdError + Send + Sync + 'static>) -> StreamingError {
+    fn transport_err(inner: Box<dyn StdError + Send + Sync + 'static>) -> PromptError {
         completion_err(ProviderError::Http(Arc::new(
             rig_core::http_client::Error::Instance(inner),
         )))
@@ -341,8 +332,8 @@ mod tests {
     }
 
     #[test]
-    fn prompt_wrapped_completion_error_is_classified() {
-        let got = classify_connection_error(&prompt_err(ProviderError::Provider(
+    fn provider_wrapped_transport_error_is_classified() {
+        let got = classify_connection_error(&completion_err(ProviderError::Provider(
             "Http client error: error sending request".into(),
         )))
         .expect("prompt-wrapped transport error is retryable");

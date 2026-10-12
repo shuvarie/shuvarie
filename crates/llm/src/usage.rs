@@ -40,27 +40,23 @@ mod tests {
 
     #[test]
     fn footprint_prefers_reported_total() {
-        let usage = TokenUsage {
-            input_tokens: Some(1_000),
-            output_tokens: Some(200),
-            total_tokens: Some(1_500),
-            cached_input_tokens: Some(300),
-            cache_creation_input_tokens: Some(0),
-            ..TokenUsage::default()
-        };
+        let usage = TokenUsage::new()
+            .input_tokens(Some(1_000))
+            .output_tokens(Some(200))
+            .total_tokens(Some(1_500))
+            .cached_input_tokens(Some(300))
+            .cache_creation_input_tokens(Some(0));
         assert_eq!(context_footprint(&usage), 1_500);
     }
 
     #[test]
     fn footprint_sums_components_without_total() {
-        let usage = TokenUsage {
-            input_tokens: Some(1_000),
-            output_tokens: Some(200),
-            total_tokens: None,
-            cached_input_tokens: Some(300),
-            cache_creation_input_tokens: Some(50),
-            ..TokenUsage::default()
-        };
+        let usage = TokenUsage::new()
+            .input_tokens(Some(1_000))
+            .output_tokens(Some(200))
+            .total_tokens(None)
+            .cached_input_tokens(Some(300))
+            .cache_creation_input_tokens(Some(50));
         assert_eq!(context_footprint(&usage), 1_550);
     }
 
@@ -71,25 +67,21 @@ mod tests {
 
     #[test]
     fn read_tokens_excludes_the_completion() {
-        let usage = TokenUsage {
-            input_tokens: Some(1_000),
-            output_tokens: Some(200),
-            total_tokens: Some(1_500),
-            cached_input_tokens: Some(300),
-            ..TokenUsage::default()
-        };
+        let usage = TokenUsage::new()
+            .input_tokens(Some(1_000))
+            .output_tokens(Some(200))
+            .total_tokens(Some(1_500))
+            .cached_input_tokens(Some(300));
         assert_eq!(read_tokens(&usage), 1_300);
     }
 
     #[test]
     fn read_tokens_sums_split_cache_without_total() {
-        let usage = TokenUsage {
-            input_tokens: Some(1_000),
-            output_tokens: Some(200),
-            cached_input_tokens: Some(300),
-            cache_creation_input_tokens: Some(50),
-            ..TokenUsage::default()
-        };
+        let usage = TokenUsage::new()
+            .input_tokens(Some(1_000))
+            .output_tokens(Some(200))
+            .cached_input_tokens(Some(300))
+            .cache_creation_input_tokens(Some(50));
         assert_eq!(read_tokens(&usage), 1_350);
     }
 

@@ -12,7 +12,17 @@ use crate::stream::StreamItem;
 
 pub use rig_agent::tool::{DynamicTool, Tool, ToolContext, ToolSet};
 pub use rig_core::completion::ToolDefinition;
+pub use rig_core::message::ToolName;
 pub use rig_core::tool::{ToolErrorKind, ToolExecutionError, ToolOutput, ToolResult};
+
+/// Build a rig [`ToolName`] from a roster, worker or MCP tool name. Names
+/// reaching this layer are non-empty by construction and rig's dynamic-tool
+/// constructors have no error path, so an empty name is a programming error.
+pub fn tool_name(name: impl Into<String>) -> ToolName {
+    let name = name.into();
+    debug_assert!(!name.is_empty(), "tool name must not be empty");
+    ToolName::new(name).expect("tool name must not be empty")
+}
 
 /// Wrap a typed [`Tool`] as a [`DynamicTool`]. The tool reports host-only
 /// [`FileChange`]s via [`ToolContext::insert_result`]; a [`FileChangeHook`]
@@ -24,7 +34,7 @@ where
 {
     let tool = Arc::new(tool);
     DynamicTool::new_with_context(
-        name,
+        tool_name(name),
         tool.description(),
         tool.parameters(),
         move |ctx, args| {

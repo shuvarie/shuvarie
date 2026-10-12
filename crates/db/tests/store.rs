@@ -188,22 +188,18 @@ async fn append_and_load_messages_in_order() {
             &[],
             &[],
             false,
-            TokenUsage {
-                input_tokens: Some(10),
-                output_tokens: Some(20),
-                total_tokens: Some(30),
-                cached_input_tokens: Some(4),
-                reasoning_tokens: Some(5),
-                ..Default::default()
-            },
+            TokenUsage::new()
+                .input_tokens(Some(10))
+                .output_tokens(Some(20))
+                .total_tokens(Some(30))
+                .cached_input_tokens(Some(4))
+                .reasoning_tokens(Some(5)),
             0.0012,
-            &TokenUsage {
-                input_tokens: Some(12_000),
-                output_tokens: Some(20),
-                total_tokens: Some(12_020),
-                cached_input_tokens: Some(11_500),
-                ..Default::default()
-            },
+            &TokenUsage::new()
+                .input_tokens(Some(12_000))
+                .output_tokens(Some(20))
+                .total_tokens(Some(12_020))
+                .cached_input_tokens(Some(11_500)),
             &shuvarie_db::Attribution::default(),
             None,
         )

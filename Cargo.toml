@@ -105,7 +105,8 @@ kdl = "6.7"
 regex = "1"
 reqwest = "0.13"
 # Do NOT include `rig`. It has too many implicit dependencies.
-rig-core = { version = "0.43", features = ["reqwest"] }
+rig-agent = "0.44"
+rig-core = { version = "0.44", features = ["reqwest"] }
 rmcp = { version = "3.4", default-features = false }
 selune = "0.4"
 serde = { version = "1", features = ["derive"] }

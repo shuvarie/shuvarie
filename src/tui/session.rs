@@ -2003,13 +2003,13 @@ mod tests {
         let mut session = shuvarie_core::Session::new();
         session.push_user("go");
         session.push_assistant("ok");
-        session.last_usage = Some(TokenUsage {
-            input_tokens: Some(500),
-            output_tokens: Some(200),
-            total_tokens: Some(20_200),
-            cached_input_tokens: Some(19_400),
-            ..Default::default()
-        });
+        session.last_usage = Some(
+            TokenUsage::new()
+                .input_tokens(Some(500))
+                .output_tokens(Some(200))
+                .total_tokens(Some(20_200))
+                .cached_input_tokens(Some(19_400)),
+        );
         screen.update(SessionMessage::Loaded {
             id: uuid::Uuid::now_v7(),
             title: "t".into(),
@@ -2043,10 +2043,7 @@ mod tests {
             context_length: Some(200_000),
         });
         screen.update(SessionMessage::UsageUpdate {
-            usage: TokenUsage {
-                total_tokens: Some(84_000),
-                ..Default::default()
-            },
+            usage: TokenUsage::new().total_tokens(Some(84_000)),
             cost: 0.0,
             context_tokens: Some(84_000),
         });
@@ -2076,23 +2073,20 @@ mod tests {
             context_length: Some(200_000),
         });
         screen.update(SessionMessage::UsageUpdate {
-            usage: TokenUsage {
-                total_tokens: Some(84_000),
-                ..Default::default()
-            },
+            usage: TokenUsage::new().total_tokens(Some(84_000)),
             cost: 0.0,
             context_tokens: Some(84_000),
         });
 
         screen.update(SessionMessage::CompactionStarted);
         let mut session = shuvarie_core::Session::new();
-        session.last_usage = Some(TokenUsage {
-            input_tokens: Some(500),
-            output_tokens: Some(200),
-            total_tokens: Some(20_200),
-            cached_input_tokens: Some(19_400),
-            ..Default::default()
-        });
+        session.last_usage = Some(
+            TokenUsage::new()
+                .input_tokens(Some(500))
+                .output_tokens(Some(200))
+                .total_tokens(Some(20_200))
+                .cached_input_tokens(Some(19_400)),
+        );
         screen.update(SessionMessage::SessionCompacted { session });
 
         let rendered = text(screen.sidebar.rendered_lines());
@@ -3268,11 +3262,9 @@ mod tests {
             context_length: Some(200_000),
         });
         screen.sidebar.update(SidebarMessage::UpdateUsage {
-            usage: TokenUsage {
-                input_tokens: Some(10_100),
-                output_tokens: Some(12_300),
-                ..Default::default()
-            },
+            usage: TokenUsage::new()
+                .input_tokens(Some(10_100))
+                .output_tokens(Some(12_300)),
             cost: 0.125,
             context_tokens: Some(84_000),
         });

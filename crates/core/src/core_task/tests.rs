@@ -218,12 +218,10 @@ async fn stream_events_forward_and_accumulate_usage() {
             text: "hello ".into(),
         },
         StreamItem::Usage {
-            usage: TokenUsage {
-                input_tokens: Some(10),
-                output_tokens: Some(20),
-                total_tokens: Some(30),
-                ..TokenUsage::default()
-            },
+            usage: TokenUsage::new()
+                .input_tokens(Some(10))
+                .output_tokens(Some(20))
+                .total_tokens(Some(30)),
             worker: None,
         },
         StreamItem::Delta {
@@ -231,12 +229,10 @@ async fn stream_events_forward_and_accumulate_usage() {
         },
         StreamItem::Done {
             text: "hello world".into(),
-            usage: TokenUsage {
-                input_tokens: Some(10),
-                output_tokens: Some(20),
-                total_tokens: Some(30),
-                ..TokenUsage::default()
-            },
+            usage: TokenUsage::new()
+                .input_tokens(Some(10))
+                .output_tokens(Some(20))
+                .total_tokens(Some(30)),
         },
     ]));
 
@@ -404,18 +400,14 @@ async fn committed_turn_persists_the_last_main_request_usage() {
 
     // Two completed calls (a tool turn, then the reply): the stream reports
     // each call's own usage, then `Done` carries rig's aggregate of both.
-    let call_one = TokenUsage {
-        input_tokens: Some(40_000),
-        output_tokens: Some(500),
-        total_tokens: Some(40_500),
-        ..TokenUsage::default()
-    };
-    let call_two = TokenUsage {
-        input_tokens: Some(50_000),
-        output_tokens: Some(600),
-        total_tokens: Some(50_600),
-        ..TokenUsage::default()
-    };
+    let call_one = TokenUsage::new()
+        .input_tokens(Some(40_000))
+        .output_tokens(Some(500))
+        .total_tokens(Some(40_500));
+    let call_two = TokenUsage::new()
+        .input_tokens(Some(50_000))
+        .output_tokens(Some(600))
+        .total_tokens(Some(50_600));
     let stream: shuvarie_llm::StreamStream = Box::pin(futures_util::stream::iter(vec![
         StreamItem::Usage {
             usage: call_one,
@@ -559,12 +551,10 @@ async fn stream_done_waits_for_queued_worker_items_to_drain() {
 
     let done = StreamItem::Done {
         text: "final".into(),
-        usage: TokenUsage {
-            input_tokens: Some(10),
-            output_tokens: Some(20),
-            total_tokens: Some(30),
-            ..TokenUsage::default()
-        },
+        usage: TokenUsage::new()
+            .input_tokens(Some(10))
+            .output_tokens(Some(20))
+            .total_tokens(Some(30)),
     };
     let worker_result = StreamItem::ToolResult {
         name: "grep".into(),
@@ -577,12 +567,10 @@ async fn stream_done_waits_for_queued_worker_items_to_drain() {
         call_id: "w1".into(),
     };
     let worker_request_usage = StreamItem::Usage {
-        usage: TokenUsage {
-            input_tokens: Some(5),
-            output_tokens: Some(7),
-            total_tokens: Some(12),
-            ..TokenUsage::default()
-        },
+        usage: TokenUsage::new()
+            .input_tokens(Some(5))
+            .output_tokens(Some(7))
+            .total_tokens(Some(12)),
         worker: Some("explore_workspace".into()),
     };
     let (worker_tx, worker_rx) = tokio::sync::mpsc::channel::<StreamItem>(8);
@@ -602,12 +590,12 @@ async fn stream_done_waits_for_queued_worker_items_to_drain() {
 
     let session_shared = session.clone();
     let store = Store::open_in_memory().await.unwrap();
-    let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage {
-        input_tokens: Some(5),
-        output_tokens: Some(7),
-        total_tokens: Some(12),
-        ..TokenUsage::default()
-    }));
+    let worker_usage = Arc::new(std::sync::Mutex::new(
+        TokenUsage::new()
+            .input_tokens(Some(5))
+            .output_tokens(Some(7))
+            .total_tokens(Some(12)),
+    ));
     let turn_state = Arc::new(Mutex::new(TurnState::default()));
     let (stream_done_tx, mut stream_done_rx) = tokio::sync::mpsc::channel(1);
     tokio::spawn(async move {
@@ -709,33 +697,29 @@ async fn worker_events_forward_and_usage_accumulates() {
             call_id: "w1".into(),
         },
         StreamItem::Usage {
-            usage: TokenUsage {
-                input_tokens: Some(10),
-                output_tokens: Some(20),
-                total_tokens: Some(30),
-                ..TokenUsage::default()
-            },
+            usage: TokenUsage::new()
+                .input_tokens(Some(10))
+                .output_tokens(Some(20))
+                .total_tokens(Some(30)),
             worker: None,
         },
         StreamItem::Done {
             text: "done".into(),
-            usage: TokenUsage {
-                input_tokens: Some(10),
-                output_tokens: Some(20),
-                total_tokens: Some(30),
-                ..TokenUsage::default()
-            },
+            usage: TokenUsage::new()
+                .input_tokens(Some(10))
+                .output_tokens(Some(20))
+                .total_tokens(Some(30)),
         },
     ]));
 
     let session_shared = session.clone();
     let store = Store::open_in_memory().await.unwrap();
-    let worker_usage = Arc::new(std::sync::Mutex::new(TokenUsage {
-        input_tokens: Some(5),
-        output_tokens: Some(7),
-        total_tokens: Some(12),
-        ..TokenUsage::default()
-    }));
+    let worker_usage = Arc::new(std::sync::Mutex::new(
+        TokenUsage::new()
+            .input_tokens(Some(5))
+            .output_tokens(Some(7))
+            .total_tokens(Some(12)),
+    ));
     let turn_state = Arc::new(Mutex::new(TurnState::default()));
     let (stream_done_tx, _stream_done_rx) = tokio::sync::mpsc::channel(1);
     tokio::spawn(async move {

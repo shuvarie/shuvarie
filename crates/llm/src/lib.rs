@@ -29,10 +29,7 @@ pub use model::Model;
 pub use provider::{ProviderClient, ProviderKind};
 pub use retry::{ConnectionFailure, classify_connection_error};
 pub use stream::{StreamItem, StreamStream};
-pub use tool::{
-    DynamicTool, FileChangeHook, Tool, ToolContext, ToolDefinition, ToolErrorKind,
-    ToolExecutionError, ToolOutput, ToolResult, ToolSet, into_dynamic,
-};
+pub use tool::*;
 pub use tool_image::DocumentSourceKind;
 pub use tool_image::{ToolResultContentAlias as ToolResultContent, tool_content_with_image};
 pub use usage::{TokenUsage, context_footprint, read_tokens};

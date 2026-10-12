@@ -86,7 +86,7 @@ where
     if let Some(reason) = ask_reason {
         let tool = Arc::new(tool);
         Some(DynamicTool::new_with_context(
-            name,
+            shuvarie_llm::tool_name(name),
             tool.description(),
             tool.parameters(),
             move |ctx, args| {

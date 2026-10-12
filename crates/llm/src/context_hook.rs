@@ -36,7 +36,7 @@ use rig_agent::agent::{
 };
 use rig_core::completion::Usage;
 use rig_core::completion::message::{
-    AssistantContent, Message, Reasoning, ReasoningContent, Text, ToolResult, ToolResultContent,
+    AssistantContent, Message, Text, ToolResult, ToolResultContent,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -80,41 +80,20 @@ fn message_text_len(msg: &Message) -> usize {
                 _ => 0,
             })
             .sum(),
-        Message::Assistant { content, .. } => content
+        Message::Assistant(assistant) => assistant
+            .content
             .iter()
             .map(|c| match c {
                 AssistantContent::Text(t) => t.text.chars().count(),
                 AssistantContent::ToolCall(tc) => {
-                    tc.function.name.as_str().len() + tc.function.arguments.to_string().len()
+                    tc.function.name.as_str().len()
+                        + tc.function.arguments_value().to_string().len()
                 }
-                AssistantContent::Reasoning(reasoning) => reasoning_len(reasoning),
+                AssistantContent::Reasoning(reasoning) => reasoning.text.chars().count(),
                 _ => 0,
             })
             .sum(),
     }
-}
-
-fn reason_content_len(content: &[ReasoningContent]) -> usize {
-    content
-        .iter()
-        .map(|c| match c {
-            ReasoningContent::Text { text, .. } => text.chars().count(),
-            ReasoningContent::Summary(s) => s.chars().count(),
-            _ => 0,
-        })
-        .sum()
-}
-
-/// Reasoning is sealed to the provider that issued it, so its text is
-/// measured through the serialized flattened content (the same value any
-/// provider replay opens); unknown shapes measure as zero.
-/// Reasoning is sealed to the provider that issued it; a value opened by its
-/// own issuer always succeeds, so the text is measurable directly.
-fn reasoning_len(reasoning: &rig_core::message::Sealed<Reasoning>) -> usize {
-    reasoning
-        .open(reasoning.issuer())
-        .map(|reasoning| reason_content_len(&reasoning.content))
-        .unwrap_or(0)
 }
 
 fn tool_result_len(tr: &ToolResult) -> usize {
@@ -391,6 +370,7 @@ fn condense_message(msg: &Message) -> Message {
                             call: tr.call.clone(),
                             name: tr.name.clone(),
                             content: vec![ToolResultContent::Text(Text::new(recovery_hint(tr)))],
+                            is_error: tr.is_error,
                         })
                     }
                     other => other.clone(),
@@ -481,16 +461,15 @@ mod tests {
                 call: mint_call_id(),
                 name: rig_core::message::ToolName::new(name).expect("non-empty"),
                 content: vec![ToolResultContent::Text(Text::new(content.to_string()))],
+                is_error: false,
             })],
         }
     }
 
     fn usage_of(total: u64, output: u64) -> Usage {
-        Usage {
-            total_tokens: Some(total),
-            output_tokens: Some(output),
-            ..Usage::default()
-        }
+        Usage::new()
+            .total_tokens(Some(total))
+            .output_tokens(Some(output))
     }
 
     #[test]

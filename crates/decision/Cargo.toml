@@ -14,7 +14,7 @@ rig-core.workspace = true
 # The System One decision wire (also served by Ollama and Cloudflare's Clef).
 # `reqwest` is not in its default features and gates the shared-client `Jev`
 # constructors used by `client::DecisionClient`.
-rig-typesafeai = { version = "0.43", features = ["reqwest"] }
+rig-typesafeai = { version = "0.44", features = ["reqwest"] }
 serde_json.workspace = true
 thiserror.workspace = true
 

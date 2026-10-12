@@ -104,7 +104,7 @@ fn user_content_parts(
                             ),
                             media_type: Some(media_type),
                             detail: Some(ImageDetail::Auto),
-                            additional_params: None,
+                            native: None,
                         })),
                         // An image attachment with a media type rig does not
                         // classify as a recognized image is a data bug; degrade
@@ -121,13 +121,10 @@ fn user_content_parts(
                         .filter(|text| !text.is_empty())
                 }) {
                     Some(text) => parts.push(rig_core::message::UserContent::Text(
-                        rig_core::message::Text {
-                            text: format!(
-                                "<document name=\"{}\">\n{text}\n</document>",
-                                attachment.name
-                            ),
-                            additional_params: None,
-                        },
+                        rig_core::message::Text::new(format!(
+                            "<document name=\"{}\">\n{text}\n</document>",
+                            attachment.name
+                        )),
                     )),
                     None => parts.push(unavailable_note(attachment, "content unavailable")),
                 }

@@ -22,15 +22,12 @@ pub fn tool_content_with_image(
         ))
     })?;
     Ok(vec![
-        ToolResultContent::Text(Text {
-            text: note,
-            additional_params: None,
-        }),
+        ToolResultContent::Text(Text::new(note)),
         ToolResultContent::Image(Image {
             data: DocumentSourceKind::Base64(base64_data),
             media_type: Some(media_type),
             detail: Some(ImageDetail::Auto),
-            additional_params: None,
+            native: None,
         }),
     ])
 }

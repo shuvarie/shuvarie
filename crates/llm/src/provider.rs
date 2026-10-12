@@ -965,16 +965,16 @@ async fn run_worker_agent(
                 let _ = activity_tx
                     .send(StreamItem::ToolStart {
                         name: tool_call.function.name.to_string(),
-                        args: tool_call.function.arguments,
+                        args: tool_call.function.arguments_value(),
                         worker: Some(name.to_string()),
                         spawn: Some(spawn),
                         call_id: tool_call.id.to_string(),
                     })
                     .await;
             }
-            Ok(rig_agent::agent::MultiTurnStreamItem::StreamUserItem(
-                rig_core::streaming::StreamedUserContent::ToolResult { tool_result },
-            )) if !file_hook.surfaced_early(&tool_result.call) => {
+            Ok(rig_agent::agent::MultiTurnStreamItem::ToolResult { tool_result })
+                if !file_hook.surfaced_early(&tool_result.call) =>
+            {
                 let call_id = tool_result.call.clone();
                 let tool_name = tool_names.remove(&call_id).unwrap_or_default();
                 let captured = file_hook.take(&call_id);
@@ -1084,28 +1084,28 @@ fn map_agent_stream(
                 pending_workers.push_back(name.clone());
                 StreamItem::WorkerStart {
                     name,
-                    args: tool_call.function.arguments,
+                    args: tool_call.function.arguments_value(),
                     call_id: call_id.to_string(),
                 }
             } else {
                 tool_names.insert(call_id.clone(), name.clone());
                 StreamItem::ToolStart {
                     name,
-                    args: tool_call.function.arguments,
+                    args: tool_call.function.arguments_value(),
                     worker: None,
                     spawn: None,
                     call_id: call_id.to_string(),
                 }
             }
         }
-        Ok(rig_agent::agent::MultiTurnStreamItem::StreamUserItem(
-            rig_core::streaming::StreamedUserContent::ToolResult { tool_result },
-        )) if file_hook.surfaced_early(&tool_result.call) => StreamItem::Delta {
-            text: String::new(),
-        },
-        Ok(rig_agent::agent::MultiTurnStreamItem::StreamUserItem(
-            rig_core::streaming::StreamedUserContent::ToolResult { tool_result },
-        )) => {
+        Ok(rig_agent::agent::MultiTurnStreamItem::ToolResult { tool_result })
+            if file_hook.surfaced_early(&tool_result.call) =>
+        {
+            StreamItem::Delta {
+                text: String::new(),
+            }
+        }
+        Ok(rig_agent::agent::MultiTurnStreamItem::ToolResult { tool_result }) => {
             let call_id = tool_result.call.clone();
             let mut output = String::new();
             for content in tool_result.content.iter() {
