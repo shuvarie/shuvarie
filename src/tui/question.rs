@@ -1,10 +1,13 @@
-use ratatui::layout::Alignment;
+use std::cell::Cell;
+
+use ratatui::layout::{Alignment, Constraint, Layout};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph, Wrap};
 use shuvarie_core::QuestionPrompt;
 use termina::event::{KeyCode, KeyEvent, Modifiers};
 
 use super::components::InputBuffer;
+use super::list::scroll_offset_for_row;
 use super::theme;
 use super::utils::text::wrap_text;
 
@@ -46,6 +49,32 @@ pub struct QuestionUI {
     pub custom_answers: Vec<Option<String>>,
     pub typing_custom: bool,
     pub typing_buffer: InputBuffer,
+    /// First visible rendered row of the option list, so navigating past the
+    /// bottom of the viewport scrolls the list instead of hiding the cursor.
+    /// The viewport is only known once the area is laid out, so the offset is
+    /// recomputed (and clamped) at paint time.
+    offset: Cell<usize>,
+}
+
+/// The scrollable option list of the current question: its lines plus the
+/// rendered `[start, end)` row span of each option row (the custom-answer row
+/// included when enabled).
+struct OptionBlock {
+    lines: Vec<Line<'static>>,
+    rows: Vec<(usize, usize)>,
+    /// Total rendered height of `lines`.
+    height: usize,
+}
+
+impl OptionBlock {
+    /// The minimal offset keeping `cursor`'s row in view given the previous
+    /// `offset` and the option viewport's rendered height.
+    fn offset_for(&self, cursor: usize, offset: usize, viewport: usize) -> usize {
+        let Some(&(start, end)) = self.rows.get(cursor) else {
+            return 0;
+        };
+        scroll_offset_for_row(start, end, offset, viewport, self.height)
+    }
 }
 
 const MAX_VIEW_ROWS: usize = 12;
@@ -66,6 +95,7 @@ impl QuestionUI {
             custom_answers: Vec::new(),
             typing_custom: false,
             typing_buffer: InputBuffer::new(),
+            offset: Cell::new(0),
         }
     }
 
@@ -80,11 +110,13 @@ impl QuestionUI {
         self.custom_answers = self.questions.iter().map(|_| None).collect();
         self.typing_custom = false;
         self.typing_buffer.clear();
+        self.offset.set(0);
     }
 
     pub fn close(&mut self) {
         self.open = false;
         self.questions.clear();
+        self.offset.set(0);
     }
 
     fn row_count(&self, question_index: usize) -> usize {
@@ -390,13 +422,49 @@ impl QuestionUI {
             return;
         }
 
-        frame.render_widget(self.paragraph(inner.width), inner);
+        if self.at_confirm {
+            // The Confirm row closes the summary, so tail the block to keep it
+            // in view however many questions were asked.
+            let lines = self.confirm_lines();
+            let offset = measured_height(&lines, inner.width).saturating_sub(inner.height as usize);
+            frame.render_widget(scrolled_paragraph(lines, offset), inner);
+            return;
+        }
+        let Some(q) = self.questions.get(self.current) else {
+            return;
+        };
+        if self.typing_custom {
+            frame.render_widget(self.paragraph(inner.width), inner);
+            return;
+        }
+
+        // The header/question and the help line stay pinned; only the option
+        // list scrolls to follow the cursor. Reserve at least one row for it.
+        let head = self.head_lines(q);
+        let help = self.help_line(q);
+        let avail = inner.height as usize;
+        let head_h = measured_height(&head, inner.width).min(avail.saturating_sub(1));
+        let help_h = measured_height(std::slice::from_ref(&help), inner.width)
+            .min(avail.saturating_sub(head_h + 1));
+        let [head_area, body_area, help_area] = Layout::vertical([
+            Constraint::Length(head_h as u16),
+            Constraint::Min(0),
+            Constraint::Length(help_h as u16),
+        ])
+        .areas(inner);
+
+        frame.render_widget(wrapped_paragraph(head), head_area);
+
+        let options = self.option_block(q, body_area.width);
+        let offset = options.offset_for(self.cursor, self.offset.get(), body_area.height as usize);
+        self.offset.set(offset);
+        frame.render_widget(scrolled_paragraph(options.lines, offset), body_area);
+
+        frame.render_widget(wrapped_paragraph(vec![help]), help_area);
     }
 
     fn paragraph(&self, width: u16) -> Paragraph<'static> {
-        Paragraph::new(self.build_lines(width))
-            .alignment(Alignment::Left)
-            .wrap(Wrap { trim: false })
+        wrapped_paragraph(self.build_lines(width))
     }
 
     fn build_lines(&self, width: u16) -> Vec<Line<'static>> {
@@ -407,95 +475,139 @@ impl QuestionUI {
         let Some(q) = self.questions.get(self.current) else {
             return Vec::new();
         };
-        let progress = if self.questions.len() > 1 {
-            format!("{} / {}  ", self.current + 1, self.questions.len())
-        } else {
-            String::new()
-        };
-        let mut lines = vec![Line::from(vec![
-            Span::raw("▸ ").fg(theme::accent()),
-            Span::raw(format!("{progress}{}", q.header))
-                .fg(theme::accent())
-                .bold(),
-        ])];
-        lines.push(Line::from(
-            Span::raw(q.question.clone()).fg(theme::text()).italic(),
-        ));
-        lines.push(Line::from(""));
+        let mut lines = self.head_lines(q);
         if self.typing_custom {
             lines.push(
                 self.typing_buffer
                     .cursor_line(theme::text(), theme::accent()),
             );
-            lines.push(theme::help_line(&[
-                ("←/→", "move"),
-                ("Enter", "save"),
-                ("Esc", "cancel"),
-            ]));
-            return lines;
+        } else {
+            lines.extend(self.option_block(q, width).lines);
         }
-        for (i, option) in q.options.iter().enumerate() {
-            let picked = self.picked[self.current].contains(&i);
-            let marker = if q.multiple {
-                if picked { "[x] " } else { "[ ] " }
-            } else if picked {
-                "● "
-            } else {
-                "  "
-            };
-            let number = format!("{} ", i + 1);
-            let mut spans = Vec::new();
-            if self.cursor == i {
-                spans.push(Span::raw("▶ ").fg(theme::accent()));
-            } else {
-                spans.push(Span::raw("  "));
-            }
-            spans.push(Span::raw(marker).fg(if picked {
-                theme::success()
-            } else {
-                theme::text_muted()
-            }));
-            spans.push(Span::raw(number).fg(theme::text_muted()));
-            spans.push(Span::raw(option.label.clone()).fg(theme::text()));
-            lines.push(Line::from(spans));
-            if !option.description.is_empty() {
-                let desc_width = (width as usize).saturating_sub(DESC_INDENT);
-                for row in wrap_text(&option.description, desc_width) {
-                    lines.push(Line::from(
-                        Span::raw(format!("{}{row}", " ".repeat(DESC_INDENT)))
-                            .fg(theme::text_muted()),
-                    ));
-                }
-            }
+        lines.push(self.help_line(q));
+        lines
+    }
+
+    /// The pinned rows above the option list: the header (carrying the question
+    /// progress), the question itself, and the blank separator.
+    fn head_lines(&self, q: &QuestionPrompt) -> Vec<Line<'static>> {
+        let progress = if self.questions.len() > 1 {
+            format!("{} / {}  ", self.current + 1, self.questions.len())
+        } else {
+            String::new()
+        };
+        vec![
+            Line::from(vec![
+                Span::raw("▸ ").fg(theme::accent()),
+                Span::raw(format!("{progress}{}", q.header))
+                    .fg(theme::accent())
+                    .bold(),
+            ]),
+            Line::from(Span::raw(q.question.clone()).fg(theme::text()).italic()),
+            Line::from(""),
+        ]
+    }
+
+    /// The scrollable option list of the current question, with the rendered
+    /// row span of each option so the list can scroll to follow the cursor.
+    fn option_block(&self, q: &QuestionPrompt, width: u16) -> OptionBlock {
+        let mut lines = Vec::new();
+        let mut rows = Vec::with_capacity(q.options.len() + 1);
+        let mut height = 0;
+        for index in 0..q.options.len() {
+            let row = self.option_row_lines(q, index, width);
+            let row_height = measured_height(&row, width);
+            rows.push((height, height + row_height));
+            height += row_height;
+            lines.extend(row);
         }
         if q.custom {
-            let saved = self.custom_answers[self.current].clone();
-            let selected = self.cursor == q.options.len();
-            let mut spans = Vec::new();
-            if selected {
-                spans.push(Span::raw("▶ ").fg(theme::accent()));
-            } else {
-                spans.push(Span::raw("  "));
+            let row = self.custom_row_lines(q, width);
+            let row_height = measured_height(&row, width);
+            rows.push((height, height + row_height));
+            height += row_height;
+            lines.extend(row);
+        }
+        OptionBlock {
+            lines,
+            rows,
+            height,
+        }
+    }
+
+    /// The rows of one option: its label line plus any wrapped description.
+    fn option_row_lines(&self, q: &QuestionPrompt, index: usize, width: u16) -> Vec<Line<'static>> {
+        let option = &q.options[index];
+        let picked = self.picked[self.current].contains(&index);
+        let marker = if q.multiple {
+            if picked { "[x] " } else { "[ ] " }
+        } else if picked {
+            "● "
+        } else {
+            "  "
+        };
+        let number = format!("{} ", index + 1);
+        let mut spans = Vec::new();
+        if self.cursor == index {
+            spans.push(Span::raw("▶ ").fg(theme::accent()));
+        } else {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::raw(marker).fg(if picked {
+            theme::success()
+        } else {
+            theme::text_muted()
+        }));
+        spans.push(Span::raw(number).fg(theme::text_muted()));
+        spans.push(Span::raw(option.label.clone()).fg(theme::text()));
+        let mut lines = vec![Line::from(spans)];
+        if !option.description.is_empty() {
+            let desc_width = (width as usize).saturating_sub(DESC_INDENT);
+            for row in wrap_text(&option.description, desc_width) {
+                lines.push(Line::from(
+                    Span::raw(format!("{}{row}", " ".repeat(DESC_INDENT))).fg(theme::text_muted()),
+                ));
             }
-            spans.push(Span::raw("✎ ").fg(theme::text_muted()));
-            match saved {
-                Some(text) => {
-                    // A saved custom answer is the picked row: the green dot
-                    // (or checkbox) lives here instead of on any option.
-                    let marker = if q.multiple { "[x] " } else { "● " };
-                    let used = 4 + marker.chars().count();
-                    spans.push(Span::raw(marker).fg(theme::success()));
-                    spans.push(truncate_span(
-                        &text,
-                        width.saturating_sub(used as u16),
-                        theme::text(),
-                    ));
-                }
-                None => {
-                    spans.push(Span::raw("Type your own answer").fg(theme::text_dim()));
-                }
+        }
+        lines
+    }
+
+    /// The single row for typing a custom answer (the "✎" entry): its saved
+    /// answer as the picked row, or the placeholder.
+    fn custom_row_lines(&self, q: &QuestionPrompt, width: u16) -> Vec<Line<'static>> {
+        let saved = self.custom_answers[self.current].clone();
+        let selected = self.cursor == q.options.len();
+        let mut spans = Vec::new();
+        if selected {
+            spans.push(Span::raw("▶ ").fg(theme::accent()));
+        } else {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::raw("✎ ").fg(theme::text_muted()));
+        match saved {
+            Some(text) => {
+                // A saved custom answer is the picked row: the green dot
+                // (or checkbox) lives here instead of on any option.
+                let marker = if q.multiple { "[x] " } else { "● " };
+                let used = 4 + marker.chars().count();
+                spans.push(Span::raw(marker).fg(theme::success()));
+                spans.push(truncate_span(
+                    &text,
+                    width.saturating_sub(used as u16),
+                    theme::text(),
+                ));
             }
-            lines.push(Line::from(spans));
+            None => {
+                spans.push(Span::raw("Type your own answer").fg(theme::text_dim()));
+            }
+        }
+        vec![Line::from(spans)]
+    }
+
+    /// The pinned help row describing the keys for the current question.
+    fn help_line(&self, q: &QuestionPrompt) -> Line<'static> {
+        if self.typing_custom {
+            return theme::help_line(&[("←/→", "move"), ("Enter", "save"), ("Esc", "cancel")]);
         }
         let hints: &[(&str, &str)] = if self.questions.len() > 1 {
             &[
@@ -514,8 +626,7 @@ impl QuestionUI {
         } else {
             &[("↑/↓", "choose"), ("Enter", "pick"), ("Esc", "dismiss")]
         };
-        lines.push(theme::help_line(hints));
-        lines
+        theme::help_line(hints)
     }
 
     fn confirm_lines(&self) -> Vec<Line<'static>> {
@@ -564,6 +675,24 @@ impl QuestionUI {
         ]));
         lines
     }
+}
+
+/// A left-aligned, word-wrapping paragraph over `lines`.
+fn wrapped_paragraph(lines: Vec<Line<'static>>) -> Paragraph<'static> {
+    Paragraph::new(lines)
+        .alignment(Alignment::Left)
+        .wrap(Wrap { trim: false })
+}
+
+/// A wrapping paragraph scrolled down by `offset` rendered rows.
+fn scrolled_paragraph(lines: Vec<Line<'static>>, offset: usize) -> Paragraph<'static> {
+    wrapped_paragraph(lines).scroll((offset as u16, 0))
+}
+
+/// The rendered (post-wrap) height of `lines` at `width` — the row count the
+/// same paragraph would paint.
+fn measured_height(lines: &[Line<'static>], width: u16) -> usize {
+    wrapped_paragraph(lines.to_vec()).line_count(width)
 }
 
 fn ctrl_mod(key: &KeyEvent) -> bool {
@@ -773,5 +902,136 @@ mod tests {
         let texts = texts(&ui.build_lines(40));
         assert_eq!(texts[3], "▶ ● 1 label");
         assert_eq!(texts[4], "  ✎ Type your own answer");
+    }
+
+    /// A single question with `count` one-row options and no descriptions.
+    fn many_options(count: usize) -> QuestionUI {
+        let mut ui = QuestionUI::new();
+        ui.open(
+            1,
+            vec![QuestionPrompt {
+                question: "Which one?".into(),
+                header: "Pick".into(),
+                options: (0..count)
+                    .map(|i| QuestionOption {
+                        label: format!("label {i}"),
+                        description: String::new(),
+                    })
+                    .collect(),
+                multiple: false,
+                custom: false,
+            }],
+        );
+        ui
+    }
+
+    fn draw(ui: &QuestionUI, width: u16, height: u16) -> Buffer {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let area = Rect::new(0, 0, width, height);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| ui.view(frame, area)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_rows(buf: &Buffer) -> Vec<String> {
+        (0..buf.area.height).map(|y| row_text(buf, y)).collect()
+    }
+
+    /// The row carrying the cursor mark (`▶ `, not the `▸ ` header glyph).
+    fn cursor_row(rows: &[String]) -> String {
+        rows.iter()
+            .map(|row| row.trim())
+            .find(|row| row.starts_with("▶ "))
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    #[test]
+    fn option_block_spans_cover_wrapped_description_rows() {
+        let ui = ui(&["first row here second row here", ""]);
+        let block = ui.option_block(&ui.questions[0], 30);
+        // The first option is a label row plus two wrapped description rows;
+        // the second is a single label row.
+        assert_eq!(block.rows, vec![(0, 3), (3, 4)]);
+        assert_eq!(block.height, 4);
+    }
+
+    #[test]
+    fn option_block_offset_keeps_the_cursor_row_visible() {
+        let ui = many_options(20);
+        let block = ui.option_block(&ui.questions[0], 40);
+        assert_eq!(block.offset_for(0, 0, 8), 0, "no scroll while in view");
+        assert_eq!(block.offset_for(15, 0, 8), 8, "scroll down to follow");
+        assert_eq!(block.offset_for(19, 8, 8), 12, "stop at the last row");
+        assert_eq!(block.offset_for(3, 8, 8), 3, "scroll back up");
+    }
+
+    #[test]
+    fn navigating_past_the_viewport_scrolls_the_option_list() {
+        let mut ui = many_options(20);
+        for _ in 0..15 {
+            ui.update(QuestionMessage::Down);
+        }
+        assert_eq!(ui.cursor, 15);
+        let rows = buffer_rows(&draw(&ui, 40, 14));
+        assert!(
+            rows.iter().any(|row| row.trim() == "▸ Pick"),
+            "the header stays pinned: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("10 label 9")),
+            "the list scrolled down: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("1 label 0")),
+            "the first option scrolled off: {rows:?}"
+        );
+        assert_eq!(cursor_row(&rows), "▶   16 label 15");
+    }
+
+    #[test]
+    fn navigating_back_to_the_top_scrolls_the_list_up() {
+        let mut ui = many_options(20);
+        for _ in 0..19 {
+            ui.update(QuestionMessage::Down);
+        }
+        assert_eq!(
+            cursor_row(&buffer_rows(&draw(&ui, 40, 14))),
+            "▶   20 label 19"
+        );
+        for _ in 0..19 {
+            ui.update(QuestionMessage::Up);
+        }
+        assert_eq!(ui.cursor, 0);
+        let rows = buffer_rows(&draw(&ui, 40, 14));
+        assert_eq!(cursor_row(&rows), "▶   1 label 0");
+        assert!(rows.iter().any(|row| row.trim() == "▸ Pick"));
+        assert_eq!(ui.offset.get(), 0, "scrolling back reaches the top again");
+    }
+
+    #[test]
+    fn a_short_list_does_not_scroll() {
+        let mut ui = many_options(3);
+        ui.update(QuestionMessage::Down);
+        ui.update(QuestionMessage::Down);
+        let rows = buffer_rows(&draw(&ui, 40, 14));
+        assert!(rows.iter().any(|row| row.contains("1 label 0")));
+        assert_eq!(cursor_row(&rows), "▶   3 label 2");
+        assert_eq!(ui.offset.get(), 0);
+    }
+
+    #[test]
+    fn the_confirm_summary_scrolls_to_keep_the_confirm_row_visible() {
+        let mut ui = custom_ui(false, 15);
+        ui.at_confirm = true;
+        ui.custom_answers = vec![Some("x".to_string()); 15];
+        let rows = buffer_rows(&draw(&ui, 40, 14));
+        let last = rows
+            .iter()
+            .map(|row| row.trim())
+            .rfind(|row| !row.is_empty())
+            .unwrap_or_default();
+        assert_eq!(last, "▶ Confirm", "rows: {rows:?}");
     }
 }

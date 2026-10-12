@@ -24,6 +24,35 @@ pub fn scroll_offset_for(
     }
 }
 
+/// Minimal scroll offset keeping a `[start, end)` row span — measured in
+/// rendered rows, so a row may cover several — inside a `viewport_height`-row
+/// window of a `len`-row block, moving as little as possible from
+/// `old_offset`. A row taller than the viewport is aligned to its top so its
+/// first rows stay visible.
+pub fn scroll_offset_for_row(
+    start: usize,
+    end: usize,
+    old_offset: usize,
+    viewport_height: usize,
+    len: usize,
+) -> usize {
+    if len == 0 || viewport_height == 0 {
+        return 0;
+    }
+    let max_offset = len.saturating_sub(viewport_height);
+    let start = start.min(len - 1);
+    let end = end.clamp(start + 1, len);
+    if start < old_offset {
+        start.min(max_offset)
+    } else if end > old_offset + viewport_height {
+        end.saturating_sub(viewport_height)
+            .min(start)
+            .min(max_offset)
+    } else {
+        old_offset.min(max_offset)
+    }
+}
+
 pub fn render_list_item(content: String, is_selected: bool) -> ListItem<'static> {
     let prefix: &'static str = if is_selected { "▶ " } else { "  " };
     let line = Line::from(vec![
@@ -117,5 +146,36 @@ mod tests {
     #[test]
     fn offset_selection_above_old_offset_returns_selected() {
         assert_eq!(scroll_offset_for(0, 3, 5, 10), 0);
+    }
+
+    #[test]
+    fn row_offset_keeps_a_row_inside_the_window() {
+        assert_eq!(scroll_offset_for_row(2, 4, 0, 4, 10), 0);
+    }
+
+    #[test]
+    fn row_offset_scrolls_a_row_below_the_window_into_view() {
+        assert_eq!(scroll_offset_for_row(5, 6, 0, 4, 10), 2);
+    }
+
+    #[test]
+    fn row_offset_scrolls_back_to_a_row_above_the_window() {
+        assert_eq!(scroll_offset_for_row(1, 3, 5, 4, 10), 1);
+    }
+
+    #[test]
+    fn row_offset_stops_at_the_last_row() {
+        assert_eq!(scroll_offset_for_row(8, 10, 0, 4, 10), 6);
+    }
+
+    #[test]
+    fn row_offset_top_aligns_a_row_taller_than_the_window() {
+        assert_eq!(scroll_offset_for_row(3, 9, 0, 4, 10), 3);
+    }
+
+    #[test]
+    fn row_offset_is_zero_for_an_empty_block_or_viewport() {
+        assert_eq!(scroll_offset_for_row(0, 1, 2, 4, 0), 0);
+        assert_eq!(scroll_offset_for_row(0, 1, 2, 0, 10), 0);
     }
 }
