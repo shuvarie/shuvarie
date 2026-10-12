@@ -6,7 +6,7 @@ use ratatui::prelude::*;
 
 use super::theme;
 
-const FRAMES: [&str; 6] = ["⠹", "⠼", "⠶", "⠧", "⠏", "⠛"];
+const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 const GENERATING_FRAMES: [&str; 18] = [
     "  ⢀⣾⣿⡿⠁  ",
@@ -92,7 +92,7 @@ fn frameplay(kind: SpinnerKind) -> &'static Frameplay<&'static str> {
     static WAITING: OnceLock<Frameplay<&'static str>> = OnceLock::new();
 
     match kind {
-        SpinnerKind::Inline => INLINE.get_or_init(|| Frameplay::new(FRAMES, spinner_options(8))),
+        SpinnerKind::Inline => INLINE.get_or_init(|| Frameplay::new(FRAMES, spinner_options(14))),
         SpinnerKind::Generating => {
             GENERATING.get_or_init(|| Frameplay::new(GENERATING_FRAMES, spinner_options(14)))
         }
