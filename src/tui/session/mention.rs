@@ -12,6 +12,7 @@ use ratatui::widgets::{Block, Clear, ListItem, Padding};
 use shuvarie_core::attachments::PathCandidate;
 use termina::event::{KeyCode, KeyEvent};
 
+use crate::tui::directive;
 use crate::tui::list::{render_list_item_line, scroll_offset_for};
 use crate::tui::theme;
 use crate::tui::utils::ctrl;
@@ -99,14 +100,15 @@ impl MentionMenu {
     /// no cached listing): the caller sends `RequestPathCompletions`; the
     /// reply lands in [`MentionMenu::set_candidates`].
     pub fn sync(&mut self, buffer: &str) -> Option<(u64, String)> {
-        let mention = trailing_mention(buffer);
-        let (range, tail) = match mention {
+        let (range, tail) = match trailing_mention(buffer) {
             Some((start, tail)) => (
                 TokenRange {
                     start,
                     end: buffer.len(),
                 },
-                tail.to_string(),
+                // The tail is the escaped token as typed; decode it so directory
+                // listing and name matching see the real names.
+                directive::unescape(tail),
             ),
             None => {
                 self.open = false;
@@ -224,7 +226,8 @@ impl MentionMenu {
 
     /// The text to splice for the selected candidate: the typed directory
     /// part (which may be a subpath, absolute, or `~`-prefixed) plus the
-    /// entry name. `None` with no selection.
+    /// entry name. The result is *unescaped* (a real path); the caller escapes
+    /// it for the `@` directive token. `None` with no selection.
     pub fn accept(&self) -> Option<String> {
         let idx = self.filtered.get(self.selected)?;
         let name = self
@@ -337,7 +340,9 @@ fn trailing_mention(buffer: &str) -> Option<(usize, &str)> {
             continue;
         }
         let tail = &buffer[byte + 1..];
-        if tail.chars().any(char::is_whitespace) || tail.contains("://") {
+        // A directive token may escape its whitespace (`a\ b.png`), so only
+        // unescaped whitespace ends the mention being typed.
+        if directive::has_unescaped_whitespace(tail) || tail.contains("://") {
             return None;
         }
         return Some((byte, tail));
@@ -383,6 +388,23 @@ mod tests {
         assert_eq!(trailing_mention("plain text"), None);
         assert_eq!(trailing_mention("@http://x"), None, "URL-shaped");
         assert_eq!(trailing_mention("email me a@b"), None, "mid-token @");
+    }
+
+    #[test]
+    fn escaped_spaces_keep_a_mention_open_and_listing_decoded() {
+        // An escaped space never ends the token being completed.
+        assert_eq!(
+            trailing_mention("@My\\ Docs/a"),
+            Some((0, "My\\ Docs/a")),
+            "the raw (escaped) tail is returned"
+        );
+        // The query handed to core is decoded, so it names a real directory.
+        let mut menu = MentionMenu::new();
+        assert_eq!(menu.sync("@My\\ Docs/"), Some((0, "My Docs/".to_string())));
+        menu.set_candidates(0, vec![candidate("shot 1.png")]);
+        assert!(menu.active());
+        // Accept composes the real (unescaped) path; the caller re-escapes it.
+        assert_eq!(menu.accept().as_deref(), Some("My Docs/shot 1.png"));
     }
 
     #[test]

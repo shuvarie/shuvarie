@@ -992,6 +992,12 @@ impl App {
                     let menu = SessionMessage::PathCompletions { token, candidates };
                     Some(AppMessage::Session(menu))
                 }
+                CoreEvent::ClipboardImage { attachment } => {
+                    Some(AppMessage::Session(SessionMessage::ClipboardAttached {
+                        path: attachment.path,
+                        probe: attachment.probe,
+                    }))
+                }
                 CoreEvent::AttachmentNotice { text } => {
                     Some(AppMessage::Session(SessionMessage::ShowStatus {
                         status: text,
@@ -2343,6 +2349,10 @@ impl App {
             SessionEffect::PathCompletions { token, query } => {
                 self.ctx
                     .send(shuvarie_core::Command::RequestPathCompletions { token, query });
+                None
+            }
+            SessionEffect::AttachClipboard => {
+                self.ctx.send(shuvarie_core::Command::AttachClipboard);
                 None
             }
             SessionEffect::OpenMediaViewer { items, selected } => {

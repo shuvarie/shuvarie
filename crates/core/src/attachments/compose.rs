@@ -21,6 +21,15 @@ pub struct DirectiveProbe {
     pub error: Option<String>,
 }
 
+/// A clipboard image staged to a temp file, ready to enter the composer as a
+/// pending attachment: the staged path plus the same shallow probe the attach
+/// strip uses, computed from the bytes core has already sniffed and fitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipboardAttachment {
+    pub path: String,
+    pub probe: DirectiveProbe,
+}
+
 /// Preview one attachment directive path: exists/size/kind from filesystem
 /// metadata plus an extension-based kind guess. Deliberately shallow.
 pub fn run_directive_probe(workspace_root: &Path, path: &str) -> DirectiveProbe {

@@ -110,7 +110,9 @@ fn locate(path: &str) -> Option<Shell> {
     find_in_path(path).map(Shell::new)
 }
 
-fn find_in_path(name: &str) -> Option<PathBuf> {
+/// Locate a bare program name in `PATH` (used by the shell resolver and the
+/// clipboard reader auto-detection).
+pub(crate) fn find_in_path(name: &str) -> Option<PathBuf> {
     let dirs = std::env::var_os("PATH")?;
     find_in_dirs(name, std::env::split_paths(&dirs))
 }

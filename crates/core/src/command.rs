@@ -112,6 +112,13 @@ pub enum Command {
         token: u64,
         query: String,
     },
+    /// Read an image off the system clipboard for the composer's
+    /// paste-from-clipboard keybinding: run the configured or auto-detected
+    /// reader program, sniff and fit its stdout, and stage the result to a temp
+    /// file. Reply: [`crate::Event::ClipboardImage`] on success, or
+    /// [`crate::Event::AttachmentNotice`] with the reason on failure. Runs on
+    /// the blocking pool (it spawns a process).
+    AttachClipboard,
     LoadSession {
         id: uuid::Uuid,
     },

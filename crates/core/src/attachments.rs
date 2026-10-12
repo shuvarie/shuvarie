@@ -31,7 +31,9 @@ use sha2::Digest;
 use shuvarie_llm::Attachment;
 use std::path::{Path, PathBuf};
 
-pub use compose::{DirectiveProbe, PathCandidate, path_candidates, run_directive_probe};
+pub use compose::{
+    ClipboardAttachment, DirectiveProbe, PathCandidate, path_candidates, run_directive_probe,
+};
 pub use ingest::resolve_directives;
 pub(crate) use ingest::{DocumentFailure, document_convert, fit_image, image_media_type};
 pub use shape::{
@@ -62,6 +64,9 @@ pub struct AttachmentSettings {
     pub image_edge: u32,
     /// The legacy-format external converter program (`.doc`/`.ppt`), if any.
     pub office_converter: Option<String>,
+    /// The clipboard image reader program (with optional arguments), if any.
+    /// Unset, the clipboard fetcher auto-detects a platform helper.
+    pub clipboard_command: Option<String>,
 }
 
 impl Default for AttachmentSettings {
@@ -71,6 +76,7 @@ impl Default for AttachmentSettings {
             image_budget: DEFAULT_REQUEST_IMAGE_BYTES,
             image_edge: DEFAULT_IMAGE_EDGE,
             office_converter: None,
+            clipboard_command: None,
         }
     }
 }
@@ -82,6 +88,7 @@ impl From<&shuvarie_config::AttachmentsConfig> for AttachmentSettings {
             image_budget: config.image_budget as u64 * 1024 * 1024,
             image_edge: config.image_edge,
             office_converter: config.office_converter.clone(),
+            clipboard_command: config.clipboard_command.clone(),
         }
     }
 }

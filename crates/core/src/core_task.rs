@@ -929,6 +929,30 @@ pub async fn run(
                             .await
                             .ok();
                     }
+                    Command::AttachClipboard => {
+                        let settings = crate::attachments::AttachmentSettings::from(
+                            &ctx.config.attachments,
+                        );
+                        let result = tokio::task::spawn_blocking(move || {
+                            crate::clipboard::fetch_image(&settings)
+                        })
+                        .await
+                        .expect("the clipboard reader cannot join-fail");
+                        match result {
+                            Ok(attachment) => {
+                                let _ = ctx
+                                    .event_tx
+                                    .send(Event::ClipboardImage { attachment })
+                                    .await;
+                            }
+                            Err(error) => {
+                                let _ = ctx
+                                    .event_tx
+                                    .send(Event::AttachmentNotice { text: error })
+                                    .await;
+                            }
+                        }
+                    }
                     Command::LoadSession { id } => {
                         if stream_busy(&ctx.active_stream, &ctx.event_tx).await {
                             continue;

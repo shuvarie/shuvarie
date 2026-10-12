@@ -34,7 +34,6 @@ pub fn ctrl_alt(key: &KeyEvent) -> bool {
 /// Map ctrl+shift key
 ///
 /// Match nice: -1
-#[allow(dead_code)]
 #[inline]
 pub fn ctrl_shift(key: &KeyEvent) -> bool {
     key.modifiers

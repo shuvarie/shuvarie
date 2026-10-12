@@ -3236,6 +3236,96 @@ async fn directive_probe_and_completions_reply_in_order() {
     let _ = handle.await;
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn clipboard_attach_stages_an_image_or_reports_the_reason() {
+    use std::os::unix::fs::PermissionsExt;
+
+    fn reader(dir: &std::path::Path, body: &str) -> String {
+        let path = dir.join("fake-clipboard.sh");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    // A real 1x1 PNG the reader prints to its stdout.
+    let png = dir.path().join("shot.png");
+    {
+        let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([10, 20, 30, 255]));
+        image.save(&png).unwrap();
+    }
+    let program = reader(dir.path(), &format!("cat '{}'", png.display()));
+    let mut config = empty_config();
+    config.attachments.clipboard_command = Some(program);
+
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
+    let handle = tokio::spawn(run(
+        config,
+        empty_connections(),
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        Default::default(),
+        cmd_rx,
+        event_tx,
+    ));
+    recv_skills_loaded(&mut event_rx).await;
+
+    // A reader that prints an image: a staged, pre-probed attachment.
+    cmd_tx.send(Command::AttachClipboard).await.unwrap();
+    let event = event_rx.recv().await.expect("event");
+    let Event::ClipboardImage { attachment } = event else {
+        panic!("expected ClipboardImage, got {event:?}");
+    };
+    assert_eq!(
+        attachment.probe.kind,
+        Some(shuvarie_llm::AttachmentKind::Image)
+    );
+    assert!(attachment.probe.error.is_none());
+    let staged = std::fs::read(&attachment.path).expect("the staged file exists");
+    assert!(
+        staged.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "the bytes are a PNG"
+    );
+    let _ = std::fs::remove_file(&attachment.path);
+
+    // A reader that prints nothing: the reason rides the notice channel.
+    let mut config = empty_config();
+    config.attachments.clipboard_command = Some(reader(dir.path(), "exit 0"));
+    let (cmd_tx2, cmd_rx2) = tokio::sync::mpsc::channel::<Command>(8);
+    let (event_tx2, mut event_rx2) = tokio::sync::mpsc::channel::<Event>(8);
+    let handle2 = tokio::spawn(run(
+        config,
+        empty_connections(),
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        None,
+        None,
+        permissions_for_tests(),
+        TrustGrants::all(),
+        Default::default(),
+        cmd_rx2,
+        event_tx2,
+    ));
+    recv_skills_loaded(&mut event_rx2).await;
+    cmd_tx2.send(Command::AttachClipboard).await.unwrap();
+    let event = event_rx2.recv().await.expect("event");
+    let Event::AttachmentNotice { text } = event else {
+        panic!("expected AttachmentNotice, got {event:?}");
+    };
+    assert!(text.contains("no image"), "{text}");
+
+    drop(cmd_tx);
+    drop(cmd_tx2);
+    let _ = handle.await;
+    let _ = handle2.await;
+}
+
 /// A chat-completions mock whose first connection drops mid-turn: it streams a
 /// text delta carrying `partial`, then the wire's in-band error envelope (a
 /// 200-status terminal failure). Every later connection answers normally with

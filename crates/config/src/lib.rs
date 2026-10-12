@@ -2898,6 +2898,12 @@ pub struct AttachmentsConfig {
     /// LibreOffice/soffice CLI). Unset, the legacy formats are rejected
     /// with a conversion hint.
     pub office_converter: Option<String>,
+
+    /// `clipboard-command` — program (plus optional quoted arguments) that
+    /// prints the clipboard image (png, jpeg, gif, or webp) to standard output,
+    /// read by the composer's paste-from-clipboard keybinding. Unset, a platform
+    /// helper is auto-detected (`wl-paste`, `xclip`, `pngpaste`, or PowerShell).
+    pub clipboard_command: Option<String>,
 }
 
 impl Default for AttachmentsConfig {
@@ -2907,6 +2913,7 @@ impl Default for AttachmentsConfig {
             image_budget: 16,
             image_edge: 1568,
             office_converter: None,
+            clipboard_command: None,
         }
     }
 }
@@ -4148,7 +4155,7 @@ mod tests {
         }
         let parsed = config_kdl::from_kdl(
             "attachments {\n max-images 4\n image-budget 8\n image-edge 1024\n \
-             office-converter \"soffice\"\n}",
+             office-converter \"soffice\"\n clipboard-command \"wl-paste --type image/png\"\n}",
         )
         .unwrap();
         assert_eq!(parsed.attachments.max_images, 4);
@@ -4158,14 +4165,23 @@ mod tests {
             parsed.attachments.office_converter.as_deref(),
             Some("soffice")
         );
+        assert_eq!(
+            parsed.attachments.clipboard_command.as_deref(),
+            Some("wl-paste --type image/png")
+        );
 
         let mut config = Config::default();
         config.attachments.image_budget = 32;
         config.attachments.office_converter = Some("/usr/bin/soffice".into());
+        config.attachments.clipboard_command = Some("pngpaste -".into());
         let text = config_kdl::to_kdl(&config).unwrap();
         assert!(text.contains("image-budget 32"), "body: {text}");
         assert!(
             text.contains("office-converter \"/usr/bin/soffice\""),
+            "body: {text}"
+        );
+        assert!(
+            text.contains("clipboard-command \"pngpaste -\""),
             "body: {text}"
         );
         // an all-default settings section serializes to nothing
@@ -4187,6 +4203,7 @@ mod tests {
             "attachments { image-edge 31 }",
             "attachments { image-edge 8001 }",
             "attachments { office-converter \" \" }",
+            "attachments { clipboard-command \"  \" }",
             "attachments { nope 3 }",
             "attachments { max-images 2 max-images 3 }",
             "attachments \"soffice\"",

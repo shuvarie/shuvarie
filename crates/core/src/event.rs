@@ -166,6 +166,13 @@ pub enum Event {
         token: u64,
         candidates: Vec<crate::attachments::PathCandidate>,
     },
+    /// Reply to [`Command::AttachClipboard`]: an image read off the system
+    /// clipboard and staged to a temp file, ready to enter the composer as a
+    /// pending attachment. Failures are reported as [`Event::AttachmentNotice`]
+    /// instead, so this event is only sent on success.
+    ClipboardImage {
+        attachment: crate::attachments::ClipboardAttachment,
+    },
     /// A send-side attachment accommodation the user should know about
     /// (history images trimmed to the request budget or degraded to notes on
     /// a text-only target): shown in the status row until the next

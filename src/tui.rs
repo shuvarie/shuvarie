@@ -26,15 +26,23 @@ mod commands;
 mod components;
 mod confirm_quit;
 mod context;
+/// The composer's `@path` directive token encoding (see
+/// `docs/designs/images-and-drops.md`).
+mod directive;
 mod escape;
 mod event;
 /// Filesystem watch on the workspace's git `HEAD` file: the sidebar branch
 /// label refreshes on checkouts made outside the TUI.
 mod git_watch;
 mod history_search;
+/// Opt-in raw input tracing (`SHUVARIE_TRACE_INPUT`), for diagnosing file
+/// drops.
+mod input_trace;
 mod list;
 mod model_picker;
 mod notify;
+/// Classify a paste payload as ordinary text or a dropped file path.
+mod paste_path;
 mod permission;
 mod popup;
 mod question;
@@ -294,7 +302,9 @@ where
                 // still render immediately.
                 ev = event_stream.next() => {
                     let Some(ev_result) = ev else { break 'render_loop app.session.session_id; };
-                    let msg = app.map_event(Event::Terminal(ev_result?));
+                    let term_ev = ev_result?;
+                    input_trace::record(&term_ev);
+                    let msg = app.map_event(Event::Terminal(term_ev));
                     apply_msg(&mut app, rat.backend_mut().terminal_mut(), msg)
                 }
                 // Core event — drain all already-queued core events as one batch.

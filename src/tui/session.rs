@@ -9,7 +9,9 @@ use shuvarie_llm::{AttachmentKind, TokenUsage, format_size};
 use termina::event::{KeyCode, KeyEvent, KeyEventKind};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::tui::utils::{alt, alt_shift, ctrl};
+use crate::tui::directive;
+use crate::tui::paste_path::{self, Payload};
+use crate::tui::utils::{alt, alt_shift, ctrl, ctrl_shift};
 
 use self::mention::{MentionMenu, MentionMessage};
 use super::commands::{self, CommandAction, CommandRef};
@@ -141,6 +143,22 @@ pub enum SessionMessage {
         token: u64,
         items: Vec<shuvarie_core::attachments::DirectiveProbe>,
     },
+    /// A dropped or pasted file path: hold it as a pending attachment. The
+    /// composer's paste routing produces this when a bracketed paste decodes to
+    /// a path shape (see [`crate::tui::paste_path`]).
+    Attach {
+        path: String,
+    },
+    /// The core read an image off the system clipboard for the composer: hold
+    /// the staged file as a pending attachment. `probe` is computed core-side
+    /// (the bytes are already staged, so no round trip is needed).
+    ClipboardAttached {
+        path: String,
+        probe: shuvarie_core::attachments::DirectiveProbe,
+    },
+    /// Read an image off the system clipboard and attach it (Ctrl+Shift+V /
+    /// Alt+Shift+V).
+    AttachClipboard,
     /// Reply to [`SessionEffect::PathCompletions`]: the `@` mention popup's
     /// directory listing (the mention menu matches by its token and dir).
     PathCompletions {
@@ -319,12 +337,13 @@ pub struct SessionScreen {
     /// The session's deduped per-model usage (first-use ordered), rebuilt on
     /// load and extended live; the `/assisted-by` popup reads it at open.
     pub models_used: Vec<shuvarie_core::ModelUsage>,
-    /// The attach strip's probe round-trip: the pending token, the path set
-    /// the last issued probe carried, the replies aligned to it, and the
-    /// core requests `sync_pending` queues (flushed by the app hop).
+    /// The composer's pending attachments (typed `@path` directives and
+    /// dropped/pasted paths) plus their probe round-trip: the pending token,
+    /// the path set the last issued probe carried, and the core requests
+    /// `sync_pending` queues (flushed by the app hop).
     pending_token: u64,
     requested_directives: Vec<String>,
-    pending: Option<Vec<PendingChip>>,
+    pending: Vec<PendingAttachment>,
     deferred_effects: Vec<SessionEffect>,
 }
 
@@ -360,7 +379,7 @@ impl SessionScreen {
             models_used: Vec::new(),
             pending_token: 0,
             requested_directives: Vec::new(),
-            pending: Some(Vec::new()),
+            pending: Vec::new(),
             deferred_effects: Vec::new(),
         }
     }
@@ -465,8 +484,13 @@ impl SessionScreen {
             self.error = Some(format!("unknown command: {name}"));
             return None;
         };
+        let attachments: Vec<String> = self.pending.iter().map(|a| a.path.clone()).collect();
         match command.invocation_content(args.as_deref()) {
-            Ok(content) => Some(send_message_effect(content, command.model.clone())),
+            Ok(content) => Some(send_message_effect(
+                content,
+                attachments,
+                command.model.clone(),
+            )),
             Err(error) => {
                 self.error = Some(format!("failed to read command {name}: {error}"));
                 None
@@ -555,6 +579,9 @@ impl SessionScreen {
                 return Some(SessionMessage::Sidebar(m));
             }
             return match key.code {
+                // Ctrl+Shift+V reads an image off the system clipboard; plain
+                // Ctrl+V stays the half-page scroll below.
+                KeyCode::Char('v') if ctrl_shift(key) => Some(SessionMessage::AttachClipboard),
                 KeyCode::Char('n') => {
                     if self.input.wants_recall_down() {
                         Some(SessionMessage::Text(TextAreaMessage::CursorDown))
@@ -580,6 +607,9 @@ impl SessionScreen {
                 KeyCode::Up => Some(SessionMessage::RecallSteered {
                     stacked: alt_shift(key),
                 }),
+                // Alt+Shift+V mirrors Ctrl+Shift+V on terminals where the kitty
+                // keyboard protocol does not report Ctrl+Shift.
+                KeyCode::Char('v') if alt_shift(key) => Some(SessionMessage::AttachClipboard),
                 // Emacs `M-v`: half a screen back toward the start.
                 KeyCode::Char('v') => Some(SessionMessage::Chat(ChatMessage::ScrollHalfPageUp)),
                 _ => self.input.map_event(key).map(SessionMessage::Text),
@@ -617,7 +647,9 @@ impl SessionScreen {
     /// Bracketed-paste routing, mirroring `map_event`'s popup priority. A
     /// question popup captures the paste for its custom-answer field; search
     /// mode captures it for the needle; the bash popup and slash menu leave
-    /// the paste to the input area.
+    /// the paste to the input area. In the input area a paste that decodes to a
+    /// single-line file path — a dropped file — becomes a pending attachment
+    /// instead of pasting its path as text.
     pub fn map_paste(&self, text: &str) -> Option<SessionMessage> {
         if self.permission.open {
             return None;
@@ -632,9 +664,19 @@ impl SessionScreen {
                 text.to_string(),
             )));
         }
-        Some(SessionMessage::Text(TextAreaMessage::Paste(
-            text.to_string(),
-        )))
+        // While the slash menu is open the paste is a command argument
+        // (`/export …`), never a dropped file: keep the plain text paste.
+        if self.slash.active() {
+            return Some(SessionMessage::Text(TextAreaMessage::Paste(
+                text.to_string(),
+            )));
+        }
+        match paste_path::classify(text) {
+            Payload::Path(path) => Some(SessionMessage::Attach { path }),
+            Payload::Text => Some(SessionMessage::Text(TextAreaMessage::Paste(
+                text.to_string(),
+            ))),
+        }
     }
 
     fn sync_slash(&mut self) {
@@ -680,6 +722,11 @@ impl SessionScreen {
                 if let Some(effect) = self.input.update(m) {
                     match effect {
                         TextAreaEffect::Submit { content } => {
+                            // A submit consumes the buffer and its pending
+                            // attachments; capture them before clearing.
+                            let attachments: Vec<String> =
+                                self.pending.iter().map(|a| a.path.clone()).collect();
+                            self.clear_pending();
                             if let Some(raw) = content.strip_prefix('!') {
                                 let command = raw.trim().to_string();
                                 self.sync_slash();
@@ -705,7 +752,7 @@ impl SessionScreen {
                                 Ok(Some((expanded, model))) => {
                                     self.input.remember_sent(&content);
                                     self.sync_slash();
-                                    return Some(send_message_effect(expanded, model));
+                                    return Some(send_message_effect(expanded, attachments, model));
                                 }
                                 Ok(None) => {}
                                 Err(error) => {
@@ -726,7 +773,7 @@ impl SessionScreen {
                             // turn or gets steered behind a busy agent.
                             self.input.remember_sent(&content);
                             self.sync_slash();
-                            return Some(send_message_effect(expanded, None));
+                            return Some(send_message_effect(expanded, attachments, None));
                         }
                     }
                 }
@@ -825,6 +872,7 @@ impl SessionScreen {
                 SlashMessage::Run => {
                     if let Some(action) = self.slash.selected_action() {
                         self.input.buffer.clear();
+                        self.clear_pending();
                         self.sync_slash();
                         return self.run_command_ref(action);
                     }
@@ -842,10 +890,11 @@ impl SessionScreen {
                     MentionMessage::Accept => {
                         if let Some(candidate) = self.mention.accept() {
                             let (start, end) = self.mention.token_range();
-                            self.input
-                                .buffer
-                                .replace_range(start..end, &format!("@{candidate}"));
-                            self.input.buffer.place_cursor(start + 1 + candidate.len());
+                            // The candidate is a real path; escape it so a space
+                            // in a name stays inside the directive token.
+                            let token = format!("@{}", directive::escape(&candidate));
+                            self.input.buffer.replace_range(start..end, &token);
+                            self.input.buffer.place_cursor(start + token.len());
                         }
                     }
                     MentionMessage::Dismiss => self.mention.dismiss(),
@@ -854,16 +903,12 @@ impl SessionScreen {
             }
             SessionMessage::DirectivesValidated { token, items } => {
                 if token == self.pending_token {
-                    self.pending = Some(
-                        self.requested_directives
-                            .iter()
-                            .zip(items)
-                            .map(|(path, probe)| PendingChip {
-                                path: path.clone(),
-                                probe,
-                            })
-                            .collect(),
-                    );
+                    for (path, probe) in self.requested_directives.iter().zip(items) {
+                        if let Some(attachment) = self.pending.iter_mut().find(|a| &a.path == path)
+                        {
+                            attachment.probe = Some(probe);
+                        }
+                    }
                 }
                 None
             }
@@ -871,6 +916,15 @@ impl SessionScreen {
                 self.mention.set_candidates(token, candidates);
                 None
             }
+            SessionMessage::Attach { path } => {
+                self.push_dropped(path, None);
+                None
+            }
+            SessionMessage::ClipboardAttached { path, probe } => {
+                self.push_dropped(path, Some(probe));
+                None
+            }
+            SessionMessage::AttachClipboard => Some(SessionEffect::AttachClipboard),
             SessionMessage::OpenMediaViewer { sha } => {
                 let items = self.chat.image_inventory();
                 if items.is_empty() {
@@ -1383,7 +1437,7 @@ impl SessionScreen {
         // aligned with the content column's left padding so the chips line
         // up under the chat.
         if strip_rows > 0
-            && let Some(lines) = pending_strip_lines(&self.pending, strip_area.width)
+            && let Some(lines) = pending_strip_lines(&self.pending)
         {
             let strip_block = Block::new().padding(Padding::horizontal(2));
             frame.render_widget(Paragraph::new(lines), strip_block.inner(strip_area));
@@ -1561,14 +1615,17 @@ impl SessionScreen {
 pub enum SessionEffect {
     /// Send a prompt. `model` is the per-turn streaming override
     /// (`<provider_kind>/<model>` from a custom command's frontmatter);
-    /// `None` streams on the active provider. `attachments` are the
-    /// composer's pending `@path` directives (empty until the compose UX
-    /// gains the attach strip).
+    /// `None` streams on the active provider. `attachments` are the composer's
+    /// pending attachment paths: the typed `@path` directives the prompt carries
+    /// and any dropped/pasted files held only in the pending list.
     SendMessage {
         content: String,
         attachments: Vec<String>,
         model: Option<String>,
     },
+    /// Read an image off the system clipboard for the composer (reply:
+    /// `Event::ClipboardImage`, or `Event::AttachmentNotice` on failure).
+    AttachClipboard,
     /// Run a bash-mode (`!`-prefixed) command locally through the resolved
     /// shell. Never persisted, never sent to the model.
     RunBash {
@@ -1626,24 +1683,52 @@ pub enum SessionEffect {
     },
 }
 
-/// One chip of the composer's pending-attachment strip: the directive path
-/// and its shallow probe (metadata only; send time does the real work).
-#[derive(Debug, Clone)]
-struct PendingChip {
-    path: String,
-    probe: shuvarie_core::attachments::DirectiveProbe,
+/// How a pending attachment entered the composer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingOrigin {
+    /// Typed as an `@path` directive still present in the buffer.
+    Directive,
+    /// Dropped or pasted as a path; no buffer token mirrors it.
+    Dropped,
 }
 
-impl PendingChip {
+/// One chip of the composer's pending-attachment strip: the path and its
+/// shallow probe (metadata only; send time does the real work). `probe` is
+/// `None` between an attachment's appearance and the core's reply.
+#[derive(Debug, Clone)]
+struct PendingAttachment {
+    /// The decoded filesystem path (no escaping, no `@`).
+    path: String,
+    origin: PendingOrigin,
+    probe: Option<shuvarie_core::attachments::DirectiveProbe>,
+}
+
+impl PendingAttachment {
+    /// The chip's label: `@path` for a typed directive (so the strip echoes the
+    /// buffer), the file name for a dropped/pasted path (a staged clipboard
+    /// file's full path is noise).
+    fn label(&self) -> String {
+        match self.origin {
+            PendingOrigin::Directive => format!("@{}", self.path),
+            PendingOrigin::Dropped => file_name(&self.path),
+        }
+    }
+
     fn line(&self) -> Line<'static> {
-        if let Some(error) = &self.probe.error {
+        let Some(probe) = &self.probe else {
+            return Line::from(vec![
+                Span::raw("·").fg(theme::text_dim()),
+                Span::raw(format!(" {} — checking...", self.label())).fg(theme::text_dim()),
+            ]);
+        };
+        if let Some(error) = &probe.error {
             return Line::from(vec![
                 Span::raw("✗").fg(theme::warning()),
-                Span::raw(format!(" @{}", self.path)).fg(theme::text()),
+                Span::raw(format!(" {}", self.label())).fg(theme::text()),
                 Span::raw(format!(" — {error}")).fg(theme::warning()),
             ]);
         }
-        let (icon, color, kind) = match self.probe.kind {
+        let (icon, color, kind) = match probe.kind {
             Some(AttachmentKind::Image) => (
                 crate::tui::session::media::CHIP_ICON_IMAGE,
                 theme::accent(),
@@ -1656,42 +1741,42 @@ impl PendingChip {
             ),
             None => ("▪", theme::text_dim(), "file"),
         };
-        let size = match self.probe.size {
+        let size = match probe.size {
             Some(size) => format!(" · {}", format_size(size)),
             None => String::new(),
         };
         Line::from(vec![
             Span::raw(icon).fg(color),
-            Span::raw(format!(" @{} — {kind}{size}", self.path)).fg(color),
+            Span::raw(format!(" {} — {kind}{size}", self.label())).fg(color),
         ])
     }
 }
 
-/// Rows the pending-attachment strip reserves above the input: up to two
-/// chip rows plus an overflow hint, nothing while empty or validated-empty.
-fn pending_strip_rows(pending: &Option<Vec<PendingChip>>) -> u16 {
-    match pending {
-        Some(chips) if !chips.is_empty() => {
-            (chips.len().min(2) + usize::from(chips.len() > 2)) as u16
-        }
-        _ => 0,
-    }
+/// The file name of a path, falling back to the whole path when it has none.
+fn file_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.to_string())
+}
+
+/// Rows the pending-attachment strip reserves above the input: up to two chip
+/// rows plus an overflow hint, nothing while empty.
+fn pending_strip_rows(pending: &[PendingAttachment]) -> u16 {
+    (pending.len().min(2) + usize::from(pending.len() > 2)) as u16
 }
 
 /// The strip's lines: one chip per row (two visible) and an overflow hint.
-fn pending_strip_lines(
-    pending: &Option<Vec<PendingChip>>,
-    _width: u16,
-) -> Option<Vec<Line<'static>>> {
-    let chips = pending.as_ref()?;
-    if chips.is_empty() {
+fn pending_strip_lines(pending: &[PendingAttachment]) -> Option<Vec<Line<'static>>> {
+    if pending.is_empty() {
         return None;
     }
     let mut lines: Vec<Line<'static>> = Vec::new();
-    for chip in chips.iter().take(2) {
+    for chip in pending.iter().take(2) {
         lines.push(chip.line());
     }
-    let overflow = chips.len().saturating_sub(2);
+    let overflow = pending.len().saturating_sub(2);
     if overflow > 0 {
         lines.push(Line::from(format!("… +{overflow} more")).fg(theme::text_muted()));
     }
@@ -1770,20 +1855,62 @@ impl SessionScreen {
     }
 
     /// Sync the compose-side attachment surfaces to the buffer: the pending
-    /// directive probe (the attach strip) and the `@` mention popup. Both
-    /// answer through effects queued into `deferred_effects` — the app hop
-    /// drains them via [`SessionScreen::take_deferred_effects`] so a message
-    /// with its own effect still gets them sent.
+    /// attachments (the attach strip) and the `@` mention popup. Both answer
+    /// through effects queued into `deferred_effects` — the app hop drains them
+    /// via [`SessionScreen::take_deferred_effects`] so a message with its own
+    /// effect still gets them sent.
+    ///
+    /// The pending list mirrors the buffer's `@path` directives (in text order)
+    /// followed by any dropped/pasted paths no token carries. A dropped
+    /// attachment lives only in this list; when the buffer's directive set and
+    /// the list's path set disagree with the last issued probe, the whole set
+    /// is re-probed (preserving the probes of surviving paths).
     fn sync_pending(&mut self) {
         let directives = at_directives(&self.input.buffer.value);
-        if self.requested_directives != directives {
+        let mut desired: Vec<(String, PendingOrigin)> = directives
+            .iter()
+            .cloned()
+            .map(|path| (path, PendingOrigin::Directive))
+            .collect();
+        for attachment in &self.pending {
+            if attachment.origin == PendingOrigin::Dropped && !directives.contains(&attachment.path)
+            {
+                desired.push((attachment.path.clone(), PendingOrigin::Dropped));
+            }
+        }
+        let paths: Vec<String> = desired.iter().map(|(path, _)| path.clone()).collect();
+        let current: Vec<String> = self.pending.iter().map(|a| a.path.clone()).collect();
+        if paths != current {
+            let probes: Vec<Option<shuvarie_core::attachments::DirectiveProbe>> = paths
+                .iter()
+                .map(|path| {
+                    self.pending
+                        .iter()
+                        .find(|a| &a.path == path)
+                        .and_then(|a| a.probe.clone())
+                })
+                .collect();
+            self.pending = desired
+                .into_iter()
+                .zip(probes)
+                .map(|((path, origin), probe)| PendingAttachment {
+                    path,
+                    origin,
+                    probe,
+                })
+                .collect();
+        }
+        // Re-probe whenever the set differs from the last issued probe — a new
+        // directive, a drop, or a removal. A dropped attachment is pushed
+        // straight into `pending`, so the two path vectors can agree while the
+        // probe is still outstanding.
+        if paths != self.requested_directives {
             self.pending_token = self.pending_token.wrapping_add(1);
-            self.requested_directives = directives.clone();
-            self.pending = Some(Vec::new());
-            if !directives.is_empty() {
+            self.requested_directives = paths.clone();
+            if !paths.is_empty() {
                 self.deferred_effects.push(SessionEffect::ProbeDirectives {
                     token: self.pending_token,
-                    paths: directives,
+                    paths,
                 });
             }
         }
@@ -1791,6 +1918,33 @@ impl SessionScreen {
             self.deferred_effects
                 .push(SessionEffect::PathCompletions { token, query });
         }
+    }
+
+    /// Drop every pending attachment. Called on a submit that consumes the
+    /// buffer (send, bash, a slash command) so a dropped attachment never bleeds
+    /// into the next prompt.
+    fn clear_pending(&mut self) {
+        self.pending.clear();
+        self.requested_directives.clear();
+    }
+
+    /// Hold a dropped or pasted path as a pending attachment, deduped by path (a
+    /// repeat drop of the same file is a no-op). `probe` preloads the
+    /// core-computed probe for a staged clipboard file; a dropped path without
+    /// one is probed by the next [`SessionScreen::sync_pending`].
+    fn push_dropped(
+        &mut self,
+        path: String,
+        probe: Option<shuvarie_core::attachments::DirectiveProbe>,
+    ) {
+        if self.pending.iter().any(|a| a.path == path) {
+            return;
+        }
+        self.pending.push(PendingAttachment {
+            path,
+            origin: PendingOrigin::Dropped,
+            probe,
+        });
     }
 
     /// Queued core requests from the compose-side sync; the app hop sends
@@ -1801,13 +1955,38 @@ impl SessionScreen {
     }
 }
 
+/// The literal-send effect builder: the prompt text plus the composer's
+/// attachment paths — the explicit `attachments` captured at submit (typed
+/// directives and dropped/pasted files alike), merged with the `@` directives
+/// the *expanded* content still carries (a directive inside a compacted paste
+/// is invisible to the raw buffer's scan).
+fn send_message_effect(
+    content: String,
+    attachments: Vec<String>,
+    model: Option<String>,
+) -> SessionEffect {
+    let mut attachments = attachments;
+    for path in at_directives(&content) {
+        if !attachments.contains(&path) {
+            attachments.push(path);
+        }
+    }
+    SessionEffect::SendMessage {
+        content,
+        attachments,
+        model,
+    }
+}
+
 /// Extract the composer's `@path` attachment directives from a composed
 /// prompt: an `@` opening a token (line start or after whitespace) becomes an
 /// attachment path; the token stays in the prompt text so the model and the
-/// transcript keep seeing it. Heuristics keep prose mentions (like "ping
-/// @bob") from aborting sends: a directive must carry a file-suffix-looking
-/// extension after a final `.` (1-8 alphanumeric characters), and must not
-/// contain `://` (a URL, not a path). Repeated paths dedupe.
+/// transcript keep seeing it. A path containing whitespace escapes it with a
+/// backslash per whitespace character ([`directive::escape`]); the decoded path
+/// is returned. Heuristics keep prose mentions (like "ping @bob") from aborting
+/// sends: a directive must carry a file-suffix-looking extension after a final
+/// `.` (1-8 alphanumeric characters), and must not contain `://` (a URL, not a
+/// path). Repeated paths dedupe.
 fn at_directives(content: &str) -> Vec<String> {
     const TRAILING_PUNCTUATION: &[char] = &['.', ',', ':', ';', '!', '?', ')', ']', '"', '\''];
     let mut directives = Vec::new();
@@ -1818,12 +1997,23 @@ fn at_directives(content: &str) -> Vec<String> {
             let boundary = i == 0 || chars[i - 1].is_whitespace();
             if boundary && chars[i] == '@' {
                 let start = i + 1;
-                let end = chars[start..]
-                    .iter()
-                    .position(|ch| ch.is_whitespace())
-                    .map_or(chars.len(), |offset| start + offset);
+                // The token ends at the first *unescaped* whitespace; a
+                // backslash-escaped whitespace is part of the path.
+                let mut end = start;
+                while end < chars.len() {
+                    if chars[end] == '\\' && end + 1 < chars.len() && chars[end + 1].is_whitespace()
+                    {
+                        end += 2;
+                        continue;
+                    }
+                    if chars[end].is_whitespace() {
+                        break;
+                    }
+                    end += 1;
+                }
                 if end > start {
-                    let mut path: String = chars[start..end].iter().collect();
+                    let raw: String = chars[start..end].iter().collect();
+                    let mut path = directive::unescape(&raw);
                     while path
                         .chars()
                         .next_back()
@@ -1849,17 +2039,6 @@ fn at_directives(content: &str) -> Vec<String> {
         }
     }
     directives
-}
-
-/// The literal-send effect builder: extracts `@path` directives from the
-/// composed text on the way out.
-fn send_message_effect(content: String, model: Option<String>) -> SessionEffect {
-    let attachments = at_directives(&content);
-    SessionEffect::SendMessage {
-        content,
-        attachments,
-        model,
-    }
 }
 
 #[cfg(test)]
@@ -3546,8 +3725,10 @@ mod compose_tests {
             }
             other => panic!("expected the probe last: {other:?}"),
         };
-        // While probing, the strip is hidden.
-        assert_eq!(screen.pending.as_ref().unwrap().len(), 0);
+        // The attachment exists already, awaiting its probe.
+        assert_eq!(screen.pending.len(), 1);
+        assert!(screen.pending[0].probe.is_none());
+        assert_eq!(screen.pending[0].origin, PendingOrigin::Directive);
         // The reply fills the strip with chips.
         screen.update(SessionMessage::DirectivesValidated {
             token: probe_token,
@@ -3557,7 +3738,11 @@ mod compose_tests {
                 error: None,
             }],
         });
-        assert_eq!(screen.pending.as_ref().unwrap().len(), 1);
+        assert_eq!(screen.pending.len(), 1);
+        assert_eq!(
+            screen.pending[0].probe.as_ref().unwrap().kind,
+            Some(shuvarie_llm::AttachmentKind::Document)
+        );
         // A stale reply (an older token) never clobbers it.
         screen.update(SessionMessage::DirectivesValidated {
             token: 0,
@@ -3567,15 +3752,172 @@ mod compose_tests {
                 error: Some("missing file".into()),
             }],
         });
-        assert!(screen.pending.as_ref().unwrap()[0].probe.error.is_none());
+        assert!(screen.pending[0].probe.as_ref().unwrap().error.is_none());
         // The chip line renders above the input (its own row).
         let buf = draw(&screen, 100, 30);
         let chip_rows = (0..buf.area().height)
             .filter(|y| content_row_text(&buf, *y).contains("@plan.pdf"))
             .count();
         assert!(chip_rows > 0, "the chip renders somewhere");
-        // And clearing the buffer drops the strip.
-        assert!(screen.pending.as_ref().unwrap().len() == 1);
+        // Clearing the buffer detaches the directive chip.
+        screen.update(SessionMessage::Text(TextAreaMessage::Clear));
+        assert!(screen.pending.is_empty(), "an erased directive detaches");
+    }
+
+    #[test]
+    fn a_pasted_path_becomes_a_dropped_attachment_and_is_probed() {
+        let mut screen = SessionScreen::new();
+        // A bracketed paste that decodes to a dropped screenshot path.
+        let message = screen.map_paste("/tmp/Screenshot\\ 2026-05-27\\ at\\ 13.37.31.png");
+        let Some(SessionMessage::Attach { path }) = message else {
+            panic!("the drop decodes to a path");
+        };
+        assert_eq!(path, "/tmp/Screenshot 2026-05-27 at 13.37.31.png");
+        screen.update(SessionMessage::Attach { path });
+        assert_eq!(screen.pending.len(), 1);
+        assert_eq!(screen.pending[0].origin, PendingOrigin::Dropped);
+        // The structural attach still queues a probe for the strip.
+        let deferred = screen.take_deferred_effects();
+        assert!(matches!(
+            deferred.last(),
+            Some(SessionEffect::ProbeDirectives { paths, .. })
+                if paths == &["/tmp/Screenshot 2026-05-27 at 13.37.31.png".to_string()]
+        ));
+        // The buffer text is untouched: a drop is not text.
+        assert!(screen.input.buffer.value.is_empty());
+        // A second drop of the same path is a no-op.
+        screen.update(SessionMessage::Attach {
+            path: "/tmp/Screenshot 2026-05-27 at 13.37.31.png".into(),
+        });
+        assert_eq!(screen.pending.len(), 1);
+    }
+
+    #[test]
+    fn prose_paste_stays_text() {
+        let screen = SessionScreen::new();
+        assert!(matches!(
+            screen.map_paste("just some prose"),
+            Some(SessionMessage::Text(TextAreaMessage::Paste(text))) if text == "just some prose"
+        ));
+    }
+
+    #[test]
+    fn a_slash_argument_paste_is_never_a_dropped_file() {
+        let mut screen = SessionScreen::new();
+        // `/new` stays available without a session (unlike `/export`).
+        type_text(&mut screen, "/new");
+        assert!(screen.slash.active(), "the menu is open on `/new`");
+        assert!(matches!(
+            screen.map_paste("/tmp/out.json"),
+            Some(SessionMessage::Text(TextAreaMessage::Paste(text))) if text == "/tmp/out.json"
+        ));
+    }
+
+    #[test]
+    fn clipboard_attach_holds_a_preprobed_dropped_attachment() {
+        let mut screen = SessionScreen::new();
+        // Ctrl+Shift+V / Alt+Shift+V ask for a clipboard read.
+        let ctrl_shift_v = termina::event::KeyEvent::new(
+            KeyCode::Char('v'),
+            termina::event::Modifiers::CONTROL | termina::event::Modifiers::SHIFT,
+        );
+        assert!(matches!(
+            screen.map_event(&ctrl_shift_v),
+            Some(SessionMessage::AttachClipboard)
+        ));
+        let alt_shift_v = termina::event::KeyEvent::new(
+            KeyCode::Char('v'),
+            termina::event::Modifiers::ALT | termina::event::Modifiers::SHIFT,
+        );
+        assert!(matches!(
+            screen.map_event(&alt_shift_v),
+            Some(SessionMessage::AttachClipboard)
+        ));
+        // Plain Ctrl+V stays the half-page scroll.
+        assert!(matches!(
+            screen.map_event(&termina::event::KeyEvent::new(
+                KeyCode::Char('v'),
+                termina::event::Modifiers::CONTROL
+            )),
+            Some(SessionMessage::Chat(ChatMessage::ScrollHalfPageDown))
+        ));
+        // The core's staged image arrives as a pre-probed dropped attachment.
+        screen.update(SessionMessage::ClipboardAttached {
+            path: "/tmp/shuvarie-paste-1-2/clipboard.png".into(),
+            probe: DirectiveProbe {
+                kind: Some(shuvarie_llm::AttachmentKind::Image),
+                size: Some(2048),
+                error: None,
+            },
+        });
+        assert_eq!(screen.pending.len(), 1);
+        assert_eq!(screen.pending[0].origin, PendingOrigin::Dropped);
+        assert_eq!(
+            screen.pending[0].probe.as_ref().unwrap().kind,
+            Some(shuvarie_llm::AttachmentKind::Image)
+        );
+        // The chip shows the file name, not the whole temp path.
+        assert_eq!(screen.pending[0].label(), "clipboard.png");
+    }
+
+    #[test]
+    fn send_carries_dropped_and_typed_attachments() {
+        let mut screen = SessionScreen::new();
+        type_text(&mut screen, "hi @plan.pdf");
+        screen.update(SessionMessage::Attach {
+            path: "/tmp/dropped shot.png".into(),
+        });
+        let effect = screen
+            .update(SessionMessage::Text(TextAreaMessage::Submit))
+            .expect("a send");
+        match effect {
+            SessionEffect::SendMessage {
+                content,
+                attachments,
+                ..
+            } => {
+                assert_eq!(content, "hi @plan.pdf");
+                assert_eq!(
+                    attachments,
+                    vec!["plan.pdf".to_string(), "/tmp/dropped shot.png".to_string()]
+                );
+            }
+            other => panic!("expected a send: {other:?}"),
+        }
+        assert!(screen.pending.is_empty(), "a submit clears the pending set");
+    }
+
+    #[test]
+    fn escaped_directives_are_decoded_at_send_time() {
+        // A typed directive with an escaped space is one token, decoded.
+        assert_eq!(
+            at_directives("look at @/tmp/a\\ b.png please"),
+            vec!["/tmp/a b.png"]
+        );
+        // Undecoded, the space would have split the token.
+        assert_eq!(at_directives("look at @a\\ b.png"), vec!["a b.png"]);
+    }
+
+    #[test]
+    fn accepting_a_mention_with_spaces_splices_an_escaped_directive() {
+        let mut screen = SessionScreen::new();
+        type_text(&mut screen, "@");
+        screen.update(SessionMessage::PathCompletions {
+            token: 0,
+            candidates: vec![PathCandidate {
+                name: "my shot.png".into(),
+                is_dir: false,
+            }],
+        });
+        screen.update(SessionMessage::Mention(MentionMessage::Accept));
+        assert_eq!(screen.input.buffer.value, "@my\\ shot.png");
+        // The escaped token round-trips through the send-time tokenizer.
+        assert_eq!(
+            at_directives(&screen.input.buffer.value),
+            vec!["my shot.png"]
+        );
+        assert_eq!(screen.pending.len(), 1);
+        assert_eq!(screen.pending[0].path, "my shot.png");
     }
 
     #[test]

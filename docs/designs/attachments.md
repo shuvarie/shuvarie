@@ -14,9 +14,14 @@ The attachment feature spans the stack around one currency type: `shuvarie-llm`'
   `attachments { … }` config via `AttachmentSettings`.
 - `crates/core/src/office_convert.rs`: the optional external converter (`office-converter`
   config) for legacy `.doc`/`.ppt` — shared by the composer attachments and the file tools
+- `crates/core/src/clipboard.rs`: the optional clipboard image reader (`clipboard-command`
+  config, auto-detecting `wl-paste`/`xclip`/`pngpaste`/PowerShell) behind the composer's
+  paste-from-clipboard keybinding — see [`images-and-drops.md`](images-and-drops.md)
 - `crates/db/`: content-addressed `AttachmentBlob` store (sha256 → bytes, GC'd on delete
   cascades) + per-message `MessageAttachment` rows; session-file export/import carries base64 blobs.
 - `src/tui/session/media.rs`: decode-once `MediaStore` (LRU-capped) + halfblock lifting
   through ratatui-image into ordinary `BodyChunk` lines; `blocks/media.rs` renders the
   per-turn attachment strip with hit regions; `viewer.rs` is the fullscreen gallery;
   `session/mention.rs` the compose-time preview/completion.
+- `src/tui/{directive,paste_path}.rs`: the composer's `@path` directive escaping and the
+  drop-payload classifier; `session.rs` holds the structural pending-attachment list.

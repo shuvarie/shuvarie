@@ -2,6 +2,7 @@ pub mod agents;
 pub mod apply_patch;
 pub mod attachments;
 pub mod catalog;
+pub(crate) mod clipboard;
 pub mod command;
 pub mod compaction;
 pub mod context;

@@ -666,6 +666,7 @@ fn parse_attachments(node: &KdlNode, input: &str) -> Result<AttachmentsConfig> {
     let mut image_budget = None;
     let mut image_edge = None;
     let mut office_converter = None;
+    let mut clipboard_command = None;
     for child in child_nodes(node) {
         match child.name().value() {
             "max-images" => set_once(input, child, &mut max_images, scalar_usize(input, child))?,
@@ -679,13 +680,20 @@ fn parse_attachments(node: &KdlNode, input: &str) -> Result<AttachmentsConfig> {
                 &mut office_converter,
                 scalar_string(input, child),
             )?,
+            "clipboard-command" => set_once(
+                input,
+                child,
+                &mut clipboard_command,
+                scalar_string(input, child),
+            )?,
             other => {
                 return Err(node_error(
                     input,
                     child,
                     format!(
                         "unknown node `{other}` in `attachments` (expected `max-images`, \
-                         `image-budget`, `image-edge`, or `office-converter`)"
+                         `image-budget`, `image-edge`, `office-converter`, or \
+                         `clipboard-command`)"
                     ),
                     None,
                 ));
@@ -721,6 +729,17 @@ fn parse_attachments(node: &KdlNode, input: &str) -> Result<AttachmentsConfig> {
             ));
         }
         config.office_converter = Some(value);
+    }
+    if let Some(value) = clipboard_command {
+        if value.trim().is_empty() {
+            return Err(node_error(
+                input,
+                node,
+                "`clipboard-command` takes a program (plus optional arguments)",
+                None,
+            ));
+        }
+        config.clipboard_command = Some(value);
     }
     Ok(config)
 }
@@ -3674,6 +3693,9 @@ fn attachments_node(cfg: &AttachmentsConfig) -> Option<KdlNode> {
     }
     if let Some(program) = &cfg.office_converter {
         children.push(value_node("office-converter", program.as_str()));
+    }
+    if let Some(command) = &cfg.clipboard_command {
+        children.push(value_node("clipboard-command", command.as_str()));
     }
     section_node("attachments", children)
 }
