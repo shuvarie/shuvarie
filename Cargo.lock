@@ -2183,9 +2183,9 @@ dependencies = [
 
 [[package]]
 name = "frameplay"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfbd96915c6f52d9652f384ec7eb0a6c5be1cd96c1ed3d633bcbde3c6613ab54"
+checksum = "6f14139b26038250d58a91cf0e5732a26c2d6483644db48575618e82a8ce932d"
 
 [[package]]
 name = "fs4"
