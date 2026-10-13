@@ -57,6 +57,24 @@ pub enum Event {
         /// their own id, so the UI can keep their activity apart.
         spawn: Option<u64>,
         call_id: String,
+        /// The call is queued behind its batch's tool-concurrency limit: the
+        /// calls the model emitted before it still hold every slot, so none of
+        /// it has begun executing. The block still appears (the model asked for
+        /// it), but as waiting rather than running; [`Event::ToolRunning`]
+        /// follows when a slot frees.
+        waiting: bool,
+    },
+    /// A queued tool call took a free concurrency slot and began executing: the
+    /// block [`Event::ToolStarted`] (or [`Event::WorkerStarted`]) created for it
+    /// leaves its waiting state and starts animating. Sent for calls that were
+    /// announced `waiting`, never for one that ran from the start.
+    ToolRunning {
+        name: String,
+        worker: Option<String>,
+        /// The spawn id of the worker run the call happens inside (`None` for
+        /// main-agent calls).
+        spawn: Option<u64>,
+        call_id: String,
     },
     ToolFinished {
         name: String,
@@ -109,6 +127,11 @@ pub enum Event {
         name: String,
         args: serde_json::Value,
         call_id: String,
+        /// The spawned worker call is queued behind the batch's
+        /// tool-concurrency limit, like [`Event::ToolStarted`]'s `waiting`:
+        /// worker-tool calls are dynamic tools of the main agent's own batch and
+        /// spend from the same slots.
+        waiting: bool,
     },
     WorkerFinished {
         name: String,

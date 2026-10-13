@@ -874,10 +874,25 @@ impl App {
                     worker,
                     spawn,
                     call_id,
+                    waiting,
                 } => Some(AppMessage::Session(SessionMessage::Chat(
                     ChatMessage::ToolStarted {
                         name,
                         args,
+                        worker,
+                        spawn,
+                        call_id: Some(call_id),
+                        waiting,
+                    },
+                ))),
+                CoreEvent::ToolRunning {
+                    name,
+                    worker,
+                    spawn,
+                    call_id,
+                } => Some(AppMessage::Session(SessionMessage::Chat(
+                    ChatMessage::ToolRunning {
+                        name,
                         worker,
                         spawn,
                         call_id: Some(call_id),
@@ -948,11 +963,13 @@ impl App {
                     name,
                     args,
                     call_id,
+                    waiting,
                 } => Some(AppMessage::Session(SessionMessage::Chat(
                     ChatMessage::WorkerStarted {
                         name,
                         args,
                         call_id: Some(call_id),
+                        waiting,
                     },
                 ))),
                 CoreEvent::WorkerFinished {

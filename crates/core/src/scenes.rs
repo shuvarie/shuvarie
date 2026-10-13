@@ -435,7 +435,9 @@ impl Scene {
     /// The scene's tool-concurrency setting: how many tool calls the agent
     /// may run concurrently within one assistant message (a batch of worker
     /// spawns, or an otherwise parallel-capable tool). The unset default is
-    /// sequential (`1`); a configured `0` clamps to it.
+    /// sequential (`1`); a configured `0` clamps to it. rig announces a whole
+    /// batch up front, so the calls past this limit are queued rather than
+    /// running — the core tracks that split to show a queued call as waiting.
     pub fn tool_concurrency(&self) -> usize {
         self.config
             .as_ref()
