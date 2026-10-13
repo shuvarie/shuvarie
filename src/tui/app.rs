@@ -3337,6 +3337,43 @@ mod tests {
     }
 
     #[test]
+    fn escape_asks_to_quit_from_the_title_but_stays_the_forms_key() {
+        let esc =
+            || termina::event::KeyEvent::new(KeyCode::Escape, termina::event::Modifiers::NONE);
+        let mut app = app_with(Connections::default());
+
+        // The title page: Esc reaches the quit prompt through the router.
+        assert!(matches!(
+            app.map_event(Event::Terminal(TermEvent::Key(esc()))),
+            Some(AppMessage::Welcome(WelcomeMessage::RequestQuit))
+        ));
+        app.update(AppMessage::Welcome(WelcomeMessage::RequestQuit));
+        assert!(app.confirm_quit.open, "Esc opens the prompt over the title");
+
+        // Cancelling drops back onto the page it was asked from.
+        app.update(AppMessage::CancelQuit);
+        assert!(matches!(app.overlay, Overlay::Welcome));
+        assert_eq!(app.welcome.stage, WelcomeStage::Intro);
+
+        // The form page: Esc is still the form's own key, and walks back.
+        app.update(AppMessage::Welcome(WelcomeMessage::Advance));
+        assert_eq!(app.welcome.stage, WelcomeStage::AddProvider);
+        let msg = app
+            .map_event(Event::Terminal(TermEvent::Key(esc())))
+            .expect("the form captures Esc");
+        assert!(matches!(
+            msg,
+            AppMessage::AddProvider(AddProviderMessage::Cancel)
+        ));
+        app.update(msg);
+        assert_eq!(app.welcome.stage, WelcomeStage::Intro);
+        assert!(
+            !app.confirm_quit.open,
+            "the form's Esc cancels the form, it does not ask to quit"
+        );
+    }
+
+    #[test]
     fn a_provider_with_no_models_skips_the_picker() {
         let mut app = app_with(Connections::default());
         let provider = onboard_pending_provider(&mut app);

@@ -6,7 +6,9 @@ a configured provider.
 
 - `src/tui/welcome.rs`: the page machine. `WelcomeStage` is `Intro → AddProvider → ModelPicker →
   AllSet`; `Welcome::{open,close}` raise and drop the flow, `map_event` maps Ctrl+C to
-  `RequestQuit` on every page and any other key press to `Advance` on the two interstitial pages,
+  `RequestQuit` on every page and Esc to it on the two interstitial ones (the form and the picker
+  have a `Cancel`/accept meaning for Esc, so it is left to them), and any other key press to
+  `Advance` on the interstitial pages,
   and `update` turns `Advance` into `AddProvider` (from the title) or `Finish` (from the closing
   page). `view` paints the interstitial pages only; the form and the picker paint themselves.
 - `src/tui/welcome/art.rs`: the title page's drawing. The `Shuvarie` wordmark is a `tui-big-text`
@@ -29,7 +31,9 @@ a configured provider.
   on the form; `ModelsLoaded` pages on to the picker (or straight to `AllSet` when the provider
   lists nothing) and `ModelsError` returns to the form with the error; the picker's `Selected` and
   Esc-with-a-default land on `AllSet`; `AllSet`'s next key press finishes onboarding. Esc on the
-  form's first page walks back to the title.
+  form's first page walks back to the title. Cancelling the quit prompt calls `close_overlay`,
+  which re-points the overlay at the stage still showing, so it lands back on the page it was
+  asked from.
 - `src/tui/add_provider.rs` / `src/tui/model_picker.rs`: `dialog_rect(area, fullscreen, …)` picks
   between the centred popup and `fullscreen_rect`, the viewport inset by a small margin; the
   render loop's `set_viewport` geometry mirrors the same choice through

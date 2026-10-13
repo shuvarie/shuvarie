@@ -2,7 +2,8 @@
 //! It pages fullscreen through an animated title, the first-provider form, the
 //! model picker, and a closing "all set" page — nothing below it is painted or
 //! interactive, so there is no way into a session that has no provider behind
-//! it. Ctrl+C asks to quit from every page.
+//! it. Ctrl+C asks to quit from every page, and Esc from the two interstitial
+//! ones — the form and the picker have a `Cancel`/accept meaning for it.
 //!
 //! The welcome owns only the two interstitial pages ([`art`] does the drawing);
 //! the form and the picker paint themselves fullscreen, and `App` forwards
@@ -80,16 +81,23 @@ impl Welcome {
             .flatten()
     }
 
-    /// The interstitial pages' key handling: Ctrl+C always asks to quit, and a
-    /// key press moves the flow on. The form and the picker own their keys, so
-    /// nothing else is mapped on their pages — the router forwards to them
-    /// instead.
+    /// The interstitial pages' key handling: Ctrl+C and Esc ask to quit, and
+    /// any other key press moves the flow on. The form and the picker own their
+    /// keys, so nothing else is mapped on their pages — the router forwards to
+    /// them instead.
     pub fn map_event(&self, key: &KeyEvent) -> Option<WelcomeMessage> {
         if key.modifiers.contains(Modifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Some(WelcomeMessage::RequestQuit);
         }
         match self.stage {
             WelcomeStage::Intro | WelcomeStage::AllSet => {
+                // Esc asks to quit here instead of paging on: it is the key a
+                // user looking for a way out reaches for first, and there is
+                // nothing else on these pages for it to mean. On the form and
+                // the picker it stays `Cancel`/accept and is left alone.
+                if key.code == KeyCode::Escape && key.kind == KeyEventKind::Press {
+                    return Some(WelcomeMessage::RequestQuit);
+                }
                 (key.kind == KeyEventKind::Press).then_some(WelcomeMessage::Advance)
             }
             WelcomeStage::AddProvider | WelcomeStage::ModelPicker => None,
@@ -178,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn any_key_press_advances_the_interstitial_pages() {
+    fn any_key_press_but_escape_advances_the_interstitial_pages() {
         let mut welcome = Welcome::new();
         welcome.open();
 
@@ -236,6 +244,39 @@ mod tests {
                 Some(WelcomeEffect::RequestQuit)
             ));
             assert!(welcome.open, "asking to quit leaves onboarding open");
+        }
+    }
+
+    #[test]
+    fn escape_asks_to_quit_on_the_interstitial_pages_only() {
+        for stage in [WelcomeStage::Intro, WelcomeStage::AllSet] {
+            let mut welcome = Welcome::new();
+            welcome.open();
+            welcome.stage = stage;
+            assert!(
+                matches!(
+                    welcome.map_event(&key(KeyCode::Escape)),
+                    Some(WelcomeMessage::RequestQuit)
+                ),
+                "Esc on {stage:?}"
+            );
+            assert!(matches!(
+                welcome.update(WelcomeMessage::RequestQuit),
+                Some(WelcomeEffect::RequestQuit)
+            ));
+            assert_eq!(welcome.stage, stage, "asking to quit does not page on");
+        }
+
+        // The form maps Esc to `Cancel` and the picker to a close: onboarding
+        // must not swallow either.
+        for stage in [WelcomeStage::AddProvider, WelcomeStage::ModelPicker] {
+            let mut welcome = Welcome::new();
+            welcome.open();
+            welcome.stage = stage;
+            assert!(
+                welcome.map_event(&key(KeyCode::Escape)).is_none(),
+                "Esc is the sub-page's own key on {stage:?}"
+            );
         }
     }
 
