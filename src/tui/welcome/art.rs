@@ -21,15 +21,18 @@ use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
+use tui_big_text::{BigText, PixelSize};
 
 use crate::tui::theme;
 
 /// The wordmark's letters, in order.
-const WORDMARK_TEXT: &str = "SHUVARIE";
-/// The block font's cell size: every glyph letter is `GLYPH_WIDTH` columns
-/// wide and `GLYPH_HEIGHT` rows tall.
-const GLYPH_WIDTH: usize = 5;
-const GLYPH_HEIGHT: usize = 5;
+const WORDMARK_TEXT: &str = "Shuvarie";
+/// One glyph's box: `tui-big-text` draws from the 8x8 `font8x8` bitmaps, and
+/// [`PixelSize::Full`] spends one terminal cell on each font pixel. The layout
+/// reserves this much room per letter, so it is spelled out here rather than
+/// measured: `the_wordmark_paints_exactly_its_box` holds the widget to it.
+const GLYPH_WIDTH: u16 = 8;
+const GLYPH_HEIGHT: u16 = 8;
 
 /// The chess rook, its crenellations on top and its base flared at the bottom.
 const ROOK: [&str; 9] = [
@@ -74,51 +77,24 @@ const RAIN_RATE: u32 = 12;
 /// The caption under the wordmark.
 const CAPTION: &str = "Press any key to continue";
 
-/// The block glyphs of one letter, no trailing padding (the builder pads every
-/// row out to [`GLYPH_WIDTH`]). `None` for a letter the font does not cover.
-fn glyph(letter: char) -> Option<[&'static str; GLYPH_HEIGHT]> {
-    Some(match letter {
-        'S' => ["█████", "█", "█████", "    █", "█████"],
-        'H' => ["█   █", "█   █", "█████", "█   █", "█   █"],
-        'U' => ["█   █", "█   █", "█   █", "█   █", "█████"],
-        'V' => ["█   █", "█   █", "█   █", " █ █", "  █"],
-        'A' => [" ███", "█   █", "█████", "█   █", "█   █"],
-        'R' => ["████", "█   █", "████", "█  █", "█   █"],
-        'I' => ["█████", "  █", "  █", "  █", "█████"],
-        'E' => ["█████", "█", "████", "█", "█████"],
-        _ => return None,
-    })
+/// The `Shuvarie` jumbotron: one line of oversized pixel text, built fresh on
+/// each paint (it is eight glyphs of lookup, not worth caching).
+fn big_text() -> BigText<'static> {
+    BigText::builder()
+        .pixel_size(PixelSize::Full)
+        .style(
+            Style::new()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD),
+        )
+        .lines(vec![Line::from(WORDMARK_TEXT)])
+        .build()
 }
 
-/// The wordmark's rows, rendered once from the per-letter glyphs: one blank
-/// column between letters and every row padded to the full width, so the
-/// layout maths below stays in step with what is painted.
-fn wordmark() -> &'static [String] {
-    static WORDMARK: OnceLock<Vec<String>> = OnceLock::new();
-    WORDMARK.get_or_init(|| {
-        let letters: Vec<_> = WORDMARK_TEXT.chars().filter_map(glyph).collect();
-        (0..GLYPH_HEIGHT)
-            .map(|row| {
-                letters
-                    .iter()
-                    .map(|letter| {
-                        let mut text = String::from(letter[row]);
-                        let pad = GLYPH_WIDTH.saturating_sub(text.chars().count());
-                        text.extend(std::iter::repeat_n(' ', pad));
-                        text
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
-            .collect()
-    })
-}
-
-/// The wordmark's painted size in cells.
+/// The wordmark's painted size in cells: one glyph box per letter.
 fn wordmark_size() -> (u16, u16) {
-    let letters = WORDMARK_TEXT.chars().count();
-    let width = GLYPH_WIDTH * letters + letters.saturating_sub(1);
-    (width as u16, GLYPH_HEIGHT as u16)
+    let width = GLYPH_WIDTH * WORDMARK_TEXT.chars().count() as u16;
+    (width, GLYPH_HEIGHT)
 }
 
 /// The rain indexer: a wall-clock clock the scene reads a frame number off.
@@ -161,19 +137,68 @@ pub fn paint(buf: &mut Buffer, area: Rect, rain_frame: usize) {
     // anything else, so nothing of the frame before it shows through.
     buf.set_style(area, Style::new().bg(theme::bg()).fg(theme::text()));
 
-    let wordmark = wordmark_rect(area);
-    let rook = rook_rect(area, wordmark);
-    let knight = knight_rect(area, wordmark);
+    let placement = placement(area);
 
     render_rain(buf, area, rain_frame);
-    if let Some(origin) = rook {
+    if let Some(origin) = placement.rook {
         render_glyphs(buf, area, origin, &ROOK, silhouette_style());
     }
-    if let Some(origin) = knight {
+    if let Some(origin) = placement.knight {
         render_glyphs(buf, area, origin, &KNIGHT, silhouette_style());
     }
-    render_wordmark(buf, area, wordmark);
-    render_caption(buf, area, wordmark);
+    render_wordmark(buf, placement.wordmark);
+    render_caption(buf, area, placement.wordmark);
+}
+
+/// Where the scene's pieces land on a given viewport.
+struct Placement {
+    /// The wordmark's box: the cells the big text paints into.
+    wordmark: Rect,
+    /// The knight's origin, `None` when it cannot clear the wordmark.
+    knight: Option<(u16, u16)>,
+    /// The rook's origin, `None` when it cannot clear the wordmark.
+    rook: Option<(u16, u16)>,
+}
+
+/// Lays the scene out from the viewport alone: the knight claims the
+/// bottom-left corner, the wordmark is centred above it but lifts when it would
+/// otherwise trample the knight, and the rook takes the right edge beside the
+/// wordmark. Each silhouette gives way when the viewport cannot hold it clear.
+fn placement(area: Rect) -> Placement {
+    let knight = bottom_left(area, &KNIGHT);
+    let wordmark = wordmark_rect(area, knight);
+    // The lift the wordmark asked for may not have been enough: on a viewport
+    // that short the knight steps aside rather than scribbling over the text.
+    let knight = knight.filter(|(_, top)| *top >= wordmark.bottom());
+    let rook = rook_rect(area, wordmark);
+    Placement {
+        wordmark,
+        knight,
+        rook,
+    }
+}
+
+/// The origin of a silhouette pinned to the bottom-left corner, or `None` when
+/// the viewport cannot hold it clear of the edges.
+fn bottom_left(area: Rect, art: &[&str]) -> Option<(u16, u16)> {
+    let x = area.x + 1;
+    let y = area.bottom().checked_sub(art.len() as u16)?;
+    let width = art_width(art);
+    (y >= area.y && x + width <= area.right()).then_some((x, y))
+}
+
+/// The rect the wordmark paints into: the block text centred on `area`, lifted
+/// to leave the caption — and the knight — room underneath.
+fn wordmark_rect(area: Rect, knight: Option<(u16, u16)>) -> Rect {
+    let (width, height) = wordmark_size();
+    let centred = area.y + area.height.saturating_sub(height + 2) / 2;
+    let y = match knight {
+        // The caption row would land in the knight's lap: lift the block clear.
+        Some((_, top)) if centred + height + 1 > top => top.saturating_sub(height + 1).max(area.y),
+        _ => centred,
+    };
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    Rect::new(x, y, width.min(area.width), height)
 }
 
 /// The widest row of a piece of art: the box the layout has to reserve for
@@ -181,25 +206,6 @@ pub fn paint(buf: &mut Buffer, area: Rect, rain_frame: usize) {
 /// the first — sets the width.
 fn art_width(art: &[&str]) -> u16 {
     art.iter().map(|row| row.chars().count()).max().unwrap_or(0) as u16
-}
-
-/// The rect the wordmark paints into: the block text centred on `area`, lifted
-/// half a row to leave the caption — and the knight — room underneath.
-fn wordmark_rect(area: Rect) -> Rect {
-    let (width, height) = wordmark_size();
-    let x = area.x + area.width.saturating_sub(width) / 2;
-    let y = area.y + area.height.saturating_sub(height + 2) / 2;
-    Rect::new(x, y, width.min(area.width), height)
-}
-
-/// The knight's origin, pinned to the bottom-left corner. `None` when the
-/// terminal is too short for the silhouette to clear the wordmark.
-fn knight_rect(area: Rect, wordmark: Rect) -> Option<(u16, u16)> {
-    let width = art_width(&KNIGHT);
-    let height = KNIGHT.len() as u16;
-    let x = area.x + 1;
-    let y = area.bottom().checked_sub(height)?;
-    (y >= wordmark.bottom() && x + width <= area.right()).then_some((x, y))
 }
 
 /// The rook's origin, pinned near the right edge and centred vertically.
@@ -241,11 +247,11 @@ fn render_glyphs<S: AsRef<str>>(
     }
 }
 
-fn render_wordmark(buf: &mut Buffer, area: Rect, rect: Rect) {
-    let style = Style::new()
-        .fg(theme::accent())
-        .add_modifier(Modifier::BOLD);
-    render_glyphs(buf, area, (rect.x, rect.y), wordmark(), style);
+/// Paints the jumbotron into the box the layout reserved for it. `BigText`
+/// writes every cell of that box — blank pixels included — so the rain stops at
+/// the wordmark rather than showing through the counters.
+fn render_wordmark(buf: &mut Buffer, rect: Rect) {
+    big_text().render(rect, buf);
 }
 
 fn render_caption(buf: &mut Buffer, area: Rect, wordmark: Rect) {
@@ -333,45 +339,41 @@ mod tests {
         buf[(x, y)].symbol().starts_with(DROP)
     }
 
-    /// Every glyph stays inside the font's cell box, so the builder's padding
-    /// can never under- or over-run a letter.
+    /// The wordmark paints exactly the box the layout reserves for it — no
+    /// wider, or it would run into the silhouettes; no narrower, or `BigText`
+    /// and the placement maths would disagree about where the text ends.
     #[test]
-    fn glyphs_fit_the_block_font() {
-        for letter in WORDMARK_TEXT.chars() {
-            let glyph = glyph(letter).unwrap_or_else(|| panic!("no glyph for {letter}"));
-            for row in glyph {
-                assert!(
-                    row.chars().count() <= GLYPH_WIDTH,
-                    "{letter} row {row:?} is wider than {GLYPH_WIDTH} cells"
-                );
+    fn the_wordmark_paints_exactly_its_box() {
+        let (width, height) = wordmark_size();
+        let area = Rect::new(0, 0, 120, 20);
+        let wordmark = Rect::new(10, 5, width, height);
+        let mut buf = Buffer::empty(area);
+        buf.set_style(area, Style::new().bg(theme::bg()).fg(theme::text()));
+        render_wordmark(&mut buf, wordmark);
+
+        let mut letters = 0;
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                let cell = &buf[(x, y)];
+                let inside = (wordmark.x..wordmark.right()).contains(&x)
+                    && (wordmark.y..wordmark.bottom()).contains(&y);
+                if !inside {
+                    assert_eq!(
+                        cell.symbol(),
+                        " ",
+                        "({x}, {y}) paints outside the {width}x{height} box"
+                    );
+                    continue;
+                }
+                // The widget styles every cell of a glyph's box, blank pixels
+                // included, so the box — and nothing but the box — is the
+                // wordmark's, and the page's background survives under it.
+                assert_eq!(cell.style().fg, Some(theme::accent()), "({x}, {y})");
+                assert_eq!(cell.style().bg, Some(theme::bg()), "({x}, {y})");
+                letters += usize::from(cell.symbol() != " ");
             }
         }
-    }
-
-    /// The wordmark keeps one fixed width, one blank column between letters:
-    /// a short or long row would shear the block text.
-    #[test]
-    fn wordmark_rows_share_one_width_and_spell_the_name() {
-        let (width, height) = wordmark_size();
-        assert_eq!(height, GLYPH_HEIGHT as u16);
-        assert_eq!(width as usize, GLYPH_WIDTH * 8 + 7, "eight letters, joined");
-
-        let rows = wordmark();
-        assert_eq!(rows.len(), GLYPH_HEIGHT);
-        for row in rows {
-            assert_eq!(row.chars().count(), width as usize, "row {row:?}");
-        }
-        // Every letter is exactly `GLYPH_WIDTH` wide with one blank column
-        // between them, so the block text neither shears nor runs together.
-        let letters = WORDMARK_TEXT.chars().count();
-        for join in 1..letters {
-            let at = join * GLYPH_WIDTH + join - 1;
-            assert_eq!(
-                rows[2].chars().nth(at),
-                Some(' '),
-                "blank column before letter {join}"
-            );
-        }
+        assert!(letters > 0, "the wordmark spells something");
     }
 
     /// The silhouettes' boxes are the widths the placement maths reserves, so
@@ -391,23 +393,46 @@ mod tests {
         }
     }
 
-    /// The scene's pieces never overlap on a normal terminal: the rook clears
-    /// the wordmark, and the knight sits below it.
+    /// A roomy terminal shows the whole scene: the rook clears the wordmark to
+    /// the right, the knight takes the corner below it.
     #[test]
-    fn a_regular_terminal_places_every_piece() {
-        let area = Rect::new(0, 0, 80, 24);
-        let wordmark = wordmark_rect(area);
-        let rook = rook_rect(area, wordmark).expect("rook fits an 80x24 terminal");
-        let knight = knight_rect(area, wordmark).expect("knight fits an 80x24 terminal");
+    fn a_roomy_terminal_places_every_piece() {
+        let area = Rect::new(0, 0, 100, 30);
+        let placement = placement(area);
 
-        assert_eq!(wordmark, Rect::new(16, 8, 47, 5));
+        let rook = placement.rook.expect("rook fits a 100x30 terminal");
+        let knight = placement.knight.expect("knight fits a 100x30 terminal");
         assert!(
-            rook.0 >= wordmark.right(),
+            rook.0 >= placement.wordmark.right(),
             "rook starts right of the wordmark"
         );
         assert!(
-            knight.1 >= wordmark.bottom(),
+            knight.1 >= placement.wordmark.bottom(),
             "knight starts below the wordmark"
+        );
+    }
+
+    /// The wordmark is wide enough that a standard 80x24 terminal cannot fit
+    /// the rook beside it, but the knight still takes the corner: the wordmark
+    /// gives up the centred row rather than trampling the helmet.
+    #[test]
+    fn a_standard_terminal_lifts_the_wordmark_over_the_knight() {
+        let area = Rect::new(0, 0, 80, 24);
+        let placement = placement(area);
+        let knight = placement.knight.expect("knight fits an 80x24 terminal");
+
+        assert!(
+            placement.rook.is_none(),
+            "no room for the rook at 80 columns"
+        );
+        assert!(knight.1 >= placement.wordmark.bottom(), "knight is clear");
+        assert!(
+            placement.wordmark.bottom() < knight.1,
+            "the caption row sits above the knight"
+        );
+        assert!(
+            placement.wordmark.y < area.height / 2,
+            "the block is lifted off the centred row to make room"
         );
     }
 
@@ -415,48 +440,50 @@ mod tests {
     /// letting them collide with the wordmark.
     #[test]
     fn a_cramped_terminal_drops_the_silhouettes() {
-        let narrow = Rect::new(0, 0, 20, 24);
-        let wordmark = wordmark_rect(narrow);
-        assert!(rook_rect(narrow, wordmark).is_none());
-        assert!(knight_rect(narrow, wordmark).is_none());
+        let narrow = placement(Rect::new(0, 0, 20, 24));
+        assert!(narrow.rook.is_none());
+        assert!(narrow.knight.is_none());
 
-        let short = Rect::new(0, 0, 80, 12);
-        let wordmark = wordmark_rect(short);
-        assert!(knight_rect(short, wordmark).is_none());
+        let short = placement(Rect::new(0, 0, 80, 12));
+        assert!(short.rook.is_none());
+        assert!(short.knight.is_none());
     }
 
     /// The intro paints the wordmark, the caption, and the rook on a terminal
     /// with room for them.
     #[test]
     fn the_scene_paints_the_wordmark_caption_and_rook() {
-        let buf = scene(80, 24, 0);
-        let area = Rect::new(0, 0, 80, 24);
-        let wordmark = wordmark_rect(area);
+        let area = Rect::new(0, 0, 100, 30);
+        let buf = scene(area.width, area.height, 0);
+        let placement = placement(area);
+        let wordmark = placement.wordmark;
 
-        assert_eq!(
-            buf[(wordmark.x, wordmark.y)].symbol(),
-            "█",
-            "the wordmark's first cell"
-        );
         assert_eq!(
             buf[(wordmark.x, wordmark.y)].style().fg,
-            Some(theme::accent())
+            Some(theme::accent()),
+            "the wordmark owns its box's first cell"
+        );
+        assert!(
+            (wordmark.y..wordmark.bottom())
+                .flat_map(|y| (wordmark.x..wordmark.right()).map(move |x| (x, y)))
+                .any(|(x, y)| buf[(x, y)].symbol() == "█"),
+            "the wordmark spells something"
         );
 
-        let caption = row_of(&buf, wordmark.bottom() + 1, 80);
+        let caption = row_of(&buf, wordmark.bottom() + 1, area.width);
         assert!(caption.contains(CAPTION), "{caption:?}");
         assert!(
             caption.starts_with(' '),
             "the caption is centred: {caption:?}"
         );
 
-        let rook = rook_rect(area, wordmark).expect("rook fits");
+        let rook = placement.rook.expect("rook fits");
         assert_eq!(buf[(rook.0, rook.1)].symbol(), "▛", "the rook's crown");
         assert_eq!(buf[(rook.0, rook.1)].style().fg, Some(theme::text_dim()));
 
         // The rain never buries the wordmark, whatever frame is showing.
         for frame in 0..8 {
-            let buf = scene(80, 24, frame);
+            let buf = scene(area.width, area.height, frame);
             assert_eq!(
                 buf[(wordmark.x, wordmark.y)].style().fg,
                 Some(theme::accent()),

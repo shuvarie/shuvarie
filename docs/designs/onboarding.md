@@ -9,10 +9,13 @@ a configured provider.
   `RequestQuit` on every page and any other key press to `Advance` on the two interstitial pages,
   and `update` turns `Advance` into `AddProvider` (from the title) or `Finish` (from the closing
   page). `view` paints the interstitial pages only; the form and the picker paint themselves.
-- `src/tui/welcome/art.rs`: the title page's drawing. The `Shuvarie` wordmark is built once from a
-  five-row block font (one five-wide glyph per letter); the rook and the knight-with-sword are
-  stored as character art and placed from the viewport alone, each dropped when the terminal is
-  too small to hold it clear of the wordmark. The arrow rain is one drop per screen column, each
+- `src/tui/welcome/art.rs`: the title page's drawing. The `Shuvarie` wordmark is a `tui-big-text`
+  `BigText` line at `PixelSize::Full`, so each letter is one 8x8 `font8x8` glyph box and the box the
+  layout reserves is eight cells per letter; `the_wordmark_paints_exactly_its_box` holds the widget
+  to it. The rook and the knight-with-sword are stored as character art and placed from the viewport
+  alone: the knight takes the bottom-left corner, the wordmark is centred but lifts when the caption
+  row would land in the knight's lap, and each silhouette is dropped when the terminal is too small
+  to hold it clear. The arrow rain is one drop per screen column, each
   on its own period and phase from a column hash, so it needs no state: `view` paints whatever
   frame the `FrameIndexer` clock selects and `next_wake` reports when the loop should come back.
 - `src/tui/app.rs`: `welcome.open` is the single "onboarding is running" flag. `App::view` skips

@@ -60,6 +60,7 @@ shuvarie-highlight.workspace = true
 shuvarie-llm.workspace = true
 tempfile.workspace = true
 termina = { version = "0.3", features = ["event-stream"] }
+tui-big-text = "0.8"
 tui-popup = "0.7"
 tui-scrollbar = "0.2.8"
 tokio.workspace = true
