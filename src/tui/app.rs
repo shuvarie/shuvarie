@@ -7,7 +7,7 @@ use shuvarie_core::{
     Connections, DEFAULT_NOTIFY_ERROR_SOUNDS, DEFAULT_NOTIFY_SOUNDS, Event as CoreEvent, Model,
     NotifyPrefs, RegistriesConfig, UiPrefs,
 };
-use termina::event::{KeyCode, KeyEventKind, MouseButton, MouseEventKind};
+use termina::event::{KeyCode, KeyEventKind, Modifiers, MouseButton, MouseEventKind};
 use termina::{Event as TermEvent, PlatformTerminal};
 use tokio::sync::mpsc::Sender;
 
@@ -18,7 +18,7 @@ use super::add_decision_provider::{
     AddDecisionProviderForm, AddDecisionProviderMessage, AddDecisionProviderOutcome,
 };
 use super::add_provider::{
-    AddProviderForm, AddProviderMessage, AddProviderOutcome, AddProviderStage,
+    AddProviderForm, AddProviderMessage, AddProviderOutcome, AddProviderStage, fullscreen_rect,
 };
 use super::assisted_by::{AssistedByEffect, AssistedByMessage, AssistedByPopup};
 use super::auth::{AuthMessage, AuthPopup};
@@ -47,7 +47,7 @@ use super::todo::{TodoEffect, TodoMessage, TodoPopup};
 use super::variant;
 use super::viewer::{MediaViewer, MediaViewerMessage, ViewerItem};
 use super::warning::{WarningMessage, WarningPopup};
-use super::welcome::{Welcome, WelcomeEffect, WelcomeMessage};
+use super::welcome::{Welcome, WelcomeEffect, WelcomeMessage, WelcomeStage};
 use super::workspace::WorkspaceInfo;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -541,14 +541,16 @@ impl App {
                 }
             }
             Overlay::ModelPicker => {
-                if let Some(h) = model_picker_list_height(area) {
+                let fullscreen = self.welcome.open;
+                if let Some(h) = model_picker_list_height(area, fullscreen) {
                     self.model_picker
                         .update(ModelPickerMessage::Resize { viewport_height: h });
                 }
             }
             Overlay::AddProvider => {
+                let fullscreen = self.welcome.open;
                 if let Some(form) = &mut self.add_provider_form
-                    && let Some(h) = add_provider_list_height(area, form.stage)
+                    && let Some(h) = add_provider_list_height(area, form.stage, fullscreen)
                 {
                     form.update(AddProviderMessage::Resize { viewport_height: h });
                 }
@@ -687,6 +689,21 @@ impl App {
                     // dismisses, leaving the underlying overlay untouched.
                     if self.warning.open {
                         return self.warning.map_event(&key).map(AppMessage::Warning);
+                    }
+
+                    // Onboarding spreads across three overlays, but Ctrl+C
+                    // asks to quit from every one of its pages; the form and
+                    // the picker do not map it themselves. A deeper overlay
+                    // (the quit prompt) keeps its own Ctrl+C handling.
+                    if self.welcome.open
+                        && matches!(
+                            self.overlay,
+                            Overlay::Welcome | Overlay::AddProvider | Overlay::ModelPicker
+                        )
+                        && key.modifiers.contains(Modifiers::CONTROL)
+                        && key.code == KeyCode::Char('c')
+                    {
+                        return Some(AppMessage::Welcome(WelcomeMessage::RequestQuit));
                     }
 
                     // Overlay events
@@ -1225,10 +1242,11 @@ impl App {
             }
             AppMessage::CancelQuit => {
                 self.confirm_quit.update(ConfirmQuitMessage::Cancel);
-                // The quit prompt can also open over the welcome screen, so
-                // canceling must return there instead of the bare session.
+                // The quit prompt can also open over onboarding, so canceling
+                // must return to the page it covered rather than the bare
+                // session.
                 self.overlay = if self.welcome.open {
-                    Overlay::Welcome
+                    welcome_overlay(self.welcome.stage)
                 } else {
                     Overlay::None
                 };
@@ -1425,6 +1443,12 @@ impl App {
                 if let Some(form) = &mut self.add_provider_form {
                     let outcome = form.update(m);
                     match outcome {
+                        AddProviderOutcome::Cancel if self.welcome.open => {
+                            // Escaping the form's first page walks back to the
+                            // title rather than stranding the user in a session
+                            // with no provider behind it.
+                            self.back_to_intro();
+                        }
                         AddProviderOutcome::Cancel => {
                             self.close_overlay();
                         }
@@ -1468,7 +1492,9 @@ impl App {
                                 self.ctx
                                     .send(shuvarie_core::Command::AuthProviderLogin { name: id });
                             }
-                            self.close_overlay();
+                            // The form stays up: `ModelsLoaded` pages on to the
+                            // picker, or straight to the closing page when the
+                            // provider lists no models at all.
                         }
                         AddProviderOutcome::None => {}
                     }
@@ -1520,8 +1546,11 @@ impl App {
                             }
                             self.ctx
                                 .send(shuvarie_core::Command::SetActiveModel { model });
+                            self.leave_model_picker();
                         }
                         ModelPickerEffect::FetchRegistries(ids) => {
+                            // Going online keeps the picker up: the fetch fills
+                            // the rows it was asked for.
                             for registry in ids {
                                 self.ctx
                                     .send(shuvarie_core::Command::FetchRegistry { registry });
@@ -1539,9 +1568,9 @@ impl App {
                                 self.ctx
                                     .send(shuvarie_core::Command::SetActiveModel { model: first });
                             }
+                            self.leave_model_picker();
                         }
                     }
-                    self.close_overlay();
                 }
             }
             AppMessage::CommandMenu(m) => {
@@ -1589,6 +1618,9 @@ impl App {
                 if let Some(effect) = self.welcome.update(m) {
                     match effect {
                         WelcomeEffect::AddProvider => self.open_add_provider(),
+                        // Closing every dialog drops the form and the picker
+                        // with the flow; `welcome` has already closed itself.
+                        WelcomeEffect::Finish => self.close_overlay(),
                         WelcomeEffect::RequestQuit => self.open_confirm_quit(),
                     }
                 }
@@ -1650,9 +1682,15 @@ impl App {
                 if self.pending_model_pick.as_deref() == Some(provider_name.as_str()) {
                     self.pending_model_pick = None;
                     if models.is_empty() {
-                        self.session.update(SessionMessage::ShowError {
-                            error: format!("{provider_name}: no models found"),
-                        });
+                        // Nothing to choose: the provider is configured, so
+                        // onboarding is done with it.
+                        if self.welcome.open {
+                            self.enter_all_set();
+                        } else {
+                            self.session.update(SessionMessage::ShowError {
+                                error: format!("{provider_name}: no models found"),
+                            });
+                        }
                     } else {
                         self.models.insert(provider_name.clone(), models.clone());
                         self.open_model_picker();
@@ -1722,9 +1760,18 @@ impl App {
             } => {
                 if self.pending_model_pick.as_deref() == Some(provider_name.as_str()) {
                     self.pending_model_pick = None;
-                    self.session.update(SessionMessage::ShowError {
-                        error: format!("{provider_name}: {error}"),
-                    });
+                    if self.welcome.open {
+                        // Back to the form so the key or endpoint can be
+                        // corrected and resubmitted.
+                        self.set_welcome_stage(WelcomeStage::AddProvider);
+                        if let Some(form) = &mut self.add_provider_form {
+                            form.error = Some(format!("{provider_name}: {error}"));
+                        }
+                    } else {
+                        self.session.update(SessionMessage::ShowError {
+                            error: format!("{provider_name}: {error}"),
+                        });
+                    }
                 } else if self.model_picker.open {
                     self.model_picker
                         .update(ModelPickerMessage::ProviderModels {
@@ -1913,8 +1960,39 @@ impl App {
         }
     }
 
+    /// Shows onboarding's closing page: the next key press hands the screen
+    /// over to the session.
+    fn enter_all_set(&mut self) {
+        self.set_welcome_stage(WelcomeStage::AllSet);
+    }
+
+    /// Steps onboarding back to its title page, dropping the half-filled form
+    /// with it.
+    fn back_to_intro(&mut self) {
+        self.add_provider_form = None;
+        self.set_welcome_stage(WelcomeStage::Intro);
+    }
+
+    /// Moves onboarding to `stage`, keeping the overlay that routes its keys,
+    /// pastes, and registry events in step with the page on screen.
+    fn set_welcome_stage(&mut self, stage: WelcomeStage) {
+        self.welcome.stage = stage;
+        self.overlay = welcome_overlay(stage);
+    }
+
+    /// Leaves the model picker: mid-onboarding it pages on to the closing
+    /// screen, and in the ordinary flow it returns to the session.
+    fn leave_model_picker(&mut self) {
+        if self.welcome.open {
+            self.enter_all_set();
+        } else {
+            self.close_overlay();
+        }
+    }
+
     /// Opens the provider selector popup, seeding its registry source from
-    /// the `[registries] selune` entry.
+    /// the `[registries] selune` entry. While onboarding is open the form
+    /// takes the whole screen instead.
     fn open_add_provider(&mut self) {
         let names: Vec<String> = self
             .ctx
@@ -1969,9 +2047,10 @@ impl App {
         self.overlay = Overlay::AddDecisionProvider;
     }
 
-    /// Opens the model selector popup over every configured provider.
-    /// Catalog-less providers whose models are not cached yet get a live
-    /// `ListModels` fetch.
+    /// Opens the model selector over every configured provider. Catalog-less
+    /// providers whose models are not cached yet get a live `ListModels`
+    /// fetch. While onboarding is open the picker takes the whole screen
+    /// instead of a centred popup.
     fn open_model_picker(&mut self) {
         self.model_picker
             .open(&self.ctx.connections, &self.models, &self.registries);
@@ -1983,7 +2062,13 @@ impl App {
             self.ctx
                 .send(shuvarie_core::Command::ListModels { provider_name });
         }
-        self.overlay = Overlay::ModelPicker;
+        if self.welcome.open {
+            // Onboarding pages through the picker: it fills the screen until a
+            // model is chosen.
+            self.set_welcome_stage(WelcomeStage::ModelPicker);
+        } else {
+            self.overlay = Overlay::ModelPicker;
+        }
     }
 
     fn refresh_sessions(&mut self) {
@@ -2427,7 +2512,11 @@ impl App {
             self.session.update(SessionMessage::ThemeChanged);
         }
         if self.welcome.open {
-            self.welcome.close();
+            // Onboarding outlives the dialog that was open over it: only its
+            // own closing page hands the screen to the session. Keeping the
+            // overlay on the stage also keeps key, paste, and registry routing
+            // pointed at the page that is actually showing.
+            self.overlay = welcome_overlay(self.welcome.stage);
         }
     }
 
@@ -2454,11 +2543,15 @@ impl App {
     fn reload_config(&mut self) {
         if let Ok(fresh) = Connections::load() {
             self.ctx.connections = fresh;
-            if shuvarie_core::catalog::has_connected_providers(&self.ctx.connections)
-                && self.welcome.open
+            // A config that becomes usable while onboarding is still on its
+            // title page (another instance, or a hand-edited file) pages
+            // straight on to the end rather than dropping the user into a
+            // session halfway through the flow.
+            if self.welcome.open
+                && self.welcome.stage == WelcomeStage::Intro
+                && shuvarie_core::catalog::has_connected_providers(&self.ctx.connections)
             {
-                self.welcome.close();
-                self.overlay = Overlay::None;
+                self.enter_all_set();
             }
             self.session.update(SessionMessage::UpdateConfig {
                 provider: self
@@ -2485,20 +2578,39 @@ impl App {
     }
 
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
-        self.session.view(frame, area);
-
         // `auth` and `warning` are transient popups that paint above every
         // overlay; the dialogs underneath them take the dim border so the
         // stack reads top-down.
         let stacked = self.auth.open || self.warning.open;
-        self.welcome.view(frame, area, stacked);
+
+        if self.welcome.open {
+            // Onboarding owns the whole screen: the session is not painted at
+            // all, so there is nothing to fall back into until a provider is
+            // configured.
+            self.welcome.view(frame, area);
+            match self.welcome.stage {
+                WelcomeStage::AddProvider => {
+                    if let Some(form) = &self.add_provider_form {
+                        form.view(frame, area, stacked, true);
+                    }
+                }
+                WelcomeStage::ModelPicker => self.model_picker.view(frame, area, stacked, true),
+                WelcomeStage::Intro | WelcomeStage::AllSet => {}
+            }
+            self.confirm_quit.view(frame, area, stacked);
+            self.auth.view(frame, area, self.warning.open);
+            self.warning.view(frame, area, false);
+            return;
+        }
+
+        self.session.view(frame, area);
         if let Some(form) = &self.add_provider_form {
-            form.view(frame, area, stacked);
+            form.view(frame, area, stacked, false);
         }
         if let Some(form) = &self.add_decision_provider_form {
             form.view(frame, area, stacked);
         }
-        self.model_picker.view(frame, area, stacked);
+        self.model_picker.view(frame, area, stacked, false);
         self.session_picker.view(frame, area, stacked);
         self.tree_popup.view(frame, area, stacked);
         self.scene_picker.view(frame, area, stacked);
@@ -2524,6 +2636,29 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     Rect::new(x, y, pop_w, pop_h)
 }
 
+/// The overlay a welcome stage paints under: the interstitial pages own the
+/// welcome overlay itself, while the form and the picker delegate to their own
+/// dialogs — which is also how their keys, pastes, and registry events are
+/// routed.
+fn welcome_overlay(stage: WelcomeStage) -> Overlay {
+    match stage {
+        WelcomeStage::Intro | WelcomeStage::AllSet => Overlay::Welcome,
+        WelcomeStage::AddProvider => Overlay::AddProvider,
+        WelcomeStage::ModelPicker => Overlay::ModelPicker,
+    }
+}
+
+/// The height of the list a dialog paints into `popup`: the frame's inner area
+/// minus the `fixed_rows` its layout spends on everything but the list (a
+/// search input, a status line, the hint bar).
+fn dialog_inner_list_height(popup: Rect, fixed_rows: u16) -> Option<u16> {
+    if popup.width < 2 || popup.height < 2 {
+        return None;
+    }
+    let inner_height = popup.height - 2;
+    (inner_height > fixed_rows).then(|| inner_height - fixed_rows)
+}
+
 /// The height of the list an overlay dialog paints: the dialog's inner area
 /// minus the `fixed_rows` its layout spends on everything but the list (a
 /// search input, a status line, the hint bar).
@@ -2533,12 +2668,7 @@ fn overlay_inner_list_height(
     percent_y: u16,
     fixed_rows: u16,
 ) -> Option<u16> {
-    let popup = centered_rect(percent_x, percent_y, area);
-    if popup.width < 2 || popup.height < 2 {
-        return None;
-    }
-    let inner_height = popup.height - 2;
-    (inner_height > fixed_rows).then(|| inner_height - fixed_rows)
+    dialog_inner_list_height(centered_rect(percent_x, percent_y, area), fixed_rows)
 }
 
 fn command_menu_list_height(area: Rect) -> Option<u16> {
@@ -2546,19 +2676,28 @@ fn command_menu_list_height(area: Rect) -> Option<u16> {
     overlay_inner_list_height(area, 60, 40, 2)
 }
 
-fn model_picker_list_height(area: Rect) -> Option<u16> {
+/// The model picker's list height: an onboarding page fills the viewport, the
+/// ordinary popup stays centred. Either way the search input and the hint bar
+/// sit outside the list.
+fn model_picker_list_height(area: Rect, fullscreen: bool) -> Option<u16> {
+    if fullscreen {
+        return dialog_inner_list_height(fullscreen_rect(area), 2);
+    }
     overlay_inner_list_height(area, 60, 60, 2)
 }
 
 /// The add-provider dialog's list height for its stage: the select stage
 /// spends a search input and a hint bar outside the list, the transport picker
 /// only the hint bar, and the details form paints no list at all.
-fn add_provider_list_height(area: Rect, stage: AddProviderStage) -> Option<u16> {
+fn add_provider_list_height(area: Rect, stage: AddProviderStage, fullscreen: bool) -> Option<u16> {
     let fixed_rows = match stage {
         AddProviderStage::Select => 2,
         AddProviderStage::KindList => 1,
         AddProviderStage::Details => return None,
     };
+    if fullscreen {
+        return dialog_inner_list_height(fullscreen_rect(area), fixed_rows);
+    }
     overlay_inner_list_height(area, 50, 55, fixed_rows)
 }
 
@@ -3093,6 +3232,208 @@ mod tests {
         assert!(matches!(app.overlay, Overlay::None));
     }
 
+    fn live_model(id: &str) -> Model {
+        Model {
+            id: id.to_string(),
+            name: Some(id.to_string()),
+            context_length: Some(4096),
+            description: None,
+            r#type: None,
+            created_at: None,
+            owned_by: None,
+            max_output_tokens: None,
+        }
+    }
+
+    /// Walks onboarding from its title page to the point where the first
+    /// provider has been submitted and its live models are pending.
+    fn onboard_pending_provider(app: &mut App) -> String {
+        app.update(AppMessage::Welcome(WelcomeMessage::Advance));
+        assert_eq!(app.welcome.stage, WelcomeStage::AddProvider);
+        app.update(AppMessage::AddProvider(AddProviderMessage::OpenCustom));
+        {
+            let form = app.add_provider_form.as_mut().expect("the form is open");
+            form.name.set("Local Ollama");
+            form.kind.set("ollama");
+        }
+        app.update(AppMessage::AddProvider(AddProviderMessage::Submit));
+        app.pending_model_pick
+            .clone()
+            .expect("submitting names the provider its model is pending for")
+    }
+
+    /// The connection state the core saves after `AddProvider`, as the
+    /// `ConfigSaved` reload would leave it: the provider exists and is active,
+    /// with no model yet.
+    fn connect_after_add(app: &mut App, id: &str) {
+        app.ctx.connections.providers.insert(
+            id.to_string(),
+            shuvarie_core::ProviderConfig::new("Local Ollama", "ollama", None, None),
+        );
+        app.ctx.connections.active = Some(shuvarie_core::Active {
+            provider: id.to_string(),
+            model: None,
+            variant: None,
+        });
+    }
+
+    #[test]
+    fn onboarding_reaches_the_session_only_through_a_picked_model() {
+        let mut app = app_with(Connections::default());
+        assert!(app.welcome.open, "no providers: onboarding starts");
+        assert_eq!(app.welcome.stage, WelcomeStage::Intro);
+        assert!(matches!(app.overlay, Overlay::Welcome));
+
+        // Any key press on the title page opens the first-provider form.
+        let press = termina::event::KeyEvent::new(KeyCode::Char(' '), Modifiers::NONE);
+        assert!(matches!(
+            app.map_event(Event::Terminal(TermEvent::Key(press))),
+            Some(AppMessage::Welcome(WelcomeMessage::Advance))
+        ));
+        let provider = onboard_pending_provider(&mut app);
+        assert!(matches!(app.overlay, Overlay::AddProvider));
+        assert!(app.add_provider_form.is_some(), "the form fills the screen");
+
+        // The live model list pages on to the picker…
+        connect_after_add(&mut app, &provider);
+        app.update(AppMessage::ModelsLoaded {
+            provider_name: provider.clone(),
+            models: vec![live_model("llama3")],
+        });
+        assert_eq!(app.welcome.stage, WelcomeStage::ModelPicker);
+        assert!(matches!(app.overlay, Overlay::ModelPicker));
+        assert!(app.model_picker.open);
+
+        // …choosing a model moves to the closing screen…
+        app.update(AppMessage::ModelPicker(ModelPickerMessage::Select));
+        assert_eq!(app.welcome.stage, WelcomeStage::AllSet);
+        assert!(matches!(app.overlay, Overlay::Welcome));
+        assert!(app.welcome.open, "the closing screen is still onboarding");
+
+        // …and the next key press hands the screen to the session.
+        app.update(AppMessage::Welcome(WelcomeMessage::Advance));
+        assert!(!app.welcome.open);
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(
+            app.add_provider_form.is_none(),
+            "the flow's dialogs go with it"
+        );
+    }
+
+    #[test]
+    fn escaping_the_first_form_page_walks_back_to_the_title() {
+        let mut app = app_with(Connections::default());
+        app.update(AppMessage::Welcome(WelcomeMessage::Advance));
+        assert_eq!(app.welcome.stage, WelcomeStage::AddProvider);
+
+        app.update(AppMessage::AddProvider(AddProviderMessage::Cancel));
+        assert_eq!(app.welcome.stage, WelcomeStage::Intro, "back to the title");
+        assert!(matches!(app.overlay, Overlay::Welcome));
+        assert!(
+            app.add_provider_form.is_none(),
+            "the half-filled form is dropped"
+        );
+        assert!(app.welcome.open, "onboarding is still running");
+    }
+
+    #[test]
+    fn a_provider_with_no_models_skips_the_picker() {
+        let mut app = app_with(Connections::default());
+        let provider = onboard_pending_provider(&mut app);
+
+        app.update(AppMessage::ModelsLoaded {
+            provider_name: provider,
+            models: Vec::new(),
+        });
+        assert_eq!(app.welcome.stage, WelcomeStage::AllSet);
+        assert!(!app.model_picker.open, "there was nothing to choose");
+    }
+
+    #[test]
+    fn a_failed_model_list_returns_to_the_form_with_the_error() {
+        let mut app = app_with(Connections::default());
+        let provider = onboard_pending_provider(&mut app);
+
+        app.update(AppMessage::ModelsError {
+            provider_name: provider,
+            error: "unauthorized".into(),
+        });
+        assert_eq!(app.welcome.stage, WelcomeStage::AddProvider);
+        assert!(matches!(app.overlay, Overlay::AddProvider));
+        let error = app
+            .add_provider_form
+            .as_ref()
+            .unwrap()
+            .error
+            .clone()
+            .expect("the failure is shown where it can be corrected");
+        assert!(error.contains("unauthorized"), "{error}");
+    }
+
+    #[test]
+    fn ctrl_c_quits_from_the_form_and_picker_pages() {
+        let key = termina::event::KeyEvent::new(KeyCode::Char('c'), Modifiers::CONTROL);
+        for stage in [WelcomeStage::AddProvider, WelcomeStage::ModelPicker] {
+            let mut app = app_with(Connections::default());
+            let provider = onboard_pending_provider(&mut app);
+            connect_after_add(&mut app, &provider);
+            if stage == WelcomeStage::ModelPicker {
+                app.update(AppMessage::ModelsLoaded {
+                    provider_name: provider,
+                    models: vec![live_model("llama3")],
+                });
+            }
+            assert_eq!(app.welcome.stage, stage);
+
+            assert!(
+                matches!(
+                    app.map_event(Event::Terminal(TermEvent::Key(key))),
+                    Some(AppMessage::Welcome(WelcomeMessage::RequestQuit))
+                ),
+                "Ctrl+C on {stage:?}"
+            );
+            app.update(AppMessage::Welcome(WelcomeMessage::RequestQuit));
+            assert!(app.confirm_quit.open, "{stage:?}: the quit prompt opens");
+
+            // Cancelling drops the page back under the prompt.
+            app.update(AppMessage::CancelQuit);
+            assert_eq!(app.welcome.stage, stage);
+            assert!(matches!(app.overlay, ref o if *o == welcome_overlay(stage)));
+            assert!(
+                app.welcome.open,
+                "{stage:?}: onboarding survives the prompt"
+            );
+        }
+    }
+
+    #[test]
+    fn onboarding_paints_its_own_page_and_no_session() {
+        let mut app = app_with(Connections::default());
+        app.session.update(SessionMessage::ShowError {
+            error: "SESSION-MARKER".into(),
+        });
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| app.view(frame, frame.area()))
+            .unwrap();
+        let screen: String = (0..24)
+            .map(|y| {
+                (0..80)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(screen.contains("Press any key to continue"), "{screen}");
+        assert!(
+            !screen.contains("SESSION-MARKER"),
+            "the session is not painted under onboarding"
+        );
+    }
+
     #[tokio::test]
     async fn ctrl_t_maps_to_cycle_variant_and_sends_the_command() {
         let (mut app, mut rx) = app_with_rx(connected());
@@ -3147,9 +3488,13 @@ mod tests {
     #[test]
     fn provider_popup_scrolls_only_once_the_highlight_leaves_the_page() {
         let mut app = app_with(Connections::default());
+        // The ordinary popup flow, not the onboarding page: onboarding fills
+        // the viewport, so its list is a different height.
+        app.welcome.close();
         let area = Rect::new(0, 0, 120, 40);
         let viewport = usize::from(
-            add_provider_list_height(area, AddProviderStage::Select).expect("room for a list"),
+            add_provider_list_height(area, AddProviderStage::Select, false)
+                .expect("room for a list"),
         );
         let providers: Vec<_> = shuvarie_core::catalog::providers()
             .into_iter()
@@ -3568,6 +3913,7 @@ mod tests {
     fn theme_picker_opens_previews_and_restores_on_cancel() {
         let _guard = theme::lock_for_tests();
         let mut app = app_with(Connections::default());
+        app.welcome.close();
         let original = theme::current();
         let _restore = PaletteRestore(original);
         // Seed cached sidebar lines so the repaint below is observable.
@@ -3600,6 +3946,7 @@ mod tests {
         let original = theme::current();
         let _restore = PaletteRestore(original);
         let (mut app, mut rx) = app_with_rx(Connections::default());
+        app.welcome.close();
         app.run_command(CommandAction::OpenThemePicker, None);
         assert!(app.theme_picker.open);
         app.update(AppMessage::Theme(ThemePickerMessage::Next));

@@ -228,9 +228,17 @@ where
         last_draw = Instant::now();
 
         // Spinners advance on wall-clock time, so waking at each earliest
-        // frame boundary keeps every spinner at its own frame rate.
-        spinner_wake = spinner::next_wake(app.active_spinners())
-            .map(|until| tokio::time::Instant::now() + until);
+        // frame boundary keeps every spinner at its own frame rate; the
+        // welcome screen's art animates off the same clock, and the loop takes
+        // whichever comes first.
+        spinner_wake = match (
+            spinner::next_wake(app.active_spinners()),
+            app.welcome.animation_wake(),
+        ) {
+            (Some(spinner), Some(welcome)) => Some(spinner.min(welcome)),
+            (spinner, welcome) => spinner.or(welcome),
+        }
+        .map(|until| tokio::time::Instant::now() + until);
         picker_wake = app
             .session_picker
             .open

@@ -1,0 +1,33 @@
+# Onboarding (the welcome screen)
+
+Onboarding is the flow a run with no connected provider starts in. It replaces the session
+instead of floating over it, so there is no way into an unconfigured session — the only exit is
+a configured provider.
+
+- `src/tui/welcome.rs`: the page machine. `WelcomeStage` is `Intro → AddProvider → ModelPicker →
+  AllSet`; `Welcome::{open,close}` raise and drop the flow, `map_event` maps Ctrl+C to
+  `RequestQuit` on every page and any other key press to `Advance` on the two interstitial pages,
+  and `update` turns `Advance` into `AddProvider` (from the title) or `Finish` (from the closing
+  page). `view` paints the interstitial pages only; the form and the picker paint themselves.
+- `src/tui/welcome/art.rs`: the title page's drawing. The `Shuvarie` wordmark is built once from a
+  five-row block font (one five-wide glyph per letter); the rook and the knight-with-sword are
+  stored as character art and placed from the viewport alone, each dropped when the terminal is
+  too small to hold it clear of the wordmark. The arrow rain is one drop per screen column, each
+  on its own period and phase from a column hash, so it needs no state: `view` paints whatever
+  frame the `FrameIndexer` clock selects and `next_wake` reports when the loop should come back.
+- `src/tui/app.rs`: `welcome.open` is the single "onboarding is running" flag. `App::view` skips
+  every session widget while it is set, `welcome_overlay(stage)` maps the stage onto the overlay
+  that routes that page's keys, pastes, and registry events (`Welcome` for the interstitial pages,
+  `AddProvider`/`ModelPicker` for the dialogs), and `set_welcome_stage` moves both together. The
+  flow's transitions: form `Submit` sends `AddProvider`/`SetActiveProvider`/`ListModels` and stays
+  on the form; `ModelsLoaded` pages on to the picker (or straight to `AllSet` when the provider
+  lists nothing) and `ModelsError` returns to the form with the error; the picker's `Selected` and
+  Esc-with-a-default land on `AllSet`; `AllSet`'s next key press finishes onboarding. Esc on the
+  form's first page walks back to the title.
+- `src/tui/add_provider.rs` / `src/tui/model_picker.rs`: `dialog_rect(area, fullscreen, …)` picks
+  between the centred popup and `fullscreen_rect`, the viewport inset by a small margin; the
+  render loop's `set_viewport` geometry mirrors the same choice through
+  `add_provider_list_height`/`model_picker_list_height`.
+- `src/tui.rs`: the render loop wakes at the earliest of the spinners' next frame and the welcome
+  art's (`App::welcome.animation_wake`), both wall-clock driven, so the title animates without any
+  render-loop state.

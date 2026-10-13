@@ -802,17 +802,22 @@ impl AddProviderForm {
         Line::from(spans)
     }
 
-    pub fn view(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool) {
+    pub fn view(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool, fullscreen: bool) {
         match self.stage {
-            AddProviderStage::Select => self.view_select(frame, area, dimmed),
-            AddProviderStage::KindList => self.view_kind_list(frame, area, dimmed),
-            AddProviderStage::Details => self.view_details(frame, area, dimmed),
+            AddProviderStage::Select => self.view_select(frame, area, dimmed, fullscreen),
+            AddProviderStage::KindList => self.view_kind_list(frame, area, dimmed, fullscreen),
+            AddProviderStage::Details => self.view_details(frame, area, dimmed, fullscreen),
         }
     }
 
-    fn view_select(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool) {
-        let popup = centered_rect(50, 55, area);
-        popup::dialog(frame, popup, "Add Provider", dimmed, |inner, buf| {
+    fn view_select(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool, fullscreen: bool) {
+        let popup = dialog_rect(area, fullscreen, 50, 55);
+        let title = if fullscreen {
+            "Add your first provider"
+        } else {
+            "Add Provider"
+        };
+        popup::dialog(frame, popup, title, dimmed, |inner, buf| {
             let [search_area, list_area, hint_area] =
                 Layout::vertical([Length(1), Min(0), Length(1)]).areas(inner);
 
@@ -881,8 +886,8 @@ impl AddProviderForm {
         });
     }
 
-    fn view_kind_list(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool) {
-        let popup = centered_rect(50, 55, area);
+    fn view_kind_list(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool, fullscreen: bool) {
+        let popup = dialog_rect(area, fullscreen, 50, 55);
         popup::dialog(frame, popup, "Provider Type", dimmed, |inner, buf| {
             let [list_area, hint_area] = Layout::vertical([Min(0), Length(1)]).areas(inner);
 
@@ -916,8 +921,8 @@ impl AddProviderForm {
         });
     }
 
-    fn view_details(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool) {
-        let popup = centered_rect(60, 55, area);
+    fn view_details(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool, fullscreen: bool) {
+        let popup = dialog_rect(area, fullscreen, 60, 55);
         let title = match &self.origin {
             Some(provider) => format!("Configure Provider — {}", provider.name),
             None => "Add Custom Provider".to_string(),
@@ -970,6 +975,27 @@ impl AddProviderForm {
             .render(hint_area, buf);
         });
     }
+}
+
+/// The rect a dialog paints into: `centered_rect` for the ordinary popup, the
+/// viewport inset by a small margin when the dialog is one fullscreen page of
+/// the onboarding flow.
+pub fn dialog_rect(area: Rect, fullscreen: bool, percent_x: u16, percent_y: u16) -> Rect {
+    if fullscreen {
+        fullscreen_rect(area)
+    } else {
+        centered_rect(percent_x, percent_y, area)
+    }
+}
+
+/// The rect an onboarding page fills: the whole viewport, inset by a small
+/// margin so a fullscreen dialog keeps a border's worth of room from the
+/// terminal's edges.
+pub fn fullscreen_rect(area: Rect) -> Rect {
+    area.inner(Margin {
+        vertical: 1,
+        horizontal: 2,
+    })
 }
 
 pub fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
