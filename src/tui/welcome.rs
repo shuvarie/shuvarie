@@ -13,8 +13,13 @@
 //! see `screensaver`, which draws it through `art` and gives it a caption of its
 //! own, since a key press there hands the screen back to the session instead of
 //! paging on to the provider form.
+//!
+//! The title animates, so the welcome keeps the one clock that needs a
+//! lifespan — when the page came up, which its entrance sweep is drawn from —
+//! and hands it to `art` on every paint. Pages are arrived at through
+//! [`Welcome::show`], which is what sets it.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ratatui::layout::Alignment;
 use ratatui::prelude::*;
@@ -61,7 +66,13 @@ pub enum WelcomeEffect {
 
 pub struct Welcome {
     pub open: bool,
+    /// The page on screen. It is changed through [`Welcome::show`], which is
+    /// what keeps the title's entrance clock in step with it.
     pub stage: WelcomeStage,
+    /// When the title page last came up. Its entrance sweep is drawn from it, so
+    /// the page sweeps in every time it is arrived at. `None` while onboarding is
+    /// down.
+    title_at: Option<Instant>,
 }
 
 impl Welcome {
@@ -69,25 +80,56 @@ impl Welcome {
         Self {
             open: false,
             stage: WelcomeStage::Intro,
+            title_at: None,
         }
     }
 
     /// Raises onboarding, always from its first page.
     pub fn open(&mut self) {
         self.open = true;
-        self.stage = WelcomeStage::Intro;
+        self.show(WelcomeStage::Intro);
     }
 
     /// Drops onboarding: the session takes the screen.
     pub fn close(&mut self) {
         self.open = false;
+        self.title_at = None;
+    }
+
+    /// Shows `stage`. This is how the page changes: the title restarts its
+    /// entrance sweep when it is arrived at, so stepping back to it from the
+    /// form sweeps it in again rather than showing a scene already drawn.
+    pub fn show(&mut self, stage: WelcomeStage) {
+        self.stage = stage;
+        if stage == WelcomeStage::Intro {
+            self.title_at = Some(Instant::now());
+        }
+    }
+
+    /// How long the title page has been up — the clock its entrance sweep runs
+    /// on.  Zero on any other page, which draws the scene settled.
+    fn age(&self) -> Duration {
+        match (self.open, self.stage) {
+            (true, WelcomeStage::Intro) => self.title_at.map_or(Duration::ZERO, |at| at.elapsed()),
+            _ => Duration::ZERO,
+        }
+    }
+
+    /// Reads the settled title page rather than its sweep, which a test cannot wait
+    /// out: the entrance runs off the wall clock, and back-dating it is the only way
+    /// to draw past its end.
+    #[cfg(test)]
+    pub(crate) fn settle(&mut self) {
+        if self.open && self.stage == WelcomeStage::Intro {
+            self.title_at = Some(Instant::now() - art::ENTRANCE);
+        }
     }
 
     /// The wall-clock delay until the title art's next frame. `None` when
     /// onboarding is closed or showing a page that does not animate.
     pub fn animation_wake(&self) -> Option<Duration> {
         (self.open && self.stage == WelcomeStage::Intro)
-            .then(art::next_wake)
+            .then(|| art::next_wake(self.age()))
             .flatten()
     }
 
@@ -119,7 +161,7 @@ impl Welcome {
             WelcomeMessage::RequestQuit => Some(WelcomeEffect::RequestQuit),
             WelcomeMessage::Advance => match self.stage {
                 WelcomeStage::Intro => {
-                    self.stage = WelcomeStage::AddProvider;
+                    self.show(WelcomeStage::AddProvider);
                     Some(WelcomeEffect::AddProvider)
                 }
                 WelcomeStage::AllSet => {
@@ -136,7 +178,7 @@ impl Welcome {
             return;
         }
         match self.stage {
-            WelcomeStage::Intro => art::view(frame, area, CONTINUE_CAPTION),
+            WelcomeStage::Intro => art::view(frame, area, self.age(), CONTINUE_CAPTION),
             WelcomeStage::AllSet => self.view_all_set(frame, area),
             // The form and the picker paint themselves fullscreen; the welcome
             // only owns the pages between them.
@@ -337,15 +379,66 @@ mod tests {
     }
 
     fn draw(stage: WelcomeStage, width: u16, height: u16) -> Buffer {
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
         let mut welcome = Welcome::new();
         welcome.open();
-        welcome.stage = stage;
+        welcome.show(stage);
+        // Draw the title as if its entrance were long over: the tests that read
+        // the finished page are not measuring the sweep.
+        // `the_title_page_sweeps_in_every_time_it_comes_up` is what covers that.
+        welcome.title_at = Some(Instant::now() - art::ENTRANCE);
+        paint_page(&welcome, width, height)
+    }
+
+    fn paint_page(welcome: &Welcome, width: u16, height: u16) -> Buffer {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| welcome.view(frame, frame.area()))
             .unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    /// Whether the title's entrance has reached `(x, y)`. Ahead of its edge the
+    /// sweep paints both colour channels the same, so a cell is "reached" once
+    /// they differ.
+    fn reached(buf: &Buffer, x: u16, y: u16) -> bool {
+        let style = buf[(x, y)].style();
+        style.fg != style.bg
+    }
+
+    /// The title sweeps in as it comes up — and sweeps in again when it is
+    /// stepped back to from the form, rather than showing a scene already drawn.
+    #[test]
+    fn the_title_page_sweeps_in_every_time_it_comes_up() {
+        let mut welcome = Welcome::new();
+        welcome.open();
+        let arriving = |welcome: &Welcome| {
+            let buf = paint_page(welcome, 80, 24);
+            (0..24)
+                .flat_map(|y| (0..80).map(move |x| (x, y)))
+                .filter(|&(x, y)| reached(&buf, x, y))
+                .count()
+        };
+
+        let sweeping = arriving(&welcome);
+        assert!(
+            sweeping <= 80,
+            "a title that has only just come up has an edge no deeper than its first row: {sweeping} cells"
+        );
+        welcome.title_at = Some(Instant::now() - art::ENTRANCE);
+        assert_eq!(
+            arriving(&welcome),
+            80 * 24,
+            "and then the whole page arrives"
+        );
+
+        // Stepping away and back starts the sweep over.
+        welcome.show(WelcomeStage::AddProvider);
+        welcome.show(WelcomeStage::Intro);
+        assert!(
+            arriving(&welcome) <= 80,
+            "coming back to the title sweeps it in again"
+        );
     }
 
     fn text(buf: &Buffer, width: u16) -> String {

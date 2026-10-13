@@ -2025,9 +2025,11 @@ impl App {
     }
 
     /// Moves onboarding to `stage`, keeping the overlay that routes its keys,
-    /// pastes, and registry events in step with the page on screen.
+    /// pastes, and registry events in step with the page on screen. The welcome
+    /// is told rather than assigned so that the title's entrance sweep is
+    /// restarted with it whenever the page is arrived at.
     fn set_welcome_stage(&mut self, stage: WelcomeStage) {
-        self.welcome.stage = stage;
+        self.welcome.show(stage);
         self.overlay = welcome_overlay(stage);
     }
 
@@ -2683,14 +2685,26 @@ impl App {
         }
 
         if self.screensaver.is_open() {
-            // The scene is opaque and fullscreen as well, so the session is
-            // skipped rather than painted under it: a chat nobody is reading
-            // should not repaint on the rain's clock.
+            // The scene is opaque and fullscreen, so the session is skipped rather
+            // than painted under it: a chat nobody is reading should not repaint on
+            // the rain's clock. The exception is the scene's own entrance, which
+            // arrives over the session — the screen it is wiping away is the
+            // session, so it has to be painted for there to be anything to wipe.
+            if self.screensaver.sweeping_in() {
+                self.view_session_page(frame, area, stacked);
+            }
             self.screensaver.view(frame, area);
             self.view_popups(frame, area, stacked);
             return;
         }
 
+        self.view_session_page(frame, area, stacked);
+    }
+
+    /// The session page: the session and every dialog that paints over it. It is
+    /// what the normal path shows, and what the screensaver's scene sweeps in
+    /// over, so both paint it the same way.
+    fn view_session_page(&self, frame: &mut Frame<'_>, area: Rect, stacked: bool) {
         self.session.view(frame, area);
         if let Some(form) = &self.add_provider_form {
             form.view(frame, area, stacked, false);
@@ -3544,6 +3558,8 @@ mod tests {
         app.session.update(SessionMessage::ShowError {
             error: "SESSION-MARKER".into(),
         });
+        // The page arrives by sweeping in, so the test reads it once it has landed.
+        app.welcome.settle();
 
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
@@ -3617,33 +3633,60 @@ mod tests {
         assert!(app.screensaver.is_open());
     }
 
+    /// The scene sweeps in over the session — the plate with it — and stands on its
+    /// own page once it has landed. What `App::view` paints under it while it
+    /// arrives is the screen the wipe has to cover; with the page down there is
+    /// nothing left to cover, so the session stops repainting.
     #[test]
-    fn the_scene_paints_itself_and_no_session() {
+    fn the_scene_wipes_the_session_away_as_it_sweeps_in() {
         let mut app = app_with(connected());
         active_session(&mut app);
         app.session.update(SessionMessage::ShowError {
             error: "SESSION-MARKER".into(),
         });
-        app.run_command(CommandAction::Screensaver, None);
 
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
-        terminal
-            .draw(|frame| app.view(frame, frame.area()))
-            .unwrap();
-        let screen: String = (0..24)
-            .map(|y| {
-                (0..80)
-                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let screen = |app: &App| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+            terminal
+                .draw(|frame| app.view(frame, frame.area()))
+                .unwrap();
+            (0..24)
+                .map(|y| {
+                    (0..80)
+                        .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
 
-        assert!(screen.contains("Press any key to exit"), "{screen}");
+        let session = screen(&app);
         assert!(
-            !screen.contains("SESSION-MARKER"),
-            "the session is not painted under the scene"
+            session.contains("SESSION-MARKER"),
+            "the session is on screen before the scene goes up: {session}"
+        );
+
+        app.run_command(CommandAction::Screensaver, None);
+        // Held at the start of its entrance: the phase is otherwise the wall clock's
+        // to pick.
+        app.screensaver.hold_at_start();
+        let sweeping = screen(&app);
+        assert!(
+            sweeping.contains("SESSION-MARKER"),
+            "the scene arrives over the session, so what it covers is still there: {sweeping}"
+        );
+        assert!(
+            !sweeping.contains("Press any key to exit"),
+            "and has not reached the page's own caption yet: {sweeping}"
+        );
+
+        app.screensaver.settle();
+        let settled = screen(&app);
+        assert!(settled.contains("Press any key to exit"), "{settled}");
+        assert!(
+            !settled.contains("SESSION-MARKER"),
+            "and the session is gone once the page has landed: {settled}"
         );
     }
 

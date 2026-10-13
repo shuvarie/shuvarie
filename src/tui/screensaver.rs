@@ -9,11 +9,18 @@
 //!
 //! Like onboarding it paints an opaque fullscreen page: `App::view` skips the
 //! session rather than painting it under the rain, so a long chat does not
-//! repaint sixty times a minute behind a scene nobody is reading. It also
-//! outlives a dialog opened over it, so cancelling the quit prompt lands back on
-//! the scene instead of dropping the user into the session.
+//! repaint sixty times a minute behind a scene nobody is reading. The one
+//! exception is the scene's own entrance, which arrives *over* the session — see
+//! [`Screensaver::sweeping_in`] — because the screen it wipes away is the session,
+//! and it has to be painted for there to be anything to wipe. It also outlives a
+//! dialog opened over it, so cancelling the quit prompt lands back on the scene
+//! instead of dropping the user into the session.
+//!
+//! The scene sweeps in as it comes up, as it does on the title page. That needs a
+//! clock, and the page is where it belongs: the scene reads none of its own, so
+//! the screensaver records when it was raised and reports the age on every paint.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -40,31 +47,73 @@ pub enum ScreensaverEffect {
 
 pub struct Screensaver {
     open: bool,
+    /// When the scene last came up. The entrance sweep is drawn from it, so
+    /// raising the scene again sweeps it in again. `None` while it is down.
+    opened_at: Option<Instant>,
 }
 
 impl Screensaver {
     pub fn new() -> Self {
-        Self { open: false }
+        Self {
+            open: false,
+            opened_at: None,
+        }
     }
 
-    /// Raises the scene over the session.
+    /// Raises the scene over the session, sweeping in from the top of the page.
     pub fn open(&mut self) {
         self.open = true;
+        self.opened_at = Some(Instant::now());
     }
 
     /// Drops the scene: the session takes the screen back.
     pub fn close(&mut self) {
         self.open = false;
+        self.opened_at = None;
+    }
+
+    /// Reads the settled page rather than the sweep, which a test cannot wait out:
+    /// the entrance runs off the wall clock, and back-dating it is the only way to
+    /// draw past its end.
+    #[cfg(test)]
+    pub(crate) fn settle(&mut self) {
+        if self.open {
+            self.opened_at = Some(Instant::now() - art::ENTRANCE);
+        }
+    }
+
+    /// Holds the scene at the very start of its entrance, so a test can read the
+    /// screen it has not covered yet. A loaded machine can otherwise be hundreds of
+    /// milliseconds into the sweep by the time a test draws it; an instant in the
+    /// future reads as an age of zero for as long as it stays there.
+    #[cfg(test)]
+    pub(crate) fn hold_at_start(&mut self) {
+        if self.open {
+            self.opened_at = Some(Instant::now() + art::ENTRANCE);
+        }
     }
 
     pub fn is_open(&self) -> bool {
         self.open
     }
 
+    /// Whether the scene is still sweeping in, and so still covering the screen it
+    /// was raised over rather than standing on it: `App::view` paints the session
+    /// underneath while this holds, and stops once the page has landed.
+    pub fn sweeping_in(&self) -> bool {
+        self.open && self.age() < art::ENTRANCE
+    }
+
+    /// How long the scene has been up — the clock its entrance sweep runs on.
+    /// Zero while it is down, which draws the settled scene.
+    fn age(&self) -> Duration {
+        self.opened_at.map_or(Duration::ZERO, |at| at.elapsed())
+    }
+
     /// The wall-clock delay until the scene's next frame — the render loop's
     /// wake. `None` while it is down: the rain is all that moves here.
     pub fn animation_wake(&self) -> Option<Duration> {
-        self.open.then(art::next_wake).flatten()
+        self.open.then(|| art::next_wake(self.age())).flatten()
     }
 
     /// Any key press dismisses the scene. Ctrl+C is the exception: it asks to
@@ -97,7 +146,7 @@ impl Screensaver {
     /// so a stray call cannot cover the session.
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
         if self.open {
-            art::view(frame, area, CAPTION);
+            art::view(frame, area, self.age(), CAPTION);
         }
     }
 }
@@ -122,9 +171,17 @@ mod tests {
         KeyEvent::new(code, Modifiers::CONTROL)
     }
 
+    /// The scene paints over a marked screen: what `App::view` puts under it before
+    /// the sweep runs, so a cell still carrying the marker is one the page has not
+    /// covered.
+    const UNDERLAY: &str = "~";
+
+    /// A scene that has long since swept in. The tests that read the finished
+    /// page are not measuring the entrance, so they draw past its end.
     fn raised() -> Screensaver {
         let mut screensaver = Screensaver::new();
         screensaver.open();
+        screensaver.settle();
         screensaver
     }
 
@@ -202,9 +259,63 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| screensaver.view(frame, frame.area()))
+            .draw(|frame| {
+                for pos in frame.area().positions() {
+                    frame.buffer_mut()[pos].set_symbol(UNDERLAY);
+                }
+                screensaver.view(frame, frame.area());
+            })
             .unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    /// Whether the entrance has reached `(x, y)`. Ahead of its edge the page has
+    /// not painted at all, so the screen underneath still stands there.
+    fn reached(buf: &Buffer, x: u16, y: u16) -> bool {
+        buf[(x, y)].symbol() != UNDERLAY
+    }
+
+    /// How much of the page the entrance has reached.
+    fn arrived(buf: &Buffer) -> usize {
+        (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| reached(buf, x, y))
+            .count()
+    }
+
+    /// The scene sweeps in as it comes up, and comes up sweeping every time: the
+    /// entrance is drawn from when the scene was raised, and the screensaver is
+    /// what records that.
+    #[test]
+    fn raising_the_scene_sweeps_it_in_again() {
+        let mut screensaver = Screensaver::new();
+        screensaver.open();
+        assert!(
+            screensaver.sweeping_in(),
+            "a scene that has just come up is still sweeping in"
+        );
+        screensaver.hold_at_start();
+        assert_eq!(
+            arrived(&draw(&screensaver, 80, 24)),
+            0,
+            "and has not covered the screen it was raised over"
+        );
+        assert_eq!(
+            arrived(&draw(&raised(), 80, 24)),
+            80 * 24,
+            "and then the whole page arrives"
+        );
+
+        // Dropping it and raising it again starts the entrance over rather than
+        // showing a scene already drawn.
+        screensaver.settle();
+        assert!(!screensaver.sweeping_in(), "the page has landed");
+        screensaver.close();
+        screensaver.open();
+        assert!(
+            screensaver.sweeping_in(),
+            "raising the scene again sweeps it in again"
+        );
     }
 
     fn text(buf: &Buffer, width: u16) -> String {
@@ -234,8 +345,32 @@ mod tests {
     fn a_closed_screensaver_paints_nothing() {
         let buf = draw(&Screensaver::new(), 80, 24);
         assert!(
-            text(&buf, 80).trim().is_empty(),
+            buf.area.positions().all(|pos| !reached(&buf, pos.x, pos.y)),
             "an unopened scene never covers the session"
+        );
+    }
+
+    /// `sweeping_in` is what `App::view` reads to decide whether the session is
+    /// painted under the scene: it reports the entrance, and nothing else. The
+    /// screen it leaves uncovered is the art's, which `welcome::art` tests.
+    #[test]
+    fn the_scene_reports_while_it_is_still_sweeping_in() {
+        let mut screensaver = Screensaver::new();
+        assert!(
+            !screensaver.sweeping_in(),
+            "a scene that is down is not covering anything"
+        );
+
+        screensaver.open();
+        assert!(
+            screensaver.sweeping_in(),
+            "a scene just raised is still coming up"
+        );
+
+        screensaver.settle();
+        assert!(
+            !screensaver.sweeping_in(),
+            "a scene that has arrived stands on its own page"
         );
     }
 }

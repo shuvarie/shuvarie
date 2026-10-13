@@ -4,6 +4,15 @@
 //! stamped dim in the top-right corner. The `Shuvarie` wordmark and the caption
 //! paint over it, so the scene reads as quiet chrome behind the text.
 //!
+//! The page sweeps in rather than appearing whole: for its first [`ENTRANCE`] it
+//! is wiped down the screen behind an irregular edge, its dark plate with it, so
+//! it covers what was underneath rather than cutting to it. That is a
+//! `tachyonfx` effect over the finished page, which is why the page is built in
+//! a buffer of its own and only the part the edge has reached is copied out.
+//! What stands ahead of the edge is the caller's to paint: onboarding leaves the
+//! empty frame, and the screensaver puts the session there, so the live screen is
+//! what the scene wipes away as it comes up.
+//!
 //! The caption belongs to the page, not to the scene: it says what a key press
 //! does next, and the two pages that show this scene promise different things.
 //!
@@ -15,6 +24,13 @@
 //! wall-clock time ([`FrameIndexer`]), so [`view`] paints whichever frame the
 //! clock has selected and [`next_wake`] reports when the render loop should
 //! come back for the next one.
+//!
+//! The scene is a pure function of its two clocks — the rain's frame number and
+//! the age the page reports — and holds no state of its own. The entrance keeps
+//! that property by being **rebuilt on every paint** and advanced straight to
+//! the age rather than being kept alive between frames: `sweep_in` draws its
+//! jitter from a fixed seed, so a rebuilt effect lays down exactly the edge an
+//! effect advanced frame by frame would have.
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -26,6 +42,7 @@ use ratatui::layout::{Alignment, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
+use tachyonfx::{Effect, EffectTimer, Interpolation, Motion, fx};
 use tui_big_text::{BigText, PixelSize};
 
 use crate::tui::components::version_label;
@@ -81,6 +98,27 @@ const RAIN_FRAMES: usize = 1_000;
 /// Drops per second.
 const RAIN_RATE: u32 = 12;
 
+/// How long the scene takes to sweep in. Long enough to read as an arrival,
+/// short enough not to hold anyone up on the way to the provider form.
+pub const ENTRANCE: Duration = Duration::from_millis(900);
+/// How many cells deep each column's own edge fades in. Small on purpose: it is
+/// the tear across the columns, not a wide gradient, that should shape the
+/// boundary.
+const ENTRANCE_GRADIENT: u16 = 3;
+/// How much of the page's height the sweep's torn edge spans, as a percentage.
+/// This is what makes the sweep irregular rather than a straight wipe, and it is
+/// taken from the page so that a tall terminal is not wiped cleanly while a
+/// short one is shredded.
+const ENTRANCE_TEAR_PERCENT: u16 = 35;
+/// The scene's frame rate while the sweep is running, in whole milliseconds a
+/// frame. Once the scene has arrived the rain's twelve frames a second are its
+/// heartbeat, but a gradient crossing the page in eleven steps reads as dropped
+/// frames rather than as animation, so the entrance asks the render loop to come
+/// back faster.
+const ENTRANCE_FRAME_MS: u64 = 1_000 / 30;
+/// The entrance's frame period, as the duration the render loop is handed.
+const ENTRANCE_FRAME: Duration = Duration::from_millis(ENTRANCE_FRAME_MS);
+
 /// The `Shuvarie` jumbotron: one line of oversized pixel text, built fresh on
 /// each paint (it is eight glyphs of lookup, not worth caching).
 fn big_text() -> BigText<'static> {
@@ -120,26 +158,115 @@ pub fn rain_frame() -> usize {
     rain().get_cur_index()
 }
 
-/// How long until the rain's next frame — the render loop's wake. `None` when
-/// the rain is not animating.
-pub fn next_wake() -> Option<Duration> {
-    rain().time_to_next_frame()
+/// The entrance sweep: the page wiped in from the top of the screen.
+///
+/// Each column's leading edge is offset from its neighbours over about
+/// [`ENTRANCE_TEAR_PERCENT`] of the page, so the edge is torn rather than
+/// straight. The faded colour is the plate's own, which does double duty: it is
+/// what a cell ahead of the edge is painted, and so what [`paint`] reads the edge
+/// back off the built page with.
+///
+/// Built fresh on every paint rather than kept between frames: the jitter comes
+/// from a fixed seed, so rebuilding costs nothing but the edge is identical
+/// either way. See the module docs.
+fn entrance(area: Rect) -> Effect {
+    let tear = (area.height * ENTRANCE_TEAR_PERCENT / 100).max(1);
+    fx::sweep_in(
+        Motion::UpToDown,
+        ENTRANCE_GRADIENT,
+        tear,
+        theme::bg(),
+        EffectTimer::from_ms(ENTRANCE.as_millis() as u32, Interpolation::CubicOut),
+    )
+}
+
+/// How long until the entrance's next frame; `None` once the scene has arrived.
+fn entrance_wake(age: Duration) -> Option<Duration> {
+    (age < ENTRANCE).then(|| {
+        // `Duration` has no remainder, so the phase within the current frame is
+        // taken in whole milliseconds — a wake is no finer than the frame it
+        // waits for anyway.
+        let phase = age.as_millis() as u64 % ENTRANCE_FRAME_MS;
+        ENTRANCE_FRAME - Duration::from_millis(phase)
+    })
+}
+
+/// How long until the scene's next frame — the render loop's wake. The entrance
+/// sets the pace while it runs; once the scene has arrived the rain is all that
+/// moves.
+///
+/// `age` is how long the page showing the scene has been up, and it is the
+/// caller's to keep: the scene reads no clock of its own beyond the rain's.
+pub fn next_wake(age: Duration) -> Option<Duration> {
+    let rain = rain().time_to_next_frame();
+    match entrance_wake(age) {
+        Some(entrance) => Some(rain.map_or(entrance, |rain| rain.min(entrance))),
+        None => rain,
+    }
 }
 
 /// Paints the scene into `frame`, taking the rain's frame off the wall clock.
-pub fn view(frame: &mut Frame<'_>, area: Rect, caption: &str) {
-    paint(frame.buffer_mut(), area, rain_frame(), caption);
+///
+/// `age` is how long the page has been showing the scene: the entrance sweep is
+/// drawn from it, and a page reporting an age past [`ENTRANCE`] gets the settled
+/// scene.
+pub fn view(frame: &mut Frame<'_>, area: Rect, age: Duration, caption: &str) {
+    paint(frame.buffer_mut(), area, rain_frame(), age, caption);
 }
 
-/// Buffer-level [`view`] with an explicit rain frame, so tests paint against a
-/// bare [`Buffer`] and pick the frame they assert on.
-pub fn paint(buf: &mut Buffer, area: Rect, rain_frame: usize, caption: &str) {
+/// Buffer-level [`view`] with explicit clocks, so tests paint against a bare
+/// [`Buffer`] and pick the frame and the age they assert on.
+///
+/// The page arrives by covering `buf` behind the entrance's edge, and the cells
+/// ahead of it are never written to at all: they are left exactly as the caller
+/// painted them, which is where the session stands under the screensaver. See
+/// the module docs.
+pub fn paint(buf: &mut Buffer, area: Rect, rain_frame: usize, age: Duration, caption: &str) {
     if area.is_empty() {
         return;
     }
-    // The page owns the whole screen: fill it with the theme background before
-    // anything else, so nothing of the frame before it shows through.
-    buf.set_style(area, Style::new().bg(theme::bg()).fg(theme::text()));
+    if age >= ENTRANCE {
+        // Settled: the page goes down whole rather than through the effect, so
+        // the steady state is the drawn page exactly and not the effect's last
+        // frame of it.
+        paint_page(buf, area, rain_frame, caption);
+        return;
+    }
+
+    // Part way in, the page is built off the buffer and the entrance applied to
+    // *that*: `sweep_in` paints the cells its edge has not reached, so running it
+    // over the caller's own pixels would bury what the page is covering.
+    let mut page = Buffer::empty(area);
+    paint_page(&mut page, area, rain_frame, caption);
+    entrance(area).process(age, &mut page, area);
+
+    for pos in area.positions() {
+        let painted = &page[pos];
+        // `sweep_in` writes the faded colour to *both* channels of every cell
+        // ahead of its edge and leaves the rest of the page alone, so a cell
+        // carrying the plate on both is one the edge has not reached. Nothing in
+        // the page is ever drawn in the plate's own colour, which is what makes
+        // that readable — `the_plate_is_never_painted_as_ink` holds the scene to
+        // it.
+        if painted.fg == theme::bg() && painted.bg == theme::bg() {
+            continue;
+        }
+        buf[pos] = painted.clone();
+    }
+}
+
+/// The page itself, painted whole into `buf`: the plate, then the scene on it.
+fn paint_page(buf: &mut Buffer, area: Rect, rain_frame: usize, caption: &str) {
+    // The page owns the whole screen, so every cell it covers is rewritten — the
+    // symbol with the style. Restyling alone would leave the glyphs of the screen
+    // underneath standing in the page's own ink, which is exactly the screen the
+    // screensaver's scene is sweeping away: the plate has to clear it.
+    let plate = Style::new().bg(theme::bg()).fg(theme::text());
+    for pos in area.positions() {
+        let cell = &mut buf[pos];
+        cell.reset();
+        cell.set_style(plate);
+    }
 
     let mask = rook_mask();
     let placement = placement(area, mask);
@@ -501,15 +628,53 @@ fn hash(value: u32) -> u32 {
 mod tests {
     use super::*;
 
+    use ratatui::style::Color;
+
     /// A caption the scene knows nothing about: the page owns the string, so
     /// the tests pass one in and read it back out.
     const CAPTION: &str = "Press the any key";
 
-    fn scene(width: u16, height: u16, frame: usize) -> Buffer {
-        let area = Rect::new(0, 0, width, height);
+    /// What the tests stand the entrance on: a marker on every cell, painted the
+    /// way `App::view` paints the session under the screensaver's scene before the
+    /// sweep runs. A cell still carrying it is a cell the page has not covered.
+    const UNDERLAY: &str = "~";
+    const UNDERLAY_STYLE: Style = Style::new().fg(Color::Red).bg(Color::Blue);
+
+    /// A marked page: an empty one carrying the underlay the scene sweeps over.
+    fn underlay(area: Rect) -> Buffer {
         let mut buf = Buffer::empty(area);
-        paint(&mut buf, area, frame, CAPTION);
+        for pos in area.positions() {
+            buf[pos].set_symbol(UNDERLAY).set_style(UNDERLAY_STYLE);
+        }
         buf
+    }
+
+    /// A scene long since arrived: the entrance sweep is over, so these tests
+    /// read the page it settles on rather than the entrance itself.
+    fn scene(width: u16, height: u16, frame: usize) -> Buffer {
+        sweep(width, height, frame, ENTRANCE)
+    }
+
+    /// The scene `age` into its entrance sweep, over the underlay.
+    fn sweep(width: u16, height: u16, frame: usize, age: Duration) -> Buffer {
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = underlay(area);
+        paint(&mut buf, area, frame, age, CAPTION);
+        buf
+    }
+
+    /// Whether the entrance's edge has reached `(x, y)`. Ahead of it the page has
+    /// not painted at all, so the underlay is still standing there untouched.
+    fn swept(buf: &Buffer, x: u16, y: u16) -> bool {
+        buf[(x, y)].symbol() != UNDERLAY
+    }
+
+    /// How far down the page the entrance has carried: the last row it has
+    /// reached, as a count of rows from the top.
+    fn depth(buf: &Buffer, area: Rect) -> u16 {
+        (area.y..area.bottom())
+            .filter(|&y| (area.x..area.right()).any(|x| swept(buf, x, y)))
+            .count() as u16
     }
 
     fn row_of(buf: &Buffer, y: u16, width: u16) -> String {
@@ -900,6 +1065,172 @@ mod tests {
                 "frame {frame} keeps the wordmark"
             );
         }
+    }
+
+    /// The page arrives by sweeping in down the screen rather than appearing
+    /// whole, the top of it first.
+    #[test]
+    fn the_scene_sweeps_in_from_the_top() {
+        let area = Rect::new(0, 0, 100, 30);
+        let total = area.width as usize * area.height as usize;
+        let at = |step: u32| sweep(area.width, area.height, 0, ENTRANCE * step / 10);
+
+        assert_eq!(depth(&at(0), area), 0, "nothing has been painted yet");
+        assert_eq!(
+            depth(&at(10), area),
+            area.height,
+            "a finished sweep leaves no row behind"
+        );
+
+        // The page fills in as the edge carries down it, never back up.
+        let counts: Vec<usize> = (0..=10)
+            .map(|step| {
+                let buf = at(step);
+                (area.y..area.bottom())
+                    .flat_map(|y| (area.x..area.right()).map(move |x| (x, y)))
+                    .filter(|(x, y)| swept(&buf, *x, *y))
+                    .count()
+            })
+            .collect();
+        assert!(
+            counts.windows(2).all(|step| step[0] <= step[1]),
+            "the reveal never retreats: {counts:?}"
+        );
+        assert_eq!(counts[0], 0, "nothing has arrived yet: {counts:?}");
+        assert_eq!(total, counts[10], "the page has all arrived: {counts:?}");
+        assert!(
+            counts[1] > 0 && counts[1] < total,
+            "the reveal is progressive rather than all at once: {counts:?}"
+        );
+
+        // And it is the top of the page that goes first.
+        let early = at(1);
+        assert!(
+            (area.x..area.right()).any(|x| swept(&early, x, area.y)),
+            "the sweep has reached the top of the page"
+        );
+        assert!(
+            !(area.x..area.right()).any(|x| swept(&early, x, area.bottom() - 1)),
+            "and not the bottom of it"
+        );
+    }
+
+    /// The whole page sweeps in, its dark plate with it: ahead of the edge nothing
+    /// has been painted, so the screen the page is covering still stands there —
+    /// rather than the plate landing at once and the scene materialising on it.
+    #[test]
+    fn the_plate_sweeps_in_with_the_page() {
+        let area = Rect::new(0, 0, 100, 30);
+
+        assert_eq!(
+            depth(&sweep(area.width, area.height, 0, Duration::ZERO), area),
+            0,
+            "an entrance that has just started leaves the screen it covers alone"
+        );
+
+        // A tenth of the way in: the page has taken the top of the screen, and the
+        // screen it is covering still has the bottom of it, untouched.
+        let mid = sweep(area.width, area.height, 0, ENTRANCE / 10);
+        assert!(depth(&mid, area) > 0, "the page has covered the top row");
+        assert!(
+            depth(&mid, area) < area.height,
+            "and has not reached the bottom"
+        );
+        assert!(
+            (area.x..area.right()).all(|x| !swept(&mid, x, area.bottom() - 1)),
+            "leaving the bottom row to the screen underneath"
+        );
+        assert_eq!(
+            mid[(area.x, area.y)].bg,
+            theme::bg(),
+            "what arrives over it is the page's own plate"
+        );
+
+        // Once it has landed there is no underlay left anywhere: the page is
+        // opaque, which is what lets the screensaver stop painting the session.
+        let arrived = sweep(area.width, area.height, 0, ENTRANCE);
+        assert!(
+            area.positions().all(|pos| swept(&arrived, pos.x, pos.y)),
+            "a settled page covers the screen whole"
+        );
+    }
+
+    /// Nothing in the page is drawn in the plate's own colour. That is what lets
+    /// [`paint`] read the entrance's edge back off the built page: a cell carrying
+    /// the plate on both channels is a cell the edge has not reached.
+    #[test]
+    fn the_plate_is_never_painted_as_ink() {
+        for (width, height) in [(80, 24), (100, 30), (40, 12)] {
+            let area = Rect::new(0, 0, width, height);
+            for frame in 0..8 {
+                let buf = scene(width, height, frame);
+                for pos in area.positions() {
+                    let cell = &buf[pos];
+                    assert!(
+                        cell.fg != theme::bg() || cell.bg != theme::bg(),
+                        "frame {frame} on {width}x{height} draws {:?} at {pos:?} in the plate's own colour",
+                        cell.symbol()
+                    );
+                }
+            }
+        }
+    }
+
+    /// The entrance is a pure function of the scene's clocks, which is what lets
+    /// it be rebuilt on every paint instead of being kept alive between frames:
+    /// the same clock draws the same page, sweep and all. What makes that work is
+    /// `sweep_in` drawing its jitter from a fixed seed.
+    #[test]
+    fn the_entrance_is_a_pure_function_of_its_clock() {
+        for age in [
+            Duration::ZERO,
+            ENTRANCE / 3,
+            ENTRANCE / 2,
+            ENTRANCE - Duration::from_millis(1),
+        ] {
+            assert_eq!(
+                sweep(80, 24, 7, age).content,
+                sweep(80, 24, 7, age).content,
+                "the scene {age:?} into its entrance redraws identically"
+            );
+        }
+        assert_ne!(
+            sweep(80, 24, 7, Duration::ZERO).content,
+            sweep(80, 24, 7, ENTRANCE / 2).content,
+            "the sweep is what moves the page between the two"
+        );
+    }
+
+    /// While the sweep runs the render loop is paced by the entrance rather than
+    /// by the rain, so the gradient crosses the page in more than the eleven
+    /// steps the rain's twelve frames a second would give it.
+    #[test]
+    fn the_entrance_sets_the_pace_until_the_scene_has_arrived() {
+        assert!(
+            ENTRANCE_FRAME < Duration::from_millis(1_000 / RAIN_RATE as u64),
+            "the entrance has to be the faster of the two clocks to pace anything"
+        );
+
+        for age in [Duration::ZERO, Duration::from_millis(1), ENTRANCE / 2] {
+            let wake = entrance_wake(age).expect("the sweep is still running");
+            assert!(
+                wake > Duration::ZERO && wake <= ENTRANCE_FRAME,
+                "{age:?} into the sweep waits {wake:?}"
+            );
+        }
+        assert!(
+            entrance_wake(ENTRANCE).is_none(),
+            "an arrived scene has no entrance frame left to wait for"
+        );
+
+        // The loop is handed the entrance's pace, and the rain still drives it
+        // once the scene has arrived.
+        let wake = next_wake(Duration::ZERO).expect("the scene animates");
+        assert!(wake <= ENTRANCE_FRAME, "woken in {wake:?}");
+        assert!(
+            next_wake(ENTRANCE).is_some(),
+            "the rain keeps animating behind a settled scene"
+        );
     }
 
     /// The rain animates across the whole background: every column is rained on
