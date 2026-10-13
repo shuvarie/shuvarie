@@ -202,6 +202,22 @@ fn advance(text: &str, bytes: usize) -> (u16, usize) {
     (c.width().unwrap_or(0) as u16, bytes + c.len_utf8().max(1))
 }
 
+/// The block a tool event lands on: the last in `blocks` that `is_match`
+/// accepts, preferring one whose call is executing over one still queued for a
+/// concurrency slot — an event that could be either (a shell chunk resolved to
+/// an ambiguous call) belongs to the call that produced it, and only a running
+/// call has output.
+fn find_tool_block(blocks: &mut [Block], is_match: impl Fn(&Block) -> bool) -> Option<&mut Block> {
+    if let Some(index) = blocks
+        .iter()
+        .rposition(|block| block.tool_is_running() && is_match(block))
+    {
+        return blocks.get_mut(index);
+    }
+    let index = blocks.iter().rposition(is_match)?;
+    blocks.get_mut(index)
+}
+
 pub enum ChatMessage {
     BeginUserTurn {
         content: String,
@@ -232,6 +248,20 @@ pub enum ChatMessage {
         /// on it).
         spawn: Option<u64>,
         call_id: Option<String>,
+        /// The call is queued behind its batch's tool-concurrency limit: the
+        /// block opens in the waiting state (a still `◇` instead of the
+        /// spinner) and starts animating on the [`ChatMessage::ToolRunning`]
+        /// that follows once a slot frees.
+        waiting: bool,
+    },
+    /// A queued call's turn came: rig freed a concurrency slot for it and it is
+    /// running now. Resolves to its block by call id (the name+worker fallback
+    /// for events without one) and only moves a block that was waiting.
+    ToolRunning {
+        name: String,
+        worker: Option<String>,
+        spawn: Option<u64>,
+        call_id: Option<String>,
     },
     ToolFinished {
         name: String,
@@ -259,6 +289,10 @@ pub enum ChatMessage {
         name: String,
         args: Value,
         call_id: Option<String>,
+        /// The spawned worker call is queued behind the same concurrency limit
+        /// as [`ChatMessage::ToolStarted`]'s `waiting`: worker-tool calls spend
+        /// from the main agent batch's slots too.
+        waiting: bool,
     },
     WorkerFinished {
         name: String,
@@ -695,17 +729,31 @@ impl Chat {
                 worker,
                 spawn,
                 call_id,
+                waiting,
             } => {
                 self.streaming = true;
                 let mut in_flight = self.in_flight.borrow_mut();
                 let turn = in_flight.get_or_insert_with(|| TurnData::new(Role::Assistant));
-                turn.push_block(Block::Tool(Box::new(ToolBlock::new(
-                    name,
-                    args.to_string(),
-                    worker,
-                    spawn,
-                    call_id,
-                ))));
+                let block = ToolBlock::new(name, args.to_string(), worker, spawn, call_id);
+                turn.push_block(Block::Tool(Box::new(if waiting {
+                    block.queued()
+                } else {
+                    block
+                })));
+            }
+            ChatMessage::ToolRunning {
+                name,
+                worker,
+                spawn,
+                call_id,
+            } => {
+                let promoted =
+                    self.with_running_tool(&name, &worker, spawn, call_id.as_deref(), |block| {
+                        block.update(BlockMessage::Tool(ToolMessage::Run))
+                    });
+                if promoted {
+                    self.touch_in_flight();
+                }
             }
             ChatMessage::ToolFinished {
                 name,
@@ -752,17 +800,18 @@ impl Chat {
                 name,
                 args,
                 call_id,
+                waiting,
             } => {
                 self.streaming = true;
                 let mut in_flight = self.in_flight.borrow_mut();
                 let turn = in_flight.get_or_insert_with(|| TurnData::new(Role::Assistant));
-                turn.push_block(Block::Tool(Box::new(ToolBlock::new(
-                    name,
-                    args.to_string(),
-                    Some(String::new()),
-                    None,
-                    call_id,
-                ))));
+                let block =
+                    ToolBlock::new(name, args.to_string(), Some(String::new()), None, call_id);
+                turn.push_block(Block::Tool(Box::new(if waiting {
+                    block.queued()
+                } else {
+                    block
+                })));
             }
             ChatMessage::WorkerFinished {
                 name,
@@ -1639,13 +1688,17 @@ impl Chat {
         );
     }
 
-    /// Find the still-running block a finish or streamed shell chunk belongs
+    /// Find the block a finish, a promotion, or a streamed shell chunk belongs
     /// to and apply it. Both carry the provider's call id when the core could
-    /// resolve it, so batched calls of one tool (all `Running` at once — and
+    /// resolve it, so batched calls of one tool (all in flight at once — and
     /// their streamed shell output) each land on their own block; the
     /// name+worker+spawn match is only a fallback for events without an id —
     /// a block carrying a spawn id never cross-matches a spawn-less event or
     /// another spawn's, so concurrent runs of one worker stay apart.
+    ///
+    /// A call queued for a concurrency slot is in flight like a running one and
+    /// takes its own events (the promotion that starts it, and — on a cut turn —
+    /// its kill); [`find_tool_block`] keeps a chunk of an ambiguous call off it.
     fn with_running_tool(
         &mut self,
         name: &str,
@@ -1655,7 +1708,7 @@ impl Chat {
         apply: impl FnOnce(&mut Block) -> bool,
     ) -> bool {
         let is_match = |block: &Block| {
-            if !block.tool_is_running() {
+            if !block.tool_is_active() {
                 return false;
             }
             let own = block.tool_call_id().unwrap_or_default();
@@ -1667,7 +1720,7 @@ impl Chat {
         let mut in_flight = self.in_flight.borrow_mut();
         if let Some(turn) = in_flight.as_mut()
             && let Some(blocks) = turn.blocks.as_mut()
-            && let Some(block) = blocks.iter_mut().rev().find(|block| is_match(block))
+            && let Some(block) = find_tool_block(blocks, is_match)
         {
             return apply(block);
         }
@@ -1679,7 +1732,7 @@ impl Chat {
             let Some(blocks) = turn.blocks.as_mut() else {
                 continue;
             };
-            let Some(block) = blocks.iter_mut().rev().find(|block| is_match(block)) else {
+            let Some(block) = find_tool_block(blocks, is_match) else {
                 continue;
             };
             let updated = apply(block);
@@ -2575,6 +2628,7 @@ pub(crate) mod tests {
             worker: None,
             spawn: None,
             call_id: None,
+            waiting: false,
         });
         let tool_only = render_turn_lines(&chat, None, 80).unwrap();
         assert!(tool_only.contains("(Working...)"));
@@ -2631,6 +2685,7 @@ pub(crate) mod tests {
             worker: None,
             spawn: None,
             call_id: None,
+            waiting: false,
         });
         chat.update(ChatMessage::ReasoningReceived {
             content: "again".into(),
@@ -2776,6 +2831,7 @@ pub(crate) mod tests {
             name: "explore".into(),
             args: serde_json::json!("find it"),
             call_id: None,
+            waiting: false,
         });
         chat.update(ChatMessage::ToolStarted {
             name: "read_file".into(),
@@ -2783,6 +2839,7 @@ pub(crate) mod tests {
             worker: Some("explore".into()),
             spawn: None,
             call_id: None,
+            waiting: false,
         });
         chat.update(ChatMessage::StreamDone);
         assert!(chat.in_flight.borrow().is_none());
@@ -2819,6 +2876,7 @@ pub(crate) mod tests {
             worker: Some("explore".into()),
             spawn: None,
             call_id: None,
+            waiting: false,
         });
         assert!(
             chat.in_flight.borrow().is_some(),
@@ -2839,6 +2897,7 @@ pub(crate) mod tests {
             name: "explore".into(),
             args: serde_json::json!("find it"),
             call_id: None,
+            waiting: false,
         });
         chat.update(ChatMessage::ToolStarted {
             name: "read_file".into(),
@@ -2846,6 +2905,7 @@ pub(crate) mod tests {
             worker: Some("explore".into()),
             spawn: None,
             call_id: None,
+            waiting: false,
         });
         chat.update(ChatMessage::StreamDone);
         assert!(chat.has_running_tool_blocks());
@@ -2897,6 +2957,7 @@ pub(crate) mod tests {
             worker: None,
             spawn: None,
             call_id: None,
+            waiting: false,
         });
         assert!(chat.has_running_tool_blocks());
         chat.update(ChatMessage::StreamDone);
@@ -2927,13 +2988,114 @@ pub(crate) mod tests {
         assert!(!chat.has_running_tool_blocks(), "stale finish is a no-op");
     }
 
+    /// rig announces a whole batch's calls at once but only starts as many as the
+    /// scene's concurrency allows: the rest open waiting (a still `◇` in place of
+    /// the spinner) and take the spinner up when a slot frees.
+    #[test]
+    fn a_queued_call_leaves_waiting_when_its_turn_comes() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "go".into(),
+            attachments: Vec::new(),
+        });
+        for (call_id, waiting) in [("c1", false), ("c2", true)] {
+            chat.update(ChatMessage::ToolStarted {
+                name: "read_file".into(),
+                args: serde_json::json!({ "path": call_id }),
+                worker: None,
+                spawn: None,
+                call_id: Some(call_id.into()),
+                waiting,
+            });
+        }
+
+        let lines = render_turn_lines(&chat, None, 80).unwrap();
+        assert_eq!(
+            lines.matches('◇').count(),
+            1,
+            "only the queued call waits: {lines}"
+        );
+        assert!(
+            chat.has_running_tool_blocks(),
+            "the call that runs still animates"
+        );
+
+        // The batch's first call settles and the queued one takes its slot.
+        chat.update(ChatMessage::ToolFinished {
+            name: "read_file".into(),
+            ok: true,
+            output: "one".into(),
+            worker: None,
+            spawn: None,
+            file_change: None,
+            streams: None,
+            duration_ms: 40,
+            call_id: Some("c1".into()),
+        });
+        chat.update(ChatMessage::ToolRunning {
+            name: "read_file".into(),
+            worker: None,
+            spawn: None,
+            call_id: Some("c2".into()),
+        });
+        let lines = render_turn_lines(&chat, None, 80).unwrap();
+        assert!(!lines.contains('◇'), "the promoted call spins: {lines}");
+    }
+
+    /// A queued call animates nothing, so it arms no render-loop wake — but the
+    /// promotion that starts it (a straggler can land after the turn commits) must
+    /// take the spinner up and rebuild the committed turn's cache.
+    #[test]
+    fn a_late_promotion_rebuilds_the_committed_turn() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "go".into(),
+            attachments: Vec::new(),
+        });
+        chat.update(ChatMessage::WorkerStarted {
+            name: "explore_workspace".into(),
+            args: serde_json::json!({ "task": "map it" }),
+            call_id: Some("w1".into()),
+            waiting: true,
+        });
+        chat.update(ChatMessage::StreamDone);
+        assert!(
+            !chat.has_running_tool_blocks(),
+            "a queued block does not animate"
+        );
+        let rev_before = chat.turns.borrow().last().unwrap().rev;
+
+        chat.update(ChatMessage::ToolRunning {
+            name: "explore_workspace".into(),
+            worker: Some(String::new()),
+            spawn: None,
+            call_id: Some("w1".into()),
+        });
+        assert!(
+            chat.has_running_tool_blocks(),
+            "the promoted call animates now"
+        );
+        let turns = chat.turns.borrow();
+        let turn = turns.last().unwrap();
+        assert!(
+            turn.rev > rev_before,
+            "committed turn cache must rebuild for the new spinner slot"
+        );
+        let blocks = turn.blocks.as_deref().unwrap();
+        let Block::Tool(tool) = blocks.last().unwrap() else {
+            panic!("expected tool block")
+        };
+        assert!(tool.is_running());
+    }
+
     #[test]
     fn batched_same_tool_finishes_land_on_their_own_blocks() {
         // A model can batch several calls of one tool in a single response:
-        // rig streams every call's start before any result, so all blocks are
-        // running at once. Each finish must land on the block of its own
-        // call id — matching by name alone reverses the outputs onto the
-        // sibling blocks (the first block would show the newest list).
+        // rig streams every call's start before any result, so the blocks open
+        // together (all running when the batch allows that concurrency). Each
+        // finish must land on the block of its own call id — matching by name
+        // alone reverses the outputs onto the sibling blocks (the first block
+        // would show the newest list).
         let mut chat = Chat::new();
         chat.update(ChatMessage::BeginUserTurn {
             content: "go".into(),
@@ -2945,6 +3107,7 @@ pub(crate) mod tests {
             worker: None,
             spawn: None,
             call_id: Some("call-1".into()),
+            waiting: false,
         });
         chat.update(ChatMessage::ToolStarted {
             name: "todo".into(),
@@ -2952,6 +3115,7 @@ pub(crate) mod tests {
             worker: None,
             spawn: None,
             call_id: Some("call-2".into()),
+            waiting: false,
         });
         chat.update(ChatMessage::ToolFinished {
             name: "todo".into(),
@@ -3009,6 +3173,7 @@ pub(crate) mod tests {
             name: "run_tests".into(),
             args: serde_json::json!({ "task": "verify" }),
             call_id: Some("w1".into()),
+            waiting: false,
         });
         chat.update(ChatMessage::ToolStarted {
             name: "run_shell".into(),
@@ -3016,6 +3181,7 @@ pub(crate) mod tests {
             worker: Some("run_tests".into()),
             spawn: None,
             call_id: Some("s1".into()),
+            waiting: false,
         });
         chat.update(ChatMessage::ToolStarted {
             name: "run_shell".into(),
@@ -3023,6 +3189,7 @@ pub(crate) mod tests {
             worker: Some("run_tests".into()),
             spawn: None,
             call_id: Some("s2".into()),
+            waiting: false,
         });
         chat.update(ChatMessage::ToolOutput {
             tool: "run_shell".into(),
@@ -3072,6 +3239,7 @@ pub(crate) mod tests {
             worker: None,
             spawn: None,
             call_id: None,
+            waiting: false,
         });
         chat.update(ChatMessage::ToolFinished {
             name: "run_shell".into(),
@@ -3246,6 +3414,7 @@ pub(crate) mod tests {
             worker: None,
             spawn: None,
             call_id: None,
+            waiting: false,
         });
         chat.update(ChatMessage::ToolFinished {
             name: "edit_file".into(),
@@ -3924,6 +4093,7 @@ pub(crate) mod tests {
             worker: None,
             spawn: None,
             call_id: None,
+            waiting: false,
         });
         let output: String = (0..500)
             .map(|i| format!("out {i}: payload {i} with filler"))
@@ -4016,6 +4186,7 @@ pub(crate) mod tests {
             worker: None,
             spawn: None,
             call_id: None,
+            waiting: false,
         });
         chat.update(ChatMessage::ToolFinished {
             name: "read_file".into(),
@@ -4122,6 +4293,7 @@ pub(crate) mod tests {
             worker: None,
             spawn: None,
             call_id: None,
+            waiting: false,
         });
         chat.update(ChatMessage::ToolFinished {
             name: "read_file".into(),
@@ -4480,6 +4652,7 @@ pub(crate) mod tests {
                 worker: Some("explore_workspace".into()),
                 spawn: None,
                 call_id: Some(format!("call_{i}")),
+                waiting: false,
             });
             chat.update(ChatMessage::ToolFinished {
                 name: "read_file".into(),
@@ -4502,6 +4675,7 @@ pub(crate) mod tests {
             worker: None,
             spawn: None,
             call_id: Some("call_running".into()),
+            waiting: false,
         });
         let diags = BTreeMap::new();
         let env_rev = 0u64;
@@ -4623,6 +4797,7 @@ pub(crate) mod tests {
             worker: None,
             spawn: None,
             call_id: Some("call_1".into()),
+            waiting: false,
         });
         let diags = BTreeMap::new();
         let env = ChatEnv {
@@ -4703,6 +4878,7 @@ pub(crate) mod tests {
             worker: None,
             spawn: None,
             call_id: Some("call_1".into()),
+            waiting: false,
         });
         let diags = BTreeMap::new();
         let env = ChatEnv {
@@ -4946,6 +5122,7 @@ pub(crate) mod tests {
             worker: None,
             spawn: None,
             call_id: None,
+            waiting: false,
         });
         chat.update(ChatMessage::ToolOutput {
             tool: "run_shell".into(),
@@ -5015,6 +5192,7 @@ pub(crate) mod tests {
             worker: None,
             spawn: None,
             call_id: None,
+            waiting: false,
         });
         chat.update(ChatMessage::ToolFinished {
             name: "run_shell".into(),
@@ -5055,6 +5233,7 @@ pub(crate) mod tests {
             worker: None,
             spawn: None,
             call_id: None,
+            waiting: false,
         });
         chat.update(ChatMessage::ToolFinished {
             name: "run_shell".into(),

@@ -185,6 +185,13 @@ impl Block {
         matches!(self, Block::Tool(tool) if tool.is_running())
     }
 
+    /// Whether the block's call is still in flight: running, or queued waiting
+    /// for a concurrency slot. Tool events (finishes, streamed chunks, the
+    /// promotion that starts a queued call) resolve to a block by this.
+    pub fn tool_is_active(&self) -> bool {
+        matches!(self, Block::Tool(tool) if tool.is_active())
+    }
+
     /// Whether the block's first segment animates per spinner frame: a
     /// thinking reasoning header or a running tool header.
     pub fn spinner_bearing(&self) -> bool {

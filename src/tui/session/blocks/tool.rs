@@ -20,7 +20,12 @@ const COLLAPSED_OUTPUT_LINES: usize = 5;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToolStatus {
+    /// The call is executing: rig gave it a concurrency slot and its body is
+    /// running.
     Running,
+    /// The call was emitted for the batch but has not begun: the calls before
+    /// it still hold every tool-concurrency slot, so it waits its turn.
+    Waiting,
     Ok,
     Failed,
     /// The call never finished: killed by the shell timeout or cut off when
@@ -41,6 +46,9 @@ pub enum ToolMessage {
         file_change: Option<FileChange>,
         duration_ms: u64,
     },
+    /// A queued call's turn came: rig freed a slot for it and it is running
+    /// now. A no-op for a call that was running already.
+    Run,
     /// The turn was cut while this call was still running: stop the spinner
     /// and mark the block killed, keeping whatever output streamed so far.
     Kill,
@@ -116,6 +124,14 @@ impl ToolBlock {
         }
     }
 
+    /// Open the block queued rather than running: the call was announced with
+    /// the batch but rig has not given it a concurrency slot yet. The header
+    /// holds a still `◇` until [`ToolMessage::Run`] opens its turn.
+    pub fn queued(mut self) -> Self {
+        self.status = ToolStatus::Waiting;
+        self
+    }
+
     pub fn from_record(record: &ToolRecord) -> Self {
         Self {
             name: record.name.clone(),
@@ -167,8 +183,22 @@ impl ToolBlock {
         (!self.call_id.is_empty()).then_some(self.call_id.as_str())
     }
 
+    /// Whether the call is still in flight — running, or queued waiting for a
+    /// concurrency slot. Events (a finish, a streamed shell chunk, the turn's
+    /// kill) resolve to a block by this; only [`Self::is_running`] animates.
+    pub fn is_active(&self) -> bool {
+        matches!(self.status, ToolStatus::Running | ToolStatus::Waiting)
+    }
+
+    /// Whether the call is executing right now (its header spins).
     pub fn is_running(&self) -> bool {
         self.status == ToolStatus::Running
+    }
+
+    /// Whether the call is queued for a concurrency slot (its header shows the
+    /// waiting glyph, static — nothing of the call has begun).
+    pub fn is_waiting(&self) -> bool {
+        self.status == ToolStatus::Waiting
     }
 
     /// Flip the collapse state of the output rows.
@@ -261,7 +291,9 @@ impl ToolBlock {
 
     pub fn bg(&self) -> Color {
         match self.status {
-            ToolStatus::Running => theme::running_bg(),
+            // A queued call is in flight like a running one: the same block
+            // background, with the header glyph telling the two apart.
+            ToolStatus::Running | ToolStatus::Waiting => theme::running_bg(),
             ToolStatus::Ok => theme::success_bg(),
             ToolStatus::Killed => theme::warning_bg(),
             ToolStatus::Failed => theme::error_bg(),
@@ -271,7 +303,7 @@ impl ToolBlock {
     pub fn update(&mut self, msg: ToolMessage) -> bool {
         match msg {
             ToolMessage::Output { stdout, stderr } => {
-                if self.status != ToolStatus::Running {
+                if !self.is_running() {
                     return false;
                 }
                 self.output = stdout;
@@ -286,7 +318,7 @@ impl ToolBlock {
                 file_change,
                 duration_ms,
             } => {
-                if self.status != ToolStatus::Running {
+                if !self.is_active() {
                     return false;
                 }
                 self.status = finish_status(ok, &self.name, &output);
@@ -300,8 +332,20 @@ impl ToolBlock {
                 self.body_rev += 1;
                 true
             }
+            ToolMessage::Run => {
+                if !self.is_waiting() {
+                    return false;
+                }
+                self.status = ToolStatus::Running;
+                // The header swaps its waiting glyph for the spinner and a
+                // `question` block's body its queued note: the bump keys the body
+                // and estimate caches so neither survives the handover. (Registering
+                // the header as a spinner slot is the turn's job, on its rev.)
+                self.body_rev += 1;
+                true
+            }
             ToolMessage::Kill => {
-                if self.status != ToolStatus::Running {
+                if !self.is_active() {
                     return false;
                 }
                 self.status = ToolStatus::Killed;
@@ -397,6 +441,7 @@ impl ToolBlock {
         let mut header: Vec<Span<'static>> = Vec::new();
         match self.status {
             ToolStatus::Running => header.push(spinner::spinner()),
+            ToolStatus::Waiting => header.push(spinner::queued()),
             ToolStatus::Ok => header.push(
                 Span::raw(if is_worker_call { "❖" } else { "✓" })
                     .fg(if is_worker_call {
@@ -718,19 +763,27 @@ fn push_todo_rows(
     }
 }
 
-/// The bottom meta row of a tool block: `Elapsed 4.5s` while the call is
-/// running (recomputed every frame from the wall clock), `Took 10.3s` once it
-/// finishes — the finished value comes from the core-measured duration. Only
-/// shown for `shows_elapsed` blocks, with the value dimmed like the label so
-/// timing never competes with the block's content.
+/// The bottom meta row of a tool block: `Elapsed 4.5s` while the call runs,
+/// `Queued 4.5s` while it is still waiting for a concurrency slot, `Took 10.3s`
+/// once it finishes — the finished value comes from the core-measured duration.
+/// Only shown for `shows_elapsed` blocks, with the value dimmed like the label
+/// so timing never competes with the block's content. The clock runs from the
+/// batch's announcement either way, so the label changes at the handover and
+/// the number does not jump.
 fn elapsed_line(tool: &ToolBlock) -> Line<'static> {
-    if tool.status == ToolStatus::Running {
+    if tool.is_active() {
         let ms = tool
             .started_at
             .map(|started| started.elapsed().as_millis() as u64)
             .unwrap_or_default();
         Line::from(vec![
-            Span::raw("  Elapsed ").fg(theme::text_muted()).italic(),
+            Span::raw(if tool.is_waiting() {
+                "  Queued "
+            } else {
+                "  Elapsed "
+            })
+            .fg(theme::text_muted())
+            .italic(),
             Span::raw(format_duration_ms(ms))
                 .fg(theme::text_muted())
                 .italic(),
@@ -746,12 +799,16 @@ fn elapsed_line(tool: &ToolBlock) -> Line<'static> {
 }
 
 fn push_question_block_lines(body: &mut BodyBuilder, tool: &ToolBlock) {
-    if tool.status == ToolStatus::Running {
+    if tool.is_active() {
         body.fixed(
-            Span::raw("  Asking...")
-                .fg(theme::text_muted())
-                .italic()
-                .into(),
+            Span::raw(if tool.is_waiting() {
+                "  Queued..."
+            } else {
+                "  Asking..."
+            })
+            .fg(theme::text_muted())
+            .italic()
+            .into(),
         );
         return;
     }
@@ -1121,6 +1178,114 @@ mod tests {
         );
         assert_eq!(grown, block.est());
         let _ = block.view(80, &env);
+    }
+
+    /// One block of a batch that outran the scene's `tool_concurrency`: its call
+    /// was announced but not started.
+    fn queued_block(name: &str, args: &str) -> ToolBlock {
+        ToolBlock::new(
+            name.to_string(),
+            args.to_string(),
+            None,
+            None,
+            Some("c1".into()),
+        )
+        .queued()
+    }
+
+    /// A queued call holds a still `◇` where a running one spins: the block is in
+    /// flight — no result has landed — but nothing of it has started yet.
+    #[test]
+    fn a_queued_block_holds_the_diamond_until_its_turn_comes() {
+        let env = ChatEnv {
+            rev: 0,
+            lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
+        };
+        let mut block = queued_block("run_shell", r#"{"command":"ls"}"#);
+        assert!(block.is_waiting() && block.is_active() && !block.is_running());
+        let text = block_text(&block, &env);
+        assert!(text.starts_with("◇"), "the header waits: {text}");
+
+        assert!(block.update(ToolMessage::Run), "the promotion applies");
+        assert!(block.is_running() && !block.is_waiting());
+        let text = block_text(&block, &env);
+        assert!(!text.contains('◇'), "the glyph is gone: {text}");
+        let glyph = text.chars().next().expect("a header glyph");
+        assert!(
+            ('\u{2800}'..='\u{28ff}').contains(&glyph),
+            "the promoted call spins its braille spinner: {text}"
+        );
+        assert!(
+            !block.update(ToolMessage::Run),
+            "a call that already runs cannot be promoted twice"
+        );
+    }
+
+    /// A result settles a call that was still queued (the events carry the call's
+    /// own id, so they land whether or not its turn came), and the turn's kill cuts
+    /// one that never started.
+    #[test]
+    fn a_queued_block_takes_its_own_result_or_kill() {
+        let mut block = queued_block("read_file", r#"{"path":"src/main.rs"}"#);
+        assert!(block.update(ToolMessage::Finish {
+            ok: true,
+            output: "one\ntwo".into(),
+            stderr: String::new(),
+            file_change: None,
+            duration_ms: 7,
+        }));
+        assert_eq!(block.status, ToolStatus::Ok);
+        assert_eq!(
+            block.duration_ms, 7,
+            "the finished row keeps its measurement"
+        );
+
+        let mut killed = queued_block("run_shell", r#"{"command":"ls"}"#);
+        assert!(killed.update(ToolMessage::Kill), "a queued call is cut too");
+        assert_eq!(killed.status, ToolStatus::Killed);
+        assert!(!killed.update(ToolMessage::Kill), "and only once");
+    }
+
+    /// The meta row of a queued `shows_elapsed` block counts the wait rather than
+    /// claiming time spent running; the handover relabels it without resetting the
+    /// clock the batch's announcement started.
+    #[test]
+    fn a_queued_block_meta_row_counts_its_wait() {
+        let env = ChatEnv {
+            rev: 0,
+            lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
+        };
+        let mut block = queued_block("explore_workspace", r#"{"task":"map it"}"#);
+        let text = block_text(&block, &env);
+        assert!(text.contains("Queued"), "{text}");
+        assert!(!text.contains("Elapsed"), "{text}");
+
+        block.update(ToolMessage::Run);
+        let text = block_text(&block, &env);
+        assert!(
+            text.contains("Elapsed") && !text.contains("Queued"),
+            "{text}"
+        );
+    }
+
+    /// A queued `question` block has not reached the user, so its body waits rather
+    /// than claiming to ask: the promotion must rebuild the cached body.
+    #[test]
+    fn a_queued_question_waits_in_its_body() {
+        let env = ChatEnv {
+            rev: 0,
+            lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
+        };
+        let mut block = queued_block("question", r#"{"questions":[]}"#);
+        assert!(block_text(&block, &env).contains("Queued..."));
+
+        block.update(ToolMessage::Run);
+        let text = block_text(&block, &env);
+        assert!(text.contains("Asking..."), "{text}");
+        assert!(!text.contains("Queued..."), "{text}");
     }
 
     fn finished_edit_block() -> ToolBlock {

@@ -1255,14 +1255,31 @@ impl SessionScreen {
                 self.status = Some("Thinking...".to_string());
                 self.retry = None;
             }
-            ChatMessage::ToolStarted { name, .. } => {
+            ChatMessage::ToolStarted { name, waiting, .. } => {
                 self.busy_kind = BusyKind::Tool;
-                self.status = Some(format!("Calling tool: {name}"));
+                // Only a call that is really running names the status row: a
+                // queued one would claim a tool the model has not reached yet.
+                if !waiting {
+                    self.status = Some(format!("Calling tool: {name}"));
+                }
                 self.retry = None;
             }
-            ChatMessage::WorkerStarted { name, .. } => {
+            ChatMessage::ToolRunning { name, worker, .. } => {
                 self.busy_kind = BusyKind::Tool;
-                self.status = Some(format!("Spawned worker: {name}"));
+                // A worker-tool block (the empty worker marker) reports its spawn
+                // like its start did, rather than claiming a tool called `explore`.
+                self.status = Some(if worker.as_deref() == Some("") {
+                    format!("Spawned worker: {name}")
+                } else {
+                    format!("Calling tool: {name}")
+                });
+                self.retry = None;
+            }
+            ChatMessage::WorkerStarted { name, waiting, .. } => {
+                self.busy_kind = BusyKind::Tool;
+                if !waiting {
+                    self.status = Some(format!("Spawned worker: {name}"));
+                }
                 self.retry = None;
             }
             ChatMessage::ToolFinished {
@@ -2598,6 +2615,7 @@ mod tests {
             worker: None,
             spawn: None,
             call_id: None,
+            waiting: false,
         }));
         assert!(screen.is_busy());
         assert_eq!(screen.busy_kind, BusyKind::Tool);

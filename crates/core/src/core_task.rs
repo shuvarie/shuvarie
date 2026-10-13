@@ -1888,6 +1888,130 @@ struct PendingToolCall {
     started: std::time::Instant,
 }
 
+/// Which rig tool batch a call belongs to (see [`ToolGate`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ToolBatch {
+    /// A call of the manager stream's own batch: the host tools and the
+    /// worker-tool calls alike — a worker tool is a dynamic tool of that same
+    /// batch, so it spends from the same concurrency budget.
+    Manager,
+    /// A call inside one worker run's batch, keyed by the process-wide spawn id
+    /// of that run (`run_worker_agent` tags every inner call with it).
+    Worker(u64),
+}
+
+/// The batch a call belongs to, derived from the worker tag the stream items
+/// carry: worker-internal calls are the ones tagged with an owning worker name
+/// (`spawn` rides along); everything else is the manager's own batch — a
+/// worker-tool call of the manager included, whose result carries the run's
+/// spawn tag but whose call still spent a manager slot.
+fn tool_batch(worker: Option<&str>, spawn: Option<u64>) -> ToolBatch {
+    match worker {
+        None => ToolBatch::Manager,
+        Some(_) => ToolBatch::Worker(spawn.unwrap_or_default()),
+    }
+}
+
+/// A call the model emitted for a batch: what the UI needs to find the block
+/// again once the call's turn to run comes.
+#[derive(Debug)]
+struct QueuedCall {
+    call_id: String,
+    name: String,
+    worker: Option<String>,
+    spawn: Option<u64>,
+}
+
+#[derive(Default)]
+struct BatchQueue {
+    /// Started calls whose result has not arrived yet, in start order.
+    running: Vec<String>,
+    /// Calls emitted for the batch that have not started: they wait for a slot,
+    /// in call order — the order rig polls them in.
+    queued: std::collections::VecDeque<QueuedCall>,
+}
+
+/// Splits a batched tool call into running or waiting.
+///
+/// rig emits every call of an assistant message's tool batch up front, before
+/// any of them executes, and then starts them in call order at most
+/// `tool_concurrency` at a time. A call past the free slots has therefore not
+/// begun: it waits for an earlier call to settle. Tracking that split lets the
+/// UI show a queued call as waiting instead of spinning every block of the
+/// batch until its slowest call returns.
+struct ToolGate {
+    /// Slots per batch: the scene's `tool_concurrency` for the manager stream,
+    /// and rig's sequential default inside a worker run (shuvarie never sets a
+    /// worker run's concurrency).
+    concurrency: usize,
+    batches: std::collections::HashMap<ToolBatch, BatchQueue>,
+}
+
+impl ToolGate {
+    fn new(concurrency: usize) -> Self {
+        Self {
+            concurrency: concurrency.max(1),
+            batches: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Record a call the model emitted for `batch`. `true` when the call takes
+    /// one of the batch's slots and runs now; `false` when the batch's earlier
+    /// calls hold them all and it queues behind them.
+    fn start(&mut self, batch: ToolBatch, call: QueuedCall) -> bool {
+        let queue = self.batches.entry(batch).or_default();
+        if queue.running.len() < self.concurrency {
+            queue.running.push(call.call_id);
+            true
+        } else {
+            queue.queued.push_back(call);
+            false
+        }
+    }
+
+    /// Record that the call `call_id` of `batch` settled, freeing its slot: the
+    /// call that takes the slot, if one waited for it. rig starts a batch's
+    /// calls in call order, so that is the queue's front.
+    fn settle(&mut self, batch: ToolBatch, call_id: &str) -> Option<QueuedCall> {
+        let queue = self.batches.get_mut(&batch)?;
+        match queue.running.iter().position(|running| running == call_id) {
+            Some(index) => {
+                queue.running.remove(index);
+            }
+            // A call that never ran — a sibling failed the batch fast, or a hook
+            // skipped it — holds no slot: drop it from the queue instead.
+            None => queue.queued.retain(|queued| queued.call_id != call_id),
+        }
+        let promoted = if queue.running.len() < self.concurrency {
+            queue.queued.pop_front()
+        } else {
+            None
+        };
+        if let Some(call) = &promoted {
+            queue.running.push(call.call_id.clone());
+        }
+        // The batch is over once the last of its calls settled: the next batch
+        // under this key starts from empty slots.
+        if queue.running.is_empty() && queue.queued.is_empty() {
+            self.batches.remove(&batch);
+        }
+        promoted
+    }
+}
+
+/// Announce that a queued call took a free slot and began executing, so the UI
+/// can leave the block's waiting state.
+async fn announce_tool_running(event_tx: &Sender<Event>, call: QueuedCall) {
+    let _ = event_tx
+        .send(Event::ToolRunning {
+            name: call.name,
+            worker: call.worker,
+            spawn: call.spawn,
+            call_id: call.call_id,
+        })
+        .await;
+}
+
 /// The provisional title for a new session: a trimmed prefix of the first
 /// user prompt, capped at `max_chars` (the `ui.title` `max-chars` property),
 /// or "Untitled session" for an empty prompt.
@@ -2880,6 +3004,7 @@ impl CoreCtx {
                     stream_done,
                     steer_shared,
                     deny_cut_shared,
+                    tool_concurrency,
                 )
                 .await;
             })
@@ -3264,6 +3389,7 @@ async fn stream_stream_to_events(
     stream_done_tx: Sender<StreamOutcome>,
     steer: SteerSignal,
     deny_cut: crate::permissions::DenyCut,
+    tool_concurrency: usize,
 ) {
     use futures_util::StreamExt;
 
@@ -3284,6 +3410,10 @@ async fn stream_stream_to_events(
         std::collections::HashMap::new();
     let mut pending_worker_starts: std::collections::HashMap<String, std::time::Instant> =
         std::collections::HashMap::new();
+    // Which calls of each rig tool batch hold a concurrency slot and which are
+    // queued behind them, so an announced call is shown running only once it
+    // really is (see [`ToolGate`]).
+    let mut tool_gate = ToolGate::new(tool_concurrency);
     let mut outcome = StreamOutcome::Finished;
     // Set when the manager stream reaches `Done`. Sending `Event::StreamDone`
     // is deferred until the merged stream is exhausted, so worker receiver
@@ -3414,6 +3544,15 @@ async fn stream_stream_to_events(
                         started,
                     });
                 }
+                let waiting = !tool_gate.start(
+                    tool_batch(worker.as_deref(), spawn),
+                    QueuedCall {
+                        call_id: call_id.clone(),
+                        name: name.clone(),
+                        worker: worker.clone(),
+                        spawn,
+                    },
+                );
                 let _ = event_tx
                     .send(Event::ToolStarted {
                         name,
@@ -3421,6 +3560,7 @@ async fn stream_stream_to_events(
                         worker,
                         spawn,
                         call_id,
+                        waiting,
                     })
                     .await;
                 if is_main {
@@ -3507,6 +3647,7 @@ async fn stream_stream_to_events(
                     });
                     ts.tool_records = turn_tool_records.clone();
                 }
+                let promoted = tool_gate.settle(tool_batch(worker.as_deref(), spawn), &call_id);
                 let _ = event_tx
                     .send(Event::ToolFinished {
                         name,
@@ -3520,6 +3661,12 @@ async fn stream_stream_to_events(
                         call_id,
                     })
                     .await;
+                // Announced after the settled call, so the status row ends up
+                // naming the tool that is running now rather than the one that
+                // just returned.
+                if let Some(call) = promoted {
+                    announce_tool_running(&event_tx, call).await;
+                }
                 if is_main {
                     action = if pending_tool_args.is_empty() && pending_worker_starts.is_empty() {
                         ActionPhase::Between
@@ -3533,12 +3680,26 @@ async fn stream_stream_to_events(
                 args,
                 call_id,
             } => {
+                // A worker-tool call is a dynamic tool of the manager stream's
+                // own batch, so it queues against the same concurrency budget.
+                // The TUI marks worker-tool blocks with an empty worker name,
+                // which the promotion carries back to find the block again.
+                let waiting = !tool_gate.start(
+                    ToolBatch::Manager,
+                    QueuedCall {
+                        call_id: call_id.clone(),
+                        name: name.clone(),
+                        worker: Some(String::new()),
+                        spawn: None,
+                    },
+                );
                 pending_worker_starts.insert(call_id.clone(), std::time::Instant::now());
                 let _ = event_tx
                     .send(Event::WorkerStarted {
                         name,
                         args,
                         call_id,
+                        waiting,
                     })
                     .await;
                 action = ActionPhase::Tools;
@@ -3557,6 +3718,7 @@ async fn stream_stream_to_events(
                     .remove(&call_id)
                     .map(|started| started.elapsed().as_millis() as u64)
                     .unwrap_or_default();
+                let promoted = tool_gate.settle(ToolBatch::Manager, &call_id);
                 let _ = event_tx
                     .send(Event::WorkerFinished {
                         name,
@@ -3566,6 +3728,9 @@ async fn stream_stream_to_events(
                         call_id,
                     })
                     .await;
+                if let Some(call) = promoted {
+                    announce_tool_running(&event_tx, call).await;
+                }
                 action = if pending_tool_args.is_empty() && pending_worker_starts.is_empty() {
                     ActionPhase::Between
                 } else {

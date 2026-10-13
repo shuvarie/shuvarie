@@ -258,6 +258,7 @@ async fn stream_events_forward_and_accumulate_usage() {
             stream_done_tx,
             SteerSignal::default(),
             DenyCut::default(),
+            1,
         )
         .await;
     });
@@ -355,6 +356,7 @@ async fn committed_turn_records_model_use_and_broadcasts() {
             stream_done_tx,
             SteerSignal::default(),
             DenyCut::default(),
+            1,
         )
         .await;
     });
@@ -448,6 +450,7 @@ async fn committed_turn_persists_the_last_main_request_usage() {
             stream_done_tx,
             SteerSignal::default(),
             DenyCut::default(),
+            1,
         )
         .await;
     });
@@ -512,6 +515,7 @@ async fn stream_error_schedules_turn_retry_and_leaves_session_clean() {
             stream_done_tx,
             SteerSignal::default(),
             DenyCut::default(),
+            1,
         )
         .await;
     });
@@ -615,6 +619,7 @@ async fn stream_done_waits_for_queued_worker_items_to_drain() {
             stream_done_tx,
             SteerSignal::default(),
             DenyCut::default(),
+            1,
         )
         .await;
     });
@@ -739,6 +744,7 @@ async fn worker_events_forward_and_usage_accumulates() {
             stream_done_tx,
             SteerSignal::default(),
             DenyCut::default(),
+            1,
         )
         .await;
     });
@@ -836,6 +842,7 @@ async fn overflow_without_plan_reports_error_without_compaction_events() {
             stream_done_tx,
             SteerSignal::default(),
             DenyCut::default(),
+            1,
         )
         .await;
     });
@@ -874,18 +881,26 @@ async fn spawn_preempt_stream(
     items: Vec<StreamItem>,
     steer: SteerSignal,
     deny_cut: crate::permissions::DenyCut,
+    tool_concurrency: usize,
 ) -> (
     Arc<Mutex<Session>>,
     tokio::sync::mpsc::Receiver<Event>,
     tokio::sync::mpsc::Receiver<StreamOutcome>,
 ) {
-    spawn_stream_core(Box::pin(futures_util::stream::iter(items)), steer, deny_cut).await
+    spawn_stream_core(
+        Box::pin(futures_util::stream::iter(items)),
+        steer,
+        deny_cut,
+        tool_concurrency,
+    )
+    .await
 }
 
 async fn spawn_stream_core(
     stream: shuvarie_llm::StreamStream,
     steer: SteerSignal,
     deny_cut: crate::permissions::DenyCut,
+    tool_concurrency: usize,
 ) -> (
     Arc<Mutex<Session>>,
     tokio::sync::mpsc::Receiver<Event>,
@@ -922,6 +937,7 @@ async fn spawn_stream_core(
             stream_done_tx,
             steer,
             deny_cut,
+            tool_concurrency,
         )
         .await;
     });
@@ -981,6 +997,7 @@ async fn steered_prompt_cuts_after_text_segment_before_tools_run() {
         ],
         steer,
         DenyCut::default(),
+        1,
     )
     .await;
 
@@ -1030,6 +1047,7 @@ async fn steered_prompt_cuts_after_thinking_segment() {
         ],
         steer,
         DenyCut::default(),
+        1,
     )
     .await;
 
@@ -1074,6 +1092,7 @@ async fn steered_prompt_waits_for_full_turn_without_boundary() {
         ],
         steer,
         DenyCut::default(),
+        1,
     )
     .await;
 
@@ -1122,6 +1141,7 @@ async fn steered_prompt_ignores_worker_activity() {
         ],
         steer,
         DenyCut::default(),
+        1,
     )
     .await;
 
@@ -1182,6 +1202,7 @@ async fn steered_prompt_cuts_when_worker_batch_settles() {
         ],
         steer,
         DenyCut::default(),
+        1,
     )
     .await;
 
@@ -1232,6 +1253,7 @@ async fn steered_prompt_cuts_only_after_whole_multi_tool_batch() {
         ],
         steer,
         DenyCut::default(),
+        1,
     )
     .await;
 
@@ -1294,7 +1316,7 @@ async fn permission_deny_cuts_the_turn_after_the_denied_result() {
         }),
     );
     let (session, mut event_rx, mut stream_done_rx) =
-        spawn_stream_core(stream, SteerSignal::default(), deny_cut.clone()).await;
+        spawn_stream_core(stream, SteerSignal::default(), deny_cut.clone(), 1).await;
 
     // The tool denies while its call runs: after the start, before the
     // result is streamed.
@@ -1363,6 +1385,7 @@ async fn deny_after_done_cannot_discard_a_finished_turn() {
         ],
         SteerSignal::default(),
         deny_cut.clone(),
+        1,
     )
     .await;
 
@@ -1420,6 +1443,7 @@ async fn steered_prompt_waits_for_thinking_to_complete() {
         ],
         steer,
         DenyCut::default(),
+        1,
     )
     .await;
 
@@ -1466,6 +1490,7 @@ async fn steered_prompt_waits_for_text_to_complete() {
         ],
         steer,
         DenyCut::default(),
+        1,
     )
     .await;
 
@@ -1520,6 +1545,7 @@ async fn steered_prompt_cuts_when_worker_straggler_result_lags() {
         ],
         steer,
         DenyCut::default(),
+        1,
     )
     .await;
 
@@ -1557,6 +1583,7 @@ async fn unarmed_signal_never_cuts() {
         ],
         steer,
         DenyCut::default(),
+        1,
     )
     .await;
 
@@ -1615,6 +1642,7 @@ async fn steered_prompt_cuts_mid_stream_when_armed_between_actions() {
             stream_done_tx,
             steer_shared,
             DenyCut::default(),
+            1,
         )
         .await;
     });
@@ -1817,6 +1845,7 @@ async fn tool_result_clears_the_pending_call() {
             stream_done_tx,
             SteerSignal::default(),
             DenyCut::default(),
+            1,
         )
         .await;
     });
@@ -1829,6 +1858,194 @@ async fn tool_result_clears_the_pending_call() {
     let guard = session.lock().await;
     assert_eq!(guard.tool_records.len(), 1);
     assert!(!guard.tool_records[0].killed);
+}
+
+/// One call the model emitted, as the gate sees it.
+fn gate_call(call_id: &str) -> QueuedCall {
+    QueuedCall {
+        call_id: call_id.into(),
+        name: "read_file".into(),
+        worker: None,
+        spawn: None,
+    }
+}
+
+/// rig emits a whole batch's calls at once: only the first `concurrency` of them
+/// run, and each freed slot starts the next one in call order.
+#[test]
+fn the_gate_queues_calls_past_the_batch_concurrency() {
+    let mut gate = ToolGate::new(2);
+    assert!(gate.start(ToolBatch::Manager, gate_call("c1")));
+    assert!(gate.start(ToolBatch::Manager, gate_call("c2")));
+    assert!(!gate.start(ToolBatch::Manager, gate_call("c3")));
+    assert!(!gate.start(ToolBatch::Manager, gate_call("c4")));
+
+    // c1 settles: c3 — the front of the queue — takes its slot, not c4.
+    let promoted = gate.settle(ToolBatch::Manager, "c1").expect("c3 waits");
+    assert_eq!(promoted.call_id, "c3");
+    let promoted = gate.settle(ToolBatch::Manager, "c2").expect("c4 waits");
+    assert_eq!(promoted.call_id, "c4");
+    // Both slots are taken again, so nothing else waits.
+    assert!(gate.settle(ToolBatch::Manager, "c3").is_none());
+    assert!(gate.settle(ToolBatch::Manager, "c4").is_none());
+    assert!(gate.batches.is_empty(), "the drained batch is forgotten");
+}
+
+/// The next assistant message's batch starts from empty slots: a call left over
+/// from the previous one must not keep it short.
+#[test]
+fn the_gate_starts_the_next_batch_from_empty_slots() {
+    let mut gate = ToolGate::new(1);
+    assert!(gate.start(ToolBatch::Manager, gate_call("c1")));
+    assert!(!gate.start(ToolBatch::Manager, gate_call("c2")));
+    assert!(gate.settle(ToolBatch::Manager, "c1").is_some());
+    assert!(gate.settle(ToolBatch::Manager, "c2").is_none());
+    // A fresh batch (the next model turn's tools) runs its first call.
+    assert!(gate.start(ToolBatch::Manager, gate_call("c3")));
+}
+
+/// A call that never ran — dropped because a sibling failed the batch fast —
+/// settles without freeing a slot, and cannot wedge the calls behind it.
+#[test]
+fn the_gate_settles_a_call_that_never_ran() {
+    let mut gate = ToolGate::new(1);
+    assert!(gate.start(ToolBatch::Manager, gate_call("c1")));
+    assert!(!gate.start(ToolBatch::Manager, gate_call("c2")));
+    // c2 was dropped without running: it holds no slot, so settling it starts
+    // nothing — c1 still owns the only one.
+    assert!(gate.settle(ToolBatch::Manager, "c2").is_none());
+    assert!(gate.settle(ToolBatch::Manager, "c1").is_none());
+    assert!(gate.batches.is_empty(), "the drained batch is forgotten");
+}
+
+/// Worker-internal calls form their own batch (rig runs them sequentially), and
+/// a worker-tool call of the manager spends from the manager batch's slots.
+#[test]
+fn the_gate_keeps_batches_apart() {
+    let mut gate = ToolGate::new(1);
+    assert!(gate.start(ToolBatch::Manager, gate_call("m1")));
+    assert!(!gate.start(ToolBatch::Manager, gate_call("m2")));
+    // The worker run's own batch is unaffected by the manager's full slot.
+    let mut inner = gate_call("w1");
+    inner.worker = Some("explore_workspace".into());
+    inner.spawn = Some(7);
+    assert!(gate.start(ToolBatch::Worker(7), inner));
+    // And the manager's queued call takes the manager's freed slot.
+    let promoted = gate.settle(ToolBatch::Manager, "m1").expect("m2 waits");
+    assert_eq!(promoted.call_id, "m2");
+}
+
+/// A batched assistant message announces every call up front: the calls past the
+/// scene's `tool_concurrency` are announced waiting (their block opens without a
+/// spinner) and are started, one per freed slot, when the call before them
+/// settles.
+#[tokio::test]
+async fn batched_calls_are_announced_waiting_and_start_in_call_order() {
+    let (session, mut event_rx, mut done_rx) = spawn_preempt_stream(
+        vec![
+            main_tool_start("read_file", "c1"),
+            main_tool_start("read_file", "c2"),
+            main_tool_start("read_file", "c3"),
+            main_tool_result("read_file", "c1"),
+            main_tool_result("read_file", "c2"),
+            main_tool_result("read_file", "c3"),
+            StreamItem::Done {
+                text: "done".into(),
+                usage: TokenUsage::default(),
+            },
+        ],
+        SteerSignal::default(),
+        DenyCut::default(),
+        1,
+    )
+    .await;
+
+    let mut log = Vec::new();
+    while let Some(event) = event_rx.recv().await {
+        match event {
+            Event::ToolStarted {
+                call_id, waiting, ..
+            } => log.push(if waiting {
+                format!("wait {call_id}")
+            } else {
+                format!("run {call_id}")
+            }),
+            Event::ToolRunning { call_id, .. } => log.push(format!("run {call_id}")),
+            Event::ToolFinished { call_id, .. } => log.push(format!("done {call_id}")),
+            Event::StreamDone { .. } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(
+        log,
+        [
+            "run c1", "wait c2", "wait c3", "done c1", "run c2", "done c2", "run c3", "done c3"
+        ],
+        "one call runs at a time, queued ones start in call order"
+    );
+    drop(session);
+    assert!(done_rx.try_recv().is_ok(), "the turn still settles");
+}
+
+/// A spawned worker is a dynamic tool of the manager's batch: with one slot free
+/// it is announced waiting like any other call, and the promotion names it with
+/// the empty worker name the UI's worker-tool blocks carry.
+#[tokio::test]
+async fn a_queued_worker_call_is_promoted_with_its_worker_marker() {
+    let (_session, mut event_rx, mut done_rx) = spawn_preempt_stream(
+        vec![
+            main_tool_start("read_file", "c1"),
+            StreamItem::WorkerStart {
+                name: "explore_workspace".into(),
+                args: serde_json::json!({"task": "find it"}),
+                call_id: "w1".into(),
+            },
+            main_tool_result("read_file", "c1"),
+            StreamItem::WorkerResult {
+                name: "explore_workspace".into(),
+                output: "found".into(),
+                ok: true,
+                spawn: Some(1),
+                call_id: "w1".into(),
+            },
+            StreamItem::Done {
+                text: "done".into(),
+                usage: TokenUsage::default(),
+            },
+        ],
+        SteerSignal::default(),
+        DenyCut::default(),
+        1,
+    )
+    .await;
+
+    let mut waiting = None;
+    let mut promoted = None;
+    while let Some(event) = event_rx.recv().await {
+        match event {
+            Event::WorkerStarted {
+                call_id,
+                waiting: queued,
+                ..
+            } => waiting = Some((call_id, queued)),
+            Event::ToolRunning {
+                call_id, worker, ..
+            } => promoted = Some((call_id, worker)),
+            Event::StreamDone { .. } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(
+        waiting,
+        Some(("w1".to_string(), true)),
+        "the worker call waits behind the running tool"
+    );
+    assert_eq!(
+        promoted,
+        Some(("w1".to_string(), Some(String::new()))),
+        "the promotion matches the UI's worker-tool block"
+    );
+    assert!(done_rx.try_recv().is_ok());
 }
 
 /// The commit path reports the turn's metadata just before its terminal event
@@ -1901,6 +2118,7 @@ async fn committed_turn_reports_and_persists_its_meta() {
             stream_done_tx,
             SteerSignal::default(),
             DenyCut::default(),
+            1,
         )
         .await;
     });
@@ -2008,6 +2226,7 @@ async fn text_runs_seal_at_tool_gaps() {
             stream_done_tx,
             SteerSignal::default(),
             DenyCut::default(),
+            1,
         )
         .await;
     });
@@ -2350,7 +2569,7 @@ async fn shell_chunks_resolve_to_their_own_concurrent_calls() {
         },
     ];
     let (_session, mut event_rx, mut done_rx) =
-        spawn_preempt_stream(items, SteerSignal::default(), DenyCut::default()).await;
+        spawn_preempt_stream(items, SteerSignal::default(), DenyCut::default(), 1).await;
 
     let mut chunks: Vec<(Option<String>, Option<String>, String)> = Vec::new();
     while let Some(event) = event_rx.recv().await {
@@ -2424,7 +2643,7 @@ async fn ambiguous_shell_chunk_stays_unresolved() {
         },
     ];
     let (_session, mut event_rx, _done_rx) =
-        spawn_preempt_stream(items, SteerSignal::default(), DenyCut::default()).await;
+        spawn_preempt_stream(items, SteerSignal::default(), DenyCut::default(), 1).await;
 
     while let Some(event) = event_rx.recv().await {
         if let Event::ToolOutput { call_id, .. } = event {

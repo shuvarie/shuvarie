@@ -898,7 +898,10 @@ async fn stream_via(
     // `tool_concurrency` caps how many tools run at once within an assistant
     // message — a batch of worker briefs in an orchestration scene spawns in
     // parallel; sequential (`1`) stays the unset default. Streamed output
-    // ordering is preserved either way.
+    // ordering is preserved either way. rig announces every call of the batch
+    // before any of them runs, so the calls past the limit start only as earlier
+    // ones settle: the core tells the two apart (its `ToolGate`) to show the
+    // queued blocks as waiting rather than spinning them all.
     let stream = agent
         .prompt(user_msg)
         .history(rig_history)

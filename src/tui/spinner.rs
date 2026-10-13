@@ -149,6 +149,17 @@ pub fn spinner() -> Span<'static> {
     Span::raw(spinner_frame()).fg(theme::accent())
 }
 
+/// The header glyph of a tool call queued behind its batch's tool-concurrency
+/// limit: a hollow diamond, held still (nothing of the call has started, so
+/// there is no rotation to animate) and dimmed to read as *not yet* next to a
+/// running block's spinner.
+pub fn queued() -> Span<'static> {
+    Span::raw(QUEUED).fg(theme::text_muted())
+}
+
+/// The waiting glyph itself, one cell wide like [`FRAMES`].
+const QUEUED: &str = "◇";
+
 /// The wide status-row spinner shown while a turn was sent but the model has
 /// not produced its first output yet.
 pub fn initializing_spinner() -> Span<'static> {
@@ -202,5 +213,8 @@ mod tests {
         for frame in FRAMES {
             assert_eq!(frame.chars().count(), 1, "inline frame {frame:?}");
         }
+        // The queued glyph shares the inline spinner's cell, so a block header
+        // does not shift when its call starts running.
+        assert_eq!(QUEUED.chars().count(), 1, "queued glyph {QUEUED:?}");
     }
 }

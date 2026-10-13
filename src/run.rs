@@ -53,8 +53,18 @@ pub async fn run_cli(
                 print!("{content}");
                 let _ = std::io::stdout().flush();
             }
-            Event::ToolStarted { name, worker, .. } => {
-                eprintln!("{}", tool_started_line(&name, worker.as_deref()));
+            Event::ToolStarted {
+                name,
+                worker,
+                waiting,
+                ..
+            } => {
+                eprintln!("{}", tool_started_line(&name, worker.as_deref(), waiting));
+            }
+            // A queued call's turn came: it is starting now, so it gets the same
+            // line any other call that begins executing gets.
+            Event::ToolRunning { name, worker, .. } => {
+                eprintln!("{}", tool_started_line(&name, worker.as_deref(), false));
             }
             Event::ToolFinished {
                 name,
@@ -68,8 +78,9 @@ pub async fn run_cli(
                     tool_finished_line(&name, worker.as_deref(), ok, duration_ms)
                 );
             }
-            Event::WorkerStarted { name, .. } => {
-                eprintln!("  ▸ {name} (worker)");
+            Event::WorkerStarted { name, waiting, .. } => {
+                let suffix = if waiting { ", queued" } else { "" };
+                eprintln!("  ▸ {name} (worker{suffix})");
             }
             Event::WorkerFinished {
                 name,
@@ -175,10 +186,19 @@ fn terminal_outcome(event: &Event) -> Option<Outcome> {
     }
 }
 
-fn tool_started_line(name: &str, worker: Option<&str>) -> String {
-    match worker {
-        Some(worker) => format!("  [worker {worker}] {name} …"),
-        None => format!("  {name} …"),
+/// The line for a call the model emitted. A queued one has not begun — the
+/// calls before it hold every concurrency slot — so it is marked instead of
+/// reported as started; [`Event::ToolRunning`] reports the same line once it
+/// really begins.
+fn tool_started_line(name: &str, worker: Option<&str>, waiting: bool) -> String {
+    let prefix = match worker {
+        Some(worker) => format!("  [worker {worker}] "),
+        None => "  ".to_string(),
+    };
+    if waiting {
+        format!("{prefix}{name} (queued)")
+    } else {
+        format!("{prefix}{name} …")
     }
 }
 
@@ -254,10 +274,20 @@ mod tests {
 
     #[test]
     fn tool_lines_name_the_worker_when_present() {
-        assert_eq!(tool_started_line("read_file", None), "  read_file …");
+        assert_eq!(tool_started_line("read_file", None, false), "  read_file …");
         assert_eq!(
-            tool_started_line("read_file", Some("explore")),
+            tool_started_line("read_file", Some("explore"), false),
             "  [worker explore] read_file …"
+        );
+        // A queued call has not started: it is marked rather than reported as
+        // running, so a piped log does not claim work the model has not reached.
+        assert_eq!(
+            tool_started_line("read_file", None, true),
+            "  read_file (queued)"
+        );
+        assert_eq!(
+            tool_started_line("read_file", Some("explore"), true),
+            "  [worker explore] read_file (queued)"
         );
         assert_eq!(
             tool_finished_line("read_file", None, true, 12),
