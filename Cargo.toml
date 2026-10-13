@@ -58,8 +58,18 @@ shuvarie-core.workspace = true
 shuvarie-db.workspace = true
 shuvarie-highlight.workspace = true
 shuvarie-llm.workspace = true
+# The scene's entrance is a shader-style effect over the finished buffer, which
+# is what `tachyonfx` is for. Only `std` and `std-duration` are wanted: the
+# default `dsl` feature pulls in `anpa` for a macro DSL nothing here uses, and
+# `std-duration` makes its `Duration` the std one the render clock already
+# hands us.
+tachyonfx = { version = "0.25", default-features = false, features = [
+    "std",
+    "std-duration",
+] }
 tempfile.workspace = true
 termina = { version = "0.3", features = ["event-stream"] }
+tui-big-text = "0.8"
 tui-popup = "0.7"
 tui-scrollbar = "0.2.8"
 tokio.workspace = true

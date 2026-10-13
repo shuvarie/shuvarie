@@ -14,7 +14,7 @@ use crate::tui::utils::num::fmt_scaled_number;
 use super::list::{render_list_item_line, scroll_offset_for};
 use super::registry::RegistryManager;
 use super::search::{Search, SearchMessage, filter_indices};
-use super::{add_provider::centered_rect, popup, theme};
+use super::{add_provider::dialog_rect, popup, theme};
 
 use shuvarie_core::{Connections, Model};
 
@@ -493,12 +493,17 @@ impl ModelPicker {
         self.recompute_offset();
     }
 
-    pub fn view(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool) {
+    pub fn view(&self, frame: &mut Frame<'_>, area: Rect, dimmed: bool, fullscreen: bool) {
         if !self.open {
             return;
         }
-        let popup = centered_rect(60, 60, area);
-        popup::dialog(frame, popup, "Select Model", dimmed, |inner, buf| {
+        let popup = dialog_rect(area, fullscreen, 60, 60);
+        let title = if fullscreen {
+            "Choose a model"
+        } else {
+            "Select Model"
+        };
+        popup::dialog(frame, popup, title, dimmed, |inner, buf| {
             let [input_area, list_area, hint_area] =
                 Layout::vertical([Length(1), Min(0), Length(1)]).areas(inner);
 
