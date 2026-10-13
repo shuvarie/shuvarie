@@ -11,7 +11,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::tui::theme;
 use crate::tui::utils::{alt, ctrl};
 
-pub use version_bar::VersionBar;
+pub use version_bar::{VersionBar, version_label};
 
 mod version_bar;
 

@@ -28,7 +28,11 @@ a configured provider.
   can share a cell. Each drop crosses its own diagonal at one cell per row (`DRIFT`), painting a
   `\` shaft that trails `TRAIL` cells back up and to the left of its bright tip; period and phase
   come from a hash of the entry cell, so it needs no state: `view` paints whatever frame the
-  `FrameIndexer` clock selects and `next_wake` reports when the loop should come back.
+  `FrameIndexer` clock selects and `next_wake` reports when the loop should come back. The running
+  version (`components::version_label`, shared with the session's version bar so the two cannot
+  disagree) is stamped dim in the top-right corner: the right end of the top row, dropped whole when
+  the viewport is narrower than the label, and painted *before* the wordmark so that on a terminal
+  short enough to bring the two onto one row `BigText`'s opaque box is what wins.
 - `src/tui/app.rs`: `welcome.open` is the single "onboarding is running" flag. `App::view` skips
   every session widget while it is set, `welcome_overlay(stage)` maps the stage onto the overlay
   that routes that page's keys, pastes, and registry events (`Welcome` for the interstitial pages,

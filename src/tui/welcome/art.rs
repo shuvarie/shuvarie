@@ -1,7 +1,8 @@
 //! The welcome screen's ASCII scene: a dim chess-rook watermark hanging off the
-//! bottom-right corner, and a rain of arrows falling down and to the right
-//! across the background. The `Shuvarie` wordmark and the continue caption
-//! paint over it, so the scene reads as quiet chrome behind the text.
+//! bottom-right corner, a rain of arrows falling down and to the right across
+//! the background, and the running version stamped dim in the top-right corner.
+//! The `Shuvarie` wordmark and the continue caption paint over it, so the scene
+//! reads as quiet chrome behind the text.
 //!
 //! The rook is the artwork from the `shuvarie-artwork` repository, embedded in
 //! the binary and painted as half blocks in the theme's dim tone. Its placement
@@ -24,6 +25,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 use tui_big_text::{BigText, PixelSize};
 
+use crate::tui::components::version_label;
 use crate::tui::theme;
 
 /// The rook artwork, vendored from the `shuvarie-artwork` repository's
@@ -146,6 +148,10 @@ pub fn paint(buf: &mut Buffer, area: Rect, rain_frame: usize) {
     if let (Some(rook), Some(mask)) = (placement.rook, mask) {
         render_rook(buf, area, &rook, mask);
     }
+    // The version is chrome and the wordmark is the subject, so the stamp goes
+    // down first: on a terminal short enough to bring the two onto the same
+    // row, `BigText`'s opaque box is what should win.
+    render_version(buf, area);
     render_wordmark(buf, placement.wordmark);
     render_caption(buf, area, placement.wordmark);
 }
@@ -341,9 +347,31 @@ fn render_rook(buf: &mut Buffer, area: Rect, rook: &Rook, mask: &Mask) {
             };
             let cell = &mut buf[(x, y)];
             cell.set_char(symbol);
-            cell.set_style(silhouette_style());
+            cell.set_style(dim_style());
         }
     }
+}
+
+/// Paints the running version into the top-right corner, in the dim watermark
+/// tone — chrome in the corner of the page rather than a label competing with
+/// the wordmark.
+fn render_version(buf: &mut Buffer, area: Rect) {
+    let Some(rect) = version_rect(area) else {
+        return;
+    };
+    let label = version_label();
+    Paragraph::new(Line::from(Span::styled(label, dim_style())))
+        .alignment(Alignment::Right)
+        .render(rect, buf);
+}
+
+/// The cells the version stamp takes: the right end of the top row, or `None`
+/// when the viewport is too narrow to hold the label whole, which loses the
+/// corner rather than showing a clipped version. The rain tests read this so
+/// they can tell the stamp's chrome from their own shafts.
+fn version_rect(area: Rect) -> Option<Rect> {
+    let width = u16::try_from(version_label().chars().count()).ok()?;
+    (width <= area.width).then(|| Rect::new(area.right() - width, area.y, width, 1))
 }
 
 /// Paints the jumbotron into the box the layout reserved for it. `BigText`
@@ -367,9 +395,9 @@ fn render_caption(buf: &mut Buffer, area: Rect, wordmark: Rect) {
     .render(line, buf);
 }
 
-/// The dim grey the silhouettes paint in — present, but never competing
-/// with the wordmark above them.
-fn silhouette_style() -> Style {
+/// The dim grey the watermark chrome paints in — the rook's silhouette and the
+/// version stamp: present, but never competing with the wordmark above them.
+fn dim_style() -> Style {
     Style::new().fg(theme::text_dim())
 }
 
@@ -748,6 +776,80 @@ mod tests {
         );
     }
 
+    /// The running version is stamped in the top-right corner: flush with the
+    /// right edge, on the top row alone, in the dim watermark tone rather than
+    /// the wordmark's accent.
+    #[test]
+    fn the_version_stamp_sits_dimmed_in_the_top_right_corner() {
+        let area = Rect::new(0, 0, 100, 30);
+        let buf = scene(area.width, area.height, 0);
+        let label = version_label();
+        let stamp = version_rect(area).expect("a 100-wide terminal holds the stamp");
+
+        let top = row_of(&buf, area.y, area.width);
+        assert!(
+            top.ends_with(&label),
+            "the stamp ends flush with the right edge: {top:?}"
+        );
+        assert_eq!(stamp.right(), area.right(), "flush with the right edge");
+        assert_eq!(
+            buf[(stamp.x, stamp.y)].style().fg,
+            Some(theme::text_dim()),
+            "the stamp paints in the dim watermark tone"
+        );
+        // One row of chrome, not a watermark across the page: nothing below the
+        // top row carries the version.
+        for y in area.y + 1..area.bottom() {
+            let row = row_of(&buf, y, area.width);
+            assert!(!row.contains(&label), "row {y} carries the stamp: {row:?}");
+        }
+    }
+
+    /// A viewport too narrow to hold the stamp whole loses the corner rather
+    /// than showing a clipped version, and exactly the stamp's own width is
+    /// where it comes back.
+    #[test]
+    fn a_cramped_terminal_drops_the_version_stamp() {
+        let label = version_label();
+        let width = label.chars().count() as u16;
+        assert!(width > 1, "the label is worth a width boundary");
+
+        let buf = scene(width - 1, 24, 0);
+        for y in 0..24 {
+            let row = row_of(&buf, y, width - 1);
+            assert!(!row.contains(&label), "row {y} carries the stamp: {row:?}");
+        }
+        assert!(
+            row_of(&scene(width, 24, 0), 0, width).ends_with(&label),
+            "a viewport exactly the stamp's width still has it"
+        );
+    }
+
+    /// Where a short terminal brings the stamp and the wordmark onto the same
+    /// row, the wordmark's opaque box is what wins: the stamp is chrome, the
+    /// title is the subject.
+    #[test]
+    fn the_wordmark_outranks_the_version_stamp() {
+        let area = Rect::new(0, 0, 60, 10);
+        let buf = scene(area.width, area.height, 0);
+        let wordmark = placement(area, rook_mask()).wordmark;
+        let stamp = version_label().chars().count() as u16;
+
+        assert_eq!(
+            wordmark.y, area.y,
+            "the terminal is short enough to collide"
+        );
+        assert!(
+            wordmark.right() + stamp > area.right(),
+            "and the two want the same corner"
+        );
+        assert_eq!(
+            buf[(wordmark.right() - 1, area.y)].style().fg,
+            Some(theme::accent()),
+            "the wordmark owns the cell the stamp would have used"
+        );
+    }
+
     /// The intro paints the wordmark, the caption, and the rook on a terminal
     /// with room for them.
     #[test]
@@ -877,6 +979,7 @@ mod tests {
         // rain is the only thing painting.
         let area = Rect::new(0, 0, 80, 30);
         let buf = scene(area.width, area.height, 0);
+        let stamp = version_rect(area);
         let mut tails = 0;
         for (x, y) in tips(&buf, sky(area)) {
             for step in 1..TRAIL as i32 {
@@ -885,6 +988,9 @@ mod tests {
                 else {
                     break; // the rest of the shaft has run off the page
                 };
+                if stamp.is_some_and(|stamp| stamp.contains(Position::new(tail_x, tail_y))) {
+                    continue; // the version stamp is chrome over the rain
+                }
                 assert!(
                     is_arrow(&buf, tail_x, tail_y),
                     "the shaft tipped at ({x}, {y}) trails to ({tail_x}, {tail_y})"

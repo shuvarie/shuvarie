@@ -28,21 +28,27 @@ impl VersionBar {
     }
 
     fn build_line(alignment: HorizontalAlignment) -> Line<'static> {
-        const VERSION: &str = env!("CARGO_PKG_VERSION");
-        let version = match option_env!("GIT_COMMIT_SHORT_HASH") {
-            Some(hash) => format!("vdebug-{hash}"),
-            None => format!("v{VERSION}"),
-        };
-
         Line::from(vec![
             Span::raw("⚔️ Shuvarie ").fg(theme::accent()).bold(),
-            Span::raw(version).fg(theme::text_dim()),
+            Span::raw(version_label()).fg(theme::text_dim()),
         ])
         .alignment(alignment)
     }
 
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
         frame.render_widget(&self.line, area);
+    }
+}
+
+/// The version the app displays: the crate version, or — on a build stamped with
+/// a commit — the short hash in its place, so a debug build is never taken for a
+/// release. Shared by the session's version bar and the welcome screen's corner
+/// stamp, which must never disagree about what is running.
+pub fn version_label() -> String {
+    const VERSION: &str = env!("CARGO_PKG_VERSION");
+    match option_env!("GIT_COMMIT_SHORT_HASH") {
+        Some(hash) => format!("vdebug-{hash}"),
+        None => format!("v{VERSION}"),
     }
 }
 
