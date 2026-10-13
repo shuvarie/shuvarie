@@ -14,10 +14,16 @@ a configured provider.
 - `src/tui/welcome/art.rs`: the title page's drawing. The `Shuvarie` wordmark is a `tui-big-text`
   `BigText` line at `PixelSize::Full`, so each letter is one 8x8 `font8x8` glyph box and the box the
   layout reserves is eight cells per letter; `the_wordmark_paints_exactly_its_box` holds the widget
-  to it. The rook and the knight-with-sword are stored as character art and placed from the viewport
-  alone: the knight takes the bottom-left corner, the wordmark is centred but lifts when the caption
-  row would land in the knight's lap, and each silhouette is dropped when the terminal is too small
-  to hold it clear. The arrow rain falls on the diagonal: every lane enters on the top row or the
+  to it. The rook is the `shuvarie-artwork` repository's `png/rook.png`, vendored into `assets/` and
+  embedded with `include_bytes!`, decoded once into a coverage `Mask` trimmed to the pixels that
+  carry ink, and painted as half blocks (`▀`/`▄`/`█`) in the dim tone: a cell its silhouette does not
+  reach is left alone, so the rain keeps falling behind it. Its box is derived from the viewport
+  alone — `ROOK_HEIGHT_PERCENT` of the rows, standing on the bottom row with `ROOK_CROP_PERCENT` of
+  its width running off the right edge, and the width carrying the artwork's aspect over the half
+  blocks' grain of two sub-pixel rows per cell — and it is dropped entire when the viewport is too
+  short or too narrow for the part that shows. The artwork is sampled across its *whole* width, the
+  cropped columns included, so the viewport cuts the silhouette off rather than squeezing it into
+  the room left over. The arrow rain falls on the diagonal: every lane enters on the top row or the
   left column (`lanes`), so between them they head every diagonal the page has and no two streaks
   can share a cell. Each drop crosses its own diagonal at one cell per row (`DRIFT`), painting a
   `\` shaft that trails `TRAIL` cells back up and to the left of its bright tip; period and phase
