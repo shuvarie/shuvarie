@@ -48,6 +48,33 @@ a configured provider.
   between the centred popup and `fullscreen_rect`, the viewport inset by a small margin; the
   render loop's `set_viewport` geometry mirrors the same choice through
   `add_provider_list_height`/`model_picker_list_height`.
-- `src/tui.rs`: the render loop wakes at the earliest of the spinners' next frame and the welcome
-  art's (`App::welcome.animation_wake`), both wall-clock driven, so the title animates without any
-  render-loop state.
+- `src/tui.rs`: the render loop wakes at the earliest of the spinners' next frame and the fullscreen
+  scenes' (`App::animation_wake`, over the welcome art and the `/screensaver` scene), both wall-clock
+  driven, so the title animates without any render-loop state.
+
+## `/screensaver`: the same scene over a live session
+
+`/screensaver` plays the title page's artwork fullscreen over a live session, for as long as someone
+wants to watch the rain. It shares the drawing and none of the flow.
+
+- `src/tui/screensaver.rs`: `Screensaver` is `open` plus the scene. `map_event` maps any key press to
+  `Close` except Ctrl+C, which asks to quit (`ScreensaverEffect::RequestQuit`): the scene has no
+  input for Ctrl+C to clear, and a user reaching for it on an ambient screen wants out of the app
+  rather than back in the session. `update` closes the model on `Close` and leaves it up on
+  `RequestQuit`, so the prompt is a dialog over the scene.
+- It is its own overlay (`Overlay::Screensaver`), not a mode of `Welcome`, because `welcome.open`
+  means "onboarding is running": `reload_config` pages a title-page welcome on to `AllSet` when a
+  config becomes connectable, and `App::view` skips the session for it. A screensaver sharing that
+  flag would inherit onboarding's auto-advance from inside a live session.
+- `App::view` paints the scene *instead of* the session — the page owns the screen, so a chat nobody
+  is reading does not repaint on the rain's clock — then the shared `view_popups` tail (the quit
+  prompt and the two transient popups), which onboarding uses too. `close_overlay` re-points the
+  overlay at the scene while it is open, so cancelling the quit prompt asked from it lands back on
+  the scene rather than in the session.
+- `App::run_command` refuses to raise it while onboarding is open: onboarding paints nothing beside
+  its own page, so the scene would never reach the terminal. The command is unreachable there anyway
+  (the composer is not live until onboarding finishes), and the guard only keeps two fullscreen
+  flows from overlapping by accident.
+- The caption belongs to the page, not the scene: `art::view` takes it as a parameter, so the title
+  page can promise the provider form and the screensaver can promise the session back. `welcome.rs`
+  owns `CONTINUE_CAPTION`, shared by both of its interstitial pages.

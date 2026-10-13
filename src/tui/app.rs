@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use ratatui::prelude::*;
 use shuvarie_core::{
@@ -31,6 +32,7 @@ use super::history_search::{HistorySearch, HistorySearchEffect, HistorySearchMes
 use super::model_picker::{ModelPicker, ModelPickerEffect, ModelPickerMessage};
 use super::notify;
 use super::scene;
+use super::screensaver::{Screensaver, ScreensaverEffect, ScreensaverMessage};
 use super::search::SearchMessage;
 use super::session::media::MediaBytes;
 use super::session::tree::{TreeEffect, TreeMessage, TreePopup};
@@ -71,6 +73,9 @@ pub enum Overlay {
     ThemePicker,
     AssistedBy,
     MediaViewer,
+    /// The `/screensaver` scene: the welcome art fullscreen over a live
+    /// session, dismissed by a key press.
+    Screensaver,
     Todos,
 }
 
@@ -99,6 +104,9 @@ pub enum AppMessage {
     AssistedBy(AssistedByMessage),
     /// The media viewer overlay: navigation and dismiss.
     MediaViewer(MediaViewerMessage),
+    /// The `/screensaver` scene: the welcome art fullscreen over a session,
+    /// dismissed by a key press (Ctrl+C asks to quit instead).
+    Screensaver(ScreensaverMessage),
     /// The `/todo` popup: walking the session's todo list.
     Todos(TodoMessage),
     /// Attachment blob bytes arrived from core (the chat pane's media and
@@ -265,6 +273,9 @@ pub struct App {
     /// The fullscreen media viewer overlay (the `/images` slash command, or
     /// a click on an image region).
     pub media_view: MediaViewer,
+    /// The `/screensaver` scene (the slash command of the same name): the
+    /// welcome art over a live session.
+    pub screensaver: Screensaver,
     /// The turn-finished notification prefs (`ui.notify`).
     notify: NotifyPrefs,
     /// Notifications `update` queued for the render loop. Kept out of the
@@ -410,6 +421,7 @@ impl App {
             theme_picker: ThemePicker::new(),
             todo_popup: TodoPopup::new(),
             media_view: MediaViewer::new(image_cell, image_protocol),
+            screensaver: Screensaver::new(),
             theme_choices,
             current_theme_pref,
             theme_backup: None,
@@ -581,6 +593,7 @@ impl App {
             | Overlay::ThemePicker
             | Overlay::AssistedBy
             | Overlay::MediaViewer
+            | Overlay::Screensaver
             | Overlay::Todos => {}
         }
     }
@@ -775,6 +788,12 @@ impl App {
                         }
                         Overlay::MediaViewer => {
                             return self.media_view.map_event(&key).map(AppMessage::MediaViewer);
+                        }
+                        Overlay::Screensaver => {
+                            return self
+                                .screensaver
+                                .map_event(&key)
+                                .map(AppMessage::Screensaver);
                         }
                         Overlay::Todos => {
                             return self.todo_popup.map_event(&key).map(AppMessage::Todos);
@@ -1218,6 +1237,7 @@ impl App {
             | Overlay::ThemePicker
             | Overlay::AssistedBy
             | Overlay::MediaViewer
+            | Overlay::Screensaver
             | Overlay::Todos => None,
             Overlay::ModelPicker => {
                 let flat = super::components::flatten_newlines(text);
@@ -1259,11 +1279,16 @@ impl App {
             }
             AppMessage::CancelQuit => {
                 self.confirm_quit.update(ConfirmQuitMessage::Cancel);
-                // The quit prompt can also open over onboarding, so canceling
-                // must return to the page it covered rather than the bare
-                // session.
+                // The quit prompt can also open over onboarding or the
+                // `/screensaver` scene, so canceling must return to the page it
+                // covered rather than the bare session. Both of those outlive
+                // the prompt, so the overlay has to be pointed back at them —
+                // the scene would otherwise stay up while keys went to the
+                // session underneath it.
                 self.overlay = if self.welcome.open {
                     welcome_overlay(self.welcome.stage)
+                } else if self.screensaver.is_open() {
+                    Overlay::Screensaver
                 } else {
                     Overlay::None
                 };
@@ -1320,6 +1345,15 @@ impl App {
                     }
                 } else if self.overlay == Overlay::MediaViewer {
                     self.overlay = Overlay::None;
+                }
+            }
+            AppMessage::Screensaver(m) => {
+                let effect = self.screensaver.update(m);
+                if self.overlay == Overlay::Screensaver && !self.screensaver.is_open() {
+                    self.overlay = Overlay::None;
+                }
+                if let Some(ScreensaverEffect::RequestQuit) = effect {
+                    self.open_confirm_quit();
                 }
             }
             AppMessage::SessionTree { session } => {
@@ -2229,6 +2263,18 @@ impl App {
             .chain(inline.then_some(SpinnerKind::Inline))
     }
 
+    /// The wall-clock delay until the soonest animated overlay's next frame:
+    /// onboarding's title art, or the `/screensaver` scene.
+    pub fn animation_wake(&self) -> Option<Duration> {
+        match (
+            self.welcome.animation_wake(),
+            self.screensaver.animation_wake(),
+        ) {
+            (Some(welcome), Some(screensaver)) => Some(welcome.min(screensaver)),
+            (welcome, screensaver) => welcome.or(screensaver),
+        }
+    }
+
     fn update_command_availability(&mut self) {
         let has_messages = self.session.has_messages();
         self.command_menu
@@ -2403,6 +2449,17 @@ impl App {
                     .update(SessionMessage::OpenMediaViewer { sha: None });
                 return effect.and_then(|effect| self.handle_session_effect(effect));
             }
+            CommandAction::Screensaver => {
+                // Onboarding owns the whole screen and paints nothing beside
+                // its own page, so the scene would never reach the terminal.
+                // The command is unreachable there anyway — the composer is not
+                // live until onboarding finishes — and this only keeps the two
+                // fullscreen flows from overlapping by accident.
+                if !self.welcome.open {
+                    self.screensaver.open();
+                    self.overlay = Overlay::Screensaver;
+                }
+            }
             CommandAction::Quit => {
                 if self.session.is_streaming() {
                     self.ctx.send(shuvarie_core::Command::CancelStream);
@@ -2534,6 +2591,13 @@ impl App {
             // overlay on the stage also keeps key, paste, and registry routing
             // pointed at the page that is actually showing.
             self.overlay = welcome_overlay(self.welcome.stage);
+        } else if self.screensaver.is_open() {
+            // The scene outlives a dialog opened over it too: only a key press
+            // on the scene dismisses it, so a path that clears the overlay has
+            // to leave it pointing back at the scene. A scene still up with the
+            // overlay on the session would paint the rain over keys that go to
+            // the chat underneath.
+            self.overlay = Overlay::Screensaver;
         }
     }
 
@@ -2614,9 +2678,16 @@ impl App {
                 WelcomeStage::ModelPicker => self.model_picker.view(frame, area, stacked, true),
                 WelcomeStage::Intro | WelcomeStage::AllSet => {}
             }
-            self.confirm_quit.view(frame, area, stacked);
-            self.auth.view(frame, area, self.warning.open);
-            self.warning.view(frame, area, false);
+            self.view_popups(frame, area, stacked);
+            return;
+        }
+
+        if self.screensaver.is_open() {
+            // The scene is opaque and fullscreen as well, so the session is
+            // skipped rather than painted under it: a chat nobody is reading
+            // should not repaint on the rain's clock.
+            self.screensaver.view(frame, area);
+            self.view_popups(frame, area, stacked);
             return;
         }
 
@@ -2639,6 +2710,13 @@ impl App {
         self.title_popup.view(frame, area, stacked);
         self.assisted_by.view(frame, area, stacked);
         self.todo_popup.view(frame, area, stacked);
+        self.view_popups(frame, area, stacked);
+    }
+
+    /// Paints the dialogs that sit above whatever page is showing: the quit
+    /// prompt and the two transient popups. Onboarding and the screensaver paint
+    /// only their own page underneath, so both share this tail.
+    fn view_popups(&self, frame: &mut Frame<'_>, area: Rect, stacked: bool) {
         self.confirm_quit.view(frame, area, stacked);
         self.auth.view(frame, area, self.warning.open);
         self.warning.view(frame, area, false);
@@ -3486,6 +3564,99 @@ mod tests {
             !screen.contains("SESSION-MARKER"),
             "the session is not painted under onboarding"
         );
+    }
+
+    /// The `/screensaver` scene is the onboarding title's artwork over a live
+    /// session, so it is raised and dismissed rather than paged through.
+    #[test]
+    fn the_screensaver_command_raises_the_scene_over_the_session() {
+        let mut app = app_with(connected());
+        active_session(&mut app);
+
+        app.run_command(CommandAction::Screensaver, None);
+        assert!(matches!(app.overlay, Overlay::Screensaver));
+        assert!(app.screensaver.is_open());
+
+        // Any key press dismisses it: the session takes the screen back, with
+        // nothing about the detour left behind.
+        let key =
+            termina::event::KeyEvent::new(KeyCode::Char('q'), termina::event::Modifiers::NONE);
+        let msg = app
+            .map_event(Event::Terminal(TermEvent::Key(key)))
+            .expect("the scene maps the key");
+        app.update(msg);
+        assert!(!app.screensaver.is_open());
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(
+            app.session.session_id.is_some(),
+            "the scene does not disturb the session"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_over_the_scene_asks_to_quit_and_cancel_returns_to_it() {
+        let mut app = app_with(connected());
+        active_session(&mut app);
+        app.run_command(CommandAction::Screensaver, None);
+
+        let ctrl_c =
+            termina::event::KeyEvent::new(KeyCode::Char('c'), termina::event::Modifiers::CONTROL);
+        let msg = app
+            .map_event(Event::Terminal(TermEvent::Key(ctrl_c)))
+            .expect("the scene maps Ctrl+C");
+        app.update(msg);
+        assert!(app.confirm_quit.open, "Ctrl+C opens the quit prompt");
+        assert!(matches!(app.overlay, Overlay::ConfirmQuit));
+        assert!(app.screensaver.is_open(), "the scene stays up underneath");
+
+        app.update(AppMessage::CancelQuit);
+        assert!(
+            matches!(app.overlay, Overlay::Screensaver),
+            "cancelling lands back on the scene, not in the session"
+        );
+        assert!(app.screensaver.is_open());
+    }
+
+    #[test]
+    fn the_scene_paints_itself_and_no_session() {
+        let mut app = app_with(connected());
+        active_session(&mut app);
+        app.session.update(SessionMessage::ShowError {
+            error: "SESSION-MARKER".into(),
+        });
+        app.run_command(CommandAction::Screensaver, None);
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| app.view(frame, frame.area()))
+            .unwrap();
+        let screen: String = (0..24)
+            .map(|y| {
+                (0..80)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(screen.contains("Press any key to exit"), "{screen}");
+        assert!(
+            !screen.contains("SESSION-MARKER"),
+            "the session is not painted under the scene"
+        );
+    }
+
+    /// Onboarding owns the whole screen and paints nothing beside its own page,
+    /// so a scene raised over it would never reach the terminal.
+    #[test]
+    fn the_scene_is_never_raised_over_onboarding() {
+        let mut app = app_with(Connections::default());
+        assert!(app.welcome.open, "no providers: onboarding is running");
+
+        app.run_command(CommandAction::Screensaver, None);
+        assert!(!app.screensaver.is_open());
+        assert!(matches!(app.overlay, Overlay::Welcome));
     }
 
     #[tokio::test]

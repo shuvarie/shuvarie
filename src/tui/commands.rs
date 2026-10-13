@@ -25,11 +25,12 @@ pub enum CommandAction {
     ToggleSidebar,
     Search,
     AssistedBy,
+    Screensaver,
     Quit,
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 24] = [
+    pub const ALL: [CommandAction; 25] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::AddDecisionProvider,
@@ -53,6 +54,7 @@ impl CommandAction {
         CommandAction::ToggleSidebar,
         CommandAction::Search,
         CommandAction::AssistedBy,
+        CommandAction::Screensaver,
         CommandAction::Quit,
     ];
 
@@ -81,6 +83,7 @@ impl CommandAction {
             CommandAction::ToggleSidebar => "sidebar",
             CommandAction::Search => "search",
             CommandAction::AssistedBy => "assisted-by",
+            CommandAction::Screensaver => "screensaver",
             CommandAction::Quit => "quit",
         }
     }
@@ -282,6 +285,11 @@ pub fn default_commands() -> Vec<CommandEntry> {
             "View images",
             "Browse the session's attached images in a gallery",
             CommandAction::Images,
+        ),
+        CommandEntry::builtin(
+            "Screensaver",
+            "Play the welcome animation fullscreen; any key dismisses it",
+            CommandAction::Screensaver,
         ),
         CommandEntry::builtin("Quit", "Exit the program", CommandAction::Quit),
     ]
@@ -523,6 +531,29 @@ mod tests {
                 args: None
             })
         );
+        assert_eq!(
+            parse_command("/screensaver"),
+            Some(ParsedCommand {
+                action: CommandAction::Screensaver,
+                args: None
+            })
+        );
+    }
+
+    /// Every built-in is reachable from the Ctrl+M menu and the inline slash
+    /// list: both build their list from `default_commands()`, and both index
+    /// the custom-command suffix off its length.
+    #[test]
+    fn every_builtin_has_a_menu_row() {
+        let commands = default_commands();
+        for action in CommandAction::ALL {
+            assert!(
+                commands
+                    .iter()
+                    .any(|entry| entry.action == CommandRef::Builtin(action)),
+                "{action:?} has no menu row"
+            );
+        }
     }
 
     #[test]
@@ -625,6 +656,11 @@ mod tests {
             })
         );
         assert_eq!(parse_command("/mcp extra"), None, "/mcp takes no arguments");
+        assert_eq!(
+            parse_command("/screensaver now"),
+            None,
+            "/screensaver takes no arguments"
+        );
         assert_eq!(
             parse_command("/mcp-reconnect github"),
             Some(ParsedCommand {

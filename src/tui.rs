@@ -48,6 +48,7 @@ mod popup;
 mod question;
 mod registry;
 mod scene;
+mod screensaver;
 mod search;
 mod session;
 mod session_picker;
@@ -229,14 +230,14 @@ where
 
         // Spinners advance on wall-clock time, so waking at each earliest
         // frame boundary keeps every spinner at its own frame rate; the
-        // welcome screen's art animates off the same clock, and the loop takes
+        // fullscreen scenes animate off the same clock, and the loop takes
         // whichever comes first.
         spinner_wake = match (
             spinner::next_wake(app.active_spinners()),
-            app.welcome.animation_wake(),
+            app.animation_wake(),
         ) {
-            (Some(spinner), Some(welcome)) => Some(spinner.min(welcome)),
-            (spinner, welcome) => spinner.or(welcome),
+            (Some(spinner), Some(scene)) => Some(spinner.min(scene)),
+            (spinner, scene) => spinner.or(scene),
         }
         .map(|until| tokio::time::Instant::now() + until);
         picker_wake = app

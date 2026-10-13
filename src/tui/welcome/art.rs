@@ -1,8 +1,11 @@
-//! The welcome screen's ASCII scene: a dim chess-rook watermark hanging off the
-//! bottom-right corner, a rain of arrows falling down and to the right across
-//! the background, and the running version stamped dim in the top-right corner.
-//! The `Shuvarie` wordmark and the continue caption paint over it, so the scene
-//! reads as quiet chrome behind the text.
+//! The onboarding title's ASCII scene, which `/screensaver` shows too: a dim
+//! chess-rook watermark hanging off the bottom-right corner, a rain of arrows
+//! falling down and to the right across the background, and the running version
+//! stamped dim in the top-right corner. The `Shuvarie` wordmark and the caption
+//! paint over it, so the scene reads as quiet chrome behind the text.
+//!
+//! The caption belongs to the page, not to the scene: it says what a key press
+//! does next, and the two pages that show this scene promise different things.
 //!
 //! The rook is the artwork from the `shuvarie-artwork` repository, embedded in
 //! the binary and painted as half blocks in the theme's dim tone. Its placement
@@ -78,9 +81,6 @@ const RAIN_FRAMES: usize = 1_000;
 /// Drops per second.
 const RAIN_RATE: u32 = 12;
 
-/// The caption under the wordmark.
-const CAPTION: &str = "Press any key to continue";
-
 /// The `Shuvarie` jumbotron: one line of oversized pixel text, built fresh on
 /// each paint (it is eight glyphs of lookup, not worth caching).
 fn big_text() -> BigText<'static> {
@@ -127,13 +127,13 @@ pub fn next_wake() -> Option<Duration> {
 }
 
 /// Paints the scene into `frame`, taking the rain's frame off the wall clock.
-pub fn view(frame: &mut Frame<'_>, area: Rect) {
-    paint(frame.buffer_mut(), area, rain_frame());
+pub fn view(frame: &mut Frame<'_>, area: Rect, caption: &str) {
+    paint(frame.buffer_mut(), area, rain_frame(), caption);
 }
 
 /// Buffer-level [`view`] with an explicit rain frame, so tests paint against a
 /// bare [`Buffer`] and pick the frame they assert on.
-pub fn paint(buf: &mut Buffer, area: Rect, rain_frame: usize) {
+pub fn paint(buf: &mut Buffer, area: Rect, rain_frame: usize, caption: &str) {
     if area.is_empty() {
         return;
     }
@@ -153,7 +153,7 @@ pub fn paint(buf: &mut Buffer, area: Rect, rain_frame: usize) {
     // row, `BigText`'s opaque box is what should win.
     render_version(buf, area);
     render_wordmark(buf, placement.wordmark);
-    render_caption(buf, area, placement.wordmark);
+    render_caption(buf, area, placement.wordmark, caption);
 }
 
 /// The rook's silhouette: the embedded artwork's alpha, cropped to the pixels
@@ -381,14 +381,15 @@ fn render_wordmark(buf: &mut Buffer, rect: Rect) {
     big_text().render(rect, buf);
 }
 
-fn render_caption(buf: &mut Buffer, area: Rect, wordmark: Rect) {
+/// The page's caption, centred one row under the wordmark.
+fn render_caption(buf: &mut Buffer, area: Rect, wordmark: Rect, caption: &str) {
     let y = wordmark.bottom() + 1;
     if y >= area.bottom() {
         return;
     }
     let line = Rect::new(area.x, y, area.width, 1);
     Paragraph::new(Line::from(Span::styled(
-        CAPTION,
+        caption,
         Style::new().fg(theme::text_muted()),
     )))
     .alignment(Alignment::Center)
@@ -500,10 +501,14 @@ fn hash(value: u32) -> u32 {
 mod tests {
     use super::*;
 
+    /// A caption the scene knows nothing about: the page owns the string, so
+    /// the tests pass one in and read it back out.
+    const CAPTION: &str = "Press the any key";
+
     fn scene(width: u16, height: u16, frame: usize) -> Buffer {
         let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
-        paint(&mut buf, area, frame);
+        paint(&mut buf, area, frame, CAPTION);
         buf
     }
 

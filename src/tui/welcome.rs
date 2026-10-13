@@ -5,9 +5,14 @@
 //! it. Ctrl+C asks to quit from every page, and Esc from the two interstitial
 //! ones — the form and the picker have a `Cancel`/accept meaning for it.
 //!
-//! The welcome owns only the two interstitial pages ([`art`] does the drawing);
+//! The welcome owns only the two interstitial pages (`art` does the drawing);
 //! the form and the picker paint themselves fullscreen, and `App` forwards
 //! their keys while the stage selects them.
+//!
+//! The title's scene is the same one `/screensaver` shows over a live session —
+//! see `screensaver`, which draws it through `art` and gives it a caption of its
+//! own, since a key press there hands the screen back to the session instead of
+//! paging on to the provider form.
 
 use std::time::Duration;
 
@@ -18,7 +23,12 @@ use termina::event::{KeyCode, KeyEvent, KeyEventKind, Modifiers};
 
 use super::theme;
 
-mod art;
+pub mod art;
+
+/// What a key press does on the interstitial pages: move the flow on. The
+/// caption says "continue" rather than naming the next page, which is the
+/// closing page on one of them and the provider form on the other.
+const CONTINUE_CAPTION: &str = "Press any key to continue";
 
 /// Which fullscreen page onboarding is showing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,7 +136,7 @@ impl Welcome {
             return;
         }
         match self.stage {
-            WelcomeStage::Intro => art::view(frame, area),
+            WelcomeStage::Intro => art::view(frame, area, CONTINUE_CAPTION),
             WelcomeStage::AllSet => self.view_all_set(frame, area),
             // The form and the picker paint themselves fullscreen; the welcome
             // only owns the pages between them.
@@ -150,7 +160,7 @@ impl Welcome {
             )),
             Line::from(""),
             Line::from(Span::styled(
-                "Press any key to continue",
+                CONTINUE_CAPTION,
                 Style::new().fg(theme::text_muted()),
             )),
         ];
