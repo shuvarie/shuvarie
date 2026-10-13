@@ -15,9 +15,12 @@ a configured provider.
   to it. The rook and the knight-with-sword are stored as character art and placed from the viewport
   alone: the knight takes the bottom-left corner, the wordmark is centred but lifts when the caption
   row would land in the knight's lap, and each silhouette is dropped when the terminal is too small
-  to hold it clear. The arrow rain is one drop per screen column, each
-  on its own period and phase from a column hash, so it needs no state: `view` paints whatever
-  frame the `FrameIndexer` clock selects and `next_wake` reports when the loop should come back.
+  to hold it clear. The arrow rain falls on the diagonal: every lane enters on the top row or the
+  left column (`lanes`), so between them they head every diagonal the page has and no two streaks
+  can share a cell. Each drop crosses its own diagonal at one cell per row (`DRIFT`), painting a
+  `\` shaft that trails `TRAIL` cells back up and to the left of its bright tip; period and phase
+  come from a hash of the entry cell, so it needs no state: `view` paints whatever frame the
+  `FrameIndexer` clock selects and `next_wake` reports when the loop should come back.
 - `src/tui/app.rs`: `welcome.open` is the single "onboarding is running" flag. `App::view` skips
   every session widget while it is set, `welcome_overlay(stage)` maps the stage onto the overlay
   that routes that page's keys, pastes, and registry events (`Welcome` for the interstitial pages,

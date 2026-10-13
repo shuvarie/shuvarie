@@ -1,8 +1,8 @@
 //! The welcome screen's ASCII scene: a dim chess-rook watermark at the right
 //! edge, a half-body knight raising a sword out of the bottom-left corner, and
-//! a rain of arrows falling across the background. The `Shuvarie` wordmark and
-//! the continue caption paint over it, so the scene reads as quiet chrome
-//! behind the text.
+//! a rain of arrows falling down and to the right across the background. The
+//! `Shuvarie` wordmark and the continue caption paint over it, so the scene
+//! reads as quiet chrome behind the text.
 //!
 //! Every piece is laid out from the viewport alone, so the scene needs no
 //! stored geometry, and each silhouette drops out when the terminal is too
@@ -17,7 +17,7 @@ use std::time::Duration;
 use frameplay::{FrameIndexer, FrameTimeReference, FrameplayOptions};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Alignment, Rect};
+use ratatui::layout::{Alignment, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
@@ -64,10 +64,17 @@ const KNIGHT: [&str; 11] = [
     "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
 ];
 
-/// The arrow a falling drop paints.
-const DROP: char = '↓';
-/// How many cells a drop's tail trails behind its head.
+/// The arrow a falling drop paints: the shaft of an arrow shot from a bow. A
+/// streak lies along the diagonal its drop falls down, so the shaft points the
+/// way it travels.
+const SHAFT: char = '\\';
+/// How many cells of shaft trail behind a drop's tip.
 const TRAIL: usize = 4;
+/// How far a drop drifts downwind for every row it falls — the slope of the
+/// rain, and so the lean of every shaft it paints. [`lanes`] starts one drop on
+/// the top row and the left column for each diagonal of the page, which between
+/// them cover every diagonal only while this is one.
+const DRIFT: i32 = 1;
 /// Frames the rain indexer cycles through. Wide enough that a drop never
 /// visibly jumps as the indexer wraps.
 const RAIN_FRAMES: usize = 1_000;
@@ -274,33 +281,82 @@ fn silhouette_style() -> Style {
     Style::new().fg(theme::text_dim())
 }
 
-/// Paints the falling arrows: one drop per screen column, each on its own
-/// period and phase so the rain looks scattered without any stored state.
+/// Paints the falling arrows: one drop per diagonal of the page, each on its
+/// own period and phase so the rain looks scattered without any stored state. A
+/// streak lies along the diagonal its drop falls down, so the shaft points the
+/// way it travels and the tail is a step of the fall itself.
 fn render_rain(buf: &mut Buffer, area: Rect, frame: usize) {
-    let rows = area.height as usize;
-    for column in 0..area.width {
-        let seed = hash(u32::from(area.x.saturating_add(column)));
-        // The period carries the drop past the bottom edge (and back round to
-        // the top) before it repeats; the phase staggers the columns.
-        let period = rows + 8 + (seed % 8) as usize;
-        let head = (frame + (seed >> 8) as usize % period) % period;
-        if head >= rows {
-            continue;
-        }
-        for row in head.saturating_sub(TRAIL - 1)..=head {
-            let style = drop_style(head - row);
-            let cell = &mut buf[(
-                area.x.saturating_add(column),
-                area.y.saturating_add(row as u16),
-            )];
-            cell.set_char(DROP);
-            cell.set_style(style);
+    for head in streak_heads(area, frame) {
+        // The streak, from its bright tip back along the shaft.
+        for step in 0..TRAIL as i32 {
+            let (x, y) = tail_cell(head, step);
+            paint_arrow(buf, area, x, y, arrow_style(step as usize));
         }
     }
 }
 
-/// A drop fades over its tail: the head is the brightest cell of the streak.
-fn drop_style(fade: usize) -> Style {
+/// The lanes of the rain: the cells a drop enters the page on — the whole top
+/// row, then the left column below the corner. Between them these head every
+/// diagonal the page has, so the rain covers it edge to edge, bottom-left corner
+/// included, and no two streaks can ever fight over a cell.
+fn lanes(area: Rect) -> Vec<(i32, i32)> {
+    let (left, top) = (i32::from(area.x), i32::from(area.y));
+    let (width, height) = (i32::from(area.width), i32::from(area.height));
+    let across = (0..width).map(|column| (left + column, top));
+    let down = (1..height).map(|row| (left, top + row));
+    across.chain(down).collect()
+}
+
+/// Where each lane's drop has fallen to in `frame`: the cell at the tip of its
+/// streak, in screen coordinates. Lanes whose drop is off the page — falling,
+/// off the bottom-right, or waiting up and to the left to re-enter — are
+/// skipped.
+fn streak_heads(area: Rect, frame: usize) -> Vec<(i32, i32)> {
+    let (right, bottom) = (i32::from(area.right()) - 1, i32::from(area.bottom()) - 1);
+    // A lane waits at least the page's longest diagonal before it repeats, so a
+    // short lane — a corner — rains no harder than the middle does.
+    let floor = usize::from(area.width.min(area.height)) + 2 * TRAIL;
+    let mut heads = Vec::new();
+    for (x, y) in lanes(area) {
+        // The steps the drop takes to cross from its entry cell to the far edge:
+        // the diagonal the page shows of its lane.
+        let span = (right - x).min(bottom - y) + 1;
+        let seed = hash(u32::from(x as u16) ^ (u32::from(y as u16) << 16));
+        // The period carries the drop clear off the page — streak and all —
+        // before it re-enters at the top-left; the phase staggers the lanes.
+        let period = (span as usize + 2 * TRAIL + seed as usize % 8).max(floor);
+        let step = (frame + (seed >> 8) as usize % period) % period;
+        let head = step as i32 - TRAIL as i32;
+        if (0..span).contains(&head) {
+            heads.push((x + DRIFT * head, y + head));
+        }
+    }
+    heads
+}
+
+/// The cell a streak occupies `step` steps behind its tip: back up one row and,
+/// with it, [`DRIFT`] columns to the left. Step 0 is the tip itself.
+fn tail_cell(head: (i32, i32), step: i32) -> (i32, i32) {
+    (head.0 - DRIFT * step, head.1 - step)
+}
+
+/// Paints one cell of a streak. A shaft runs off the top-left corner while its
+/// drop waits to re-enter, and off the bottom-right as the drop falls clear of
+/// the page: anything outside it is simply dropped.
+fn paint_arrow(buf: &mut Buffer, area: Rect, x: i32, y: i32, style: Style) {
+    let (Ok(x), Ok(y)) = (u16::try_from(x), u16::try_from(y)) else {
+        return;
+    };
+    if !area.contains(Position::new(x, y)) {
+        return;
+    }
+    let cell = &mut buf[(x, y)];
+    cell.set_char(SHAFT);
+    cell.set_style(style);
+}
+
+/// A shaft fades towards its tail: the tip is the brightest cell of the streak.
+fn arrow_style(fade: usize) -> Style {
     if fade == 0 {
         Style::new().fg(theme::text_muted())
     } else {
@@ -310,7 +366,7 @@ fn drop_style(fade: usize) -> Style {
     }
 }
 
-/// A small integer hash: seeds each column's drop so the rain scatters
+/// A small integer hash: seeds each lane's drop so the rain scatters
 /// deterministically, with no state to keep in step with the frame counter.
 fn hash(value: u32) -> u32 {
     let mut x = value.wrapping_mul(0x9E37_79B9);
@@ -335,8 +391,21 @@ mod tests {
         (0..width).map(|x| buf[(x, y)].symbol()).collect()
     }
 
-    fn is_drop(buf: &Buffer, x: u16, y: u16) -> bool {
-        buf[(x, y)].symbol().starts_with(DROP)
+    fn is_arrow(buf: &Buffer, x: u16, y: u16) -> bool {
+        buf[(x, y)].symbol().starts_with(SHAFT)
+    }
+
+    /// The tips of the streaks — the bright end of every shaft — among the
+    /// `rows` above the wordmark, the one strip of the page where the rain is
+    /// the only thing painting.
+    fn tips(buf: &Buffer, rows: u16) -> Vec<(i32, i32)> {
+        (0..rows)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                is_arrow(buf, x, y) && !buf[(x, y)].style().add_modifier.contains(Modifier::DIM)
+            })
+            .map(|(x, y)| (i32::from(x), i32::from(y)))
+            .collect()
     }
 
     /// The wordmark paints exactly the box the layout reserves for it — no
@@ -492,9 +561,8 @@ mod tests {
         }
     }
 
-    /// The rain animates across the whole background: every column's drop
-    /// passes through the rows above the wordmark, where nothing else paints
-    /// over it.
+    /// The rain animates across the whole background: every column is rained on
+    /// above the wordmark, where nothing else paints over it.
     #[test]
     fn the_rain_sweeps_every_column() {
         const ABOVE: u16 = 10;
@@ -502,7 +570,7 @@ mod tests {
             .map(|frame| {
                 let buf = scene(80, 30, frame);
                 (0..80)
-                    .map(|column| (0..ABOVE).any(|row| is_drop(&buf, column, row)))
+                    .map(|column| (0..ABOVE).any(|row| is_arrow(&buf, column, row)))
                     .collect()
             })
             .collect();
@@ -512,6 +580,82 @@ mod tests {
                 "column {column} never rains"
             );
         }
+    }
+
+    /// The lanes between them head every diagonal the page has, so the rain
+    /// reaches the bottom-left corner — which drops entering on the top row
+    /// alone never would — and no two streaks can fight over a cell.
+    #[test]
+    fn the_lanes_cover_every_diagonal() {
+        let area = Rect::new(3, 7, 80, 24);
+        let mut diagonals: Vec<i32> = lanes(area).iter().map(|&(x, y)| x - DRIFT * y).collect();
+        assert_eq!(diagonals.len(), 80 + 24 - 1, "one lane per diagonal");
+
+        diagonals.sort_unstable();
+        diagonals.dedup();
+        // Every diagonal the page has: from its bottom-left corner's to its
+        // top-right's, with no gaps between the lanes.
+        let first = i32::from(area.x) - i32::from(area.bottom()) + 1;
+        let last = i32::from(area.right()) - 1 - i32::from(area.y);
+        assert_eq!(diagonals, (first..=last).collect::<Vec<_>>());
+    }
+
+    /// The rain travels on the diagonal, not merely painted on one: a tip one
+    /// frame later is a step down and a step right of where it was, so the
+    /// arrows fall rather than slide sideways.
+    #[test]
+    fn the_rain_travels_on_the_diagonal() {
+        let area = Rect::new(0, 0, 80, 30);
+        let mut checked = 0;
+        for frame in 0..40 {
+            // Tips from row 8 down are left out, so every successor — a step
+            // down — stays in the rain-only band the `after` frame is read from.
+            let before = tips(&scene(area.width, area.height, frame), 8);
+            let after = tips(&scene(area.width, area.height, frame + 1), 10);
+            for (x, y) in before {
+                let (next_x, next_y) = (x + 1, y + 1);
+                if next_x >= i32::from(area.width) {
+                    continue; // a tip at the right edge falls off the page instead
+                }
+                assert!(
+                    after.contains(&(next_x, next_y)),
+                    "the shaft tipped at ({x}, {y}) was elsewhere than ({next_x}, {next_y})"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "a tip was on the page to follow");
+    }
+
+    /// A shaft trails back up and to the left of its tip, along the diagonal its
+    /// drop falls down, so the arrow leans into its fall.
+    #[test]
+    fn a_shaft_trails_up_and_to_the_left_of_its_tip() {
+        assert_eq!(DRIFT, 1);
+        assert_eq!(tail_cell((10, 20), 0), (10, 20));
+        assert_eq!(tail_cell((10, 20), 1), (9, 19));
+        assert_eq!(tail_cell((10, 20), TRAIL as i32 - 1), (7, 17));
+
+        // Read the streaks off the band above the wordmark — the one strip of
+        // the page where the rain is the only thing painting.
+        const ABOVE: u16 = 10;
+        let buf = scene(80, 30, 0);
+        let mut tails = 0;
+        for (x, y) in tips(&buf, ABOVE) {
+            for step in 1..TRAIL as i32 {
+                let (tail_x, tail_y) = tail_cell((x, y), step);
+                let (Ok(tail_x), Ok(tail_y)) = (u16::try_from(tail_x), u16::try_from(tail_y))
+                else {
+                    break; // the rest of the shaft has run off the page
+                };
+                assert!(
+                    is_arrow(&buf, tail_x, tail_y),
+                    "the shaft tipped at ({x}, {y}) trails to ({tail_x}, {tail_y})"
+                );
+                tails += 1;
+            }
+        }
+        assert!(tails > 0, "a shaft's tail was on screen to check");
     }
 
     /// The rain is deterministic: the same frame paints the same arrows, so the
