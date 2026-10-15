@@ -17,13 +17,13 @@
 //! does next, and the two pages that show this scene promise different things.
 //!
 //! The rook is the artwork from the `shuvarie-artwork` repository, embedded in
-//! the binary and painted as half blocks in the theme's dim tone. Its placement
-//! is derived from the viewport alone, so the scene keeps no geometry of its
-//! own: it is pinned to the bottom-right corner and simply drops out when the
-//! terminal is too small to hold the part that shows. The rain advances off
-//! wall-clock time ([`FrameIndexer`]), so [`view`] paints whichever frame the
-//! clock has selected and [`next_wake`] reports when the render loop should
-//! come back for the next one.
+//! the binary as the pixel grid itself and painted as half blocks in the theme's
+//! dim tone. It is a fixed size — one art pixel per cell half, so the terminal
+//! never scales it — standing on the bottom-right corner, with what the viewport
+//! cannot hold clipped off the silhouette rather than squeezed into it. The rain
+//! advances off wall-clock time ([`FrameIndexer`]), so [`view`] paints whichever
+//! frame the clock has selected and [`next_wake`] reports when the render loop
+//! should come back for the next one.
 //!
 //! The scene is a pure function of its two clocks — the rain's frame number and
 //! the age the page reports — and holds no state of its own. The entrance keeps
@@ -49,28 +49,92 @@ use crate::tui::components::version_label;
 use crate::tui::theme;
 
 /// The rook artwork, vendored from the `shuvarie-artwork` repository's
-/// `png/rook.png` and embedded, so the binary carries the scene and the paint
-/// path never touches the filesystem.
-const ROOK_PNG: &[u8] = include_bytes!("../../../assets/rook.png");
+/// `png/rook.png`: the pixel grid that PNG scales up five times over, cropped to
+/// the pixels that carry ink. `#` is ink and `.` is clear, so the silhouette can
+/// be read straight off the source.
+///
+/// Embedded as the grid rather than as the image, so the binary carries the
+/// scene, the paint path never touches the filesystem, and no decoder has to run
+/// to draw a watermark. The artwork is a hard-edged mask — a pixel is ink or it
+/// is clear, never something between — which is what lets the drawn cells be read
+/// off it one for one, with no resampling in between.
+const ROOK_ART: [&str; ROOK_ART_HEIGHT] = [
+    ".###......###......###......###.",
+    ".####....#####....#####....####.",
+    ".#.###...##.##....##.##...###.#.",
+    ".#..##...#...#....#...#...##..#.",
+    ".#.########.########.########.#.",
+    ".##############################.",
+    ".##############################.",
+    ".##############################.",
+    ".##############################.",
+    ".##.########################.##.",
+    ".##.########################.##.",
+    ".##.########################.##.",
+    ".##.########################.##.",
+    ".##############################.",
+    ".##############################.",
+    ".##############################.",
+    "..############################..",
+    "...##########################...",
+    "......####################......",
+    "........################........",
+    ".........##############.........",
+    ".........##############.........",
+    "..........############..........",
+    "..........############..........",
+    "..........############..........",
+    "..........############..........",
+    "..........############..........",
+    ".........##############.........",
+    ".........##############.........",
+    ".........##############.........",
+    ".........##############.........",
+    ".........##############.........",
+    ".........##############.........",
+    "........################........",
+    "........################........",
+    "........################........",
+    ".......##################.......",
+    ".......##################.......",
+    ".......##################.......",
+    ".......##################.......",
+    "......####################......",
+    "......####################......",
+    "....########################....",
+    "....########################....",
+    "..############################..",
+    ".##############################.",
+    "################################",
+    "################################",
+    "################################",
+    "################################",
+    "################################",
+];
 
-/// How tall the rook stands, as a percentage of the viewport's rows.
-const ROOK_HEIGHT_PERCENT: u16 = 75;
+/// The grid's width in art pixels, which is the width of the whole rook.
+const ROOK_ART_WIDTH: usize = 32;
+/// The grid's height in art pixels, which over the half blocks' grain of two art
+/// rows per cell is the height of the whole rook.
+const ROOK_ART_HEIGHT: usize = 51;
+
+/// The rook as drawn: one art pixel per sub-pixel of a cell, so a row of cells
+/// carries two art rows and the silhouette is the artwork's own pixels.
+const ROOK_COLUMNS: u16 = ROOK_ART_WIDTH as u16;
+const ROOK_ROWS: u16 = (ROOK_ART_HEIGHT as u16).div_ceil(2);
 /// How much of the rook's width hangs off the right edge — the crop that pins
 /// the silhouette to the corner instead of drawing it whole beside the text.
 const ROOK_CROP_PERCENT: u16 = 40;
-/// The shortest the rook is ever drawn. Below this the silhouette reads as a
-/// smudge, so the viewport is left with an empty corner instead.
-const ROOK_MIN_ROWS: u16 = 6;
+/// The columns of the rook left inside the right edge: what the corner holds of
+/// it. The rook is a fixed size, so a viewport narrower than this clips the rest
+/// of the silhouette rather than scaling it down.
+const ROOK_VISIBLE_COLUMNS: u16 = ROOK_COLUMNS - ROOK_COLUMNS * ROOK_CROP_PERCENT / 100;
 
 /// The half-block cells the rook paints with: one sub-pixel of the artwork per
 /// cell half, so a row of cells carries two rows of the silhouette.
 const UPPER_HALF: char = '▀';
 const LOWER_HALF: char = '▄';
 const FULL_BLOCK: char = '█';
-/// How much of a sub-pixel the silhouette has to cover to be inked. The
-/// artwork is a hard-edged mask, so this only rounds the box filter's partial
-/// edges.
-const INK: u8 = 128;
 
 /// The wordmark's letters, in order.
 const WORDMARK_TEXT: &str = "Shuvarie";
@@ -268,12 +332,11 @@ fn paint_page(buf: &mut Buffer, area: Rect, rain_frame: usize, caption: &str) {
         cell.set_style(plate);
     }
 
-    let mask = rook_mask();
-    let placement = placement(area, mask);
+    let placement = placement(area);
 
     render_rain(buf, area, rain_frame);
-    if let (Some(rook), Some(mask)) = (placement.rook, mask) {
-        render_rook(buf, area, &rook, mask);
+    if let Some(rook) = placement.rook {
+        render_rook(buf, rook);
     }
     // The version is chrome and the wordmark is the subject, so the stamp goes
     // down first: on a terminal short enough to bring the two onto the same
@@ -283,115 +346,20 @@ fn paint_page(buf: &mut Buffer, area: Rect, rain_frame: usize, caption: &str) {
     render_caption(buf, area, placement.wordmark, caption);
 }
 
-/// The rook's silhouette: the embedded artwork's alpha, cropped to the pixels
-/// that carry ink and kept as per-pixel coverage.
-struct Mask {
-    width: usize,
-    height: usize,
-    /// One coverage byte per art pixel, row-major — 0 clear, 255 solid.
-    coverage: Vec<u8>,
-}
-
-impl Mask {
-    /// Decodes [`ROOK_PNG`] and trims the transparent margin away from the
-    /// shape. `None` when the artwork will not decode or carries no ink at all,
-    /// which drops the rook rather than failing the paint.
-    fn decode() -> Option<Self> {
-        let image = image::ImageReader::new(std::io::Cursor::new(ROOK_PNG))
-            .with_guessed_format()
-            .ok()?
-            .decode()
-            .ok()?
-            .into_rgba8();
-
-        // The shape's own bounds: the artwork frames the rook in clear pixels,
-        // and it is the silhouette — not the frame — the corner anchors.
-        let (mut left, mut top) = (image.width(), image.height());
-        let (mut right, mut bottom) = (0, 0);
-        for (x, y, pixel) in image.enumerate_pixels() {
-            if pixel.0[3] < INK {
-                continue;
-            }
-            left = left.min(x);
-            top = top.min(y);
-            right = right.max(x);
-            bottom = bottom.max(y);
-        }
-        if left > right || top > bottom {
-            return None;
-        }
-
-        let (width, height) = (right - left + 1, bottom - top + 1);
-        let mut coverage = Vec::with_capacity((width * height) as usize);
-        for y in top..=bottom {
-            for x in left..=right {
-                coverage.push(image.get_pixel(x, y).0[3]);
-            }
-        }
-        Some(Self {
-            width: width as usize,
-            height: height as usize,
-            coverage,
-        })
-    }
-
-    /// The coverage a sub-pixel of a `columns` x `rows` box of cells stands for,
-    /// box-filtered down from the artwork's own resolution. A cell is two
-    /// sub-pixels tall, so the sub-pixel grid is `columns` x `2 * rows`.
-    fn sample(&self, column: usize, sub_row: usize, columns: usize, rows: usize) -> u8 {
-        let (x0, x1) = part_range(column, columns, self.width);
-        let (y0, y1) = part_range(sub_row, rows * 2, self.height);
-        let mut total = 0u32;
-        let mut count = 0u32;
-        for y in y0..y1 {
-            for x in x0..x1 {
-                total += u32::from(self.coverage[y * self.width + x]);
-                count += 1;
-            }
-        }
-        u8::try_from(total / count.max(1)).unwrap_or(u8::MAX)
-    }
-}
-
-/// The artwork pixels one part of a `parts`-long axis stands for: its share of
-/// `source`, never empty, so a sub-pixel always has something to average.
-fn part_range(part: usize, parts: usize, source: usize) -> (usize, usize) {
-    let start = part * source / parts;
-    let end = ((part + 1) * source / parts).max(start + 1).min(source);
-    (start, end)
-}
-
-/// The rook's silhouette, decoded from the embedded artwork on first use — and
-/// only once, failures included.
-fn rook_mask() -> Option<&'static Mask> {
-    static MASK: OnceLock<Option<Mask>> = OnceLock::new();
-    MASK.get_or_init(Mask::decode).as_ref()
-}
-
 /// Where the scene's pieces land on a given viewport.
 struct Placement {
     /// The wordmark's box: the cells the big text paints into.
     wordmark: Rect,
-    /// The rook's box, `None` when the viewport cannot hold it.
-    rook: Option<Rook>,
-}
-
-/// The rook's landing: the cells it paints, and how much of its own width is
-/// off the page behind them.
-struct Rook {
-    /// The cells inside the viewport, flush with the bottom-right corner.
-    rect: Rect,
-    /// The artwork columns hidden past the right edge, never painted: the crop
-    /// that reads as the silhouette running off the corner.
-    hidden: u16,
+    /// The rook's box, `None` when the viewport is empty.
+    rook: Option<Rect>,
 }
 
 /// Lays the scene out from the viewport alone: the wordmark takes the centred
 /// row, and the rook hangs off the bottom-right corner beside it.
-fn placement(area: Rect, mask: Option<&Mask>) -> Placement {
+fn placement(area: Rect) -> Placement {
     Placement {
         wordmark: wordmark_rect(area),
-        rook: mask.and_then(|mask| rook_rect(area, mask)),
+        rook: rook_rect(area),
     }
 }
 
@@ -404,69 +372,62 @@ fn wordmark_rect(area: Rect) -> Rect {
     Rect::new(x, y, width.min(area.width), height)
 }
 
-/// The rook's width in cells at a given height: the artwork's aspect, carried
-/// over the half blocks' grain of two sub-pixel rows per cell. Without it the
-/// silhouette would be squashed to whatever shape the terminal happens to have.
-fn rook_columns(mask: &Mask, rows: u16) -> u16 {
-    let sub_rows = u64::from(rows) * 2;
-    let columns = (sub_rows * mask.width as u64).div_ceil(mask.height as u64);
-    u16::try_from(columns).unwrap_or(u16::MAX)
-}
-
-/// The rook's box: [`ROOK_HEIGHT_PERCENT`] of the viewport tall, standing on
-/// the bottom row and flush with the right edge, with
-/// [`ROOK_CROP_PERCENT`] of its width running off that edge. `None` when the
-/// viewport cannot hold the part that shows.
-fn rook_rect(area: Rect, mask: &Mask) -> Option<Rook> {
-    if area.height < ROOK_MIN_ROWS {
-        return None;
-    }
-    let rows = u16::try_from(usize::from(area.height) * usize::from(ROOK_HEIGHT_PERCENT) / 100)
-        .ok()?
-        .max(ROOK_MIN_ROWS);
-    let columns = rook_columns(mask, rows);
-    let hidden = columns * ROOK_CROP_PERCENT / 100;
-    let visible = columns - hidden;
-    // The silhouette needs its footing on screen: a viewport too narrow for
-    // what would show gets no rook rather than a strip of one.
-    if visible > area.width {
-        return None;
-    }
-    let y = area.bottom().checked_sub(rows)?;
-    Some(Rook {
-        rect: Rect::new(area.x + area.width - visible, y, visible, rows),
-        hidden,
-    })
-}
-
-/// Paints the rook into `rook.rect` as half blocks in the dim silhouette tone.
-/// The cells the silhouette does not reach are left alone, so the rain keeps
-/// falling behind it and the rook reads as a watermark rather than a filled
-/// rectangle.
+/// The rook's box: a fixed size — the artwork's own pixels, one per cell half,
+/// so the terminal never scales it — standing on the bottom row and flush with
+/// the right edge, with [`ROOK_CROP_PERCENT`] of its width running off that
+/// edge. `None` when the viewport is empty.
 ///
-/// The artwork is sampled across its *whole* width — the visible cells plus the
-/// crop — so the columns past the right edge are what goes unseen, leaving the
-/// silhouette cut off by the viewport rather than squashed into it.
-fn render_rook(buf: &mut Buffer, area: Rect, rook: &Rook, mask: &Mask) {
-    let visible = usize::from(rook.rect.width);
-    let rows = usize::from(rook.rect.height);
-    let columns = visible + usize::from(rook.hidden);
-    if visible == 0 || rows == 0 || columns == 0 {
-        return;
+/// What a cramped viewport cannot hold is clipped off the silhouette rather than
+/// squeezed into it: a viewport shorter than the rook takes the top of it, and
+/// one narrower than the part that shows takes the left. Either way the cells
+/// that are left stay pinned to the corner, so the artwork still reads as
+/// something running off the page's edge.
+fn rook_rect(area: Rect) -> Option<Rect> {
+    if area.is_empty() {
+        return None;
     }
+    let width = ROOK_VISIBLE_COLUMNS.min(area.width);
+    let height = ROOK_ROWS.min(area.height);
+    Some(Rect::new(
+        area.right() - width,
+        area.bottom() - height,
+        width,
+        height,
+    ))
+}
+
+/// Whether the artwork inks the pixel `column` art columns across and `art_row`
+/// art rows down the grid. A row of cells is two art rows, so on an artwork of
+/// odd height the last cell's lower half falls past the artwork: an art row the
+/// grid does not reach is clear.
+fn inked(column: usize, art_row: usize) -> bool {
+    ROOK_ART
+        .get(art_row)
+        .and_then(|row| row.as_bytes().get(column))
+        .is_some_and(|&pixel| pixel == b'#')
+}
+
+/// Paints the rook into `rect` as half blocks in the dim silhouette tone. The
+/// cells the silhouette does not reach are left alone, so the rain keeps falling
+/// behind it and the rook reads as a watermark rather than a filled rectangle.
+///
+/// A cell is one art column wide and two art rows tall, read straight off the
+/// grid, so the silhouette is the artwork's own pixels at the artwork's own
+/// size. The cells a cramped viewport clipped are counted off the top and the
+/// left of the rook's box, so what is drawn is the corner of the artwork the box
+/// could hold rather than its top-left corner.
+fn render_rook(buf: &mut Buffer, rect: Rect) {
+    let columns = usize::from(rect.width);
+    let rows = usize::from(rect.height);
+    let first_column = usize::from(ROOK_VISIBLE_COLUMNS) - columns;
+    let first_row = usize::from(ROOK_ROWS) - rows;
     for row in 0..rows {
-        let y = rook.rect.y + row as u16;
-        if y >= area.bottom() {
-            break;
-        }
-        for column in 0..visible {
-            let x = rook.rect.x + column as u16;
-            if x >= area.right() {
-                break;
-            }
-            let top = mask.sample(column, row * 2, columns, rows);
-            let bottom = mask.sample(column, row * 2 + 1, columns, rows);
-            let symbol = match (top >= INK, bottom >= INK) {
+        let y = rect.y + row as u16;
+        let top = 2 * (first_row + row);
+        for column in 0..columns {
+            let x = rect.x + column as u16;
+            let art_column = first_column + column;
+            let symbol = match (inked(art_column, top), inked(art_column, top + 1)) {
                 (true, true) => FULL_BLOCK,
                 (true, false) => UPPER_HALF,
                 (false, true) => LOWER_HALF,
@@ -693,202 +654,282 @@ mod tests {
         matches!(cell.symbol(), "▀" | "▄" | "█") && cell.style().fg == Some(theme::text_dim())
     }
 
-    /// The embedded artwork decodes into a mask trimmed to its ink: the shape
-    /// reaches all four of its edges, so the corner anchors the silhouette
-    /// rather than the clear margin the artwork frames it in.
+    /// The rook on a buffer of its own, with nothing else of the scene on it: the
+    /// rain and the wordmark paint over and beside the silhouette, and the tests
+    /// below are about which of the artwork's pixels land where.
+    fn rook_only(width: u16, height: u16) -> Buffer {
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        if let Some(rook) = rook_rect(area) {
+            render_rook(&mut buf, rook);
+        }
+        buf
+    }
+
+    /// Every cell of a rook's box, in no particular order.
+    fn rook_cells(rook: Rect) -> impl Iterator<Item = (u16, u16)> {
+        (rook.x..rook.right()).flat_map(move |x| (rook.y..rook.bottom()).map(move |y| (x, y)))
+    }
+
+    /// The embedded grid is the artwork trimmed to its ink: the shape reaches all
+    /// four of its edges, so the corner anchors the silhouette rather than the
+    /// clear margin the artwork frames it in.
     #[test]
-    fn the_embedded_artwork_decodes_into_a_trimmed_mask() {
-        let mask = rook_mask().expect("the embedded artwork decodes");
-        assert!(mask.width > 0 && mask.height > 0);
+    fn the_embedded_grid_is_the_artworks_ink_bounds() {
+        assert_eq!(ROOK_ART.len(), ROOK_ART_HEIGHT, "the grid's own height");
+        for (row, line) in ROOK_ART.iter().enumerate() {
+            assert_eq!(line.len(), ROOK_ART_WIDTH, "row {row} is the grid's width");
+            assert!(
+                line.bytes().all(|pixel| pixel == b'#' || pixel == b'.'),
+                "row {row} carries ink or clear pixels: {line:?}"
+            );
+        }
+
+        // A rook stands taller than it is wide, and every row of the grid
+        // carries ink: the grid is the silhouette's bounds rather than a canvas
+        // the shape is drawn on.
+        let inked_rows = ROOK_ART.iter().filter(|line| line.contains('#')).count();
+        assert_eq!(inked_rows, ROOK_ART_HEIGHT, "no row is left clear");
         assert!(
-            mask.height > mask.width,
-            "a rook stands taller than it is wide: {}x{}",
-            mask.width,
-            mask.height
-        );
-        assert_eq!(
-            mask.coverage.len(),
-            mask.width * mask.height,
-            "one coverage byte per art pixel"
+            inked_rows > ROOK_ART_WIDTH,
+            "a rook stands taller than it is wide: {ROOK_ART_WIDTH}x{inked_rows}"
         );
 
-        let at = |x: usize, y: usize| mask.coverage[y * mask.width + x];
-        for (edge, inked) in [
-            ("top", (0..mask.width).any(|x| at(x, 0) >= INK)),
+        for (edge, inked_edge) in [
+            ("top", (0..ROOK_ART_WIDTH).any(|column| inked(column, 0))),
             (
                 "bottom",
-                (0..mask.width).any(|x| at(x, mask.height - 1) >= INK),
+                (0..ROOK_ART_WIDTH).any(|column| inked(column, ROOK_ART_HEIGHT - 1)),
             ),
-            ("left", (0..mask.height).any(|y| at(0, y) >= INK)),
+            ("left", (0..ROOK_ART_HEIGHT).any(|row| inked(0, row))),
             (
                 "right",
-                (0..mask.height).any(|y| at(mask.width - 1, y) >= INK),
+                (0..ROOK_ART_HEIGHT).any(|row| inked(ROOK_ART_WIDTH - 1, row)),
             ),
         ] {
-            assert!(inked, "the {edge} edge of the trimmed mask is inked");
+            assert!(inked_edge, "the {edge} edge of the trimmed grid is inked");
         }
     }
 
-    /// The half blocks carry two sub-pixel rows per cell, so the box the layout
-    /// reserves reproduces the artwork's aspect instead of squashing the
-    /// silhouette into whatever shape the terminal happens to have.
+    /// The rook is a fixed size — the artwork's own pixels, one per cell half —
+    /// so a roomier terminal draws the same silhouette in the same corner rather
+    /// than a bigger one.
     #[test]
-    fn the_rook_box_keeps_the_artworks_aspect() {
-        let mask = rook_mask().expect("the embedded artwork decodes");
-        let artwork = mask.width as f64 / mask.height as f64;
-        for rows in [ROOK_MIN_ROWS, 12, 22] {
-            let columns = rook_columns(mask, rows);
-            let drawn = f64::from(columns) / f64::from(rows * 2);
-            assert!(
-                (drawn - artwork).abs() < 0.1,
-                "at {rows} rows the box is {drawn} where the artwork is {artwork}"
-            );
-        }
+    fn the_rook_is_the_artworks_own_size_whatever_the_viewport() {
+        let small = rook_rect(Rect::new(0, 0, 100, 30)).expect("a rook fits a 100x30 terminal");
+        let large = rook_rect(Rect::new(0, 0, 200, 50)).expect("a rook fits a 200x50 terminal");
+
+        assert_eq!(
+            (small.width, small.height),
+            (ROOK_VISIBLE_COLUMNS, ROOK_ROWS),
+            "the box is the artwork's own size"
+        );
+        assert_eq!(
+            (large.width, large.height),
+            (small.width, small.height),
+            "the viewport does not scale it"
+        );
+        assert_eq!(small, Rect::new(80, 4, ROOK_VISIBLE_COLUMNS, ROOK_ROWS));
+        assert_eq!(large, Rect::new(180, 24, ROOK_VISIBLE_COLUMNS, ROOK_ROWS));
+
+        // And its grain is the artwork's aspect: a cell carries two art rows.
+        let artwork = f64::from(ROOK_ART_WIDTH as u16) / f64::from(ROOK_ART_HEIGHT as u16);
+        let drawn = f64::from(ROOK_COLUMNS) / f64::from(ROOK_ROWS * 2);
+        assert!(
+            (drawn - artwork).abs() < 0.1,
+            "the box draws {drawn} where the artwork is {artwork}"
+        );
     }
 
     /// The rook is pinned to the bottom-right corner with part of its width off
-    /// the page: it stands on the bottom row, ends flush with the right edge,
-    /// and the columns past that edge are the crop, never painted.
+    /// the page: it stands on the bottom row, ends flush with the right edge, and
+    /// the columns past that edge are the crop, never painted.
     #[test]
     fn the_rook_hangs_off_the_bottom_right_corner() {
-        let mask = rook_mask().expect("the embedded artwork decodes");
         let area = Rect::new(0, 0, 100, 30);
-        let rook = rook_rect(area, mask).expect("a rook fits a 100x30 terminal");
+        let rook = rook_rect(area).expect("a rook fits a 100x30 terminal");
 
-        assert_eq!(
-            rook.rect.bottom(),
-            area.bottom(),
-            "standing on the bottom row"
-        );
-        assert_eq!(rook.rect.right(), area.right(), "flush with the right edge");
-        assert_eq!(rook.rect.height, 30 * ROOK_HEIGHT_PERCENT / 100);
-        assert!(rook.hidden > 0, "part of the rook is off the page");
-        assert_eq!(
-            rook.rect.width + rook.hidden,
-            rook_columns(mask, rook.rect.height),
-            "the visible cells plus the crop are the whole rook"
+        assert_eq!(rook.bottom(), area.bottom(), "standing on the bottom row");
+        assert_eq!(rook.right(), area.right(), "flush with the right edge");
+        assert!(rook.x >= area.x && rook.y >= area.y, "inside the viewport");
+        assert!(
+            rook.width < ROOK_COLUMNS,
+            "part of the rook is off the page"
         );
         assert_eq!(
-            rook.hidden,
-            rook_columns(mask, rook.rect.height) * ROOK_CROP_PERCENT / 100
+            rook.width,
+            ROOK_COLUMNS - ROOK_COLUMNS * ROOK_CROP_PERCENT / 100,
+            "the whole rook less the crop is what shows"
         );
     }
 
-    /// A viewport too short or too narrow for the part that shows drops the rook
-    /// rather than painting a smudge or a sliver of it over the text.
+    /// A cramped viewport clips the rook rather than scaling it or dropping it:
+    /// the box keeps its footing in the corner and shows the corner of the
+    /// artwork it could hold — the base of a short terminal, the right-hand
+    /// columns of a narrow one — so the cells it does paint are the very cells a
+    /// roomier viewport paints there.
     #[test]
-    fn a_cramped_terminal_drops_the_rook() {
-        let mask = rook_mask().expect("the embedded artwork decodes");
+    fn a_cramped_viewport_clips_the_rook_rather_than_scaling_it() {
+        let roomy = Rect::new(0, 0, 100, 30);
+        let whole = rook_only(roomy.width, roomy.height);
+        let rook = rook_rect(roomy).expect("a rook fits a 100x30 terminal");
+
+        // Shorter than the rook: the crown is what goes, so the bottom row of the
+        // clipped box is still the artwork's last art row.
+        let short = Rect::new(0, 0, 100, 10);
+        let clipped = rook_only(short.width, short.height);
+        let kept = rook_rect(short).expect("a short viewport keeps the rook's corner");
+        assert_eq!(kept.height, short.height, "clipped to the viewport");
+        assert_eq!(kept.bottom(), short.bottom(), "and still standing on it");
+        assert_eq!(kept.width, rook.width, "with the width the corner holds");
+        for row in 0..kept.height {
+            for column in 0..kept.width {
+                assert_eq!(
+                    clipped[(kept.x + column, kept.y + row)].symbol(),
+                    whole[(rook.x + column, rook.bottom() - kept.height + row)].symbol(),
+                    "({column}, {row}) of the clipped rook"
+                );
+            }
+        }
+
+        // Narrower than the part that shows: the box takes the artwork off the
+        // left, so what is drawn is the columns against the right edge.
+        let narrow = Rect::new(0, 0, 8, 30);
+        let clipped = rook_only(narrow.width, narrow.height);
+        let kept = rook_rect(narrow).expect("a narrow viewport keeps the rook's corner");
+        assert_eq!(kept.width, narrow.width, "clipped to the viewport");
+        assert_eq!(kept.height, ROOK_ROWS, "the crop keeps the height");
+        assert_eq!(kept.right(), narrow.right(), "and the right edge");
+        for row in 0..kept.height {
+            for column in 0..kept.width {
+                assert_eq!(
+                    clipped[(kept.x + column, kept.y + row)].symbol(),
+                    whole[(rook.right() - kept.width + column, rook.y + row)].symbol(),
+                    "({column}, {row}) of the clipped rook"
+                );
+            }
+        }
+
+        // Only an empty viewport is left without a corner to stand in.
         assert!(
-            rook_rect(Rect::new(0, 0, 80, ROOK_MIN_ROWS - 1), mask).is_none(),
-            "too few rows to read"
+            rook_rect(Rect::new(0, 0, 0, 30)).is_none(),
+            "no columns to stand in"
         );
         assert!(
-            rook_rect(Rect::new(0, 0, 8, 24), mask).is_none(),
-            "the footing would not fit the width"
-        );
-        assert!(
-            rook_rect(Rect::new(0, 0, 100, 30), mask).is_some(),
-            "a roomy terminal keeps the rook"
+            rook_rect(Rect::new(0, 0, 80, 0)).is_none(),
+            "no rows to stand on"
         );
     }
 
     /// The rook paints half blocks in the dim tone, and only where the
-    /// silhouette reaches: the crown is wide and the shaft below it narrow, so
-    /// the box's own left edge is inked beside the crown and clear beside the
-    /// shaft. A filled rectangle would ink both.
+    /// silhouette reaches: the base spans the box's whole width and the crown
+    /// above it leaves the box's left column clear. A filled rectangle would ink
+    /// both.
     #[test]
     fn the_rook_paints_a_silhouette_not_a_rectangle() {
-        let mask = rook_mask().expect("the embedded artwork decodes");
-        let area = Rect::new(0, 0, 100, 30);
-        let rook = rook_rect(area, mask).expect("a rook fits a 100x30 terminal");
-        let buf = scene(area.width, area.height, 0);
+        let rook = rook_rect(Rect::new(0, 0, 100, 30)).expect("a rook fits a 100x30 terminal");
+        let buf = rook_only(100, 30);
 
-        let edge: Vec<bool> = (rook.rect.y..rook.rect.bottom())
-            .map(|y| is_rook(&buf, rook.rect.x, y))
+        let edge: Vec<bool> = (rook.y..rook.bottom())
+            .map(|y| is_rook(&buf, rook.x, y))
             .collect();
         assert!(
             edge.iter().any(|&inked| inked),
-            "the crown reaches the box's left edge"
+            "the base reaches the box's left edge"
         );
         assert!(
             edge.iter().any(|&inked| !inked),
-            "the shaft leaves the box's left edge clear"
+            "the crown leaves the box's left edge clear"
+        );
+        assert!(
+            inked(0, ROOK_ART_HEIGHT - 1),
+            "the artwork inks the grid's left edge at the base"
         );
 
-        // Both halves of the grain are in use somewhere on the silhouette: an
-        // edge landing on a cell boundary leaves a cell with only one of its
-        // halves inked, which is the resolution the half blocks buy.
+        // The half blocks are the vertical resolution the rook gets: the
+        // artwork's last art row is the upper half of a cell whose lower half
+        // falls past the artwork, while the body of the silhouette is full
+        // blocks and the cells it leaves go unpainted.
         assert!(
-            (rook.rect.x..rook.rect.right())
-                .flat_map(|x| (rook.rect.y..rook.rect.bottom()).map(move |y| (x, y)))
-                .any(|(x, y)| {
-                    let symbol = buf[(x, y)].symbol();
-                    is_rook(&buf, x, y)
-                        && (symbol.starts_with(UPPER_HALF) || symbol.starts_with(LOWER_HALF))
-                }),
+            rook_cells(rook).any(|(x, y)| {
+                let symbol = buf[(x, y)].symbol();
+                symbol.starts_with(UPPER_HALF) || symbol.starts_with(LOWER_HALF)
+            }),
             "the silhouette's edges round through the half blocks"
         );
         assert!(
-            (rook.rect.x..rook.rect.right())
-                .flat_map(|x| (rook.rect.y..rook.rect.bottom()).map(move |y| (x, y)))
+            rook_cells(rook)
                 .any(|(x, y)| is_rook(&buf, x, y) && buf[(x, y)].symbol().starts_with(FULL_BLOCK)),
             "the solid body of the silhouette is painted"
+        );
+        assert!(
+            rook_cells(rook).any(|(x, y)| buf[(x, y)].symbol() == " "),
+            "the cells off the silhouette are left to the rain"
         );
     }
 
     /// The crop cuts the artwork off mid-silhouette rather than squeezing the
-    /// whole of it into the room left over: the box's right edge lands where the
-    /// rook is at its narrowest — inside the shaft — and the silhouette is still
-    /// inked against the viewport edge there. A render that squeezed the artwork
-    /// into the box would show the artwork's own right edge in that cell, which
-    /// is clear at the waist.
+    /// whole of it into the room the corner has: the box's right edge lands
+    /// inside the artwork — at the shaft's waist, where the artwork is still
+    /// inked — so the viewport cuts the rook rather than showing the artwork's
+    /// own right edge, which is clear there.
     #[test]
     fn the_crop_cuts_the_artwork_mid_silhouette() {
-        let mask = rook_mask().expect("the embedded artwork decodes");
-        let area = Rect::new(0, 0, 100, 30);
-        let rook = rook_rect(area, mask).expect("a rook fits a 100x30 terminal");
-        let buf = scene(area.width, area.height, 0);
+        let rook = rook_rect(Rect::new(0, 0, 100, 30)).expect("a rook fits a 100x30 terminal");
+        let buf = rook_only(100, 30);
 
-        // The waist: the artwork row carrying the least ink — the shaft rather
-        // than the crown above it or the base below.
-        let ink = |y: usize| {
-            (0..mask.width)
-                .filter(|&x| mask.coverage[y * mask.width + x] >= INK)
+        // The waist: the art row carrying the least ink below the crown — the
+        // shaft rather than the crown above it or the base below.
+        let ink = |row: usize| {
+            (0..ROOK_ART_WIDTH)
+                .filter(|&column| inked(column, row))
                 .count()
         };
-        let waist = (0..mask.height)
-            .min_by_key(|&y| ink(y))
+        let waist = (ROOK_ART_HEIGHT / 2..ROOK_ART_HEIGHT)
+            .min_by_key(|&row| ink(row))
             .expect("rows to weigh");
-        let row = rook.rect.y + (waist * usize::from(rook.rect.height) / mask.height) as u16;
+        let last = ROOK_VISIBLE_COLUMNS as usize - 1;
 
         assert!(
-            is_rook(&buf, rook.rect.right() - 1, row),
-            "the viewport cuts the rook at its waist, so the edge cell is inked"
+            inked(last, waist),
+            "the artwork is still inked where the viewport cuts it"
         );
         assert!(
-            mask.coverage[waist * mask.width + mask.width - 1] < INK,
-            "the artwork's own right edge is clear at the waist, so the cell above \
+            !inked(ROOK_ART_WIDTH - 1, waist),
+            "the artwork's own right edge is clear at the waist, so the edge cell \
              would have shown that instead"
+        );
+        assert!(
+            is_rook(&buf, rook.right() - 1, rook.y + (waist / 2) as u16),
+            "the edge cell is inked: the crop cuts the silhouette, not the artwork"
         );
     }
 
     /// The crop is the artwork running off the corner, not a smaller rook: the
-    /// cells inside the viewport stay flush to the edge, and nothing is painted
-    /// past it.
+    /// cells the viewport holds stay flush to the edge, and the columns past it
+    /// are never painted.
     #[test]
     fn the_crop_is_painted_off_the_page() {
-        let mask = rook_mask().expect("the embedded artwork decodes");
         let area = Rect::new(0, 0, 100, 30);
-        let rook = rook_rect(area, mask).expect("a rook fits a 100x30 terminal");
-        let buf = scene(area.width, area.height, 0);
+        let rook = rook_rect(area).expect("a rook fits a 100x30 terminal");
+        let buf = rook_only(area.width, area.height);
 
-        let inked_in_last_column = (rook.rect.y..rook.rect.bottom())
-            .filter(|&y| is_rook(&buf, rook.rect.right() - 1, y))
+        let inked_in_last_column = (rook.y..rook.bottom())
+            .filter(|&y| is_rook(&buf, rook.right() - 1, y))
             .count();
         assert!(
             inked_in_last_column > 0,
             "the silhouette is cut off by the viewport, not ended short of it"
+        );
+        assert_eq!(rook.right(), area.right(), "and lands flush with the edge");
+        assert_eq!(
+            rook.width, ROOK_VISIBLE_COLUMNS,
+            "none of the crop reaches the page"
+        );
+        assert!(
+            (ROOK_VISIBLE_COLUMNS as usize..ROOK_ART_WIDTH)
+                .any(|column| inked(column, ROOK_ART_HEIGHT - 1)),
+            "the artwork carries the base past the edge, so the crop cuts it"
         );
     }
 
@@ -934,7 +975,7 @@ mod tests {
     #[test]
     fn the_wordmark_is_centred_above_its_caption() {
         let area = Rect::new(0, 0, 100, 30);
-        let wordmark = placement(area, rook_mask()).wordmark;
+        let wordmark = placement(area).wordmark;
         assert_eq!(wordmark.x, (area.width - wordmark.width) / 2);
         assert!(
             wordmark.bottom() + 1 < area.bottom(),
@@ -1002,7 +1043,7 @@ mod tests {
     fn the_wordmark_outranks_the_version_stamp() {
         let area = Rect::new(0, 0, 60, 10);
         let buf = scene(area.width, area.height, 0);
-        let wordmark = placement(area, rook_mask()).wordmark;
+        let wordmark = placement(area).wordmark;
         let stamp = version_label().chars().count() as u16;
 
         assert_eq!(
@@ -1026,7 +1067,7 @@ mod tests {
     fn the_scene_paints_the_wordmark_caption_and_rook() {
         let area = Rect::new(0, 0, 100, 30);
         let buf = scene(area.width, area.height, 0);
-        let placement = placement(area, rook_mask());
+        let placement = placement(area);
         let wordmark = placement.wordmark;
 
         assert_eq!(
@@ -1050,9 +1091,7 @@ mod tests {
 
         let rook = placement.rook.expect("rook fits");
         assert!(
-            (rook.rect.x..rook.rect.right())
-                .flat_map(|x| (rook.rect.y..rook.rect.bottom()).map(move |y| (x, y)))
-                .any(|(x, y)| is_rook(&buf, x, y)),
+            rook_cells(rook).any(|(x, y)| is_rook(&buf, x, y)),
             "the rook is painted into its corner"
         );
 
@@ -1346,11 +1385,10 @@ mod tests {
     }
 
     /// The rows above the rook: the band of the page where the rain is the only
-    /// thing painting, whatever size the artwork takes on a given viewport.
+    /// thing painting. The rook is a fixed size, so a viewport that leaves little
+    /// room above it leaves the rain little sky to be read in.
     fn sky(area: Rect) -> u16 {
-        placement(area, rook_mask())
-            .rook
-            .map_or(area.height, |rook| rook.rect.y)
+        rook_rect(area).map_or(area.height, |rook| rook.y)
     }
 
     /// The tips of the streaks — the bright end of every shaft — among the

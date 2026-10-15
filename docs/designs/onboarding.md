@@ -14,17 +14,21 @@ a configured provider.
 - `src/tui/welcome/art.rs`: the title page's drawing. The `Shuvarie` wordmark is a `tui-big-text`
   `BigText` line at `PixelSize::Full`, so each letter is one 8x8 `font8x8` glyph box and the box the
   layout reserves is eight cells per letter; `the_wordmark_paints_exactly_its_box` holds the widget
-  to it. The rook is the `shuvarie-artwork` repository's `png/rook.png`, vendored into `assets/` and
-  embedded with `include_bytes!`, decoded once into a coverage `Mask` trimmed to the pixels that
-  carry ink, and painted as half blocks (`▀`/`▄`/`█`) in the dim tone: a cell its silhouette does not
-  reach is left alone, so the rain keeps falling behind it. Its box is derived from the viewport
-  alone — `ROOK_HEIGHT_PERCENT` of the rows, standing on the bottom row with `ROOK_CROP_PERCENT` of
-  its width running off the right edge, and the width carrying the artwork's aspect over the half
-  blocks' grain of two sub-pixel rows per cell — and it is dropped entire when the viewport is too
-  short or too narrow for the part that shows. The artwork is sampled across its *whole* width, the
-  cropped columns included, so the viewport cuts the silhouette off rather than squeezing it into
-  the room left over. The arrow rain falls on the diagonal: every lane enters on the top row or the
-  left column (`lanes`), so between them they head every diagonal the page has and no two streaks
+  to it. The rook is the `shuvarie-artwork` repository's `png/rook.png` — the pixel grid that PNG
+  scales up five times over, cropped to the pixels that carry ink — embedded as the grid itself
+  (`ROOK_ART`, `#` inked and `.` clear) rather than as the image, so no decoder runs and the
+  silhouette can be read straight off the source. It is painted as half blocks (`▀`/`▄`/`█`) in the
+  dim tone, one art pixel per cell half: a cell is one art column wide and two art rows tall, read
+  off the grid with no resampling, and a cell its silhouette does not reach is left alone so the
+  rain keeps falling behind it. The rook is therefore a **fixed size** (`ROOK_COLUMNS` x `ROOK_ROWS`,
+  the artwork's own pixels), which the terminal never scales: its box stands on the bottom row with
+  `ROOK_CROP_PERCENT` of its width running off the right edge, so the viewport cuts the silhouette
+  rather than squeezing it into the room left over. What a cramped viewport cannot hold is clipped
+  off the silhouette rather than dropping it: a viewport shorter than the rook takes its top and one
+  narrower than the part that shows takes its left, and the cells that are left stay pinned to the
+  corner (`rook_rect`, `a_cramped_viewport_clips_the_rook_rather_than_scaling_it`). The arrow rain
+  falls on the diagonal: every lane enters on the top row or the left column (`lanes`), so between
+  them they head every diagonal the page has and no two streaks
   can share a cell. Each drop crosses its own diagonal at one cell per row (`DRIFT`), painting a
   `\` shaft that trails `TRAIL` cells back up and to the left of its bright tip; period and phase
   come from a hash of the entry cell, so it needs no state: `view` paints whatever frame the
