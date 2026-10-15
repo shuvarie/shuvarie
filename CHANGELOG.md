@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.2] - 2026-10-15
+
+### 🚀 Features
+
+- *(tui)* Multi-line display for `run_shell` tool title
+
+### 🐛 Bug Fixes
+
+- *(tui)* Mispositioned markdown table rendering
 ## [0.4.1] - 2026-10-15
 
 ### 🚀 Features
