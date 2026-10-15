@@ -9,7 +9,10 @@ use shuvarie_core::tools::todos::{TodoStatus, done_total, parse_items};
 use shuvarie_llm::{FileChange, PatchFileKind};
 use unicode_width::UnicodeWidthStr;
 
-use super::{format_duration_ms, hides_output_when_collapsed, shows_elapsed};
+use super::{
+    TITLE_COLLAPSE_LINES, format_duration_ms, hides_output_when_collapsed, shell_command_rows,
+    shows_elapsed, title_collapsible, title_rows,
+};
 use crate::tui::session::blocks::{ChatEnv, Segment};
 use crate::tui::session::segment::{BLOCK_PADDING, BodyChunk, BodySource, TextRows};
 use crate::tui::session::virtualizer::{TurnEst, collapsed_rows, file_change_row_est};
@@ -17,6 +20,11 @@ use crate::tui::{spinner, theme};
 use shuvarie_core::tool_record::ToolRecord;
 
 const COLLAPSED_OUTPUT_LINES: usize = 5;
+
+/// Indent of a multi-line title's continuation rows: the two columns of the
+/// status glyph and its space plus the `$ ` prompt, so further command lines
+/// line up under the first one.
+const TITLE_INDENT: &str = "    ";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToolStatus {
@@ -71,7 +79,11 @@ pub struct ToolBlock {
     status: ToolStatus,
     output: String,
     stderr: String,
+    /// Whether the body's output rows are expanded.
     expanded: bool,
+    /// Whether a multi-line title's hidden lines are expanded: the title's own
+    /// control, independent of the body's `expanded`.
+    title_expanded: bool,
     worker: Option<String>,
     spawn: Option<u64>,
     file_change: Option<FileChange>,
@@ -113,6 +125,7 @@ impl ToolBlock {
             output: String::new(),
             stderr: String::new(),
             expanded: false,
+            title_expanded: false,
             worker,
             spawn,
             file_change: None,
@@ -146,6 +159,7 @@ impl ToolBlock {
             output: record.output.clone(),
             stderr: record.stderr.clone(),
             expanded: false,
+            title_expanded: false,
             worker: record.worker.clone(),
             spawn: None,
             file_change: record.file_change.clone(),
@@ -218,6 +232,32 @@ impl ToolBlock {
         self.expanded
     }
 
+    /// Flip the title's hidden lines. Only meaningful for a header whose title
+    /// outgrew [`TITLE_COLLAPSE_LINES`] (see [`Self::title_collapsible`]); the
+    /// bump re-keys the estimate cache and rebuilds the body, both of which
+    /// live behind `body_rev`.
+    pub(super) fn toggle_title(&mut self) {
+        self.title_expanded = !self.title_expanded;
+        self.body_rev += 1;
+    }
+
+    pub(super) fn set_title_expanded(&mut self, expanded: bool) {
+        if self.title_expanded != expanded {
+            self.title_expanded = expanded;
+            self.body_rev += 1;
+        }
+    }
+
+    pub(super) fn is_title_expanded(&self) -> bool {
+        self.title_expanded
+    }
+
+    /// Whether the header's title holds more lines than the collapse cap and
+    /// so carries its own expand/collapse control.
+    pub(super) fn title_collapsible(&self) -> bool {
+        title_collapsible(&self.name, self.args_value())
+    }
+
     /// Estimated row counters mirroring [`Self::view`]: header, collapse state
     /// (which follows `expanded` — `question`/`todo` flip it on finish), file
     /// change rows, and the elapsed meta row for `shows_elapsed` tools. LSP
@@ -283,6 +323,10 @@ impl ToolBlock {
                 }
             }
         }
+        // A multi-line title costs one header row per line: the row every tool
+        // header is already counted for (`tool_count`) plus the rest.
+        est.tool_rows +=
+            title_rows(&self.name, self.args_value(), self.title_expanded).saturating_sub(1);
         if let Some(change) = &self.file_change {
             est.tool_rows += file_change_row_est(change);
         }
@@ -364,7 +408,7 @@ impl ToolBlock {
         let body = self.cached_body(width, env);
         let inner_w = width.saturating_sub(2 * BLOCK_PADDING.0).max(8) as usize;
         let mut chunks = Vec::with_capacity(body.len() + 2);
-        chunks.push(BodyChunk::fixed(vec![self.header_line(inner_w)]));
+        chunks.push(BodyChunk::fixed(self.header_lines(inner_w)));
         chunks.extend(body.iter().cloned());
         if shows_elapsed(&self.name) {
             chunks.push(BodyChunk::fixed(vec![elapsed_line(self)]));
@@ -436,7 +480,12 @@ impl ToolBlock {
         body.chunks
     }
 
-    fn header_line(&self, inner_w: usize) -> Line<'static> {
+    /// The header rows: the status glyph, the tool's title, and its right-
+    /// aligned meta. Most tools title in a single row; a `run_shell` command's
+    /// line feeds feed its title onto one row per line, and past
+    /// [`TITLE_COLLAPSE_LINES`] lines it collapses behind a `… +N more lines`
+    /// hint until expanded on the title's own control.
+    fn header_lines(&self, inner_w: usize) -> Vec<Line<'static>> {
         let is_worker_call = self.worker.as_deref() == Some("");
         let mut header: Vec<Span<'static>> = Vec::new();
         match self.status {
@@ -484,34 +533,11 @@ impl ToolBlock {
                     header.push(Span::raw(format!(" {preview}")).fg(theme::text_muted()));
                 }
             }
-            return Line::from(header);
+            return vec![Line::from(header)];
         }
 
         match self.name.as_str() {
-            "run_shell" => {
-                let cmd = args.get("command").and_then(Value::as_str).unwrap_or("");
-                let timeout = args.get("timeout_secs").and_then(Value::as_u64);
-                let (status_label, _) = split_status_line(&self.output);
-                let mut right: Vec<String> = Vec::new();
-                if let Some(t) = timeout {
-                    right.push(format!("timeout={t}s"));
-                }
-                match status_label {
-                    Some(label) if label != "exit 0" => right.push(label),
-                    None if self.status == ToolStatus::Killed => right.push("killed".into()),
-                    _ => {}
-                }
-                let right_text = right.join(" · ");
-                let right_w = UnicodeWidthStr::width(right_text.as_str());
-                header.push(Span::raw("$ ".to_string() + cmd).fg(theme::text()).bold());
-                if !right_text.is_empty() {
-                    let pad = inner_w
-                        .saturating_sub(spans_width(&header) + right_w)
-                        .max(1);
-                    header.push(Span::raw(" ".repeat(pad)));
-                    header.push(Span::raw(right_text).fg(theme::text_muted()));
-                }
-            }
+            "run_shell" => return self.shell_header_lines(inner_w, header, args),
             "read_file" => {
                 let path = args.get("path").and_then(Value::as_str).unwrap_or("");
                 let range = (self.status == ToolStatus::Ok)
@@ -595,7 +621,69 @@ impl ToolBlock {
         if let Some(spawn) = self.spawn {
             header.push(Span::raw(format!(" · spawn {spawn}")).fg(theme::text_muted()));
         }
-        Line::from(header)
+        vec![Line::from(header)]
+    }
+
+    /// The `run_shell` header: `$ <first command line>` with its timeout/exit
+    /// meta right-aligned, then one indented row per further command line. The
+    /// command's own line feeds are what make the title multi-row; a title
+    /// past the collapse cap hides its tail behind a hint row until expanded.
+    fn shell_header_lines(
+        &self,
+        inner_w: usize,
+        mut header: Vec<Span<'static>>,
+        args: &Value,
+    ) -> Vec<Line<'static>> {
+        let command = args.get("command").and_then(Value::as_str).unwrap_or("");
+        let total = shell_command_rows(args);
+        let collapsed = !self.title_expanded && total > TITLE_COLLAPSE_LINES;
+        let shown = if collapsed {
+            TITLE_COLLAPSE_LINES
+        } else {
+            total
+        };
+        let timeout = args.get("timeout_secs").and_then(Value::as_u64);
+        let (status_label, _) = split_status_line(&self.output);
+        let mut right: Vec<String> = Vec::new();
+        if let Some(t) = timeout {
+            right.push(format!("timeout={t}s"));
+        }
+        match status_label {
+            Some(label) if label != "exit 0" => right.push(label),
+            None if self.status == ToolStatus::Killed => right.push("killed".into()),
+            _ => {}
+        }
+        let right_text = right.join(" · ");
+        let right_w = UnicodeWidthStr::width(right_text.as_str());
+        let mut command_lines = command.lines();
+        let first = command_lines.next().unwrap_or("");
+        header.push(Span::raw(format!("$ {first}")).fg(theme::text()).bold());
+        if !right_text.is_empty() {
+            let pad = inner_w
+                .saturating_sub(spans_width(&header) + right_w)
+                .max(1);
+            header.push(Span::raw(" ".repeat(pad)));
+            header.push(Span::raw(right_text).fg(theme::text_muted()));
+        }
+        if let Some(spawn) = self.spawn {
+            header.push(Span::raw(format!(" · spawn {spawn}")).fg(theme::text_muted()));
+        }
+        let mut rows = vec![Line::from(header)];
+        for line in command_lines.take(shown - 1) {
+            rows.push(Line::from(vec![
+                Span::raw(TITLE_INDENT),
+                Span::raw(line.to_string()).fg(theme::text()),
+            ]));
+        }
+        if collapsed {
+            rows.push(Line::from(vec![
+                Span::raw(TITLE_INDENT),
+                Span::raw(format!("▸ … +{} more lines", total - TITLE_COLLAPSE_LINES))
+                    .fg(theme::text_muted())
+                    .italic(),
+            ]));
+        }
+        rows
     }
 }
 
@@ -1882,6 +1970,143 @@ mod tests {
         block
     }
 
+    /// A finished `run_shell` call running a `lines`-line command, with no
+    /// output: the block's rows are then the header's title alone (plus the
+    /// elapsed meta row), so header accounting reads straight off the estimate.
+    fn shell_block_with_command_lines(lines: usize) -> ToolBlock {
+        let command = (1..=lines)
+            .map(|i| format!("echo step{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        finished_block(
+            "run_shell",
+            &serde_json::json!({ "command": command }).to_string(),
+            String::new(),
+        )
+    }
+
+    /// A view context over `diags`, with the shared media store: the shape
+    /// every block test in this module builds by hand.
+    fn test_env(diags: &BTreeMap<String, Vec<shuvarie_core::DiagnosticInfo>>) -> ChatEnv<'_> {
+        ChatEnv {
+            rev: 0,
+            lsp_diagnostics: diags,
+            media: crate::tui::session::media::shared_test_store(),
+        }
+    }
+
+    #[test]
+    fn shell_title_feeds_command_lines_onto_their_own_rows() {
+        let diags = BTreeMap::new();
+        let env = test_env(&diags);
+        let block = shell_block_with_command_lines(3);
+        let text = block_text(&block, &env);
+        assert!(text.contains("$ echo step1"), "first line: {text}");
+        assert!(
+            text.contains("\n    echo step2") && text.contains("\n    echo step3"),
+            "continuation lines align under the command: {text}"
+        );
+        assert!(!text.contains("more lines"), "nothing hidden: {text}");
+        assert!(!block.title_collapsible(), "three lines stay a plain title");
+        assert_eq!(block.view(80, &env).chunk_rows(0, 80), 3);
+        // The elapsed meta row plus the two title rows past the one every
+        // header is counted for (`tool_count`, outside `tool_rows`).
+        assert_eq!(block.est().tool_rows, 1 + 2);
+    }
+
+    #[test]
+    fn long_shell_title_collapses_at_the_cap_and_expands_on_its_own_control() {
+        let diags = BTreeMap::new();
+        let env = test_env(&diags);
+        let mut block = shell_block_with_command_lines(14);
+        assert!(block.title_collapsible());
+
+        let collapsed = block_text(&block, &env);
+        assert!(collapsed.contains("$ echo step1"), "header: {collapsed}");
+        assert!(
+            collapsed.contains("    echo step10"),
+            "last shown row: {collapsed}"
+        );
+        assert!(
+            !collapsed.contains("echo step11"),
+            "rows past the cap hidden: {collapsed}"
+        );
+        assert!(
+            collapsed.contains("▸ … +4 more lines"),
+            "collapse hint: {collapsed}"
+        );
+        assert_eq!(block.view(80, &env).chunk_rows(0, 80), 11);
+        // elapsed meta row + the ten title rows the estimate adds past the one
+        // every header is counted for (the hint row is the eleventh).
+        assert_eq!(block.est().tool_rows, 1 + 10);
+
+        block.toggle_title();
+        let expanded = block_text(&block, &env);
+        assert!(expanded.contains("    echo step14"), "tail: {expanded}");
+        assert!(!expanded.contains("more lines"), "no hint: {expanded}");
+        assert_eq!(block.view(80, &env).chunk_rows(0, 80), 14);
+        assert_eq!(block.est().tool_rows, 1 + 13);
+        assert!(
+            !block.is_expanded(),
+            "the title's control leaves the body collapsed"
+        );
+    }
+
+    #[test]
+    fn title_and_body_expansion_are_independent() {
+        let diags = BTreeMap::new();
+        let env = test_env(&diags);
+        let mut block = shell_block_with_command_lines(14);
+        block.toggle();
+        assert!(block.is_expanded() && !block.is_title_expanded());
+        assert!(block_text(&block, &env).contains("▸ … +4 more lines"));
+
+        block.toggle_title();
+        block.toggle();
+        assert!(!block.is_expanded(), "body collapsed again");
+        assert!(block.is_title_expanded(), "title stays expanded");
+        assert!(block_text(&block, &env).contains("    echo step12"));
+    }
+
+    #[test]
+    fn reloaded_long_shell_title_collapses_like_a_live_one() {
+        let diags = BTreeMap::new();
+        let env = test_env(&diags);
+        let command = (1..=12)
+            .map(|i| format!("echo step{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let block = ToolBlock::from_record(&ToolRecord {
+            name: "run_shell".to_string(),
+            args_json: serde_json::json!({ "command": command }).to_string(),
+            output: String::new(),
+            stderr: String::new(),
+            ok: true,
+            killed: false,
+            worker: None,
+            message_id: 1,
+            message_seq: 1,
+            file_change: None,
+            original_content: None,
+            new_content: None,
+            duration_ms: 40,
+        });
+        assert!(block.title_collapsible());
+        let text = block_text(&block, &env);
+        assert!(text.contains("    echo step10"), "header: {text}");
+        assert!(text.contains("▸ … +2 more lines"), "hint: {text}");
+        assert!(!text.contains("echo step11"));
+    }
+
+    #[test]
+    fn other_tool_titles_stay_single_row() {
+        let diags = BTreeMap::new();
+        let env = test_env(&diags);
+        let block = finished_block("read_file", r#"{"path":"src/main.rs"}"#, String::new());
+        assert!(!block.title_collapsible());
+        assert_eq!(block.view(80, &env).chunk_rows(0, 80), 1);
+    }
+
     #[test]
     fn expanded_big_output_renders_sliced_and_matches_materialized() {
         let env = ChatEnv {
@@ -1904,7 +2129,9 @@ mod tests {
             .map(|row| Line::from(Span::raw(row.to_string()).fg(theme::text_dim())))
             .collect();
         let materialized = Segment::materialized(
-            std::iter::once(block.header_line(count_width as usize))
+            block
+                .header_lines(count_width as usize)
+                .into_iter()
                 .chain(materialized_lines)
                 .collect(),
             Some(theme::success_bg()),

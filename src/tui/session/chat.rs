@@ -18,7 +18,7 @@ use super::blocks::{
     SystemText, TextBlock, ToolBlock, ToolMessage, UserPrompt,
 };
 use super::media::{CHIP_ROWS, MediaBytes, MediaStore, MediaWrite};
-use super::segment::{BlockAddr, ResolvedRow, Segment, slice_visual, visual_row_text};
+use super::segment::{BlockAddr, HitKind, ResolvedRow, Segment, slice_visual, visual_row_text};
 use super::virtualizer::{TurnData, TurnEst, TurnFlags, locate, paint_turn};
 use crate::tui::theme;
 
@@ -477,7 +477,13 @@ pub struct Chat {
     /// first frame falls back to a single row.
     viewport: Cell<u32>,
     env_rev: u64,
+    /// Blocks the user left with their body rows expanded, addressed by
+    /// `(turn, block)`: re-applied when an evicted turn re-materializes, so
+    /// expansion survives scrolling far away.
     toggled: BTreeSet<(usize, usize)>,
+    /// The same for tool titles expanded past the collapse cap (a multi-line
+    /// `run_shell` command): a title expands independently of its body.
+    title_toggled: BTreeSet<(usize, usize)>,
     /// Live drag selection in content space; survives scrolling.
     selection: RefCell<Option<SelRange>>,
     /// A mouse button is down inside the history pane.
@@ -578,6 +584,7 @@ impl Chat {
             viewport: Cell::new(0),
             env_rev: 0,
             toggled: BTreeSet::new(),
+            title_toggled: BTreeSet::new(),
             selection: RefCell::new(None),
             dragging: Cell::new(false),
             last_click: RefCell::new(None),
@@ -857,6 +864,7 @@ impl Chat {
                 self.streaming = false;
                 self.interrupted = false;
                 self.toggled.clear();
+                self.title_toggled.clear();
                 self.clear_selection();
                 let mut scroll = self.scroll.borrow_mut();
                 scroll.offset = 0;
@@ -1029,6 +1037,7 @@ impl Chat {
         {
             let stored = self.stored.as_ref();
             let toggled = &self.toggled;
+            let title_toggled = &self.title_toggled;
             let mut y = 0u32;
             for (i, slot) in turns.iter_mut().enumerate() {
                 let h = heights[i];
@@ -1036,7 +1045,13 @@ impl Chat {
                     let marker = interrupted && !streaming && i + 1 == turns_len;
                     if slot.blocks.is_none() {
                         let session = stored.expect("lazy turn without stored session");
-                        slot.materialize(|| materialize_blocks(session, i), toggled, i, marker);
+                        slot.materialize(
+                            || materialize_blocks(session, i),
+                            toggled,
+                            title_toggled,
+                            i,
+                            marker,
+                        );
                     }
                     slot.ensure_cache(
                         i,
@@ -1113,6 +1128,7 @@ impl Chat {
             let buf = frame.buffer_mut();
             let stored = self.stored.as_ref();
             let toggled = &self.toggled;
+            let title_toggled = &self.title_toggled;
             let mut y = 0u32;
             for (i, slot) in turns.iter_mut().enumerate() {
                 let mut h = heights[i];
@@ -1122,6 +1138,7 @@ impl Chat {
                         slot.materialize(
                             || materialize_blocks(session, i),
                             toggled,
+                            title_toggled,
                             i,
                             interrupted && !streaming && i + 1 == turns_len,
                         );
@@ -1683,6 +1700,7 @@ impl Chat {
         slot.materialize(
             || materialize_blocks(session, turn_idx),
             &self.toggled,
+            &self.title_toggled,
             turn_idx,
             marker,
         );
@@ -1808,6 +1826,7 @@ impl Chat {
         self.streaming = false;
         self.interrupted = interrupted;
         self.toggled.clear();
+        self.title_toggled.clear();
         let mut scroll_state = self.scroll.borrow_mut();
         match scroll {
             ScrollInit::Restore => {
@@ -2122,7 +2141,7 @@ impl Chat {
         let width = self.width.get();
         let env_rev = self.env_rev;
         let mut start = 0u32;
-        let mut target: Option<(BlockAddr, Option<u16>)> = None;
+        let mut target: Option<(BlockAddr, HitKind)> = None;
         {
             let turns = self.turns.borrow();
             for slot in turns.iter() {
@@ -2134,7 +2153,7 @@ impl Chat {
                             .hits
                             .iter()
                             .find(|region| local >= region.start && local < region.end)
-                            .map(|region| (region.addr.clone(), region.slot));
+                            .map(|region| (region.addr.clone(), region.kind));
                     }
                     break;
                 }
@@ -2153,7 +2172,7 @@ impl Chat {
                         .hits
                         .iter()
                         .find(|region| local >= region.start && local < region.end)
-                        .map(|region| (region.addr.clone(), region.slot));
+                        .map(|region| (region.addr.clone(), region.kind));
                 }
             }
         }
@@ -2174,78 +2193,94 @@ impl Chat {
                             .hits
                             .iter()
                             .find(|region| local >= region.start && local < region.end)
-                            .map(|region| (region.addr.clone(), region.slot));
+                            .map(|region| (region.addr.clone(), region.kind));
                     }
                     break;
                 }
                 start += h;
             }
         }
-        if let Some((addr, slot)) = target {
-            if let Some(slot) = slot {
+        if let Some((addr, kind)) = target {
+            match kind {
                 // A click on an image region opens the media viewer at that
                 // image; the session drains it into the open effect.
-                self.clear_selection();
-                self.pending_media_open.set(Some((addr.turn, slot)));
-            } else {
-                self.toggle_block(addr);
+                HitKind::Media(slot) => {
+                    self.clear_selection();
+                    self.pending_media_open.set(Some((addr.turn, slot)));
+                }
+                HitKind::Body => self.toggle_block(addr),
+                HitKind::Title => self.toggle_title(addr),
             }
         }
     }
 
     fn toggle_block(&mut self, addr: BlockAddr) {
+        self.toggle_at(addr, BlockMessage::Toggle);
+    }
+
+    /// Toggle a tool header's title lines (its own control, for a `run_shell`
+    /// command past the collapse cap) instead of its body.
+    fn toggle_title(&mut self, addr: BlockAddr) {
+        self.toggle_at(addr, BlockMessage::ToggleTitle);
+    }
+
+    /// Apply a toggle to the addressed block — in a committed turn or the
+    /// in-flight one — record the resulting expansion in the matching side-set
+    /// so an evicted turn materializes back in the state the user left it in,
+    /// and refresh the turn's layout estimate.
+    fn toggle_at(&mut self, addr: BlockAddr, msg: BlockMessage) {
         self.clear_selection();
+        let title = matches!(msg, BlockMessage::ToggleTitle);
         let turns_len = self.turns.borrow().len();
-        if addr.turn < turns_len {
-            self.ensure_materialized(addr.turn);
-            let mut turns = self.turns.borrow_mut();
-            let Some(slot) = turns.get_mut(addr.turn) else {
-                return;
-            };
-            let changed = slot
-                .blocks
-                .as_mut()
-                .and_then(|blocks| blocks.get_mut(addr.block))
-                .is_some_and(|block| block.update(BlockMessage::Toggle));
-            if changed {
-                let expanded = slot
-                    .blocks
-                    .as_ref()
-                    .and_then(|blocks| blocks.get(addr.block))
-                    .is_some_and(Block::is_expanded);
-                if expanded {
-                    self.toggled.insert((addr.turn, addr.block));
-                } else {
-                    self.toggled.remove(&(addr.turn, addr.block));
-                }
-                slot.rev += 1;
-                slot.refresh_est(self.interrupted && !self.streaming && addr.turn + 1 == turns_len);
-            }
-        } else if addr.turn == turns_len {
-            let mut in_flight = self.in_flight.borrow_mut();
-            let Some(turn) = in_flight.as_mut() else {
-                return;
-            };
-            let changed = turn
-                .blocks
-                .as_mut()
-                .and_then(|blocks| blocks.get_mut(addr.block))
-                .is_some_and(|block| block.update(BlockMessage::Toggle));
-            if changed {
-                let expanded = turn
-                    .blocks
-                    .as_ref()
-                    .and_then(|blocks| blocks.get(addr.block))
-                    .is_some_and(Block::is_expanded);
-                if expanded {
-                    self.toggled.insert((addr.turn, addr.block));
-                } else {
-                    self.toggled.remove(&(addr.turn, addr.block));
-                }
-                turn.rev += 1;
-                turn.refresh_est(false);
-            }
+        if addr.turn > turns_len {
+            return;
         }
+        let live = addr.turn == turns_len;
+        if !live {
+            self.ensure_materialized(addr.turn);
+        }
+        let mut turns = self.turns.borrow_mut();
+        let mut in_flight = self.in_flight.borrow_mut();
+        let Some(turn) = (if live {
+            in_flight.as_mut()
+        } else {
+            turns.get_mut(addr.turn)
+        }) else {
+            return;
+        };
+        let changed = turn
+            .blocks
+            .as_mut()
+            .and_then(|blocks| blocks.get_mut(addr.block))
+            .is_some_and(|block| block.update(msg));
+        if !changed {
+            return;
+        }
+        let expanded = turn
+            .blocks
+            .as_ref()
+            .and_then(|blocks| blocks.get(addr.block))
+            .is_some_and(|block| {
+                if title {
+                    block.is_title_expanded()
+                } else {
+                    block.is_expanded()
+                }
+            });
+        let set = if title {
+            &mut self.title_toggled
+        } else {
+            &mut self.toggled
+        };
+        if expanded {
+            set.insert((addr.turn, addr.block));
+        } else {
+            set.remove(&(addr.turn, addr.block));
+        }
+        turn.rev += 1;
+        turn.refresh_est(
+            !live && self.interrupted && !self.streaming && addr.turn + 1 == turns_len,
+        );
     }
 
     fn toggle_last_tool(&mut self) {
@@ -4173,6 +4208,88 @@ pub(crate) mod tests {
         );
     }
 
+    /// A session of `count` turns, each a `run_shell` call whose command
+    /// overflows the title's collapse cap.
+    fn session_with_long_shell_titles(count: usize) -> shuvarie_core::Session {
+        let mut session = shuvarie_core::Session::new();
+        for i in 0..count {
+            session.push_user(format!("run {i}"));
+            session.push_assistant(format!("ran {i}"));
+            session.tool_records.push(ToolRecord {
+                name: "run_shell".to_string(),
+                args_json: serde_json::json!({
+                    "command": (1..=14)
+                        .map(|l| format!("echo {i}-{l}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .to_string(),
+                output: "exit 0:\n".to_string(),
+                stderr: String::new(),
+                ok: true,
+                killed: false,
+                worker: None,
+                message_id: i as u64,
+                message_seq: (2 * i + 1) as u64,
+                file_change: None,
+                original_content: None,
+                new_content: None,
+                duration_ms: 0,
+            });
+        }
+        session
+    }
+
+    /// The last turn whose materialized tool block holds an expanded title.
+    fn title_expanded_turn(chat: &Chat) -> Option<usize> {
+        let turns = chat.turns.borrow();
+        (0..turns.len()).rev().find(|i| {
+            turns[*i].blocks.as_ref().is_some_and(|blocks| {
+                blocks
+                    .iter()
+                    .rposition(Block::is_tool)
+                    .is_some_and(|pos| blocks[pos].is_title_expanded())
+            })
+        })
+    }
+
+    #[test]
+    fn title_expansion_survives_eviction() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::Load {
+            session: session_with_long_shell_titles(30),
+        });
+        for _ in 0..6000 {
+            chat.update(ChatMessage::ScrollDown);
+        }
+        let buf = draw(&chat, 80, 20);
+        let rect = chat.history_rect.get();
+        let (col, row) = row_with(&buf, "more lines").expect("a long title is on screen");
+        click(&mut chat, rect.x + col, row);
+        let Some(tool_idx) = title_expanded_turn(&chat) else {
+            panic!("the clicked title is expanded");
+        };
+
+        for _ in 0..6000 {
+            chat.update(ChatMessage::ScrollUp);
+        }
+        draw(&chat, 80, 20);
+        assert!(
+            chat.turns.borrow()[tool_idx].blocks.is_none(),
+            "turn evicted while scrolled away"
+        );
+
+        for _ in 0..6000 {
+            chat.update(ChatMessage::ScrollDown);
+        }
+        draw(&chat, 80, 20);
+        assert_eq!(
+            title_expanded_turn(&chat),
+            Some(tool_idx),
+            "title expansion preserved across eviction"
+        );
+    }
+
     #[test]
     fn click_toggles_tool_block() {
         let mut chat = Chat::new();
@@ -4227,6 +4344,95 @@ pub(crate) mod tests {
             .last()
             .map(Block::is_expanded);
         assert_eq!(expanded, Some(true));
+    }
+
+    /// Press and release inside the history pane: the click path the mouse
+    /// events take.
+    fn click(chat: &mut Chat, column: u16, row: u16) {
+        for kind in [super::MouseKind::Down, super::MouseKind::Up] {
+            chat.update(ChatMessage::Mouse { kind, column, row });
+        }
+    }
+
+    /// The live turn's last block as `(body expanded, title expanded)`.
+    fn in_flight_tool_state(chat: &Chat) -> (bool, bool) {
+        let in_flight = chat.in_flight.borrow();
+        let block = in_flight
+            .as_ref()
+            .unwrap()
+            .blocks
+            .as_ref()
+            .unwrap()
+            .last()
+            .unwrap();
+        (block.is_expanded(), block.is_title_expanded())
+    }
+
+    /// An in-flight `run_shell` call whose command overflows the title's
+    /// collapse cap: fourteen lines against a ten-line cap.
+    fn long_shell_chat() -> Chat {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "run".into(),
+            attachments: Vec::new(),
+        });
+        let command = (1..=14)
+            .map(|i| format!("echo step{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        chat.update(ChatMessage::ToolStarted {
+            name: "run_shell".into(),
+            args: serde_json::json!({ "command": command }),
+            worker: None,
+            spawn: None,
+            call_id: None,
+            waiting: false,
+        });
+        chat.update(ChatMessage::ToolFinished {
+            name: "run_shell".into(),
+            ok: true,
+            output: String::new(),
+            worker: None,
+            spawn: None,
+            file_change: None,
+            streams: None,
+            duration_ms: 40,
+            call_id: None,
+        });
+        chat
+    }
+
+    #[test]
+    fn click_on_a_long_title_toggles_the_title_not_the_body() {
+        let mut chat = long_shell_chat();
+        let buf = draw(&chat, 80, 30);
+        let rect = chat.history_rect.get();
+        assert_eq!(in_flight_tool_state(&chat), (false, false));
+
+        let (col, row) = row_with(&buf, "more lines").expect("collapse hint painted");
+        click(&mut chat, rect.x + col, row);
+        assert_eq!(
+            in_flight_tool_state(&chat),
+            (false, true),
+            "the title expands on its own control"
+        );
+
+        // The whole header is the title's target: any of its rows — here the
+        // title's last line, only reachable once expanded — collapses it again.
+        let buf = draw(&chat, 80, 30);
+        let (col, row) = row_with(&buf, "echo step14").expect("expanded title tail painted");
+        click(&mut chat, rect.x + col, row);
+        assert_eq!(in_flight_tool_state(&chat), (false, false));
+
+        // Rows below the header still toggle the body.
+        let buf = draw(&chat, 80, 30);
+        let (col, row) = row_with(&buf, "Took ").expect("elapsed row painted");
+        click(&mut chat, rect.x + col, row);
+        assert_eq!(
+            in_flight_tool_state(&chat),
+            (true, false),
+            "the body's own target is untouched"
+        );
     }
 
     /// The buffer row holding `needle`, searched left to right.
@@ -5555,8 +5761,16 @@ pub(crate) mod tests {
 mod media_hits_tests {
     use super::tests::draw;
     use super::*;
-    use crate::tui::session::segment::HitRegion;
+    use crate::tui::session::segment::{HitKind, HitRegion};
     use crate::tui::session::virtualizer::render_turn_cache;
+
+    /// The image slot a hit region addresses, if it is a media hit.
+    fn media_slot(hit: &HitRegion) -> Option<u16> {
+        match hit.kind {
+            HitKind::Media(slot) => Some(slot),
+            HitKind::Body | HitKind::Title => None,
+        }
+    }
     fn image_attachment(sha: &str) -> shuvarie_llm::Attachment {
         shuvarie_llm::Attachment {
             kind: shuvarie_llm::AttachmentKind::Image,
@@ -5627,7 +5841,7 @@ mod media_hits_tests {
         assert!(
             turn_hits(&chat, Some(0), 60)
                 .iter()
-                .all(|hit| hit.slot.is_none())
+                .all(|hit| media_slot(hit).is_none())
         );
         // Loaded, the image rows stamp their hit region. A between-frames
         // pass fills the render entry after the arrival.
@@ -5642,9 +5856,9 @@ mod media_hits_tests {
         let hits = turn_hits(&chat, Some(0), 60);
         let media_hit = hits
             .iter()
-            .find(|hit| hit.slot.is_some())
+            .find(|hit| media_slot(hit).is_some())
             .expect("the media segment stamps an image hit");
-        assert_eq!(media_hit.slot, Some(0));
+        assert_eq!(media_slot(media_hit), Some(0));
         // The hit's rows sit below the turn's header row(s): non-trivial.
         assert!(media_hit.end > media_hit.start);
         assert!(media_hit.start >= 1, "below the prompt text");
@@ -5670,7 +5884,7 @@ mod media_hits_tests {
         let hits = turn_hits(&chat, Some(0), 60);
         let media_hit = hits
             .iter()
-            .find(|hit| hit.slot.is_some())
+            .find(|hit| media_slot(hit).is_some())
             .expect("image hit stamped");
         // The mouse click maps through the painted frame's hit rows using
         // the pane rect the paint stored.
@@ -5688,7 +5902,7 @@ mod media_hits_tests {
         });
         assert_eq!(
             chat.take_media_open(),
-            Some((0, media_hit.slot.unwrap())),
+            Some((0, media_slot(media_hit).unwrap())),
             "the image click opens the viewer"
         );
         assert_eq!(chat.take_media_open(), None, "draining empties the request");
@@ -5722,10 +5936,10 @@ mod media_hits_tests {
         let hits = turn_hits(&chat, Some(1), 60);
         let media_hit = hits
             .iter()
-            .find(|hit| hit.slot.is_some())
+            .find(|hit| media_slot(hit).is_some())
             .expect("live turn stamps an image hit");
         let (pos, item) = chat
-            .image_hit_item(1, media_hit.slot.unwrap())
+            .image_hit_item(1, media_slot(media_hit).unwrap())
             .expect("the live click maps into the gallery");
         assert_eq!(pos, 1);
         assert_eq!(item.0, "sha_live");

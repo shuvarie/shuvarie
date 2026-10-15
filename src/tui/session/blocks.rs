@@ -45,6 +45,47 @@ pub(super) fn hides_output_when_collapsed(name: &str) -> bool {
     matches!(name, "read_file" | "list_dir" | "skill")
 }
 
+/// Title lines a tool header shows before collapsing the rest: a `run_shell`
+/// command with more line feeds than this renders its leading lines plus a
+/// `… +N more lines` hint until its title is expanded on its own control.
+pub(super) const TITLE_COLLAPSE_LINES: usize = 10;
+
+/// Title rows a `run_shell` command feeds its header onto: one per line feed,
+/// and at least one so the `$ ` prompt always has a row.
+pub(super) fn shell_command_rows(args: &serde_json::Value) -> usize {
+    let cmd = args.get("command").and_then(serde_json::Value::as_str);
+    cmd.unwrap_or("").lines().count().max(1)
+}
+
+/// The rows a tool header's title renders over: one for every tool but
+/// `run_shell`, whose command's line feeds feed the title onto a row per line
+/// — capped at [`TITLE_COLLAPSE_LINES`] plus the hint row while the title is
+/// collapsed. Mirrors what `ToolBlock`'s header renders.
+pub(super) fn title_rows(name: &str, args: &serde_json::Value, expanded: bool) -> u32 {
+    if name != "run_shell" {
+        return 1;
+    }
+    let lines = shell_command_rows(args) as u32;
+    if expanded || lines <= TITLE_COLLAPSE_LINES as u32 {
+        lines
+    } else {
+        TITLE_COLLAPSE_LINES as u32 + 1
+    }
+}
+
+/// [`title_rows`] for a persisted call, whose args are still raw JSON.
+pub(super) fn title_rows_json(name: &str, args_json: &str, expanded: bool) -> u32 {
+    let args: serde_json::Value =
+        serde_json::from_str(args_json).unwrap_or(serde_json::Value::Null);
+    title_rows(name, &args, expanded)
+}
+
+/// Whether a tool header's title holds more lines than the collapse cap, so it
+/// carries its own expand/collapse control.
+pub(super) fn title_collapsible(name: &str, args: &serde_json::Value) -> bool {
+    name == "run_shell" && shell_command_rows(args) > TITLE_COLLAPSE_LINES
+}
+
 /// One chat block: a TEA model per variant for the stateful kinds, unit
 /// variants for the stateless decorations the engine synthesizes around turns.
 pub enum Block {
@@ -63,9 +104,13 @@ pub enum Block {
 }
 
 /// Messages routed into a block, either from the chat's data flow or from a
-/// click hit-test (`Toggle`).
+/// click hit-test (`Toggle`, `ToggleTitle`).
 pub enum BlockMessage {
+    /// Flip the block's body rows (the output preview).
     Toggle,
+    /// Flip a tool header's title lines — the control a multi-line `run_shell`
+    /// command carries independently of its output.
+    ToggleTitle,
     Tool(ToolMessage),
     Text(TextMessage),
     Reasoning(ReasoningMessage),
@@ -93,6 +138,13 @@ impl Block {
                 }
                 Block::Reasoning(reasoning) => {
                     reasoning.toggle();
+                    true
+                }
+                _ => false,
+            },
+            BlockMessage::ToggleTitle => match self {
+                Block::Tool(tool) => {
+                    tool.toggle_title();
                     true
                 }
                 _ => false,
@@ -220,6 +272,24 @@ impl Block {
             Block::Reasoning(reasoning) => reasoning.is_expanded(),
             _ => false,
         }
+    }
+
+    /// Whether the block's header title holds more lines than the collapse cap
+    /// and so carries its own expand/collapse control.
+    pub fn title_collapsible(&self) -> bool {
+        matches!(self, Block::Tool(tool) if tool.title_collapsible())
+    }
+
+    /// Restore a tool block's title expansion (the persisted side-set re-applied
+    /// when an evicted turn materializes).
+    pub fn set_title_expanded(&mut self, expanded: bool) {
+        if let Block::Tool(tool) = self {
+            tool.set_title_expanded(expanded);
+        }
+    }
+
+    pub fn is_title_expanded(&self) -> bool {
+        matches!(self, Block::Tool(tool) if tool.is_title_expanded())
     }
 }
 

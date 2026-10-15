@@ -33,16 +33,28 @@ pub struct BlockAddr {
     pub block: usize,
 }
 
+/// What a click on a hit region resolves to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HitKind {
+    /// Toggle the block's body rows: its output preview.
+    Body,
+    /// Toggle a tool header's title lines: a multi-line title (a `run_shell`
+    /// command with line feeds) collapses and expands on its own control.
+    Title,
+    /// Open the media viewer at the addressed image slot.
+    Media(u16),
+}
+
 /// Row range (within a turn) covered by a hit target, with the addressed
 /// block. Recorded at render time; translated by the turn's content offset at
-/// click time. `slot` addresses one image inside the block's media strip for
-/// media hits (`None` for block-toggle targets).
+/// click time. `kind` says what the click does and, for media, which image of
+/// the block's strip it addresses.
 #[derive(Debug, Clone)]
 pub struct HitRegion {
     pub start: u32,
     pub end: u32,
     pub addr: BlockAddr,
-    pub slot: Option<u16>,
+    pub kind: HitKind,
 }
 
 /// Rows of a `\n`-separated string addressable by index: byte offsets of the
@@ -617,6 +629,16 @@ impl Segment {
 
     fn is_empty(&self, width: u16) -> bool {
         self.body_rows(width) == 0
+    }
+
+    /// Wrapped rows the chunk at `index` occupies at `content_width` — the
+    /// turn renderer uses it to bound a segment part's own hit target (a tool
+    /// header's title rows). `0` when the segment has no such chunk.
+    pub fn chunk_rows(&self, index: usize, content_width: u16) -> u32 {
+        let width = self.text_width(content_width);
+        self.chunks
+            .get(index)
+            .map_or(0, |chunk| chunk.row_count(width, self.trim))
     }
 
     /// Every row materialized: resident lines plus sliced source rows. For

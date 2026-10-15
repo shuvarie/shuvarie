@@ -10,9 +10,9 @@ use unicode_width::UnicodeWidthStr;
 
 use super::blocks::{
     Block, BlockMessage, ChatEnv, ReasoningBlock, ReasoningMessage, TextBlock, TextMessage,
-    ToolMessage, format_duration_ms, hides_output_when_collapsed, shows_elapsed,
+    ToolMessage, format_duration_ms, hides_output_when_collapsed, shows_elapsed, title_rows_json,
 };
-use super::segment::{BLOCK_PADDING, BlockAddr, HitRegion, Segment, TEXT_PADDING};
+use super::segment::{BLOCK_PADDING, BlockAddr, HitKind, HitRegion, Segment, TEXT_PADDING};
 use crate::tui::theme;
 
 /// Estimated row counters of one turn. Collected once (from stored session
@@ -171,6 +171,9 @@ impl TurnEst {
         self.tool_header_width += u32::try_from(record.name.chars().count() + 1)
             .unwrap_or(u32::MAX)
             .saturating_add(UnicodeWidthStr::width(record.args_json.as_str()).min(120) as u32);
+        // A collapsed multi-line title holds back its hidden lines: the row
+        // every header is counted for plus the rest.
+        self.tool_rows += title_rows_json(&record.name, &record.args_json, false).saturating_sub(1);
         self.tool_rows += output_row_est(record);
         if let Some(change) = &record.file_change {
             self.tool_rows += file_change_row_est(change);
@@ -406,11 +409,14 @@ impl TurnData {
     }
 
     /// Materialize the turn's blocks and apply the persisted expansion
-    /// side-set so blocks evicted while expanded come back expanded.
+    /// side-sets so blocks evicted while expanded come back expanded — the
+    /// body's rows (`toggled`) and a multi-line title's hidden lines
+    /// (`title_toggled`) independently.
     pub fn materialize(
         &mut self,
         build: impl FnOnce() -> Vec<Block>,
         toggled: &BTreeSet<(usize, usize)>,
+        title_toggled: &BTreeSet<(usize, usize)>,
         turn_idx: usize,
         interrupted_marker: bool,
     ) {
@@ -418,6 +424,9 @@ impl TurnData {
         for (idx, block) in blocks.iter_mut().enumerate() {
             if toggled.contains(&(turn_idx, idx)) {
                 block.set_expanded(true);
+            }
+            if title_toggled.contains(&(turn_idx, idx)) {
+                block.set_title_expanded(true);
             }
         }
         self.blocks = Some(blocks);
@@ -668,12 +677,26 @@ pub fn render_turn_cache(
                 _ => {}
             }
             let height = segment.measure(width);
+            // A tool whose title outgrew the collapse cap carries its own
+            // control: its header rows toggle the title's hidden lines instead
+            // of the body. Pushed ahead of the block-wide region so the more
+            // specific target wins the hit test.
+            if block.title_collapsible() {
+                let rows = segment.chunk_rows(0, width);
+                let pad = u32::from(segment.padding.1);
+                hits.push(HitRegion {
+                    start: y + pad,
+                    end: y + pad + rows,
+                    addr: addr.clone(),
+                    kind: HitKind::Title,
+                });
+            }
             if segment.hit.is_some() {
                 hits.push(HitRegion {
                     start: y,
                     end: y + height,
                     addr: addr.clone(),
-                    slot: None,
+                    kind: HitKind::Body,
                 });
             }
             // Media blocks stamp per-image rows (offset by the segment's top
@@ -686,7 +709,7 @@ pub fn render_turn_cache(
                         start: y + pad + media.from,
                         end: y + pad + media.to,
                         addr: addr.clone(),
-                        slot: Some(media.slot),
+                        kind: HitKind::Media(media.slot),
                     });
                 }
             }
