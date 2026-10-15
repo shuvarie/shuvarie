@@ -1,5 +1,74 @@
 # Changelog
 
+## [0.4.1] - 2026-10-15
+
+### 🚀 Features
+
+- *(command)* Add guardrail for invalid slash commands
+
+### 🐛 Bug Fixes
+
+- *(question)* Make escape interrupt turn
+
+### 🎨 Styling
+
+- *(art)* Use embedded art instead
+## [0.4.0] - 2026-10-13
+
+### 🚀 Features
+
+- *(command)* Add todo list command
+- *(tui)* Add turn labels of overall time taken and model names (#98)
+- *(notification)* Add on-finish notification
+- *(image)* Add image pasting from clipboard
+- *(headless)* Add headless mode
+- *(tui)* Update permission folder key
+- *(tui)* Add waiting state for queued tools
+- *(tui)* Welcome (onboard) screen rework (#99)
+
+### 🐛 Bug Fixes
+
+- *(tui)* List item scrolling should move selected area
+- *(question)* No scrolling for question dialog
+
+### 📚 Documentation
+
+- *(skill)* Update rig skill
+
+### 🚜 Refactor
+
+- After frame logic
+
+### 🎨 Styling
+
+- *(spinner)* Update block spinner frames
+- *(status)* Add initializing status
+
+### ⚙️ Miscellaneous Tasks
+
+- *(formatting)* Update formats
+## [0.3.3] - 2026-10-08
+
+### 🐛 Bug Fixes
+
+- *(notify)* Notify keeps triggering update
+- *(session)* Assistant prompts ignored in reloaded session
+
+### ⚡ Performance
+
+- *(alloc)* Use mimalloc for musl build
+- *(notify)* Lower notify poll rate to once per 5 seconds
+
+### 🧪 Testing
+
+- Update core_task mock
+- Add prompt history tests
+## [0.3.2] - 2026-10-08
+
+### 🐛 Bug Fixes
+
+- *(session)* Preserve assistant prompt when retry
+- *(session)* Token exceed limit
 ## [0.3.1] - 2026-10-06
 
 ### 🐛 Bug Fixes
@@ -67,7 +136,6 @@
 
 ### ⚙️ Miscellaneous Tasks
 
-- *(release)* Update changelog
 - Run tests on entire workspace with one character indication
 - Lint against entire workspace
 - Add cargo publish
