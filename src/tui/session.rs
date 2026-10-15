@@ -1056,6 +1056,17 @@ impl SessionScreen {
                     match effect {
                         QuestionEffect::Answer { id, answers } => {
                             self.question.close();
+                            // Dismissing the popup mid-stream doubles as an
+                            // interrupt: `CancelStream` settles the pending
+                            // question the same way the core's own cancel path
+                            // does (it drops the responder, so the awaiting tool
+                            // still reports the dismissal) *and* cuts the
+                            // running turn, so Escape backs out of a blocked
+                            // question without leaving the model to carry on.
+                            if answers.is_none() && self.chat.is_streaming() {
+                                self.last_escape = None;
+                                return Some(SessionEffect::CancelStream);
+                            }
                             self.busy_kind = BusyKind::Tool;
                             self.status = Some("Calling tool: question".to_string());
                             return Some(SessionEffect::AnswerQuestion { id, answers });
@@ -3415,6 +3426,58 @@ mod tests {
             screen.map_event(&KeyCode::Escape.into()),
             Some(SessionMessage::EscapePressed)
         ));
+    }
+
+    fn screen_with_question(streaming: bool) -> SessionScreen {
+        let mut screen = if streaming {
+            streaming_screen()
+        } else {
+            SessionScreen::new()
+        };
+        screen.update(SessionMessage::QuestionAsked {
+            id: 7,
+            questions: vec![shuvarie_core::QuestionPrompt {
+                question: "Which one?".into(),
+                header: "Pick".into(),
+                options: vec![shuvarie_core::question::QuestionOption {
+                    label: "a".into(),
+                    description: String::new(),
+                }],
+                multiple: false,
+                custom: false,
+            }],
+        });
+        screen
+    }
+
+    #[test]
+    fn escape_on_the_question_popup_interrupts_the_stream() {
+        let mut screen = screen_with_question(true);
+        assert!(matches!(
+            screen.map_event(&KeyCode::Escape.into()),
+            Some(SessionMessage::Question(QuestionMessage::Escape))
+        ));
+        // One Escape both dismisses the blocking question and cuts the turn:
+        // the core's cancel path settles the pending ask on its own.
+        assert!(matches!(
+            screen.update(SessionMessage::Question(QuestionMessage::Escape)),
+            Some(SessionEffect::CancelStream)
+        ));
+        assert!(!screen.question.open, "the popup closes with the interrupt");
+        assert!(screen.last_escape.is_none());
+    }
+
+    #[test]
+    fn escape_on_the_question_popup_dismisses_when_idle() {
+        let mut screen = screen_with_question(false);
+        assert!(matches!(
+            screen.update(SessionMessage::Question(QuestionMessage::Escape)),
+            Some(SessionEffect::AnswerQuestion {
+                id: 7,
+                answers: None
+            })
+        ));
+        assert!(!screen.question.open);
     }
 
     #[test]
