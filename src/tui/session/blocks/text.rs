@@ -1,7 +1,7 @@
 use ratatui::prelude::*;
 
 use super::super::md_cache::MdCache;
-use super::super::segment::{BLOCK_PADDING, BodyChunk, Segment, TEXT_PADDING};
+use super::super::segment::{BLOCK_PADDING, BodyChunk, Segment, TEXT_PADDING, text_width};
 use super::super::virtualizer::TurnEst;
 use crate::tui::theme;
 
@@ -38,7 +38,7 @@ impl UserPrompt {
     }
 
     pub fn view(&self, width: u16) -> Vec<Segment> {
-        let Some(chunks) = self.cache.chunks(width) else {
+        let Some(chunks) = self.cache.chunks(text_width(width, BLOCK_PADDING)) else {
             return Vec::new();
         };
         vec![Segment {
@@ -80,7 +80,11 @@ impl SteeredPrompt {
                 .fg(theme::accent())
                 .italic(),
         )])];
-        chunks.extend(self.cache.chunks(width).unwrap_or_default());
+        chunks.extend(
+            self.cache
+                .chunks(text_width(width, BLOCK_PADDING))
+                .unwrap_or_default(),
+        );
         vec![Segment {
             chunks,
             bg: Some(theme::prompt_bg()),
@@ -293,6 +297,48 @@ mod tests {
             &full,
             &[0, 40, 200, u32::from(full.area().height) - 1],
         );
+    }
+
+    /// A prompt block's cached markdown counts must wrap at the block's inset
+    /// text width, not at the outer content width: a table wider than the inset
+    /// reserves too few rows otherwise, so its tail never reaches the frame and
+    /// the following text lands mid-table. The cached render has to match a
+    /// one-shot materialization of the same content at the same width.
+    #[test]
+    fn user_prompt_wraps_counts_at_its_inset_text_width() {
+        let content =
+            "| aaaaaa | bbbbbb | cccccc | dddddd |\n|---|---|---|---|\n| 1 | 2 | 3 | 4 |\n\nafter";
+        let prompt = UserPrompt::new(content);
+        let materialized = Segment::materialized(
+            render(content),
+            Some(theme::prompt_bg()),
+            BLOCK_PADDING,
+            true,
+        );
+        // 37 content columns leaves 33 text columns: rows inside the 33..37
+        // band wrap at one width but not the other, so a mismatch is visible.
+        for width in [24u16, 33, 37, 40, 60] {
+            let seg = &prompt.view(width)[0];
+            assert_eq!(
+                seg.measure(width),
+                materialized.measure(width),
+                "measured height at width {width}"
+            );
+            assert_eq!(
+                row_strings(seg, width),
+                row_strings(&materialized, width),
+                "painted rows at width {width}"
+            );
+            // The steered prompt insets the same body behind its queue header
+            // row, so it measures that one chunk taller.
+            let steered = SteeredPrompt::new(content);
+            let steered_seg = &steered.view(width)[0];
+            assert_eq!(
+                steered_seg.measure(width),
+                seg.measure(width) + steered_seg.chunk_rows(0, width),
+                "steered prompt height at width {width}"
+            );
+        }
     }
 
     #[test]

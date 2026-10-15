@@ -118,6 +118,7 @@ impl MdCache {
                     lines: run.lines.clone(),
                 },
                 0,
+                width,
                 counts,
             ));
             covered += take;
@@ -132,6 +133,7 @@ impl MdCache {
                         lines: render.pending.clone(),
                     },
                     0,
+                    width,
                     render.pending_counts[..take].to_vec().into(),
                 ));
             }

@@ -5957,4 +5957,41 @@ mod media_hits_tests {
             .unwrap();
         out
     }
+
+    /// A user-pasted markdown table wider than the prompt block's inset text
+    /// width: every row — the bottom border last — must reach the frame. The
+    /// cached markdown's wrapped-row counts have to be built at the text width
+    /// the segment paints at, not at the outer content width, or the block
+    /// reserves too few rows and the table's tail is cut off (the text after it
+    /// landing where the table's body belongs).
+    #[test]
+    fn prompt_table_paints_every_row_inside_its_block() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "| aaaaaa | bbbbbb | cccccc | dddddd |\n|---|---|---|---|\n| 1 | 2 | 3 | 4 |\n\nafter text".into(),
+            attachments: Vec::new(),
+        });
+        chat.update(ChatMessage::StreamDone);
+
+        // Width 39: 38 content columns, a 34-column inset text width, and a
+        // 37-column table row that wraps inside the block.
+        let buf = draw(&chat, 39, 20);
+        let rows: Vec<String> = (0..20)
+            .map(|y| {
+                (0..39)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        let all = rows.join("\n");
+        assert!(all.contains("│ 1      │"), "the last table row: {all}");
+        assert!(all.contains("└"), "the bottom border: {all}");
+        assert!(
+            rows.iter().position(|row| row.contains("after text"))
+                > rows.iter().position(|row| row.contains("└")),
+            "the following text stays below the table: {all}"
+        );
+    }
 }

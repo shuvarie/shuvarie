@@ -14,7 +14,7 @@ use super::{
     shows_elapsed, title_collapsible, title_rows,
 };
 use crate::tui::session::blocks::{ChatEnv, Segment};
-use crate::tui::session::segment::{BLOCK_PADDING, BodyChunk, BodySource, TextRows};
+use crate::tui::session::segment::{BLOCK_PADDING, BodyChunk, BodySource, TextRows, text_width};
 use crate::tui::session::virtualizer::{TurnEst, collapsed_rows, file_change_row_est};
 use crate::tui::{spinner, theme};
 use shuvarie_core::tool_record::ToolRecord;
@@ -444,7 +444,7 @@ impl ToolBlock {
     }
 
     fn build_body(&self, width: u16, env: &ChatEnv) -> Vec<BodyChunk> {
-        let count_width = width.saturating_sub(2 * BLOCK_PADDING.0).max(1);
+        let count_width = text_width(width, BLOCK_PADDING);
         let is_shell = self.name == "run_shell";
         let mut body = BodyBuilder::new(count_width);
         if self.name == "question" {
@@ -1425,10 +1425,11 @@ mod tests {
         let width = 80u16;
         let seg = block.view(width, &env);
         assert!(!seg.trim);
-        let content_width = width.saturating_sub(2 * BLOCK_PADDING.0);
-        let h = seg.measure(content_width);
+        // Measure and paint at the block's outer width: the segment insets its
+        // body by the block padding itself.
+        let h = seg.measure(width);
         let mut buf = Buffer::empty(Rect::new(0, 0, width, h as u16));
-        seg.paint(buf.area, 0, 0, h, content_width, &mut buf);
+        seg.paint(buf.area, 0, 0, h, width, &mut buf);
         let rows: Vec<String> = (0..h as u16)
             .map(|y| {
                 (0..width)

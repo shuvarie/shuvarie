@@ -20,6 +20,14 @@ pub const BLOCK_PADDING: (u16, u16) = (2, 1);
 /// the content, no background, no side inset.
 pub const TEXT_PADDING: (u16, u16) = (0, 1);
 
+/// The text width a segment's body occupies at `content_width`: the content
+/// width minus the horizontal padding, at least one column. Chunk counts are
+/// built at exactly this width (see [`SlicedChunk`]), so a block whose body is
+/// inset must build them through here rather than at the outer content width.
+pub(crate) fn text_width(content_width: u16, padding: (u16, u16)) -> u16 {
+    content_width.saturating_sub(2 * padding.0).max(1)
+}
+
 /// Source-row runs longer than this render as a sliced chunk whose rows
 /// materialize only when painted; shorter runs stay fully materialized.
 pub(crate) const CHUNK_ROWS: u32 = 48;
@@ -325,11 +333,15 @@ pub struct SlicedChunk {
     pub source: BodySource,
     /// Index of the chunk's first source row within the projection.
     pub start: u32,
-    /// Wrapped-row count per source row at the build width; the build width
-    /// always matches the width the segment is measured and painted at. The
-    /// chunk covers `[start..start + counts.len())` — below the source's full
-    /// row range when the chunk's display range is trimmed (e.g. markdown
-    /// trailing blank lines).
+    /// The width the counts were built at: the width the segment owning the
+    /// chunk is measured and painted at. Consuming them at any other width
+    /// would slice the wrong source rows, so a mismatch is asserted in debug
+    /// builds.
+    width: u16,
+    /// Wrapped-row count per source row at the build width. The chunk covers
+    /// `[start..start + counts.len())` — below the source's full row range when
+    /// the chunk's display range is trimmed (e.g. markdown trailing blank
+    /// lines).
     counts: Rc<[u32]>,
 }
 
@@ -353,15 +365,17 @@ impl BodyChunk {
             BodyChunk::Sliced(SlicedChunk {
                 source,
                 start,
+                width,
                 counts,
             })
         }
     }
 
     /// A sliced chunk over `counts`-precomputed rows of `source`, covering
-    /// `[start..start + counts.len())` at the width the counts were built
-    /// with. The projection must have that many rows.
-    pub fn counted(source: BodySource, start: u32, counts: Rc<[u32]>) -> Self {
+    /// `[start..start + counts.len())` at `width`: the width the counts were
+    /// built with, which the owning segment must be measured and painted at.
+    /// The projection must have that many rows.
+    pub fn counted(source: BodySource, start: u32, width: u16, counts: Rc<[u32]>) -> Self {
         debug_assert!(
             usize::try_from(source.row_count().saturating_sub(start)).unwrap_or(usize::MAX)
                 >= counts.len(),
@@ -369,6 +383,7 @@ impl BodyChunk {
         BodyChunk::Sliced(SlicedChunk {
             source,
             start,
+            width,
             counts,
         })
     }
@@ -384,7 +399,10 @@ impl BodyChunk {
     fn row_count(&self, width: u16, trim: bool) -> u32 {
         match self {
             BodyChunk::Fixed(chunk) => chunk.counts(width, trim).iter().sum(),
-            BodyChunk::Sliced(chunk) => chunk.counts.iter().sum(),
+            BodyChunk::Sliced(chunk) => {
+                chunk.assert_width(width);
+                chunk.counts.iter().sum()
+            }
         }
     }
 
@@ -398,6 +416,7 @@ impl BodyChunk {
                 }
             }
             BodyChunk::Sliced(chunk) => {
+                chunk.assert_width(width);
                 let window = count_window(&chunk.counts, band.start, band.end);
                 paint_row_bgs(&chunk.counts, band, rect, buf, |i| {
                     source_row_bg(&chunk.source, chunk.start + i as u32)
@@ -616,7 +635,7 @@ impl Segment {
     }
 
     fn text_width(&self, content_width: u16) -> u16 {
-        content_width.saturating_sub(2 * self.padding.0).max(1)
+        text_width(content_width, self.padding)
     }
 
     /// Wrapped rows the body produces at `width` (excludes padding).
@@ -771,6 +790,7 @@ impl Segment {
                         })
                     }
                     BodyChunk::Sliced(chunk) => {
+                        chunk.assert_width(width);
                         let (first, _last, offset) = count_window(&chunk.counts, local, local + 1)?;
                         Some(ResolvedRow {
                             source: chunk.source.clone(),
@@ -820,6 +840,17 @@ impl ResolvedRow {
 }
 
 impl SlicedChunk {
+    /// The counts only describe rows wrapped at the chunk's own build width;
+    /// the segment measuring and painting them has to sit at exactly that
+    /// width.
+    fn assert_width(&self, width: u16) {
+        debug_assert_eq!(
+            self.width, width,
+            "chunk counts built at width {} but consumed at {width}",
+            self.width
+        );
+    }
+
     /// The chunk's covered source-row range: `[start..start +
     /// counts.len())`.
     #[cfg(test)]
@@ -1205,11 +1236,20 @@ pub(crate) mod tests {
 
     #[test]
     fn locate_row_resolves_sliced_chunks() {
+        // The counts are built at the padded segment's text width (40 content
+        // columns minus the two columns of inset per side), the width the
+        // segment is measured and painted at.
         let source = sample_text_source();
+        let width = text_width(40, (2, 1));
         let counts: Rc<[u32]> = (0..3)
-            .map(|i| source_row_count(&source, i, 40, false))
+            .map(|i| source_row_count(&source, i, width, false))
             .collect();
-        let seg = Segment::chunked(BodyChunk::counted(source, 0, counts), None, (2, 1), false);
+        let seg = Segment::chunked(
+            BodyChunk::counted(source, 0, width, counts),
+            None,
+            (2, 1),
+            false,
+        );
         let mid = seg.locate_row(3, 40).expect("second wrapped row");
         assert_eq!(mid.source_row, 1);
         assert_eq!(mid.wrap_index, 1);
