@@ -315,6 +315,19 @@ pub fn unescape(text: &str) -> &str {
     }
 }
 
+/// Whether `text` opens with a trigger char (`/`, `:`) that is not escaped by
+/// a doubled prefix: the shape of an attempted command invocation (a builtin,
+/// a custom command, or a skill). Leading whitespace is trimmed away, mirroring
+/// [`parse_command`]; an escaped prefix (`//`, `::`) is literal text, not an
+/// attempt.
+pub fn opens_with_trigger(text: &str) -> bool {
+    let text = text.trim();
+    match text.chars().next() {
+        Some(first) => TRIGGER_CHARS.contains(&first) && !is_escaped(text),
+        None => false,
+    }
+}
+
 /// A parsed `<trigger><alias> [args]` submission.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParsedCommand {
@@ -455,6 +468,22 @@ mod tests {
             is_escaped("// x"),
             "the doubled prefix is the escape sequence"
         );
+    }
+
+    #[test]
+    fn opens_with_trigger_detects_unescaped_prefixes() {
+        assert!(opens_with_trigger("/model"));
+        assert!(opens_with_trigger(":model"));
+        assert!(opens_with_trigger("/"));
+        assert!(opens_with_trigger("  /model"), "leading space is trimmed");
+        assert!(
+            !opens_with_trigger("//model"),
+            "the doubled prefix escapes it"
+        );
+        assert!(!opens_with_trigger("::model"));
+        assert!(!opens_with_trigger("hello /model"));
+        assert!(!opens_with_trigger(""));
+        assert!(!opens_with_trigger("!ls"));
     }
 
     #[test]

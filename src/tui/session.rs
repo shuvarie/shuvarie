@@ -16,6 +16,7 @@ use crate::tui::utils::{alt, alt_shift, ctrl, ctrl_shift};
 use self::mention::{MentionMenu, MentionMessage};
 use super::commands::{self, CommandAction, CommandRef};
 use super::components::{TextArea, TextAreaEffect, TextAreaMessage};
+use super::guard::{SlashGuardMessage, SlashGuard};
 use super::permission::{PermissionEffect, PermissionMessage, PermissionUI};
 use super::question::{QuestionEffect, QuestionMessage, QuestionUI};
 use super::sidebar::{Sidebar, SidebarMessage};
@@ -135,6 +136,9 @@ pub enum SessionMessage {
     },
     Question(QuestionMessage),
     Slash(SlashMessage),
+    /// The slash-command guardrail prompt: `Enter` sends the held submit
+    /// anyway, `Esc` aborts it and hands the text back to the composer.
+    SlashGuard(SlashGuardMessage),
     /// The composer's `@` mention completion popup: navigation and
     /// accept/dismiss. Accepted candidates splice into the buffer's trailing
     /// mention token.
@@ -310,6 +314,9 @@ pub struct SessionScreen {
     pub question: QuestionUI,
     pub permission: PermissionUI,
     slash: SlashMenu,
+    /// The slash-command guardrail: a literal send held back for confirmation
+    /// (see [`SlashGuard`]).
+    slash_guard: SlashGuard,
     /// The composer's `@` mention completion popup (trailing-mention
     /// candidates, directory listing cached per dir part).
     mention: MentionMenu,
@@ -359,6 +366,7 @@ impl SessionScreen {
             question: QuestionUI::new(),
             permission: PermissionUI::new(),
             slash: SlashMenu::new(),
+            slash_guard: SlashGuard::new(),
             mention: MentionMenu::new(),
             chat: chat::Chat::new(),
             bash: bash::BashPopup::new(),
@@ -536,6 +544,11 @@ impl SessionScreen {
         if self.question.open {
             return self.question.map_event(key).map(SessionMessage::Question);
         }
+        // The guardrail prompt replaces the composer while it is up, so it owns
+        // Enter/Esc and swallows the rest (like the permission prompt).
+        if self.slash_guard.active() {
+            return self.slash_guard.map_event(key).map(SessionMessage::SlashGuard);
+        }
         // The search tooltip floats above the chat; while it is open keys
         // edit the needle (Escape exits) before anything underneath sees
         // them. Scroll keys fall through to the chat so matches can be
@@ -660,6 +673,11 @@ impl SessionScreen {
         if self.permission.open {
             return None;
         }
+        // The guardrail prompt is modal: a paste while it is up is swallowed
+        // rather than landing in the composer behind it.
+        if self.slash_guard.active() {
+            return None;
+        }
         if self.question.open {
             return Some(SessionMessage::Question(QuestionMessage::CustomPaste(
                 text.to_string(),
@@ -720,68 +738,85 @@ impl SessionScreen {
         effect
     }
 
+    /// Handle a composer submit: a bash-mode run, a builtin slash command, a
+    /// custom command, a skill invocation, or the literal send. `confirmed`
+    /// marks the guardrail's "send anyway", so the submit is not held a second
+    /// time.
+    fn submit_prompt(&mut self, content: String, confirmed: bool) -> Option<SessionEffect> {
+        // A submit consumes the buffer and its pending attachments; capture the
+        // paths before taking them. A guardrail trip puts the chips back, so an
+        // aborted send leaves the attach strip untouched.
+        let attachments: Vec<String> = self.pending.iter().map(|a| a.path.clone()).collect();
+        let chips = std::mem::take(&mut self.pending);
+        let probed = std::mem::take(&mut self.requested_directives);
+        if let Some(raw) = content.strip_prefix('!') {
+            let command = raw.trim().to_string();
+            self.sync_slash();
+            if command.is_empty() {
+                return None;
+            }
+            return Some(SessionEffect::RunBash { command });
+        }
+        if let Some(cmd) = commands::parse_command(&content) {
+            self.sync_slash();
+            return Some(SessionEffect::RunCommand {
+                action: CommandRef::Builtin(cmd.action),
+                args: cmd.args,
+            });
+        }
+        // A custom command: expand its template (the `{{arguments}}`
+        // placeholder / trailing args) and send it, carrying the command's
+        // `model` override for this turn. An unknown name falls through to
+        // skill parsing and then to a literal send.
+        match self.expand_custom(&content) {
+            Ok(Some((expanded, model))) => {
+                self.input.remember_sent(&content);
+                self.sync_slash();
+                return Some(send_message_effect(expanded, attachments, model));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.error = Some(error);
+                self.sync_slash();
+                return None;
+            }
+        }
+        let expanded = match self.expand_skill(&content) {
+            Ok(Some(expanded)) => expanded,
+            Ok(None) => {
+                // Guardrail: the submit opened with a trigger char yet matched
+                // no command, so it is probably a typo'd command rather than
+                // prose. Hold it for confirmation instead of sending it.
+                if !confirmed && commands::opens_with_trigger(&content) {
+                    self.slash_guard.hold(content);
+                    self.pending = chips;
+                    self.requested_directives = probed;
+                    self.sync_slash();
+                    return None;
+                }
+                commands::unescape(&content).to_string()
+            }
+            Err(error) => {
+                self.error = Some(error);
+                self.sync_slash();
+                return None;
+            }
+        };
+        // Display of the user prompt is event-driven: the core's `TurnStarted`
+        // decides whether this begins a turn or gets steered behind a busy
+        // agent.
+        self.input.remember_sent(&content);
+        self.sync_slash();
+        Some(send_message_effect(expanded, attachments, None))
+    }
+
     /// The update body proper; `update` wraps it with the compose-side sync
     /// (`sync_slash` + `sync_pending`) so effects from both survive.
     fn update_effect(&mut self, msg: SessionMessage) -> Option<SessionEffect> {
         match msg {
             SessionMessage::Text(m) => {
-                if let Some(effect) = self.input.update(m) {
-                    match effect {
-                        TextAreaEffect::Submit { content } => {
-                            // A submit consumes the buffer and its pending
-                            // attachments; capture them before clearing.
-                            let attachments: Vec<String> =
-                                self.pending.iter().map(|a| a.path.clone()).collect();
-                            self.clear_pending();
-                            if let Some(raw) = content.strip_prefix('!') {
-                                let command = raw.trim().to_string();
-                                self.sync_slash();
-                                if command.is_empty() {
-                                    return None;
-                                }
-                                return Some(SessionEffect::RunBash { command });
-                            }
-                            if let Some(cmd) = commands::parse_command(&content) {
-                                self.sync_slash();
-                                return Some(SessionEffect::RunCommand {
-                                    action: CommandRef::Builtin(cmd.action),
-                                    args: cmd.args,
-                                });
-                            }
-                            // A custom command: expand its template (the
-                            // `{{arguments}}` placeholder / trailing args)
-                            // and send it, carrying the command's `model`
-                            // override for this turn. An unknown name falls
-                            // through to skill parsing and then to a literal
-                            // send.
-                            match self.expand_custom(&content) {
-                                Ok(Some((expanded, model))) => {
-                                    self.input.remember_sent(&content);
-                                    self.sync_slash();
-                                    return Some(send_message_effect(expanded, attachments, model));
-                                }
-                                Ok(None) => {}
-                                Err(error) => {
-                                    self.error = Some(error);
-                                    return None;
-                                }
-                            }
-                            let expanded = match self.expand_skill(&content) {
-                                Ok(Some(expanded)) => expanded,
-                                Ok(None) => commands::unescape(&content).to_string(),
-                                Err(error) => {
-                                    self.error = Some(error);
-                                    return None;
-                                }
-                            };
-                            // Display of the user prompt is event-driven: the
-                            // core's `TurnStarted` decides whether this begins a
-                            // turn or gets steered behind a busy agent.
-                            self.input.remember_sent(&content);
-                            self.sync_slash();
-                            return Some(send_message_effect(expanded, attachments, None));
-                        }
-                    }
+                if let Some(TextAreaEffect::Submit { content }) = self.input.update(m) {
+                    return self.submit_prompt(content, false);
                 }
                 self.sync_slash();
                 None
@@ -889,6 +924,22 @@ impl SessionScreen {
                     None
                 }
             },
+            SessionMessage::SlashGuard(SlashGuardMessage::Send) => {
+                // Send anyway: run the held text through the normal submit path
+                // with the guardrail explicitly satisfied, so it lands as the
+                // literal send the guard intercepted.
+                let content = self.slash_guard.take()?;
+                self.submit_prompt(content, true)
+            }
+            SessionMessage::SlashGuard(SlashGuardMessage::Edit) => {
+                // Abort the send: hand the text back to the composer (its
+                // pending attachments never left the strip) and keep editing.
+                if let Some(content) = self.slash_guard.take() {
+                    self.input.buffer.set(&content);
+                    self.sync_slash();
+                }
+                None
+            }
             SessionMessage::Mention(m) => {
                 match m {
                     MentionMessage::Next => self.mention.next(),
@@ -1411,11 +1462,13 @@ impl SessionScreen {
             self.permission.desired_height(content_area.width as usize)
         } else if self.question.open {
             self.question.desired_height(content_area.width as usize)
+        } else if self.slash_guard.active() {
+            self.slash_guard.desired_height(content_area.width as usize)
         } else {
             self.input.desired_height(content_area.width as usize)
         };
         let working_rows = working_rows(&self.working_todos);
-        let strip_rows = if self.permission.open || self.question.open {
+        let strip_rows = if self.permission.open || self.question.open || self.slash_guard.active() {
             0
         } else {
             pending_strip_rows(&self.pending)
@@ -1481,6 +1534,8 @@ impl SessionScreen {
             self.permission.view(frame, input_area);
         } else if self.question.open {
             self.question.view(frame, input_area);
+        } else if self.slash_guard.active() {
+            self.slash_guard.view(frame, input_area);
         } else {
             let text_color = if bash_mode {
                 theme::accent()
@@ -1598,7 +1653,9 @@ impl SessionScreen {
                 "clear"
             };
             let cut = input_selection.then_some(("Ctrl+X", "cut"));
-            let footer = if !self.question.open && self.slash.active() {
+            let footer = if self.slash_guard.active() {
+                theme::help_line(&[("Enter", "send anyway"), ("Esc", "keep editing")])
+            } else if !self.question.open && self.slash.active() {
                 theme::help_line(&[("Tab", "complete"), ("↑↓", "select"), ("Esc", "dismiss")])
             } else if self.chat.is_streaming() {
                 let mut bindings = vec![
@@ -3215,14 +3272,119 @@ mod tests {
     }
 
     #[test]
-    fn unknown_slash_name_falls_through_to_literal_send() {
+    fn unknown_slash_name_is_held_by_the_guardrail() {
         let mut screen = SessionScreen::new();
         screen.input.buffer.set("/nonexistent-command");
+        assert!(
+            screen
+                .update(SessionMessage::Text(TextAreaMessage::Submit))
+                .is_none(),
+            "an unmatched command is held instead of sent"
+        );
+        assert!(screen.slash_guard.active());
+        assert!(screen.input.buffer.value.is_empty());
         assert!(matches!(
-            screen.update(SessionMessage::Text(TextAreaMessage::Submit)),
+            screen.update(SessionMessage::SlashGuard(SlashGuardMessage::Send)),
             Some(SessionEffect::SendMessage { content, .. })
                 if content == "/nonexistent-command"
         ));
+        assert!(!screen.slash_guard.active());
+    }
+
+    #[test]
+    fn escaped_prefix_still_sends_literally() {
+        let mut screen = SessionScreen::new();
+        // `//` escapes the trigger: explicit prose, not a command attempt.
+        screen.input.buffer.set("//not-a-command");
+        assert!(matches!(
+            screen.update(SessionMessage::Text(TextAreaMessage::Submit)),
+            Some(SessionEffect::SendMessage { content, .. }) if content == "/not-a-command"
+        ));
+        assert!(!screen.slash_guard.active());
+    }
+
+    #[test]
+    fn guardrail_holds_colon_command_and_escape_puts_it_back() {
+        let mut screen = SessionScreen::new();
+        screen.input.buffer.set(":maybe a command");
+        assert!(
+            screen
+                .update(SessionMessage::Text(TextAreaMessage::Submit))
+                .is_none()
+        );
+        assert!(screen.slash_guard.active());
+        assert!(
+            screen
+                .update(SessionMessage::SlashGuard(SlashGuardMessage::Edit))
+                .is_none()
+        );
+        assert!(!screen.slash_guard.active());
+        assert_eq!(screen.input.buffer.value, ":maybe a command");
+        // The restored text is held again on the next submit (nothing latches).
+        assert!(
+            screen
+                .update(SessionMessage::Text(TextAreaMessage::Submit))
+                .is_none()
+        );
+        assert!(screen.slash_guard.active());
+    }
+
+    #[test]
+    fn guardrail_prompt_owns_enter_and_escape() {
+        let mut screen = SessionScreen::new();
+        screen.input.buffer.set("/nope");
+        screen.update(SessionMessage::Text(TextAreaMessage::Submit));
+        assert!(matches!(
+            screen.map_event(&KeyEvent::new(KeyCode::Enter, Modifiers::empty())),
+            Some(SessionMessage::SlashGuard(SlashGuardMessage::Send))
+        ));
+        assert!(matches!(
+            screen.map_event(&KeyEvent::new(KeyCode::Escape, Modifiers::empty())),
+            Some(SessionMessage::SlashGuard(SlashGuardMessage::Edit))
+        ));
+        assert!(
+            screen
+                .map_event(&KeyEvent::new(KeyCode::Char('x'), Modifiers::empty()))
+                .is_none(),
+            "the prompt is modal: other keys are swallowed"
+        );
+    }
+
+    #[test]
+    fn guardrail_edit_keeps_a_dropped_attachment() {
+        let mut screen = SessionScreen::new();
+        screen.update(SessionMessage::Attach {
+            path: "notes.md".into(),
+        });
+        assert_eq!(screen.pending.len(), 1);
+        screen.input.buffer.set("/maybe");
+        screen.update(SessionMessage::Text(TextAreaMessage::Submit));
+        assert!(screen.slash_guard.active());
+        screen.update(SessionMessage::SlashGuard(SlashGuardMessage::Edit));
+        assert_eq!(screen.input.buffer.value, "/maybe");
+        assert_eq!(
+            screen
+                .pending
+                .iter()
+                .map(|a| a.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["notes.md"],
+            "an aborted send keeps its attachment"
+        );
+    }
+
+    #[test]
+    fn guardrail_prompt_renders_in_the_input_area() {
+        let mut screen = SessionScreen::new();
+        screen.input.buffer.set("/nope");
+        screen.update(SessionMessage::Text(TextAreaMessage::Submit));
+        let buf = draw(&screen, 100, 24);
+        let (_, title) = find_row(&buf, "invalid slash command");
+        assert!(title.contains("This might be an invalid slash command"));
+        let (_, preview) = find_row(&buf, "/nope");
+        assert!(preview.contains("/nope"), "held text: {preview:?}");
+        let (_, footer) = find_row(&buf, "send anyway");
+        assert!(footer.contains("Enter send anyway"), "footer: {footer:?}");
     }
 
     #[test]

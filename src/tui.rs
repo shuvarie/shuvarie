@@ -34,6 +34,9 @@ mod event;
 /// Filesystem watch on the workspace's git `HEAD` file: the sidebar branch
 /// label refreshes on checkouts made outside the TUI.
 mod git_watch;
+/// The slash-command guardrail prompt: a trigger-prefixed submit that matched
+/// no command is held for confirmation instead of being sent as prose.
+mod guard;
 mod history_search;
 /// Opt-in raw input tracing (`SHUVARIE_TRACE_INPUT`), for diagnosing file
 /// drops.
