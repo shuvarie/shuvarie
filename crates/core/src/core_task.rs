@@ -224,6 +224,10 @@ struct CoreCtx {
     worker_turns: usize,
     max_output_chars: usize,
     max_output_bytes: usize,
+    /// `store`/`load` behind a codemode script. The session's, not a turn's, so
+    /// keys a chat's scripts write stay readable to the next script in it. In
+    /// memory only; see `docs/designs/codemode.md`.
+    codemode_store: std::sync::Arc<shuvarie_codemode::Store>,
     steer: SteerSignal,
     /// Headless (non-interactive) mode, set by [`Command::SetHeadless`] for
     /// `shuvarie run`: the `question` tool is dropped from every turn's roster
@@ -352,7 +356,8 @@ pub async fn run(
     lock_beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     lock_beat.reset();
 
-    let skills = crate::skills::Skills::load(&workspace_root, &config.skills, &trust);
+    let skills = crate::skills::Skills::load(&workspace_root, &config.skills, &trust)
+        .with_builtins(config.codemode.enabled);
     let _ = event_tx
         .send(Event::SkillsLoaded {
             skills: skills.skills.clone(),
@@ -452,6 +457,7 @@ pub async fn run(
         worker_turns,
         max_output_chars,
         max_output_bytes,
+        codemode_store: std::sync::Arc::new(shuvarie_codemode::Store::new()),
         steer,
         headless: false,
         scenes: scene_set.scenes,
@@ -727,6 +733,29 @@ pub async fn run(
                     Command::SetUiTheme { pref } => {
                         if ctx.config.ui.theme != pref {
                             ctx.config.ui.theme = pref;
+                            persist(
+                                &ctx.config,
+                                &ctx.connections,
+                                config_path.as_deref(),
+                                connections_path.as_deref(),
+                                &ctx.event_tx,
+                            )
+                            .await;
+                        }
+                    }
+                    Command::SetCodemode {
+                        enabled,
+                        mode,
+                        store,
+                    } => {
+                        let codemode = &mut ctx.config.codemode;
+                        if codemode.enabled != enabled
+                            || codemode.mode != mode
+                            || codemode.store != store
+                        {
+                            codemode.enabled = enabled;
+                            codemode.mode = mode;
+                            codemode.store = store;
                             persist(
                                 &ctx.config,
                                 &ctx.connections,
@@ -1481,7 +1510,8 @@ pub async fn run(
                             &ctx.workspace_root,
                             &ctx.config.skills,
                             &ctx.trust,
-                        );
+                        )
+                        .with_builtins(ctx.config.codemode.enabled);
                         let _ = ctx
                             .event_tx
                             .send(Event::SkillsLoaded {
@@ -2404,6 +2434,46 @@ const RESUME_PROMPT: &str = "(Your previous attempt was cut off by a connection 
      the steps you already completed and don't start the task over.)";
 
 impl CoreCtx {
+    /// The turn's codemode wiring, or `None` when the feature is off (the
+    /// default). The roster itself is not decided here -- `all_tools` has just
+    /// built it, and the scriptable part of it is exactly what
+    /// [`crate::tools::codemode::install`] takes.
+    fn codemode_wiring(
+        &self,
+        activity: Option<Sender<shuvarie_llm::StreamItem>>,
+    ) -> Option<crate::tools::codemode::Wiring> {
+        let config = &self.config.codemode;
+        if !config.is_enabled() {
+            return None;
+        }
+        Some(crate::tools::codemode::Wiring {
+            mode: match config.mode {
+                shuvarie_config::CodemodeMode::Declared => crate::tools::codemode::Mode::Declared,
+                shuvarie_config::CodemodeMode::Only => crate::tools::codemode::Mode::Only,
+            },
+            limits: shuvarie_codemode::Limits {
+                // `0` is the config's "unset", not a zero budget: a `0 ms`
+                // deadline or no calls at all would be a tool that cannot run.
+                timeout: (config.timeout_ms > 0)
+                    .then(|| std::time::Duration::from_millis(config.timeout_ms)),
+                max_operations: (config.max_operations > 0).then_some(config.max_operations),
+                max_tool_calls: (config.max_tool_calls > 0).then_some(config.max_tool_calls),
+                max_output_chars: self.max_output_chars,
+                store: config.store,
+            },
+            render: shuvarie_codemode::RenderOptions {
+                inline_budget: config.inline_budget,
+                ..Default::default()
+            },
+            // The tools a script may not orchestrate. Their scene overrides are
+            // read where the script's own calls are gated (`install`), so the
+            // model's direct access to them is untouched.
+            tool_scene: crate::scenes::ToolScene::build(Some(&config.tools)),
+            store: std::sync::Arc::clone(&self.codemode_store),
+            activity,
+        })
+    }
+
     /// Persist and start streaming a new user turn: an accepted `SendMessage`
     /// or a dispatched steered prompt. Emits [`Event::TurnStarted`] (with the
     /// `steered` flag) before the first stream event so the TUI renders the
@@ -2814,6 +2884,12 @@ impl CoreCtx {
         let preamble = crate::context::build_preamble(&base, &loaded_context);
         let question_gate = (!self.headless).then(|| QuestionGate::new(self.question_tx.clone()));
         let (shell_tx, shell_rx) = tokio::sync::mpsc::channel::<crate::tools::ShellChunk>(64);
+        // A script's nested calls are announced here and merged into the turn
+        // stream below, so the transcript, the sidebar and the session's tool
+        // records see a nested call exactly as they see a direct one. Dropped
+        // unused when codemode is off, which just closes the channel.
+        let (codemode_activity, codemode_rx) =
+            tokio::sync::mpsc::channel::<shuvarie_llm::StreamItem>(64);
         let file_locks = crate::tools::FileLocks::new();
         let tool_scene = scene.tools();
         // Connect the configured MCP servers before the roster is built so
@@ -2875,6 +2951,7 @@ impl CoreCtx {
             &self.config.tools.tools,
             Some(&self.mcp),
             &mcp_roster,
+            self.codemode_wiring(Some(codemode_activity)),
         );
         // The turn's attribution: the catalog's model code for the resolved
         // model (absent for providers outside the catalog) plus the scene the
@@ -2963,7 +3040,7 @@ impl CoreCtx {
         // the tool activity, so a chunk is always processed after its call's
         // `ToolStart` (earlier sub-streams poll first) and resolves to its own
         // call id in the stream loop.
-        let stream = merge_shell_chunks(stream, shell_rx);
+        let stream = merge_turn_channels(stream, shell_rx, codemode_rx);
         let tx = self.event_tx.clone();
         let session_shared = s.clone();
         let client_shared = client.clone();
@@ -3348,14 +3425,15 @@ fn args_command(args_json: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Merge the turn's live `run_shell` output channel into the turn stream:
-/// chunks become `StreamItem::ShellOutput` items the stream loop handles like
-/// any other item. `select_all` polls the LLM/worker sub-streams first, so a
-/// call's `ToolStart` is always processed before its own chunks and the chunk
-/// resolves to its call id.
-fn merge_shell_chunks(
+/// Merge the turn's live side channels into the turn stream: `run_shell`'s
+/// output chunks and codemode's nested-call activity both become `StreamItem`s
+/// the stream loop handles like any other item. `select_all` polls the
+/// LLM/worker sub-streams first, so a call's `ToolStart` is always processed
+/// before its own chunks and the chunk resolves to its call id.
+fn merge_turn_channels(
     stream: shuvarie_llm::StreamStream,
     shell_rx: tokio::sync::mpsc::Receiver<crate::tools::ShellChunk>,
+    codemode_rx: tokio::sync::mpsc::Receiver<shuvarie_llm::StreamItem>,
 ) -> shuvarie_llm::StreamStream {
     let chunks = futures_util::stream::unfold(shell_rx, |mut rx| async move {
         let chunk = rx.recv().await?;
@@ -3369,7 +3447,17 @@ fn merge_shell_chunks(
             rx,
         ))
     });
-    Box::pin(futures_util::stream::select_all([stream, Box::pin(chunks)]))
+    // A nested call's items are already `StreamItem`s, so they pass through as
+    // they were announced.
+    let activity = futures_util::stream::unfold(codemode_rx, |mut rx| async move {
+        let item = rx.recv().await?;
+        Some((item, rx))
+    });
+    Box::pin(futures_util::stream::select_all([
+        stream,
+        Box::pin(chunks),
+        Box::pin(activity),
+    ]))
 }
 
 #[allow(clippy::too_many_arguments)]

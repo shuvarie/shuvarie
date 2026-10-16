@@ -1,4 +1,4 @@
-use shuvarie_config::ProviderConfig;
+use shuvarie_config::{CodemodeMode, ProviderConfig};
 use shuvarie_db::StoredScroll;
 
 #[derive(Debug, Clone)]
@@ -60,6 +60,18 @@ pub enum Command {
     /// written.
     SetUiTheme {
         pref: Option<String>,
+    },
+    /// Set the `/codemode` switches that belong in the config file (`enabled`,
+    /// `mode`, `store`) and persist them. The overlays' numeric budgets are
+    /// deliberately not reachable from here: they are a one-time decision about
+    /// cost and are edited where the rest of the numbers live, in
+    /// `shuvarie.kdl`. The core reports [`crate::Event::ConfigSaved`] once the
+    /// file is written; a request that matches the current settings is a no-op
+    /// and writes nothing.
+    SetCodemode {
+        enabled: bool,
+        mode: CodemodeMode,
+        store: bool,
     },
     SaveConfig,
     NewSession,

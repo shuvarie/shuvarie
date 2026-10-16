@@ -57,15 +57,25 @@ pub(super) fn shell_command_rows(args: &serde_json::Value) -> usize {
     cmd.unwrap_or("").lines().count().max(1)
 }
 
-/// The rows a tool header's title renders over: one for every tool but
-/// `run_shell`, whose command's line feeds feed the title onto a row per line
-/// — capped at [`TITLE_COLLAPSE_LINES`] plus the hint row while the title is
-/// collapsed. Mirrors what `ToolBlock`'s header renders.
+/// Title rows a `codemode` script feeds its header onto, mirroring
+/// [`shell_command_rows`]: a script is multi-line by nature, so its header
+/// shows its line feeds rather than collapsing a whole program onto one row.
+pub(super) fn codemode_script_rows(args: &serde_json::Value) -> usize {
+    let script = args.get("script").and_then(serde_json::Value::as_str);
+    script.unwrap_or("").lines().count().max(1)
+}
+
+/// The rows a tool header's title renders over: one for most tools, but one per
+/// line feed for the two whose argument is a multi-line program (`run_shell`'s
+/// command, `codemode`'s script) — capped at [`TITLE_COLLAPSE_LINES`] plus the
+/// hint row while the title is collapsed. Mirrors what `ToolBlock`'s header
+/// renders.
 pub(super) fn title_rows(name: &str, args: &serde_json::Value, expanded: bool) -> u32 {
-    if name != "run_shell" {
-        return 1;
-    }
-    let lines = shell_command_rows(args) as u32;
+    let lines = match name {
+        "run_shell" => shell_command_rows(args),
+        "codemode" => codemode_script_rows(args),
+        _ => return 1,
+    } as u32;
     if expanded || lines <= TITLE_COLLAPSE_LINES as u32 {
         lines
     } else {
@@ -83,7 +93,11 @@ pub(super) fn title_rows_json(name: &str, args_json: &str, expanded: bool) -> u3
 /// Whether a tool header's title holds more lines than the collapse cap, so it
 /// carries its own expand/collapse control.
 pub(super) fn title_collapsible(name: &str, args: &serde_json::Value) -> bool {
-    name == "run_shell" && shell_command_rows(args) > TITLE_COLLAPSE_LINES
+    match name {
+        "run_shell" => shell_command_rows(args) > TITLE_COLLAPSE_LINES,
+        "codemode" => codemode_script_rows(args) > TITLE_COLLAPSE_LINES,
+        _ => false,
+    }
 }
 
 /// One chat block: a TEA model per variant for the stateful kinds, unit

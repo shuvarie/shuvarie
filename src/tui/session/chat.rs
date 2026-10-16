@@ -3539,7 +3539,7 @@ pub(crate) mod tests {
                 idx,
                 vec![ReasoningSegment {
                     after_tool: 0,
-                    text: format!("thinking about task {i} ") + &"y".repeat(600),
+                    text: format!("thinking about task {i} ") + "y".repeat(600).as_str(),
                     duration_ms: 0,
                 }],
             );

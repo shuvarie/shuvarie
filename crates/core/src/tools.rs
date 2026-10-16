@@ -1,3 +1,4 @@
+pub mod codemode;
 mod decide;
 mod delete_file;
 #[cfg(test)]
@@ -265,6 +266,9 @@ pub fn all_tools(
     stdio_tools: &std::collections::BTreeMap<String, shuvarie_config::StdioToolConfig>,
     mcp_manager: Option<&shuvarie_mcp::SharedMcpManager>,
     mcp_roster: &std::collections::BTreeMap<String, shuvarie_mcp::McpToolMap>,
+    // `Some` when codemode is enabled for this turn: the roster the scripts
+    // may call is exactly the roster assembled above.
+    codemode: Option<codemode::Wiring>,
 ) -> Vec<DynamicTool> {
     let mut tools = Vec::new();
     tools.extend(scene_tool("read_file", scene, &access, true, |access| {
@@ -378,7 +382,10 @@ pub fn all_tools(
             }
         }
     }
-    tools
+    match codemode {
+        Some(wiring) => codemode::install(tools, &wiring, mcp_roster, max_output_chars, &access),
+        None => tools,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -548,6 +555,9 @@ mod tests {
             &Default::default(),
             None,
             &Default::default(),
+            // The roster listing is about what the model is offered, and
+            // codemode's own wiring is a turn's, not a listing's.
+            None,
         )
         .into_iter()
         .map(|tool| tool.name().to_string())
@@ -684,6 +694,7 @@ mod tests {
             path: std::path::PathBuf::from("."),
             global: false,
             disable_model_invocation: false,
+            builtin: None,
         });
         let names = roster_with(&skills, &ToolScene::default());
         assert!(names.contains(&"skill".into()), "roster: {names:?}");

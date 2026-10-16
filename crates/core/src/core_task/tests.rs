@@ -2653,10 +2653,12 @@ async fn ambiguous_shell_chunk_stays_unresolved() {
 }
 
 #[tokio::test]
-async fn merged_shell_chunks_follow_their_tool_start() {
-    // The shell sub-stream polls after the LLM stream, so a call's
-    // ToolStart event precedes its own chunk even when both are ready at
-    // the same poll — the block the chunk streams into exists by then.
+async fn merged_turn_channels_follow_their_tool_start() {
+    // The shell and codemode sub-streams poll after the LLM stream, so a
+    // call's ToolStart event precedes its own chunk (or a nested call's
+    // activity) even when both are ready at the same poll — the block the
+    // chunk streams into, and the call a nested result resolves against,
+    // exist by then.
     let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel::<crate::tools::ShellChunk>(4);
     let _ = chunk_tx
         .send(crate::tools::ShellChunk {
@@ -2667,6 +2669,17 @@ async fn merged_shell_chunks_follow_their_tool_start() {
         })
         .await;
     drop(chunk_tx);
+    let (activity_tx, activity_rx) = tokio::sync::mpsc::channel::<StreamItem>(4);
+    let _ = activity_tx
+        .send(StreamItem::ToolStart {
+            name: "read_file".into(),
+            args: serde_json::json!({ "path": "src/main.rs" }),
+            worker: None,
+            spawn: None,
+            call_id: "s1:1".into(),
+        })
+        .await;
+    drop(activity_tx);
     let llm: shuvarie_llm::StreamStream =
         Box::pin(futures_util::stream::iter(vec![StreamItem::ToolStart {
             name: "run_shell".into(),
@@ -2675,14 +2688,14 @@ async fn merged_shell_chunks_follow_their_tool_start() {
             spawn: Some(1),
             call_id: "s1".into(),
         }]));
-    let merged = merge_shell_chunks(llm, chunk_rx);
+    let merged = merge_turn_channels(llm, chunk_rx, activity_rx);
 
     let mut items = Vec::new();
     let mut merged = merged;
     while let Some(item) = merged.next().await {
         items.push(item);
     }
-    assert_eq!(items.len(), 2, "the chunk stream ends after senders drop");
+    assert_eq!(items.len(), 3, "both side streams end after senders drop");
     assert!(
         matches!(&items[0], StreamItem::ToolStart { call_id, .. } if call_id == "s1"),
         "the ToolStart is polled first: {items:?}"
@@ -2690,6 +2703,11 @@ async fn merged_shell_chunks_follow_their_tool_start() {
     assert!(
         matches!(&items[1], StreamItem::ShellOutput { command, .. } if command == "cargo test"),
         "the chunk follows: {items:?}"
+    );
+    assert!(
+        matches!(&items[2], StreamItem::ToolStart { name, call_id, .. }
+            if name == "read_file" && call_id == "s1:1"),
+        "a nested call's activity arrives as its own ToolStart: {items:?}"
     );
 }
 
@@ -2743,6 +2761,7 @@ async fn resume_ctx(store: Store, session: Session) -> (CoreCtx, Receiver<Event>
         worker_turns,
         max_output_chars,
         max_output_bytes,
+        codemode_store: std::sync::Arc::new(shuvarie_codemode::Store::new()),
         steer: SteerSignal::default(),
         headless: false,
         scenes: shuvarie_config::Config::default().scenes,

@@ -10,8 +10,8 @@ use shuvarie_llm::{FileChange, PatchFileKind};
 use unicode_width::UnicodeWidthStr;
 
 use super::{
-    TITLE_COLLAPSE_LINES, format_duration_ms, hides_output_when_collapsed, shell_command_rows,
-    shows_elapsed, title_collapsible, title_rows,
+    TITLE_COLLAPSE_LINES, codemode_script_rows, format_duration_ms, hides_output_when_collapsed,
+    shell_command_rows, shows_elapsed, title_collapsible, title_rows,
 };
 use crate::tui::session::blocks::{ChatEnv, Segment};
 use crate::tui::session::segment::{BLOCK_PADDING, BodyChunk, BodySource, TextRows, text_width};
@@ -538,6 +538,7 @@ impl ToolBlock {
 
         match self.name.as_str() {
             "run_shell" => return self.shell_header_lines(inner_w, header, args),
+            "codemode" => return self.codemode_header_lines(inner_w, header, args),
             "read_file" => {
                 let path = args.get("path").and_then(Value::as_str).unwrap_or("");
                 let range = (self.status == ToolStatus::Ok)
@@ -622,6 +623,61 @@ impl ToolBlock {
             header.push(Span::raw(format!(" · spawn {spawn}")).fg(theme::text_muted()));
         }
         vec![Line::from(header)]
+    }
+
+    /// The `codemode` header: the tool name beside the script's first line,
+    /// then one indented row per further line. A script is multi-line by nature,
+    /// so — like a `run_shell` command — it titles across rows instead of
+    /// flattening a whole program onto one; the value, logs and call trace it
+    /// produced follow in the body.
+    fn codemode_header_lines(
+        &self,
+        inner_w: usize,
+        mut header: Vec<Span<'static>>,
+        args: &Value,
+    ) -> Vec<Line<'static>> {
+        let script = args.get("script").and_then(Value::as_str).unwrap_or("");
+        let total = codemode_script_rows(args);
+        let collapsed = !self.title_expanded && total > TITLE_COLLAPSE_LINES;
+        let shown = if collapsed {
+            TITLE_COLLAPSE_LINES
+        } else {
+            total
+        };
+        header.push(Span::raw(self.name.clone()).fg(theme::text()).bold());
+        let mut script_lines = script.lines();
+        let first = script_lines.next().unwrap_or("").trim();
+        if !first.is_empty() {
+            header.push(Span::raw(format!(" {first}")).fg(theme::accent()));
+        }
+        // A killed script is the one state the body cannot announce: it stops
+        // mid-flight, so there is no result header saying how it ended.
+        if self.status == ToolStatus::Killed {
+            let pad = inner_w
+                .saturating_sub(spans_width(&header) + UnicodeWidthStr::width("killed"))
+                .max(1);
+            header.push(Span::raw(" ".repeat(pad)));
+            header.push(Span::raw("killed").fg(theme::text_muted()));
+        }
+        if let Some(spawn) = self.spawn {
+            header.push(Span::raw(format!(" · spawn {spawn}")).fg(theme::text_muted()));
+        }
+        let mut rows = vec![Line::from(header)];
+        for line in script_lines.take(shown - 1) {
+            rows.push(Line::from(vec![
+                Span::raw(TITLE_INDENT),
+                Span::raw(line.to_string()).fg(theme::text()),
+            ]));
+        }
+        if collapsed {
+            rows.push(Line::from(vec![
+                Span::raw(TITLE_INDENT),
+                Span::raw(format!("▸ … +{} more lines", total - TITLE_COLLAPSE_LINES))
+                    .fg(theme::text_muted())
+                    .italic(),
+            ]));
+        }
+        rows
     }
 
     /// The `run_shell` header: `$ <first command line>` with its timeout/exit
@@ -2069,6 +2125,103 @@ mod tests {
         assert!(block_text(&block, &env).contains("    echo step12"));
     }
 
+    /// A finished `codemode` call running a `lines`-line script, with no output.
+    fn codemode_block_with_script_lines(lines: usize) -> ToolBlock {
+        let script = (1..=lines)
+            .map(|i| format!("let v{i} = {i};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        finished_block(
+            "codemode",
+            &serde_json::json!({ "script": script }).to_string(),
+            String::new(),
+        )
+    }
+
+    /// A script is a program, not a one-line argument: its header feeds one row
+    /// per line so the transcript shows what was run instead of the JSON blob.
+    #[test]
+    fn codemode_title_feeds_script_lines_onto_their_own_rows() {
+        let diags = BTreeMap::new();
+        let env = test_env(&diags);
+        let block = codemode_block_with_script_lines(3);
+        let text = block_text(&block, &env);
+        assert!(!text.contains("script\":"), "no raw JSON args: {text}");
+        assert!(text.contains("codemode let v1 = 1;"), "first line: {text}");
+        assert!(
+            text.contains("\n    let v2 = 2;") && text.contains("\n    let v3 = 3;"),
+            "continuation lines align under the script: {text}"
+        );
+        assert!(!text.contains("more lines"), "nothing hidden: {text}");
+        assert!(!block.title_collapsible(), "three lines stay a plain title");
+        assert_eq!(block.view(80, &env).chunk_rows(0, 80), 3);
+        // No elapsed meta row (the result body reports the run itself), so the
+        // estimate is the two title rows past the one every header is counted
+        // for (`tool_count`, outside `tool_rows`).
+        assert_eq!(block.est().tool_rows, 2);
+    }
+
+    #[test]
+    fn long_codemode_title_collapses_at_the_cap_and_expands_on_its_own_control() {
+        let diags = BTreeMap::new();
+        let env = test_env(&diags);
+        let mut block = codemode_block_with_script_lines(14);
+        assert!(block.title_collapsible());
+
+        let collapsed = block_text(&block, &env);
+        assert!(
+            collapsed.contains("codemode let v1 = 1;"),
+            "header: {collapsed}"
+        );
+        assert!(
+            collapsed.contains("    let v10 = 10;"),
+            "last shown row: {collapsed}"
+        );
+        assert!(
+            !collapsed.contains("let v11 = 11;"),
+            "rows past the cap hidden: {collapsed}"
+        );
+        assert!(
+            collapsed.contains("▸ … +4 more lines"),
+            "collapse hint: {collapsed}"
+        );
+        assert_eq!(block.view(80, &env).chunk_rows(0, 80), 11);
+        assert_eq!(block.est().tool_rows, 10);
+
+        block.toggle_title();
+        let expanded = block_text(&block, &env);
+        assert!(expanded.contains("    let v14 = 14;"), "tail: {expanded}");
+        assert!(!expanded.contains("more lines"), "no hint: {expanded}");
+        assert_eq!(block.view(80, &env).chunk_rows(0, 80), 14);
+        assert_eq!(block.est().tool_rows, 13);
+    }
+
+    /// A script cut mid-flight has no result body to say how it ended, so the
+    /// header carries the `killed` meta itself.
+    #[test]
+    fn a_killed_codemode_title_says_killed() {
+        let diags = BTreeMap::new();
+        let env = test_env(&diags);
+        let script = "let a = 1;\nlet b = 2;";
+        let mut block = ToolBlock::new(
+            "codemode",
+            serde_json::json!({ "script": script }).to_string(),
+            None,
+            None,
+            None,
+        );
+        assert!(
+            !block_text(&block, &env).contains("killed"),
+            "a running script is not killed yet"
+        );
+
+        assert!(block.update(ToolMessage::Kill));
+        let text = block_text(&block, &env);
+        assert!(text.contains("killed"), "status meta: {text}");
+        assert!(text.contains("codemode let a = 1;"), "title kept: {text}");
+        assert!(text.contains("\n    let b = 2;"), "rows kept: {text}");
+    }
+
     #[test]
     fn reloaded_long_shell_title_collapses_like_a_live_one() {
         let diags = BTreeMap::new();
@@ -2323,7 +2476,7 @@ mod tests {
         );
         block.update(ToolMessage::Finish {
             ok: false,
-            output: "exit 1:\n".to_string() + &big_output(300),
+            output: "exit 1:\n".to_string() + big_output(300).as_str(),
             stderr: "boom".to_string(),
             file_change: None,
             duration_ms: 5,

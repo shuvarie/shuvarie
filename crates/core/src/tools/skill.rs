@@ -87,6 +87,13 @@ async fn read_resource(skill: &crate::Skill, rel: &str) -> Result<String, String
     if rel.trim().is_empty() {
         return Err("empty 'path' argument".into());
     }
+    if skill.builtin.is_some() {
+        return Err(format!(
+            "'{}' is built in: it has no reference files, so only the `path` argument is \
+             unavailable -- call it without one",
+            skill.name
+        ));
+    }
     if rel_path.is_absolute() {
         return Err(format!(
             "'path' must be relative to the skill directory: {rel}"
@@ -150,6 +157,7 @@ mod tests {
                 path: PathBuf::from(".agents/skills/demo"),
                 global: false,
                 disable_model_invocation: false,
+                builtin: None,
             }],
             warnings: Vec::<SkillWarning>::new(),
         }
@@ -276,6 +284,31 @@ mod tests {
             err.to_string()
         );
         drop(dir);
+    }
+
+    /// A built-in skill has no directory at all, so it loads from its embedded
+    /// body, invokes like any other, and refuses a reference-file request with
+    /// a reason rather than a "no such file".
+    #[tokio::test]
+    async fn a_builtin_skill_loads_without_a_directory() {
+        let tool = SkillTool::new(Skills::default().with_builtins(true), 0);
+
+        let out = tool
+            .call(&mut new_ctx(), json!({ "skill": "codemode" }))
+            .await
+            .unwrap();
+        let text = out.as_text().unwrap();
+        assert!(text.contains("# Writing codemode scripts"), "{text}");
+        assert!(!text.contains("References are relative to"), "{text}");
+
+        let err = tool
+            .call(
+                &mut new_ctx(),
+                json!({ "skill": "codemode", "path": "extra.md" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("built in"), "{err}");
     }
 
     #[tokio::test]

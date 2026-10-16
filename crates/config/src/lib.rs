@@ -132,6 +132,7 @@ fn merge_layer(config: &mut Config, layer: &ConfigLayer) {
                 }
             }
             "tools" => config.tools = layer.config.tools.clone(),
+            "codemode" => config.codemode = layer.config.codemode.clone(),
             "lsp" => {
                 config.lsp.disabled = layer.config.lsp.disabled;
                 for (lang, spec) in &layer.config.lsp.servers {
@@ -429,6 +430,14 @@ pub struct Config {
     pub registries: RegistriesConfig,
 
     pub tools: ToolsConfig,
+
+    /// `codemode { … }` — one tool that runs a Rhai script, where the script
+    /// calls the other tools. Intermediate results stay in the script, so
+    /// several dependent calls cost one round trip and one summary.
+    ///
+    /// Off unless the section turns it on (`enabled #true`); see
+    /// [`CodemodeConfig::is_enabled`].
+    pub codemode: CodemodeConfig,
 
     /// `decisions { … }` — named, reusable questions for decision models,
     /// already stacked across the config chain. A permission rule or a tool
@@ -844,6 +853,82 @@ pub struct ToolsConfig {
 
 /// The per-call timeout of a `tool` when `timeout` is omitted, in seconds.
 pub const TOOL_DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/// The default inline budget of the `codemode` catalog, in estimated tokens.
+pub const CODEMODE_DEFAULT_INLINE_BUDGET: usize = 3000;
+
+/// How `codemode` presents the roster to the model.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CodemodeMode {
+    /// Tools stay in the model's roster and are described as scriptable, so the
+    /// model picks between a script and a direct call.
+    #[default]
+    Declared,
+    /// Tools are hidden from the model and reachable only through a script.
+    Only,
+}
+
+impl CodemodeMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Declared => "declared",
+            Self::Only => "only",
+        }
+    }
+}
+
+/// `codemode { … }`: the scripting tool's own configuration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodemodeConfig {
+    /// `enabled #true`. Off by default: the tool is one the model may not want,
+    /// and it changes the roster it is added to.
+    pub enabled: bool,
+
+    /// `mode "declared" | "only"`.
+    pub mode: CodemodeMode,
+
+    /// Estimated tokens of inlined tool declarations. Whatever does not fit is
+    /// still callable and listed by name, reachable through `describe_tool`.
+    pub inline_budget: usize,
+
+    /// `timeout-ms`: wall-clock budget for one script. `0` is none, which
+    /// leaves only `max-operations` between a script and a runaway loop.
+    pub timeout_ms: u64,
+
+    /// `max-operations`: Rhai operations per script. `0` is unlimited.
+    pub max_operations: u64,
+
+    /// `max-tool-calls`: nested calls per script. `0` is unlimited.
+    pub max_tool_calls: usize,
+
+    /// `store #true`: whether `store(key, value)` / `load(key)` exist.
+    pub store: bool,
+
+    /// `tools { … }`: the tools a *script* may not orchestrate. The model may
+    /// still call them directly.
+    pub tools: SceneToolsConfig,
+}
+
+impl Default for CodemodeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: CodemodeMode::default(),
+            inline_budget: CODEMODE_DEFAULT_INLINE_BUDGET,
+            timeout_ms: 0,
+            max_operations: 0,
+            max_tool_calls: 0,
+            store: true,
+            tools: SceneToolsConfig::default(),
+        }
+    }
+}
+
+impl CodemodeConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+}
 
 /// A user-defined tool: one templated command line, the declared params
 /// forming the tool's JSON input schema, and the child-process environment.

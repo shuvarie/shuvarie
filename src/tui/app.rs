@@ -23,6 +23,7 @@ use super::add_provider::{
 };
 use super::assisted_by::{AssistedByEffect, AssistedByMessage, AssistedByPopup};
 use super::auth::{AuthMessage, AuthPopup};
+use super::codemode::{CodemodeEditor, CodemodeEffect, CodemodeMessage, CodemodePrefs};
 use super::command_menu::{CommandMenu, CommandMenuMessage};
 use super::commands::{CommandAction, CommandRef};
 use super::components::TextAreaMessage;
@@ -71,6 +72,7 @@ pub enum Overlay {
     Scene,
     Variant,
     ThemePicker,
+    Codemode,
     AssistedBy,
     MediaViewer,
     /// The `/screensaver` scene: the welcome art fullscreen over a live
@@ -101,6 +103,7 @@ pub enum AppMessage {
     Scene(scene::SceneMessage),
     Variant(variant::VariantMessage),
     Theme(ThemePickerMessage),
+    Codemode(CodemodeMessage),
     AssistedBy(AssistedByMessage),
     /// The media viewer overlay: navigation and dismiss.
     MediaViewer(MediaViewerMessage),
@@ -252,6 +255,11 @@ pub struct App {
     pub title_popup: TitlePopup,
     pub assisted_by: AssistedByPopup,
     pub theme_picker: ThemePicker,
+    pub codemode_editor: CodemodeEditor,
+    /// The `/codemode` switches the overlays last reported, so reopening the
+    /// popup shows what the config file holds rather than what it held when
+    /// the App started. The editor keeps its own copy while open.
+    codemode_prefs: CodemodePrefs,
     pub todo_popup: TodoPopup,
     pub warning: WarningPopup,
     pub auth: AuthPopup,
@@ -335,6 +343,7 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ui: UiPrefs,
+        codemode_prefs: CodemodePrefs,
         theme: shuvarie_core::ResolvedTheme,
         theme_choices: Vec<shuvarie_core::ThemeChoice>,
         registries: RegistriesConfig,
@@ -419,6 +428,8 @@ impl App {
             title_popup: TitlePopup::new(),
             assisted_by: AssistedByPopup::new(),
             theme_picker: ThemePicker::new(),
+            codemode_editor: CodemodeEditor::new(),
+            codemode_prefs,
             todo_popup: TodoPopup::new(),
             media_view: MediaViewer::new(image_cell, image_protocol),
             screensaver: Screensaver::new(),
@@ -591,6 +602,7 @@ impl App {
             | Overlay::Scene
             | Overlay::Variant
             | Overlay::ThemePicker
+            | Overlay::Codemode
             | Overlay::AssistedBy
             | Overlay::MediaViewer
             | Overlay::Screensaver
@@ -773,6 +785,12 @@ impl App {
                         }
                         Overlay::ThemePicker => {
                             return self.theme_picker.map_event(&key).map(AppMessage::Theme);
+                        }
+                        Overlay::Codemode => {
+                            return self
+                                .codemode_editor
+                                .map_event(&key)
+                                .map(AppMessage::Codemode);
                         }
                         Overlay::HistorySearch => {
                             return self
@@ -1235,6 +1253,7 @@ impl App {
             | Overlay::Scene
             | Overlay::Variant
             | Overlay::ThemePicker
+            | Overlay::Codemode
             | Overlay::AssistedBy
             | Overlay::MediaViewer
             | Overlay::Screensaver
@@ -1414,6 +1433,24 @@ impl App {
                             }
                             self.close_overlay();
                         }
+                    }
+                }
+            }
+            AppMessage::Codemode(m) => {
+                if let Some(effect) = self.codemode_editor.update(m) {
+                    match effect {
+                        CodemodeEffect::Changed(prefs) => {
+                            // The core owns the config file: it applies the
+                            // three switches and persists them, and reports
+                            // back through `ConfigSaved`.
+                            self.codemode_prefs = prefs;
+                            self.ctx.send(shuvarie_core::Command::SetCodemode {
+                                enabled: prefs.enabled,
+                                mode: prefs.mode,
+                                store: prefs.store,
+                            });
+                        }
+                        CodemodeEffect::Close => self.close_overlay(),
                     }
                 }
             }
@@ -2354,6 +2391,10 @@ impl App {
             CommandAction::OpenThemePicker => {
                 self.open_theme_picker(args);
             }
+            CommandAction::OpenCodemode => {
+                self.codemode_editor.open(self.codemode_prefs);
+                self.overlay = Overlay::Codemode;
+            }
             CommandAction::NewSession => {
                 self.save_scroll();
                 self.session.update(SessionMessage::Reset);
@@ -2580,6 +2621,7 @@ impl App {
         self.assisted_by.close();
         self.variant_picker.close();
         self.theme_picker.close();
+        self.codemode_editor.close();
         self.todo_popup.close();
         // Walking away from the theme picker repaints with the palette
         // active at open (already cleared to `None` by a selection).
@@ -2718,6 +2760,7 @@ impl App {
         self.scene_picker.view(frame, area, stacked);
         self.variant_picker.view(frame, area, stacked);
         self.theme_picker.view(frame, area, stacked);
+        self.codemode_editor.view(frame, area, stacked);
         self.media_view.view(frame, area);
         self.history_search.view(frame, area, stacked);
         self.command_menu.view(frame, area, stacked);
@@ -2828,6 +2871,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         App::new(
             UiPrefs::default(),
+            CodemodePrefs::default(),
             shuvarie_core::ResolvedTheme::faerun(),
             shuvarie_core::ThemeSet::default().choices(shuvarie_core::ThemeVariant::Dark),
             RegistriesConfig::default(),
@@ -2844,6 +2888,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(16);
         let app = App::new(
             UiPrefs::default(),
+            CodemodePrefs::default(),
             shuvarie_core::ResolvedTheme::faerun(),
             shuvarie_core::ThemeSet::default().choices(shuvarie_core::ThemeVariant::Dark),
             RegistriesConfig::default(),
@@ -2914,11 +2959,16 @@ mod tests {
 
     #[test]
     fn catalog_context_length_maps_catalog_and_alias_model_id() {
-        let app = app_with(connected());
+        // The registry renames models between bumps, so the alias this test
+        // exercises is the connection's own: a bare `claude-opus-4-5` still has
+        // to resolve to its dated catalog snapshot.
+        let mut connections = connected();
+        connections.active.as_mut().unwrap().model = Some("claude-opus-4-5".into());
+        let app = app_with(connections);
         assert_eq!(
             catalog_context_length(&app.ctx.connections),
-            Some(catalog_context_window("anthropic", "claude-sonnet-4-5")),
-            "connection model alias `claude-sonnet-4-5` must map to the dated catalog entry"
+            Some(catalog_context_window("anthropic", "claude-opus-4-5")),
+            "connection model alias `claude-opus-4-5` must map to the dated catalog entry"
         );
     }
 
@@ -3058,11 +3108,14 @@ mod tests {
     #[test]
     fn catalog_context_length_uses_connection_catalog_field() {
         let mut connections = connected();
+        // An exact catalog id, so this covers the direct-hit path the `catalog`
+        // field resolves through.
+        connections.active.as_mut().unwrap().model = Some("claude-sonnet-4-6".into());
         let pc = connections.providers.get_mut("anthropic").unwrap();
         *pc = pc.clone().with_catalog(Some("anthropic"));
         assert_eq!(
             catalog_context_length(&connections),
-            Some(catalog_context_window("anthropic", "claude-sonnet-4-5")),
+            Some(catalog_context_window("anthropic", "claude-sonnet-4-6")),
             "explicit `catalog` field must drive the Selune lookup"
         );
     }

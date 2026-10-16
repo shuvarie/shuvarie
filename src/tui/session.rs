@@ -16,7 +16,7 @@ use crate::tui::utils::{alt, alt_shift, ctrl, ctrl_shift};
 use self::mention::{MentionMenu, MentionMessage};
 use super::commands::{self, CommandAction, CommandRef};
 use super::components::{TextArea, TextAreaEffect, TextAreaMessage};
-use super::guard::{SlashGuardMessage, SlashGuard};
+use super::guard::{SlashGuard, SlashGuardMessage};
 use super::permission::{PermissionEffect, PermissionMessage, PermissionUI};
 use super::question::{QuestionEffect, QuestionMessage, QuestionUI};
 use super::sidebar::{Sidebar, SidebarMessage};
@@ -547,7 +547,10 @@ impl SessionScreen {
         // The guardrail prompt replaces the composer while it is up, so it owns
         // Enter/Esc and swallows the rest (like the permission prompt).
         if self.slash_guard.active() {
-            return self.slash_guard.map_event(key).map(SessionMessage::SlashGuard);
+            return self
+                .slash_guard
+                .map_event(key)
+                .map(SessionMessage::SlashGuard);
         }
         // The search tooltip floats above the chat; while it is open keys
         // edit the needle (Escape exits) before anything underneath sees
@@ -1468,7 +1471,8 @@ impl SessionScreen {
             self.input.desired_height(content_area.width as usize)
         };
         let working_rows = working_rows(&self.working_todos);
-        let strip_rows = if self.permission.open || self.question.open || self.slash_guard.active() {
+        let strip_rows = if self.permission.open || self.question.open || self.slash_guard.active()
+        {
             0
         } else {
             pending_strip_rows(&self.pending)
