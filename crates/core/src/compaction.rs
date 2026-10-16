@@ -79,12 +79,22 @@ pub struct CompactionPlan {
 /// budget affords, even fewer messages than the floor. `None` when there is
 /// no summarizable span (too few messages, or nothing new since the previous
 /// summary before the tail).
-pub fn select_plan(messages: &[StoredMessage], keep_recent_tokens: u64) -> Option<CompactionPlan> {
+///
+/// A message costs its text plus the tool activity it stands for (`records`):
+/// the kept tail is what the next request actually carries, and a turn's tool
+/// outputs can dwarf its text. Measuring text alone would keep a tail many
+/// times over the budget while reporting nothing left to compact.
+pub fn select_plan(
+    messages: &[StoredMessage],
+    records: &[ToolRecord],
+    keep_recent_tokens: u64,
+) -> Option<CompactionPlan> {
     let len = messages.len();
     if len <= MIN_TAIL_MESSAGES {
         return None;
     }
     let start = messages.iter().rposition(|m| m.summary).unwrap_or(0);
+    let tool_tokens = tool_tokens(messages, records);
     // Walk backwards from the newest message, accumulating token estimates
     // until the tail budget is reached. The `len` sentinel covers the case
     // where the whole span fits the budget — the message-count floor then
@@ -93,7 +103,7 @@ pub fn select_plan(messages: &[StoredMessage], keep_recent_tokens: u64) -> Optio
     let mut tail_tokens = 0u64;
     let mut cut = len;
     for i in (start..len).rev() {
-        tail_tokens += shuvarie_llm::estimate_text_tokens(&messages[i].content);
+        tail_tokens += shuvarie_llm::estimate_text_tokens(&messages[i].content) + tool_tokens[i];
         if tail_tokens >= keep_recent_tokens {
             cut = i;
             break;
@@ -112,6 +122,26 @@ pub fn select_plan(messages: &[StoredMessage], keep_recent_tokens: u64) -> Optio
         cut = len - MIN_TAIL_MESSAGES;
     }
     (start < cut).then_some(CompactionPlan { start, cut })
+}
+
+/// Estimated tokens of the tool activity each message stands for: the calls it
+/// made and the results answering them, which a request replays with the
+/// message. Zero for a message that ran no tools.
+fn tool_tokens(messages: &[StoredMessage], records: &[ToolRecord]) -> Vec<u64> {
+    let index: std::collections::HashMap<u64, usize> = messages
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (m.id, i))
+        .collect();
+    let mut out = vec![0u64; messages.len()];
+    for record in records {
+        let Some(&at) = index.get(&record.message_id) else {
+            continue;
+        };
+        out[at] += shuvarie_llm::estimate_text_tokens(&record.args_json)
+            + shuvarie_llm::estimate_text_tokens(&record.output);
+    }
+    out
 }
 
 /// Serialize the head of the conversation into a transcript for the
@@ -406,11 +436,11 @@ mod tests {
         let msgs: Vec<StoredMessage> = (0..MIN_TAIL_MESSAGES)
             .map(|_| msg(MsgRole::User, "hi"))
             .collect();
-        assert!(select_plan(&msgs, 20_000).is_none());
+        assert!(select_plan(&msgs, &[], 20_000).is_none());
         let bigger: Vec<StoredMessage> = (0..MIN_TAIL_MESSAGES + 3)
             .map(|_| msg(MsgRole::User, "hi"))
             .collect();
-        let plan = select_plan(&bigger, 20_000).unwrap();
+        let plan = select_plan(&bigger, &[], 20_000).unwrap();
         assert_eq!(plan.start, 0);
         assert_eq!(
             plan.cut, 3,
@@ -432,7 +462,7 @@ mod tests {
                 }
             })
             .collect();
-        let plan = select_plan(&msgs, 100_000).unwrap();
+        let plan = select_plan(&msgs, &[], 100_000).unwrap();
         assert_eq!(plan.start, 0);
         assert_eq!(plan.cut, 3, "the walk stops once the tail budget is met");
     }
@@ -447,7 +477,7 @@ mod tests {
                 msgs.push(msg(MsgRole::User, &format!("m{i}")));
             }
         }
-        let plan = select_plan(&msgs, 20_000).unwrap();
+        let plan = select_plan(&msgs, &[], 20_000).unwrap();
         assert_eq!(plan.start, 2, "head resumes at the previous summary");
         assert_eq!(plan.cut, 6, "floor tail applies from the span");
     }
@@ -460,7 +490,7 @@ mod tests {
         let len = msgs.len();
         msgs[len - 2] = summary_msg("recent summary");
         assert!(
-            select_plan(&msgs, 20_000).is_none(),
+            select_plan(&msgs, &[], 20_000).is_none(),
             "nothing new to summarize before the tail"
         );
     }
@@ -485,7 +515,7 @@ mod tests {
         }
         msgs[len - MIN_TAIL_MESSAGES] = summary_msg("prior summary");
 
-        let plan = select_plan(&msgs, 20_000).expect("a heavy tail still compacts");
+        let plan = select_plan(&msgs, &[], 20_000).expect("a heavy tail still compacts");
         assert_eq!(plan.start, len - MIN_TAIL_MESSAGES);
         assert_eq!(
             plan.cut,
@@ -493,6 +523,33 @@ mod tests {
             "the budget keeps only the newest message"
         );
         assert!(plan.cut > plan.start, "the head folds the summary in");
+    }
+
+    #[test]
+    fn select_plan_counts_tool_activity_against_the_tail_budget() {
+        // The tail is what the next request replays: a turn's tool output can
+        // dwarf its text, so a tail the text estimate would keep whole must
+        // still be cut when the calls and results it stands for fill the
+        // budget.
+        let mut msgs: Vec<StoredMessage> = (0..8)
+            .map(|i| msg(MsgRole::User, &format!("m{i}")))
+            .collect();
+        msgs[6] = msg(MsgRole::Assistant, "looking");
+        msgs[6].id = 70;
+        let mut rec = record("read_file", "src/main.rs", 6);
+        rec.message_id = 70;
+        rec.output = "x".repeat(400_000); // 100k tokens of tool output
+
+        let plan = select_plan(&msgs, &[rec.clone()], 100_000).unwrap();
+        assert_eq!(
+            plan.cut, 6,
+            "the tool-heavy message is over budget, so the walk stops after it"
+        );
+        let plan = select_plan(&msgs, &[], 100_000).unwrap();
+        assert_eq!(
+            plan.cut, 4,
+            "without the tool activity the same tail fits and floors"
+        );
     }
 
     #[test]
