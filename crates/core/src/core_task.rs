@@ -224,6 +224,10 @@ struct CoreCtx {
     worker_turns: usize,
     max_output_chars: usize,
     max_output_bytes: usize,
+    /// `store`/`load` behind a codemode script. The session's, not a turn's, so
+    /// keys a chat's scripts write stay readable to the next script in it. In
+    /// memory only; see `docs/designs/codemode.md`.
+    codemode_store: std::sync::Arc<shuvarie_codemode::Store>,
     steer: SteerSignal,
     /// Headless (non-interactive) mode, set by [`Command::SetHeadless`] for
     /// `shuvarie run`: the `question` tool is dropped from every turn's roster
@@ -352,7 +356,8 @@ pub async fn run(
     lock_beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     lock_beat.reset();
 
-    let skills = crate::skills::Skills::load(&workspace_root, &config.skills, &trust);
+    let skills = crate::skills::Skills::load(&workspace_root, &config.skills, &trust)
+        .with_builtins(config.codemode.is_possible());
     let _ = event_tx
         .send(Event::SkillsLoaded {
             skills: skills.skills.clone(),
@@ -452,6 +457,7 @@ pub async fn run(
         worker_turns,
         max_output_chars,
         max_output_bytes,
+        codemode_store: std::sync::Arc::new(shuvarie_codemode::Store::new()),
         steer,
         headless: false,
         scenes: scene_set.scenes,
@@ -727,6 +733,29 @@ pub async fn run(
                     Command::SetUiTheme { pref } => {
                         if ctx.config.ui.theme != pref {
                             ctx.config.ui.theme = pref;
+                            persist(
+                                &ctx.config,
+                                &ctx.connections,
+                                config_path.as_deref(),
+                                connections_path.as_deref(),
+                                &ctx.event_tx,
+                            )
+                            .await;
+                        }
+                    }
+                    Command::SetCodemode {
+                        enabled,
+                        mode,
+                        store,
+                    } => {
+                        let codemode = &mut ctx.config.codemode;
+                        if codemode.enabled != enabled
+                            || codemode.mode != mode
+                            || codemode.store != store
+                        {
+                            codemode.enabled = enabled;
+                            codemode.mode = mode;
+                            codemode.store = store;
                             persist(
                                 &ctx.config,
                                 &ctx.connections,
@@ -1481,7 +1510,8 @@ pub async fn run(
                             &ctx.workspace_root,
                             &ctx.config.skills,
                             &ctx.trust,
-                        );
+                        )
+                        .with_builtins(ctx.config.codemode.is_possible());
                         let _ = ctx
                             .event_tx
                             .send(Event::SkillsLoaded {
@@ -2411,6 +2441,50 @@ const RESUME_PROMPT: &str = "(Your previous attempt was cut off by a connection 
      the steps you already completed and don't start the task over.)";
 
 impl CoreCtx {
+    /// The turn's codemode wiring, or `None` when the feature is off (the
+    /// default). The roster itself is not decided here -- `all_tools` has just
+    /// built it, and the scriptable part of it is exactly what
+    /// [`crate::tools::codemode::install`] takes.
+    fn codemode_wiring(
+        &self,
+        has_configured_tools: bool,
+    ) -> Option<crate::tools::codemode::Wiring> {
+        let config = &self.config.codemode;
+        // `auto` only offers the tool when this turn has configured sources for
+        // it to orchestrate; `on`/`off` ignore the roster.
+        if !config.is_enabled(has_configured_tools) {
+            return None;
+        }
+        Some(crate::tools::codemode::Wiring {
+            mode: match config.mode {
+                shuvarie_config::CodemodeMode::Declared => crate::tools::codemode::Mode::Declared,
+                shuvarie_config::CodemodeMode::DeclareBuiltin => {
+                    crate::tools::codemode::Mode::DeclareBuiltin
+                }
+                shuvarie_config::CodemodeMode::Only => crate::tools::codemode::Mode::Only,
+            },
+            limits: shuvarie_codemode::Limits {
+                // `0` is the config's "unset", not a zero budget: a `0 ms`
+                // deadline or no calls at all would be a tool that cannot run.
+                timeout: (config.timeout_ms > 0)
+                    .then(|| std::time::Duration::from_millis(config.timeout_ms)),
+                max_operations: (config.max_operations > 0).then_some(config.max_operations),
+                max_tool_calls: (config.max_tool_calls > 0).then_some(config.max_tool_calls),
+                max_output_chars: self.max_output_chars,
+                store: config.store,
+            },
+            render: shuvarie_codemode::RenderOptions {
+                inline_budget: config.inline_budget,
+                ..Default::default()
+            },
+            // The tools a script may not orchestrate. Their scene overrides are
+            // read where the script's own calls are gated (`install`), so the
+            // model's direct access to them is untouched.
+            tool_scene: crate::scenes::ToolScene::build(Some(&config.tools)),
+            store: std::sync::Arc::clone(&self.codemode_store),
+        })
+    }
+
     /// Persist and start streaming a new user turn: an accepted `SendMessage`
     /// or a dispatched steered prompt. Emits [`Event::TurnStarted`] (with the
     /// `steered` flag) before the first stream event so the TUI renders the
@@ -2863,6 +2937,11 @@ impl CoreCtx {
             .and_then(|p| crate::catalog::find_model(p, &model));
         let accepts_tool_images =
             crate::attachments::supports_images(client.provider_type(), catalog_model);
+        // What `enabled "auto"` keys off, and what `declare-builtin` hides: the
+        // tools that come from configuration rather than from code — the
+        // `tool` subprocess entries plus every connected MCP server's tools.
+        let has_configured_tools = !self.config.tools.tools.is_empty()
+            || mcp_roster.values().any(|roster| !roster.is_empty());
         let tools = crate::tools::all_tools(
             self.lsp.clone(),
             file_locks.clone(),
@@ -2882,6 +2961,7 @@ impl CoreCtx {
             &self.config.tools.tools,
             Some(&self.mcp),
             &mcp_roster,
+            self.codemode_wiring(has_configured_tools),
         );
         // The turn's attribution: the catalog's model code for the resolved
         // model (absent for providers outside the catalog) plus the scene the
@@ -2967,10 +3047,10 @@ impl CoreCtx {
             )
             .await;
         // Live `run_shell` output flows through the same merged turn stream as
-        // the tool activity, so a chunk is always processed after its call's
-        // `ToolStart` (earlier sub-streams poll first) and resolves to its own
-        // call id in the stream loop.
-        let stream = merge_shell_chunks(stream, shell_rx);
+        // the agent's own items, so a chunk is always processed after its call's
+        // `ToolStart` (the sub-streams poll after the agent stream) and resolves
+        // to its own call id in the stream loop.
+        let stream = merge_turn_channels(stream, shell_rx);
         let tx = self.event_tx.clone();
         let session_shared = s.clone();
         let client_shared = client.clone();
@@ -3355,12 +3435,12 @@ fn args_command(args_json: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Merge the turn's live `run_shell` output channel into the turn stream:
-/// chunks become `StreamItem::ShellOutput` items the stream loop handles like
-/// any other item. `select_all` polls the LLM/worker sub-streams first, so a
-/// call's `ToolStart` is always processed before its own chunks and the chunk
-/// resolves to its call id.
-fn merge_shell_chunks(
+/// Merge the turn's live side channels into the turn stream: `run_shell`'s
+/// output chunks become `StreamItem`s the stream loop handles like any other
+/// item. `select_all` polls the LLM/worker sub-streams first, so a call's
+/// `ToolStart` is always processed before its own chunks and the chunk resolves
+/// to its call id.
+fn merge_turn_channels(
     stream: shuvarie_llm::StreamStream,
     shell_rx: tokio::sync::mpsc::Receiver<crate::tools::ShellChunk>,
 ) -> shuvarie_llm::StreamStream {

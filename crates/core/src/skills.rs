@@ -19,6 +19,10 @@ pub struct Skill {
     pub global: bool,
     /// Hidden from the agent preamble; still invocable via `/skill:name`.
     pub disable_model_invocation: bool,
+    /// The body of a skill that ships with shuvarie rather than living in a
+    /// directory. `path` then points at nothing, because a built-in has no
+    /// reference files and no `SKILL.md` on disk: the body *is* the file.
+    pub builtin: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +67,31 @@ impl Skills {
                 .filter(|warning| !warning.path.starts_with(&workspace_dir))
                 .collect(),
         }
+    }
+
+    /// The skills that ship with shuvarie, added to whatever the workspace and
+    /// the user already provide.
+    ///
+    /// There is one so far, and it is conditional: the `codemode` reference
+    /// teaches a language, which is only worth offering when the tool that runs
+    /// it is offered too. A user's own skill of the same name wins, so the
+    /// reference can be replaced without forking.
+    pub fn with_builtins(mut self, codemode: bool) -> Self {
+        use shuvarie_codemode::skill;
+
+        if codemode && !self.skills.iter().any(|skill| skill.name == skill::NAME) {
+            self.skills.push(Skill {
+                name: skill::NAME.to_string(),
+                description: skill::DESCRIPTION.to_string(),
+                tags: vec!["codemode".to_string(), "rhai".to_string()],
+                category: Some("Built-in".to_string()),
+                path: PathBuf::new(),
+                global: false,
+                disable_model_invocation: false,
+                builtin: Some(skill::BODY),
+            });
+        }
+        self
     }
 
     /// The walk behind [`Skills::load`], with injectable global locations so
@@ -141,7 +170,7 @@ impl Skills {
             ));
             s.push_str(&format!(
                 "\n    <location>{}</location>",
-                escape_xml(&skill.path.display().to_string())
+                escape_xml(&skill.location())
             ));
             s.push_str("\n  </skill>");
         }
@@ -227,6 +256,16 @@ fn collect_skills(
 }
 
 impl Skill {
+    /// Where the skill comes from, for a prompt that has to say where to look
+    /// next: a directory for a skill on disk, and nothing to look in when the
+    /// skill shipped with shuvarie.
+    pub fn location(&self) -> String {
+        match self.builtin {
+            Some(_) => "built in".to_string(),
+            None => self.path.display().to_string(),
+        }
+    }
+
     /// Load the skill rooted at `dir`; returns it plus validation messages.
     /// `None` means the skill is not loaded (unreadable, unparsable, or no
     /// description) — every failure still yields a message.
@@ -267,6 +306,7 @@ impl Skill {
                 path: dir.to_path_buf(),
                 global: false,
                 disable_model_invocation: fm.disable_model_invocation == Some(true),
+                builtin: None,
             }),
             messages,
         )
@@ -276,15 +316,25 @@ impl Skill {
     /// frontmatter, wrapped in a `<skill>` block with a relative-path hint,
     /// plus `args` after a blank line.
     pub fn invocation_content(&self, args: Option<&str>) -> std::io::Result<String> {
-        let skill_md = self.path.join("SKILL.md");
-        let content = std::fs::read_to_string(&skill_md)?;
-        let mut s = format!(
-            "<skill name=\"{}\" location=\"{}\">\nReferences are relative to {}.\n\n{}\n</skill>",
-            self.name,
-            skill_md.display(),
-            self.path.display(),
-            skill_body(&content)
-        );
+        // A built-in skill *is* its body: there is no directory to read, and so
+        // no location to point a reference file at.
+        let mut s = match self.builtin {
+            Some(body) => format!(
+                "<skill name=\"{}\" location=\"built in\">\n\n{body}\n</skill>",
+                self.name
+            ),
+            None => {
+                let skill_md = self.path.join("SKILL.md");
+                let content = std::fs::read_to_string(&skill_md)?;
+                format!(
+                    "<skill name=\"{}\" location=\"{}\">\nReferences are relative to {}.\n\n{}\n</skill>",
+                    self.name,
+                    skill_md.display(),
+                    self.path.display(),
+                    skill_body(&content)
+                )
+            }
+        };
         if let Some(args) = args {
             s.push_str("\n\n");
             s.push_str(args);
@@ -785,6 +835,7 @@ mod tests {
             path: skill_dir,
             global: false,
             disable_model_invocation: false,
+            builtin: None,
         };
         let content = skill.invocation_content(None).unwrap();
         assert!(content.contains("# Raw\n\nno frontmatter"));
@@ -808,10 +859,67 @@ mod tests {
             path: skill_dir,
             global: false,
             disable_model_invocation: false,
+            builtin: None,
         };
         let content = skill.invocation_content(None).unwrap();
         assert!(content.contains("\nbody"));
         assert!(!content.contains("description:"));
+    }
+
+    #[test]
+    fn the_codemode_reference_ships_only_when_codemode_is_on() {
+        assert!(
+            Skills::default().with_builtins(false).skills.is_empty(),
+            "the reference teaches a language for a tool that is not offered"
+        );
+
+        let skills = Skills::default().with_builtins(true);
+        assert_eq!(skills.skills.len(), 1);
+        let skill = &skills.skills[0];
+        assert_eq!(skill.name, shuvarie_codemode::skill::NAME);
+        assert!(skill.builtin.is_some());
+        assert!(
+            !skill.disable_model_invocation,
+            "the model loads it on demand"
+        );
+        // Built in, so there is no directory for a reference file to live in.
+        assert_eq!(skill.path, PathBuf::new());
+    }
+
+    /// A user's own `codemode` skill is the workspace's answer to the same
+    /// question, and it wins: replacing the reference must not need a fork.
+    #[test]
+    fn a_users_own_codemode_skill_wins() {
+        let dir = TempDir::new().unwrap();
+        let workspace = dir.path().join("workspace");
+        write_skill(&workspace.join(".agents/skills"), "codemode", "Mine.", &[]);
+
+        let skills =
+            Skills::load_from(&workspace, None, None, &SkillsConfig::default()).with_builtins(true);
+        assert_eq!(skills.skills.len(), 1, "one skill, not two");
+        assert!(
+            skills.skills[0].builtin.is_none(),
+            "the workspace's skill should have been kept"
+        );
+    }
+
+    #[test]
+    fn a_builtin_skill_is_invoked_from_its_body() {
+        let skills = Skills::default().with_builtins(true);
+        let content = skills.skills[0].invocation_content(None).unwrap();
+
+        assert!(
+            content.starts_with("<skill name=\"codemode\" location=\"built in\">"),
+            "{content}"
+        );
+        assert!(content.contains("# Writing codemode scripts"), "{content}");
+        // The file-skill preamble would be a lie: there is no directory.
+        assert!(!content.contains("References are relative to"), "{content}");
+        // Arguments still append, so `/skill:codemode ...` works.
+        let with_args = skills.skills[0]
+            .invocation_content(Some("why does trim fail?"))
+            .unwrap();
+        assert!(with_args.ends_with("why does trim fail?"), "{with_args}");
     }
 
     #[test]
@@ -964,6 +1072,22 @@ mod tests {
         assert!(section.contains("<description>TUI skill</description>"));
         assert!(section.contains("<location>"));
         assert!(section.contains("SKILL.md"));
+    }
+
+    /// A built-in skill is reachable the same way, and the preamble has to say
+    /// so rather than pointing at a directory that does not exist.
+    #[test]
+    fn the_preamble_lists_a_builtin_skill_as_built_in() {
+        let section = Skills::default()
+            .with_builtins(true)
+            .preamble_section()
+            .unwrap();
+        assert!(section.contains("<name>codemode</name>"), "{section}");
+        assert!(
+            section.contains("<location>built in</location>"),
+            "{section}"
+        );
+        assert!(section.contains("Writing Rhai scripts"), "{section}");
     }
 
     #[test]

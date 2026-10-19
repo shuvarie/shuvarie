@@ -114,6 +114,10 @@ jiff = "0.2"
 kdl = "6.7"
 regex = "1"
 reqwest = "0.13"
+# The codemode scripting language. `serde` is the JSON bridge tools use to
+# cross between the host and a script; nothing else is wanted from it (no
+# `sync`, no `no_module` -- static modules are the call surface).
+rhai = { version = "1.26", features = ["serde"] }
 # Do NOT include `rig`. It has too many implicit dependencies.
 rig-agent = "0.44"
 rig-core = { version = "0.44", features = ["reqwest"] }
@@ -122,6 +126,7 @@ selune = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
+shuvarie-codemode = { path = "crates/codemode", version = "0.4" }
 shuvarie-config = { path = "crates/config", version = "0.4" }
 shuvarie-core = { path = "crates/core", version = "0.4" }
 shuvarie-db = { path = "crates/db", version = "0.4" }

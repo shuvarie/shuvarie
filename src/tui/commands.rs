@@ -12,6 +12,7 @@ pub enum CommandAction {
     OpenScenePicker,
     OpenVariantPicker,
     OpenThemePicker,
+    OpenCodemode,
     NewSession,
     EditTitle,
     GenTitle,
@@ -30,7 +31,7 @@ pub enum CommandAction {
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 25] = [
+    pub const ALL: [CommandAction; 26] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::AddDecisionProvider,
@@ -41,6 +42,7 @@ impl CommandAction {
         CommandAction::OpenScenePicker,
         CommandAction::OpenVariantPicker,
         CommandAction::OpenThemePicker,
+        CommandAction::OpenCodemode,
         CommandAction::NewSession,
         CommandAction::EditTitle,
         CommandAction::GenTitle,
@@ -70,6 +72,7 @@ impl CommandAction {
             CommandAction::OpenScenePicker => "scene",
             CommandAction::OpenVariantPicker => "variant",
             CommandAction::OpenThemePicker => "theme",
+            CommandAction::OpenCodemode => "codemode",
             CommandAction::NewSession => "new",
             CommandAction::EditTitle => "title",
             CommandAction::GenTitle => "gen-title",
@@ -220,6 +223,11 @@ pub fn default_commands() -> Vec<CommandEntry> {
             "Theme",
             "Pick the TUI theme (previews live)",
             CommandAction::OpenThemePicker,
+        ),
+        CommandEntry::builtin(
+            "Codemode",
+            "Offer the Rhai scripting tool, and how it presents the roster",
+            CommandAction::OpenCodemode,
         ),
         CommandEntry::builtin(
             "Edit title",

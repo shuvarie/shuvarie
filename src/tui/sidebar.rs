@@ -1050,6 +1050,7 @@ mod tests {
                 category: None,
                 global: false,
                 disable_model_invocation: false,
+                builtin: None,
             }],
             warnings: Vec::new(),
         });

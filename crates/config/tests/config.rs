@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use shuvarie_config::{
-    Active, Config, ConfigError, Connections, LspConfigRepr, LspServerSpecRepr, ProviderConfig,
-    RankingConfig,
+    Active, CodemodeConfig, CodemodeEnabled, CodemodeMode, Config, ConfigError, Connections,
+    LspConfigRepr, LspServerSpecRepr, ProviderConfig, RankingConfig,
 };
 
 fn sample_connections() -> Connections {
@@ -382,6 +382,202 @@ fn round_trip(config: &Config) -> Config {
     let path = dir.path().join("config.kdl");
     config.save_to(&path).expect("save");
     Config::load_from(&path).expect("load")
+}
+
+/// Every `codemode` mode round-trips by the name the file spells, so the mode a
+/// user wrote is the mode a later save keeps.
+#[test]
+fn codemode_modes_round_trip_under_their_own_names() {
+    for (mode, written) in [
+        (CodemodeMode::Declared, "declared"),
+        (CodemodeMode::DeclareBuiltin, "declare-builtin"),
+        (CodemodeMode::Only, "only"),
+    ] {
+        let mut config = Config::default();
+        config.codemode.enabled = CodemodeEnabled::On;
+        config.codemode.mode = mode;
+        assert_eq!(config.codemode.mode.as_str(), written);
+
+        let parsed = round_trip(&config);
+        assert_eq!(parsed.codemode.mode, mode, "`{written}` did not survive");
+        assert_eq!(parsed, config);
+    }
+}
+
+/// `disabled` round-trips: the two absolute values are KDL booleans with the
+/// polarity the node's name promises (`disabled #true` is off), and only `auto`
+/// is a string.
+#[test]
+fn codemode_disabled_round_trips_and_keeps_its_boolean_polarity() {
+    for (value, written) in [
+        (CodemodeEnabled::On, "disabled #false"),
+        (CodemodeEnabled::Auto, "disabled \"auto\""),
+        (CodemodeEnabled::Off, "disabled #true"),
+    ] {
+        let mut config = Config::default();
+        config.codemode.enabled = value;
+
+        let parsed = round_trip(&config);
+        assert_eq!(
+            parsed.codemode.enabled, value,
+            "`{written}` did not survive"
+        );
+        assert_eq!(parsed, config);
+    }
+}
+
+/// The bytes a user would read in `shuvarie.kdl`, not just the round-tripped
+/// value: the default is on, so it writes nothing, and `#true` means *off*.
+#[test]
+fn codemode_disabled_is_written_in_the_spelling_a_user_would_type() {
+    let write = |value: CodemodeEnabled| -> String {
+        let mut config = Config::default();
+        config.codemode.enabled = value;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.kdl");
+        config.save_to(&path).expect("save");
+        std::fs::read_to_string(&path).expect("read")
+    };
+
+    // On is the default, so a default section writes nothing at all.
+    assert_eq!(CodemodeConfig::default().enabled, CodemodeEnabled::On);
+    assert!(
+        !write(CodemodeEnabled::On).contains("disabled"),
+        "the default writes nothing"
+    );
+
+    assert!(write(CodemodeEnabled::Off).contains("disabled #true"));
+    // KDL writes a bare string token; both spellings are the same value.
+    assert!(write(CodemodeEnabled::Auto).contains("disabled auto"));
+    // The node that was replaced is gone from the surface entirely.
+    let off = write(CodemodeEnabled::Off);
+    assert!(!off.contains("enabled"), "no `enabled` node: {off}");
+}
+
+/// The shipping default offers the tool; `auto` narrows it to the turns that
+/// have something to script, and `off` ignores the roster.
+#[test]
+fn codemode_is_offered_by_default_and_auto_narrows_it() {
+    let defaults = CodemodeConfig::default();
+    assert_eq!(defaults.enabled, CodemodeEnabled::On);
+    assert!(
+        defaults.is_enabled(false),
+        "the default offers the tool on every turn"
+    );
+    assert!(defaults.is_enabled(true));
+    // The skill is included whenever the feature could still turn on.
+    assert!(defaults.is_possible());
+
+    let auto = CodemodeConfig {
+        enabled: CodemodeEnabled::Auto,
+        ..CodemodeConfig::default()
+    };
+    assert!(
+        !auto.is_enabled(false),
+        "auto needs something to orchestrate"
+    );
+    assert!(auto.is_enabled(true), "a configured tool to orchestrate");
+    assert!(auto.is_possible(), "auto can still turn on");
+
+    let off = CodemodeConfig {
+        enabled: CodemodeEnabled::Off,
+        ..CodemodeConfig::default()
+    };
+    assert!(!off.is_enabled(true), "`off` ignores the roster");
+    assert!(!off.is_possible(), "`off` rules the feature out entirely");
+}
+
+/// The mode default is the split that pays for itself.
+#[test]
+fn codemode_defaults_to_declare_builtin() {
+    assert_eq!(CodemodeMode::default(), CodemodeMode::DeclareBuiltin);
+    assert_eq!(CodemodeConfig::default().mode, CodemodeMode::DeclareBuiltin);
+}
+
+#[test]
+fn codemode_mode_is_parsed_from_a_hand_written_file() {
+    let config = parse_config(
+        r#"
+        codemode {
+            mode "declare-builtin"
+        }
+        "#,
+    )
+    .expect("parse");
+    assert_eq!(config.codemode.mode, CodemodeMode::DeclareBuiltin);
+}
+
+/// `disabled` takes the polarity a reader expects: `#true` turns the tool off.
+#[test]
+fn codemode_disabled_is_parsed_from_a_hand_written_file() {
+    let off = parse_config(
+        r#"
+        codemode {
+            disabled #true
+        }
+        "#,
+    )
+    .expect("parse");
+    assert_eq!(off.codemode.enabled, CodemodeEnabled::Off);
+
+    let on = parse_config(
+        r#"
+        codemode {
+            disabled #false
+        }
+        "#,
+    )
+    .expect("parse");
+    assert_eq!(on.codemode.enabled, CodemodeEnabled::On);
+
+    let auto = parse_config(
+        r#"
+        codemode {
+            disabled "auto"
+        }
+        "#,
+    )
+    .expect("parse");
+    assert_eq!(auto.codemode.enabled, CodemodeEnabled::Auto);
+
+    // Absent is the default: offered.
+    let absent = parse_config("codemode { mode \"only\" }").expect("parse");
+    assert_eq!(absent.codemode.enabled, CodemodeEnabled::On);
+}
+
+/// A value that is neither a bool nor `auto` names what is accepted, and the
+/// error points at the node the user wrote.
+#[test]
+fn an_unknown_codemode_disabled_names_the_valid_set() {
+    let err = parse_config(
+        r#"
+        codemode {
+            disabled "yes"
+        }
+        "#,
+    )
+    .expect_err("should fail");
+    let message = err.to_string();
+    assert!(message.contains("auto"), "the accepted values: {message}");
+    assert!(message.contains("yes"), "the offending value: {message}");
+}
+
+#[test]
+fn an_unknown_codemode_mode_names_the_valid_set() {
+    let err = parse_config(
+        r#"
+        codemode {
+            mode "builtin-only"
+        }
+        "#,
+    )
+    .expect_err("should fail");
+    let message = err.to_string();
+    assert!(message.contains("declare-builtin"), "{message}");
+    assert!(
+        message.contains("builtin-only"),
+        "the offending value: {message}"
+    );
 }
 
 #[test]

@@ -67,6 +67,11 @@ impl Tool for Glob {
                 .git_ignore(true)
                 .standard_filters(true)
                 .require_git(false)
+                // Entries arrive in filesystem order otherwise, so the set kept
+                // under the cap -- and therefore any count a script derives
+                // from it -- would change between two identical queries. A
+                // truncated answer has to be reproducible to be debuggable.
+                .sort_by_file_name(|a, b| a.cmp(b))
                 .build();
             let mut matches: Vec<String> = Vec::new();
             for entry in walk.flatten() {
@@ -161,6 +166,33 @@ mod tests {
             .await
             .unwrap();
         assert!(none.as_text().unwrap().contains("No files found"));
+        drop(dir);
+    }
+
+    /// A capped result has to be the same capped result every time, or a count
+    /// taken from it cannot be checked against anything.
+    #[tokio::test]
+    async fn a_truncated_answer_is_the_same_answer_twice() {
+        let (dir, _guard) = tempdir();
+        for i in 0..150 {
+            std::fs::write(format!("f{i}.txt"), "").unwrap();
+        }
+        let mut answers = Vec::new();
+        for _ in 0..3 {
+            let out = Glob::new(crate::test_util::access())
+                .call(&mut new_ctx(), json!({ "pattern": "*.txt" }))
+                .await
+                .unwrap();
+            answers.push(out.as_text().unwrap().to_string());
+        }
+        assert_eq!(answers[0], answers[1], "truncation is not stable");
+        assert_eq!(answers[1], answers[2], "truncation is not stable");
+        // And it is a prefix of the sorted whole, not an arbitrary slice.
+        let first = answers[0].lines().next().unwrap();
+        assert_eq!(
+            first, "f0.txt",
+            "the kept set should start at the sort order"
+        );
         drop(dir);
     }
 

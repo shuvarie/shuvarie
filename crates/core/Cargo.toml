@@ -24,6 +24,7 @@ serde.workspace = true
 serde_json.workspace = true
 selune.workspace = true
 shuvarie-config.workspace = true
+shuvarie-codemode.workspace = true
 shuvarie-db.workspace = true
 shuvarie-decision.workspace = true
 shuvarie-doc.workspace = true

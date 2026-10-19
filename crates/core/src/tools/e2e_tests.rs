@@ -69,6 +69,9 @@ fn roster(
         &config.tools.tools,
         mcp,
         mcp_roster,
+        // These rosters are what the model is offered directly; codemode's
+        // wiring is a turn's, so a test that wants the tool builds it.
+        None,
     );
     ToolSet::from_dynamic_tools(tools)
 }

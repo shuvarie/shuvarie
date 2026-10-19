@@ -132,6 +132,7 @@ fn merge_layer(config: &mut Config, layer: &ConfigLayer) {
                 }
             }
             "tools" => config.tools = layer.config.tools.clone(),
+            "codemode" => config.codemode = layer.config.codemode.clone(),
             "lsp" => {
                 config.lsp.disabled = layer.config.lsp.disabled;
                 for (lang, spec) in &layer.config.lsp.servers {
@@ -429,6 +430,17 @@ pub struct Config {
     pub registries: RegistriesConfig,
 
     pub tools: ToolsConfig,
+
+    /// `codemode { … }` — one tool that runs a Rhai script, where the script
+    /// calls the other tools. Intermediate results stay in the script, so
+    /// several dependent calls cost one round trip and one summary.
+    ///
+    /// Offered by default, in `declare-builtin` mode, which keeps the roster's
+    /// own tools callable and puts the configured ones (stdio `tool` entries and
+    /// MCP servers) behind a script. `codemode { disabled #true }` turns it off
+    /// and `disabled "auto"` narrows it to the turns that have a configured
+    /// source — see [`CodemodeConfig::is_enabled`].
+    pub codemode: CodemodeConfig,
 
     /// `decisions { … }` — named, reusable questions for decision models,
     /// already stacked across the config chain. A permission rule or a tool
@@ -844,6 +856,173 @@ pub struct ToolsConfig {
 
 /// The per-call timeout of a `tool` when `timeout` is omitted, in seconds.
 pub const TOOL_DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/// The default inline budget of the `codemode` catalog, in estimated tokens.
+pub const CODEMODE_DEFAULT_INLINE_BUDGET: usize = 3000;
+
+/// How `codemode` presents the roster to the model.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CodemodeMode {
+    /// Tools stay in the model's roster and are described as scriptable, so the
+    /// model picks between a script and a direct call.
+    Declared,
+    /// The roster's own built-in tools stay callable directly; stdio and MCP
+    /// tools are reachable only through a script. This is the split that pays
+    /// for itself: the builtins are few and stable, while a connected MCP server
+    /// or a pile of configured subprocess tools is where the catalog bloats.
+    #[default]
+    DeclareBuiltin,
+    /// Tools are hidden from the model and reachable only through a script.
+    Only,
+}
+
+impl CodemodeMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Declared => "declared",
+            Self::DeclareBuiltin => "declare-builtin",
+            Self::Only => "only",
+        }
+    }
+
+    /// Every mode, in the order the TUI's `/codemode` overlay cycles through
+    /// them: most permissive first, ending at the one that hides everything.
+    pub const ALL: [CodemodeMode; 3] = [
+        CodemodeMode::Declared,
+        CodemodeMode::DeclareBuiltin,
+        CodemodeMode::Only,
+    ];
+
+    /// The next mode in [`Self::ALL`], wrapping back to the first.
+    pub fn next(self) -> Self {
+        let index = Self::ALL.iter().position(|mode| *mode == self).unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+}
+
+/// How the feature is switched on.
+///
+/// Written as a `disabled` node in the file, which is why the default is the
+/// `On` variant: an absent node means the tool is offered, and the file only
+/// says something when the user wants less. A plain bool could not express the
+/// useful middle: `codemode` costs context (a catalog in the tool's description)
+/// and only pays that back when there is something worth scripting, so `auto`
+/// remains available as an opt-in for exactly the turns where a configured
+/// source gives it a job.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CodemodeEnabled {
+    /// Offered on every turn, configured sources or not. The default: the tool
+    /// appears without the user having to ask for it.
+    #[default]
+    On,
+    /// Offered only when the turn's roster has tools from configuration: a
+    /// configured `tool` subprocess entry, or a connected MCP server's tools.
+    /// A turn with neither keeps the plain roster, so `auto` pays nothing for a
+    /// feature it has nothing to script.
+    Auto,
+    /// Never offered.
+    Off,
+}
+
+impl CodemodeEnabled {
+    /// The word a person reads, for the `/codemode` overlay. There is no
+    /// `as_str` counterpart on purpose: the file spells the two absolute values
+    /// as KDL booleans (`#true` / `#false`), not strings, so a single "spelling"
+    /// helper could only be wrong for one of its callers.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+
+    /// Every value, in the order the `/codemode` overlay cycles through them:
+    /// the default first.
+    pub const ALL: [CodemodeEnabled; 3] = [Self::On, Self::Auto, Self::Off];
+
+    /// The next value in [`Self::ALL`], wrapping back to the first.
+    pub fn next(self) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|value| *value == self)
+            .unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+}
+
+/// `codemode { … }`: the scripting tool's own configuration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodemodeConfig {
+    /// `disabled #true | #false | "auto"`. Absent by default, which leaves the
+    /// tool offered — the file only has to say something when the user wants it
+    /// off, or wants `auto`'s narrower gate.
+    pub enabled: CodemodeEnabled,
+
+    /// `mode "declared" | "declare-builtin" | "only"`.
+    pub mode: CodemodeMode,
+
+    /// Estimated tokens of inlined tool declarations. Whatever does not fit is
+    /// still callable and listed by name, reachable through `describe_tool`.
+    pub inline_budget: usize,
+
+    /// `timeout-ms`: wall-clock budget for one script. `0` is none, which
+    /// leaves only `max-operations` between a script and a runaway loop.
+    pub timeout_ms: u64,
+
+    /// `max-operations`: Rhai operations per script. `0` is unlimited.
+    pub max_operations: u64,
+
+    /// `max-tool-calls`: nested calls per script. `0` is unlimited.
+    pub max_tool_calls: usize,
+
+    /// `store #true`: whether `store(key, value)` / `load(key)` exist.
+    pub store: bool,
+
+    /// `tools { … }`: the tools a *script* may not orchestrate. The model may
+    /// still call them directly.
+    pub tools: SceneToolsConfig,
+}
+
+impl Default for CodemodeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: CodemodeEnabled::default(),
+            mode: CodemodeMode::default(),
+            inline_budget: CODEMODE_DEFAULT_INLINE_BUDGET,
+            timeout_ms: 0,
+            max_operations: 0,
+            max_tool_calls: 0,
+            store: true,
+            tools: SceneToolsConfig::default(),
+        }
+    }
+}
+
+impl CodemodeConfig {
+    /// Whether the tool is offered on a turn whose roster does or does not carry
+    /// configured tools (`has_configured_tools`: a stdio `tool` entry or a
+    /// connected MCP server's tool). Only [`CodemodeEnabled::Auto`] reads it.
+    ///
+    /// The gate is evaluated against what the *config* declares, not against what
+    /// a scene later pruned from the roster, so one scene cannot silently flip a
+    /// setting whose value the user wrote down.
+    pub fn is_enabled(&self, has_configured_tools: bool) -> bool {
+        match self.enabled {
+            CodemodeEnabled::Auto => has_configured_tools,
+            CodemodeEnabled::On => true,
+            CodemodeEnabled::Off => false,
+        }
+    }
+
+    /// Whether the feature can be offered on *any* turn. Decided once per config
+    /// rather than once per roster, so it answers for the things that cannot see
+    /// a turn: the built-in reference skill's inclusion. Only `disabled #true`
+    /// rules the feature out entirely.
+    pub fn is_possible(&self) -> bool {
+        self.enabled != CodemodeEnabled::Off
+    }
+}
 
 /// A user-defined tool: one templated command line, the declared params
 /// forming the tool's JSON input schema, and the child-process environment.

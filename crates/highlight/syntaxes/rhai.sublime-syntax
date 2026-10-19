@@ -1,0 +1,115 @@
+%YAML 1.2
+---
+# Rhai, for the codemode block's script listing.
+#
+# syntect ships the curated Sublime package list and Rhai is not in it, so this
+# is the syntax set's one addition. It aims at *reading a script*, not at being
+# a complete grammar: comments, both string forms (backtick interpolation is
+# Rhai's most-used feature), numbers, keywords, and called names. Everything else
+# stays the default text color, so a script full of `file.len` does not read as a
+# wall of function names.
+name: Rhai
+file_extensions:
+  - rhai
+scope: source.rhai
+
+contexts:
+  main:
+    - include: comments
+    - include: strings
+
+    # Keywords before operators, so `in` and `is` are words; numbers before
+    # identifiers, so a literal is not a name.
+    - match: '\b(let|const|if|else|for|in|while|loop|do|until|break|continue|fn|return|switch|try|catch|throw|import|export|as|is|global|private|this)\b'
+      scope: keyword.control.rhai
+
+    - match: '\b(true|false)\b'
+      scope: constant.language.rhai
+
+    - match: '\b(\d[\d_]*(\.\d[\d_]*)?|0x[0-9a-fA-F_]+)\b'
+      scope: constant.numeric.rhai
+
+    # A name immediately before `(` is a call, which is the rule a reader uses.
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.rhai
+
+    - match: '==|!=|<=|>=|&&|\|\||=>|\+=|-=|\*=|/=|[+\-*/%<>=!]'
+      scope: keyword.operator.rhai
+
+    - match: '[{}()\[\]]'
+      scope: punctuation.section.rhai
+
+    - match: '#\{|[,;:.]'
+      scope: punctuation.separator.rhai
+
+  comments:
+    # Rhai's `//` comments, including the `///` doc form.
+    - match: '///.*$'
+      scope: comment.line.documentation.rhai
+    - match: '//.*$'
+      scope: comment.line.double-slash.rhai
+    # Block comments nest in Rhai; one level is what a script here uses, and a
+    # nested one still ends at the first `*/` rather than swallowing the file.
+    - match: '/\*'
+      scope: comment.block.rhai
+      push: block_comment
+
+  block_comment:
+    - meta_scope: comment.block.rhai
+    - match: '\*/'
+      pop: true
+
+  strings:
+    - match: '"'
+      scope: punctuation.definition.string.begin.rhai
+      push: double_string
+    # Backtick strings interpolate with `${...}`.
+    - match: '`'
+      scope: punctuation.definition.string.begin.rhai
+      push: backtick_string
+
+  double_string:
+    - meta_scope: string.quoted.double.rhai
+    - match: '\\.'
+      scope: string.escape.rhai
+    - match: '"'
+      scope: punctuation.definition.string.end.rhai
+      pop: true
+
+  backtick_string:
+    - meta_scope: string.quoted.other.rhai
+    - match: '\\.'
+      scope: string.escape.rhai
+    # The interpolation itself is code, so paint it as such.
+    - match: '\$\{'
+      scope: punctuation.section.interpolation.begin.rhai
+      push: interpolation
+    - match: '`'
+      scope: punctuation.definition.string.end.rhai
+      pop: true
+
+  interpolation:
+    - clear_scopes: 1
+    # This context's own `}` has to come *before* `include: main`: includes expand
+    # inline, and main paints `}` as punctuation, so a `}` rule placed after the
+    # include never matches. The interpolation would then stay open for the rest
+    # of the file -- the string's tail reads as code, and its closing backtick is
+    # taken for the start of a new string.
+    - match: '\}'
+      scope: punctuation.section.interpolation.end.rhai
+      pop: true
+    # A map literal (or any braced group) nests inside the interpolation, so its
+    # `}` must not end it. Count braces rather than closing at the first one.
+    - match: '#?\{'
+      scope: punctuation.section.rhai
+      push: interpolation_brace
+    - include: main
+
+  interpolation_brace:
+    - match: '\}'
+      scope: punctuation.section.rhai
+      pop: true
+    - match: '#?\{'
+      scope: punctuation.section.rhai
+      push: interpolation_brace
+    - include: main

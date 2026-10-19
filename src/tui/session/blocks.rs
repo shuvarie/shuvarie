@@ -111,6 +111,9 @@ pub enum BlockMessage {
     /// Flip a tool header's title lines — the control a multi-line `run_shell`
     /// command carries independently of its output.
     ToggleTitle,
+    /// Flip a tool's code listing — a `codemode` block's script, which collapses
+    /// independently of the result below it.
+    ToggleCode,
     Tool(ToolMessage),
     Text(TextMessage),
     Reasoning(ReasoningMessage),
@@ -145,6 +148,13 @@ impl Block {
             BlockMessage::ToggleTitle => match self {
                 Block::Tool(tool) => {
                     tool.toggle_title();
+                    true
+                }
+                _ => false,
+            },
+            BlockMessage::ToggleCode => match self {
+                Block::Tool(tool) => {
+                    tool.toggle_code();
                     true
                 }
                 _ => false,
@@ -290,6 +300,22 @@ impl Block {
 
     pub fn is_title_expanded(&self) -> bool {
         matches!(self, Block::Tool(tool) if tool.is_title_expanded())
+    }
+
+    pub fn set_code_expanded(&mut self, expanded: bool) {
+        if let Block::Tool(tool) = self {
+            tool.set_code_expanded(expanded);
+        }
+    }
+
+    pub fn is_code_expanded(&self) -> bool {
+        matches!(self, Block::Tool(tool) if tool.is_code_expanded())
+    }
+
+    /// Whether the block carries a code listing with rows hidden behind its own
+    /// control (a `codemode` script past the collapse cap).
+    pub fn code_collapsible(&self) -> bool {
+        matches!(self, Block::Tool(tool) if tool.code_collapsible())
     }
 }
 

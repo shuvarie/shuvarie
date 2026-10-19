@@ -34,6 +34,7 @@ pub(crate) fn from_kdl_with_sections(contents: &str) -> Result<(Config, Vec<Stri
             "shell" => config.shell = parse_shell(node, contents)?,
             "registries" => config.registries = parse_registries(node, contents)?,
             "tools" => config.tools = parse_tools(node, contents)?,
+            "codemode" => config.codemode = parse_codemode(node, contents)?,
             "permissions" => config.permissions = parse_permissions(node, contents)?,
             "decisions" => config.decisions = parse_decisions(node, contents)?,
             "ranking" => config.ranking = parse_ranking(node, contents)?,
@@ -227,6 +228,26 @@ fn scalar_string(input: &str, node: &KdlNode) -> Result<Option<String>> {
         None => Ok(None),
         Some(KdlValue::String(value)) => Ok(Some(value.clone())),
         Some(_) => Err(type_error(input, node, "a string")),
+    }
+}
+
+/// `codemode`'s `disabled`: a KDL boolean (`#true` = off, `#false` = on) or the
+/// string `"auto"`. Folding the node onto the enabled state is what lets the
+/// default be "offered": an absent node is [`CodemodeEnabled::On`], and the two
+/// booleans keep the polarity a reader expects from a name like `disabled`.
+fn scalar_codemode_disabled(input: &str, node: &KdlNode) -> Result<Option<CodemodeEnabled>> {
+    match scalar_value(input, node)? {
+        None => Ok(None),
+        Some(KdlValue::Bool(true)) => Ok(Some(CodemodeEnabled::Off)),
+        Some(KdlValue::Bool(false)) => Ok(Some(CodemodeEnabled::On)),
+        Some(KdlValue::String(value)) if value == "auto" => Ok(Some(CodemodeEnabled::Auto)),
+        Some(KdlValue::String(value)) => Err(node_error(
+            input,
+            node,
+            format!("`disabled` must be `#true`, `#false`, or `\"auto\"` (got `\"{value}\"`)"),
+            None,
+        )),
+        Some(_) => Err(type_error(input, node, "`#true`, `#false`, or `\"auto\"`")),
     }
 }
 
@@ -1139,6 +1160,99 @@ fn parse_registry_headers(node: &KdlNode, input: &str) -> Result<Vec<(String, St
         headers.push((name, value));
     }
     Ok(headers)
+}
+
+/// `codemode { disabled #true; mode "declare-builtin"; inline-budget 3000;
+/// timeout-ms 0; max-operations 0; max-tool-calls 0; store #true; tools { … } }`
+/// — one tool that runs a Rhai script, where the script calls the other tools.
+/// The tool is offered unless `disabled` says otherwise: `disabled #true` turns
+/// it off, `disabled #false` (or no node) leaves it on, and `disabled "auto"`
+/// narrows it to the turns that have a configured tool to script. `mode` is
+/// `declared`, `declare-builtin`, or `only`.
+fn parse_codemode(node: &KdlNode, input: &str) -> Result<CodemodeConfig> {
+    let mut enabled = None;
+    let mut mode = None;
+    let mut inline_budget = None;
+    let mut timeout_ms = None;
+    let mut max_operations = None;
+    let mut max_tool_calls = None;
+    let mut store = None;
+    let mut tools = None;
+
+    for child in child_nodes(node) {
+        match child.name().value() {
+            "disabled" => set_once(
+                input,
+                child,
+                &mut enabled,
+                scalar_codemode_disabled(input, child),
+            )?,
+            "mode" => set_once(input, child, &mut mode, scalar_string(input, child))?,
+            "inline-budget" => {
+                set_once(input, child, &mut inline_budget, scalar_usize(input, child))?
+            }
+            "timeout-ms" => set_once(input, child, &mut timeout_ms, scalar_u64(input, child))?,
+            "max-operations" => {
+                set_once(input, child, &mut max_operations, scalar_u64(input, child))?
+            }
+            "max-tool-calls" => set_once(
+                input,
+                child,
+                &mut max_tool_calls,
+                scalar_usize(input, child),
+            )?,
+            "store" => set_once(input, child, &mut store, scalar_bool(input, child))?,
+            "tools" => set_once(
+                input,
+                child,
+                &mut tools,
+                parse_scene_tools(child, input).map(Some),
+            )?,
+            other => {
+                return Err(node_error(
+                    input,
+                    child,
+                    format!(
+                        "unknown node `{other}` in `codemode` (expected `disabled`, `mode`, \
+                         `inline-budget`, `timeout-ms`, `max-operations`, `max-tool-calls`, \
+                         `store`, or `tools`)"
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+
+    let mode = match mode {
+        None => CodemodeMode::default(),
+        Some(mode) => match mode.as_str() {
+            "declared" => CodemodeMode::Declared,
+            "declare-builtin" => CodemodeMode::DeclareBuiltin,
+            "only" => CodemodeMode::Only,
+            other => {
+                return Err(node_error(
+                    input,
+                    node,
+                    format!(
+                        "`mode` must be `declared`, `declare-builtin`, or `only` (got `{other}`)"
+                    ),
+                    None,
+                ));
+            }
+        },
+    };
+
+    let defaults = CodemodeConfig::default();
+    Ok(CodemodeConfig {
+        enabled: enabled.unwrap_or(defaults.enabled),
+        mode,
+        inline_budget: inline_budget.unwrap_or(defaults.inline_budget),
+        timeout_ms: timeout_ms.unwrap_or(defaults.timeout_ms),
+        max_operations: max_operations.unwrap_or(defaults.max_operations),
+        max_tool_calls: max_tool_calls.unwrap_or(defaults.max_tool_calls),
+        store: store.unwrap_or(defaults.store),
+        tools: tools.unwrap_or_default(),
+    })
 }
 
 fn parse_tools(node: &KdlNode, input: &str) -> Result<ToolsConfig> {
@@ -3559,6 +3673,7 @@ pub(crate) fn to_kdl(config: &Config) -> Result<String> {
         decisions_node(&config.decisions),
         ranking_node(&config.ranking),
         tools_node(&config.tools),
+        codemode_node(&config.codemode),
         registries_node(&config.registries),
         scenes_node(&config.scenes),
         themes_node(&config.themes),
@@ -4469,6 +4584,43 @@ fn hooks_node(name: &str, hooks: &Option<Hooks>) -> Option<KdlNode> {
         children.push(prompt_node("turn", text));
     }
     section_node(name, children)
+}
+
+fn codemode_node(cfg: &CodemodeConfig) -> Option<KdlNode> {
+    let defaults = CodemodeConfig::default();
+    let mut children = Vec::new();
+    if cfg.enabled != defaults.enabled {
+        // The two absolute values are KDL booleans, which is the polarity the
+        // node's name promises: `disabled #true` is off. Only `auto` is a
+        // string, and an omitted node means on.
+        children.push(match cfg.enabled {
+            CodemodeEnabled::On => value_node("disabled", false),
+            CodemodeEnabled::Auto => value_node("disabled", "auto"),
+            CodemodeEnabled::Off => value_node("disabled", true),
+        });
+    }
+    if cfg.mode != defaults.mode {
+        children.push(value_node("mode", cfg.mode.as_str()));
+    }
+    if cfg.inline_budget != defaults.inline_budget {
+        children.push(int_node("inline-budget", cfg.inline_budget as i128));
+    }
+    if cfg.timeout_ms != defaults.timeout_ms {
+        children.push(int_node("timeout-ms", cfg.timeout_ms as i128));
+    }
+    if cfg.max_operations != defaults.max_operations {
+        children.push(int_node("max-operations", cfg.max_operations as i128));
+    }
+    if cfg.max_tool_calls != defaults.max_tool_calls {
+        children.push(int_node("max-tool-calls", cfg.max_tool_calls as i128));
+    }
+    if cfg.store != defaults.store {
+        children.push(value_node("store", cfg.store));
+    }
+    if let Some(tools) = scene_tools_node(&cfg.tools) {
+        children.push(tools);
+    }
+    section_node("codemode", children)
 }
 
 fn scene_tools_node(cfg: &SceneToolsConfig) -> Option<KdlNode> {

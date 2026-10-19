@@ -21,6 +21,11 @@ use shuvarie_core::tool_record::ToolRecord;
 
 const COLLAPSED_OUTPUT_LINES: usize = 5;
 
+/// Script rows a collapsed code listing shows. The code defaults to expanded
+/// (a script is the content of a `codemode` call and is visible nowhere else),
+/// so this is the cap for when a reader collapses it deliberately.
+const COLLAPSED_CODE_LINES: usize = 10;
+
 /// Indent of a multi-line title's continuation rows: the two columns of the
 /// status glyph and its space plus the `$ ` prompt, so further command lines
 /// line up under the first one.
@@ -81,6 +86,11 @@ pub struct ToolBlock {
     stderr: String,
     /// Whether the body's output rows are expanded.
     expanded: bool,
+    /// Whether the code listing's rows are expanded — a separate axis from
+    /// `expanded`, because a `codemode` block's script and its result are read
+    /// for different reasons: the code is what ran (shown whole by default),
+    /// the output is what came back (collapsed until asked for).
+    code_expanded: bool,
     /// Whether a multi-line title's hidden lines are expanded: the title's own
     /// control, independent of the body's `expanded`.
     title_expanded: bool,
@@ -125,6 +135,7 @@ impl ToolBlock {
             output: String::new(),
             stderr: String::new(),
             expanded: false,
+            code_expanded: true,
             title_expanded: false,
             worker,
             spawn,
@@ -159,6 +170,7 @@ impl ToolBlock {
             output: record.output.clone(),
             stderr: record.stderr.clone(),
             expanded: false,
+            code_expanded: true,
             title_expanded: false,
             worker: record.worker.clone(),
             spawn: None,
@@ -219,6 +231,32 @@ impl ToolBlock {
     pub(super) fn toggle(&mut self) {
         self.expanded = !self.expanded;
         self.body_rev += 1;
+    }
+
+    /// Flip the code listing's rows — a separate axis from the output: a
+    /// `codemode` block's script is shown in full by default while its result
+    /// stays collapsed, and each collapses on its own.
+    pub(super) fn toggle_code(&mut self) {
+        self.code_expanded = !self.code_expanded;
+        self.body_rev += 1;
+    }
+
+    pub(super) fn set_code_expanded(&mut self, expanded: bool) {
+        if self.code_expanded != expanded {
+            self.code_expanded = expanded;
+            self.body_rev += 1;
+        }
+    }
+
+    pub(super) fn is_code_expanded(&self) -> bool {
+        self.code_expanded
+    }
+
+    /// Whether the code listing holds more rows than the collapse cap, so it is
+    /// worth offering a control for it.
+    pub(super) fn code_collapsible(&self) -> bool {
+        self.codemode_script()
+            .is_some_and(|script| script.lines().count() > COLLAPSED_CODE_LINES)
     }
 
     pub(super) fn set_expanded(&mut self, expanded: bool) {
@@ -321,6 +359,23 @@ impl ToolBlock {
                 if !hidden {
                     est.tool_rows += collapsed_rows(output_rows);
                 }
+            }
+        }
+        // A `codemode` body leads with the script listing, which the arms above
+        // do not know about: the rows shown (the whole script, or the collapsed
+        // cap plus its hint), then the blank separator. This follows
+        // `code_expanded`, not `expanded` — the two axes are independent.
+        if self.name == "codemode" {
+            let total = self
+                .codemode_script()
+                .map_or(0, |script| script.lines().count());
+            if total > 0 {
+                let shown = if self.code_expanded {
+                    total
+                } else {
+                    total.min(COLLAPSED_CODE_LINES)
+                };
+                est.tool_rows += shown as u32 + u32::from(shown < total) + 1;
             }
         }
         // A multi-line title costs one header row per line: the row every tool
@@ -457,6 +512,9 @@ impl ToolBlock {
                 }
             }
         } else {
+            if self.name == "codemode" {
+                push_codemode_script(&mut body, self);
+            }
             let has_output = push_output_rows(self, &mut body, is_shell);
             if let Some(change) = &self.file_change {
                 if has_output {
@@ -571,6 +629,28 @@ impl ToolBlock {
                     );
                 }
             }
+            "codemode" => {
+                // The script itself is the body's code listing; the header only
+                // names the tool and says how long the script is.
+                header.push(Span::raw(self.name.clone()).fg(theme::text()).bold());
+                let lines = self
+                    .codemode_script()
+                    .map_or(0, |script| script.lines().count());
+                if lines > 0 {
+                    header.push(Span::raw(format!(" · {lines} lines")).fg(theme::text_muted()));
+                }
+                // A killed script is the one state the body cannot announce: it
+                // stops mid-flight, so there is no result header saying how it
+                // ended.
+                if self.status == ToolStatus::Killed {
+                    let text = "killed";
+                    let pad = inner_w
+                        .saturating_sub(spans_width(&header) + UnicodeWidthStr::width(text))
+                        .max(1);
+                    header.push(Span::raw(" ".repeat(pad)));
+                    header.push(Span::raw(text).fg(theme::text_muted()));
+                }
+            }
             "question" | "apply_patch" => {
                 header.push(Span::raw(self.name.clone()).fg(theme::text()).bold());
             }
@@ -622,6 +702,11 @@ impl ToolBlock {
             header.push(Span::raw(format!(" · spawn {spawn}")).fg(theme::text_muted()));
         }
         vec![Line::from(header)]
+    }
+
+    /// The script a `codemode` call ran, as the model wrote it.
+    fn codemode_script(&self) -> Option<&str> {
+        self.args_value().get("script")?.as_str()
     }
 
     /// The `run_shell` header: `$ <first command line>` with its timeout/exit
@@ -717,6 +802,62 @@ impl BodyBuilder {
         self.chunks
             .push(BodyChunk::rows(source, 0, self.width, false));
     }
+
+    /// End the trailing chunk, so the next line or source starts its own.
+    ///
+    /// `fixed` appends to a trailing `Fixed` chunk, which is what keeps a run of
+    /// plain lines in one chunk. That is wrong wherever a caller needs a chunk
+    /// boundary to survive — a hit region addressed by chunk index, for
+    /// instance: a code listing materializes as a `Fixed` chunk (it is short),
+    /// so without this the separator and the whole collapsed output would join
+    /// it and the code's hit region would cover the output too.
+    fn break_chunk(&mut self) {
+        if matches!(self.chunks.last(), Some(BodyChunk::Fixed(_))) {
+            self.chunks.push(BodyChunk::fixed(Vec::new()));
+        }
+    }
+}
+
+/// The script a `codemode` call ran, as a highlighted, line-numbered listing.
+///
+/// It leads the body because the script *is* the content of the call: the value
+/// and trace below are its result. The listing shows in full by default — a
+/// script is one call's worth of work, and this block is the only place in the
+/// transcript where it is visible at all — and collapses to
+/// [`COLLAPSED_CODE_LINES`] on its own control, independently of the output.
+fn push_codemode_script(body: &mut BodyBuilder, tool: &ToolBlock) {
+    let Some(script) = tool.codemode_script() else {
+        return;
+    };
+    let total = script.lines().count();
+    if total == 0 {
+        return;
+    }
+    let shown = if tool.code_expanded {
+        total
+    } else {
+        total.min(COLLAPSED_CODE_LINES)
+    };
+    let head: String = script.lines().take(shown).collect::<Vec<_>>().join("\n");
+    let mut lines = shuvarie_highlight::syntax::highlight_code("rhai", &head);
+    let remaining = total - shown;
+    if remaining > 0 {
+        lines.push(Line::from(
+            Span::raw(format!("▸ … +{remaining} more lines"))
+                .fg(theme::text_muted())
+                .italic(),
+        ));
+    }
+    body.rows(BodySource::Code {
+        lines: Rc::from(lines),
+        // The hint is not a line of the script: it keeps the gutter's width but
+        // carries no number.
+        numbered: shown,
+    });
+    // The listing is its own chunk by construction: the turn renderer bounds
+    // the code's click target by it, so nothing else may merge into it.
+    body.break_chunk();
+    body.fixed(Line::from(""));
 }
 
 fn push_output_rows(tool: &ToolBlock, body: &mut BodyBuilder, is_shell: bool) -> bool {
@@ -2069,6 +2210,219 @@ mod tests {
         assert!(block_text(&block, &env).contains("    echo step12"));
     }
 
+    /// A finished `codemode` call running a `lines`-line script, with no output.
+    fn codemode_block_with_script_lines(lines: usize) -> ToolBlock {
+        let script = (1..=lines)
+            .map(|i| format!("let v{i} = {i};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        finished_block(
+            "codemode",
+            &serde_json::json!({ "script": script }).to_string(),
+            String::new(),
+        )
+    }
+
+    /// A script is a program, so it is listed as one: line numbers, and the
+    /// script's own text rather than the JSON argument that carried it.
+
+    #[test]
+    fn codemode_lists_the_script_as_numbered_code() {
+        let diags = BTreeMap::new();
+        let env = test_env(&diags);
+        let block = codemode_block_with_script_lines(3);
+        let text = block_text(&block, &env);
+        assert!(!text.contains("script\":"), "no raw JSON args: {text}");
+        assert!(text.contains("codemode · 3 lines"), "header: {text}");
+        assert!(
+            text.contains("       1 let v1 = 1;") && text.contains("       3 let v3 = 3;"),
+            "each row is numbered: {text}"
+        );
+        assert!(!text.contains("more lines"), "nothing hidden: {text}");
+        // The script is the body's own chunk, so its rows are exactly the
+        // script's lines — the separator and the output follow in the next one.
+        assert_eq!(block.view(80, &env).chunk_rows(1, 80), 3);
+    }
+
+    /// Highlighting is the point of the listing: without a `rhai` grammar every
+    /// row renders in one color, which looks the same as plain text.
+    #[test]
+    fn codemode_paints_the_script_with_syntax_colors() {
+        let diags = BTreeMap::new();
+        let env = test_env(&diags);
+        let script = "// count the files\nlet files = tools::glob(#{ pattern: \"src/**/*.rs\" });\nfiles.len";
+        let block = finished_block(
+            "codemode",
+            &serde_json::json!({ "script": script }).to_string(),
+            String::new(),
+        );
+        let segment = block.view(80, &env);
+        let mut colors: Vec<String> = segment
+            .flattened()
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| format!("{:?}", span.style.fg)))
+            .collect();
+        colors.sort();
+        colors.dedup();
+        assert!(
+            colors.len() >= 3,
+            "a comment, a keyword and a string should not share one color: {colors:?}"
+        );
+    }
+
+    #[test]
+    fn dbg_chunks() {
+        let diags = BTreeMap::new();
+        let env = test_env(&diags);
+        let mut block = codemode_block_with_script_lines(14);
+        block.toggle_code();
+        let seg = block.view(80, &env);
+        for i in 0..seg.chunks.len() {
+            println!("chunk {i}: {} rows", seg.chunk_rows(i, 80));
+        }
+        println!("est {}", block.est().tool_rows);
+        println!("{}", block_text(&block, &env));
+    }
+
+    /// The code and the output are two axes with opposite defaults: the script
+    /// is what ran, so it is shown whole; the result is what came back, so it
+    /// waits to be asked for.
+    #[test]
+    fn code_starts_expanded_while_output_starts_collapsed() {
+        let diags = BTreeMap::new();
+        let env = test_env(&diags);
+        let script = (1..=14)
+            .map(|i| format!("let v{i} = {i};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let output = (1..=20)
+            .map(|i| format!("row {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let block = finished_block(
+            "codemode",
+            &serde_json::json!({ "script": script }).to_string(),
+            output,
+        );
+
+        assert!(block.is_code_expanded(), "the script is shown whole");
+        assert!(!block.is_expanded(), "the output previews");
+        let text = block_text(&block, &env);
+        assert!(
+            text.contains("      14 let v14 = 14;"),
+            "every script row: {text}"
+        );
+        assert!(
+            text.contains("… +15 more lines"),
+            "the output previews: {text}"
+        );
+    }
+
+    /// Collapsing the code shows at most ten rows plus its own hint, and leaves
+    /// the output exactly where the reader left it.
+    #[test]
+    fn collapsing_the_code_shows_ten_rows_and_its_own_hint() {
+        let diags = BTreeMap::new();
+        let env = test_env(&diags);
+        let mut block = codemode_block_with_script_lines(14);
+        assert!(block.code_collapsible(), "14 rows is past the cap");
+        assert!(!block.is_expanded(), "the output starts collapsed");
+
+        block.toggle_code();
+        assert!(!block.is_code_expanded());
+        assert!(!block.is_expanded(), "the output was not touched");
+
+        let text = block_text(&block, &env);
+        assert!(text.contains("       1 let v1 = 1;"), "{text}");
+        assert!(text.contains("      10 let v10 = 10;"), "{text}");
+        assert!(!text.contains("let v11 = 11;"), "past the cap: {text}");
+        assert!(text.contains("▸ … +4 more lines"), "code hint: {text}");
+        assert!(
+            !text.contains("      11"),
+            "the hint carries no line number: {text}"
+        );
+        // Ten numbered rows plus the hint row (unnumbered, gutter-aligned).
+        // The listing is its own chunk, so the separator below it is not
+        // counted here — that separation is what keeps the output's click
+        // target out of the code's.
+        assert_eq!(block.view(80, &env).chunk_rows(1, 80), 11);
+        assert_eq!(block.est().tool_rows, 12);
+
+        block.toggle_code();
+        assert!(block.is_code_expanded());
+        assert_eq!(block.view(80, &env).chunk_rows(1, 80), 14);
+        assert_eq!(block.est().tool_rows, 15);
+    }
+
+    /// Each axis moves on its own: expanding the output does not expand the
+    /// code, and collapsing the code does not collapse the output.
+    #[test]
+    fn the_code_and_the_output_collapse_independently() {
+        let diags = BTreeMap::new();
+        let env = test_env(&diags);
+        let script = (1..=14)
+            .map(|i| format!("let v{i} = {i};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let output = (1..=20)
+            .map(|i| format!("row {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut block = finished_block(
+            "codemode",
+            &serde_json::json!({ "script": script }).to_string(),
+            output,
+        );
+
+        // Collapse the code first: the output keeps previewing.
+        block.toggle_code();
+        let text = block_text(&block, &env);
+        assert!(!text.contains("let v11 = 11;"), "code stays short: {text}");
+        assert!(text.contains("… +15 more lines"), "output preview: {text}");
+
+        // Expanding the output leaves the code collapsed.
+        block.toggle();
+        assert!(block.is_expanded() && !block.is_code_expanded());
+        let text = block_text(&block, &env);
+        assert!(text.contains("row 1"), "output full: {text}");
+        assert!(!text.contains("let v11 = 11;"), "code still short: {text}");
+        assert!(text.contains("▸ … +4 more lines"), "code hint: {text}");
+    }
+
+    /// A script at or under the cap has nothing to hide, so it carries no
+    /// control and the click falls through to the output.
+    #[test]
+    fn a_short_script_carries_no_code_control() {
+        let block = codemode_block_with_script_lines(10);
+        assert!(!block.code_collapsible(), "ten rows fit the cap");
+        assert!(codemode_block_with_script_lines(11).code_collapsible());
+    }
+
+    /// A script cut mid-flight has no result body to say how it ended, so the
+    /// header carries the `killed` meta itself.
+    #[test]
+    fn a_killed_codemode_block_says_killed() {
+        let diags = BTreeMap::new();
+        let env = test_env(&diags);
+        let script = "let a = 1;\nlet b = 2;";
+        let mut block = ToolBlock::new(
+            "codemode",
+            serde_json::json!({ "script": script }).to_string(),
+            None,
+            None,
+            None,
+        );
+        assert!(
+            !block_text(&block, &env).contains("killed"),
+            "a running script is not killed yet"
+        );
+
+        assert!(block.update(ToolMessage::Kill));
+        let text = block_text(&block, &env);
+        assert!(text.contains("killed"), "status meta: {text}");
+        assert!(text.contains("       2 let b = 2;"), "listing kept: {text}");
+    }
+
     #[test]
     fn reloaded_long_shell_title_collapses_like_a_live_one() {
         let diags = BTreeMap::new();
@@ -2323,7 +2677,7 @@ mod tests {
         );
         block.update(ToolMessage::Finish {
             ok: false,
-            output: "exit 1:\n".to_string() + &big_output(300),
+            output: "exit 1:\n".to_string() + big_output(300).as_str(),
             stderr: "boom".to_string(),
             file_change: None,
             duration_ms: 5,

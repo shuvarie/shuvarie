@@ -21,6 +21,9 @@ pub mod add_provider;
 mod app;
 mod assisted_by;
 mod auth;
+/// The `/codemode` overlay: whether the scripting tool is offered, how it
+/// presents the roster, and the limits a script runs under.
+mod codemode;
 mod command_menu;
 mod commands;
 mod components;
@@ -136,6 +139,7 @@ pub async fn run_tui(
     let branch_watch = self::git_watch::BranchWatch::start(&workspace.path);
     let app = App::new(
         ui,
+        codemode::CodemodePrefs::from_config(&config.codemode),
         theme,
         theme_choices,
         config.registries.clone(),

@@ -417,6 +417,7 @@ impl TurnData {
         build: impl FnOnce() -> Vec<Block>,
         toggled: &BTreeSet<(usize, usize)>,
         title_toggled: &BTreeSet<(usize, usize)>,
+        code_collapsed: &BTreeSet<(usize, usize)>,
         turn_idx: usize,
         interrupted_marker: bool,
     ) {
@@ -427,6 +428,11 @@ impl TurnData {
             }
             if title_toggled.contains(&(turn_idx, idx)) {
                 block.set_title_expanded(true);
+            }
+            // Code is expanded unless the reader collapsed it, so the set is a
+            // record of *collapsing* rather than of expanding.
+            if code_collapsed.contains(&(turn_idx, idx)) {
+                block.set_code_expanded(false);
             }
         }
         self.blocks = Some(blocks);
@@ -691,6 +697,27 @@ pub fn render_turn_cache(
                     kind: HitKind::Title,
                 });
             }
+            // A code listing past the collapse cap carries the same kind of
+            // control: its own rows toggle the code, not the output. The
+            // listing is the segment's second chunk (the header is the first),
+            // so its rows start after the header's.
+            if block.code_collapsible() {
+                let header_rows = segment.chunk_rows(0, width);
+                let mut code_rows = segment.chunk_rows(1, width);
+                // Collapsed, the hint row (and the blank row after it) belongs
+                // to the control; expanded, that gap separates the listing from
+                // the output and must not swallow the click.
+                if !block.is_code_expanded() {
+                    code_rows += segment.chunk_rows(2, width);
+                }
+                let pad = u32::from(segment.padding.1);
+                hits.push(HitRegion {
+                    start: y + pad + header_rows,
+                    end: y + pad + header_rows + code_rows,
+                    addr: addr.clone(),
+                    kind: HitKind::Code,
+                });
+            }
             if segment.hit.is_some() {
                 hits.push(HitRegion {
                     start: y,
@@ -851,6 +878,77 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    /// The code listing and the output preview are separate click targets: a
+    /// `codemode` block whose script collapses must not have its code region
+    /// cover the output, or a click meant for the output toggles the code.
+    ///
+    /// This regressed once: `body.fixed` appends to a trailing `Fixed` chunk,
+    /// and a short listing materializes as one, so the separator and the whole
+    /// collapsed output merged into the code's chunk — and the region the turn
+    /// renderer derives from that chunk covered both.
+    #[test]
+    fn a_codemode_blocks_code_and_output_hit_regions_do_not_overlap() {
+        let mut turn = TurnData::new(Role::Assistant);
+        let script = (1..=13)
+            .map(|i| format!("let v{i} = {i};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let output = (1..=8)
+            .map(|i| format!("result row {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut block = ToolBlock::new(
+            "codemode",
+            serde_json::json!({ "script": script }).to_string(),
+            None,
+            None,
+            None,
+        );
+        block.update(crate::tui::session::blocks::ToolMessage::Finish {
+            ok: true,
+            output,
+            stderr: String::new(),
+            file_change: None,
+            duration_ms: 5,
+        });
+        turn.set_blocks(vec![Block::Tool(Box::new(block))], false);
+        turn.ensure_cache(
+            0,
+            80,
+            &env(),
+            0,
+            TurnFlags {
+                in_flight: false,
+                interrupted_marker: false,
+            },
+        );
+        let cache = turn.cache().expect("cache");
+        let code = cache
+            .hits
+            .iter()
+            .find(|hit| matches!(hit.kind, HitKind::Code))
+            .expect("a 13-line script carries a code control");
+        let body = cache
+            .hits
+            .iter()
+            .find(|hit| matches!(hit.kind, HitKind::Body))
+            .expect("the block is clickable");
+
+        // The region is exactly the listing's rows: not the output's too.
+        assert_eq!(
+            code.end - code.start,
+            13,
+            "the code region is the script's 13 rows, not the output's too"
+        );
+        assert!(
+            code.start >= body.start && code.end < body.end,
+            "the code region must sit strictly inside the block, with the \
+             output's rows after it: code {:?} block {:?}",
+            (code.start, code.end),
+            (body.start, body.end)
+        );
     }
 
     #[test]
