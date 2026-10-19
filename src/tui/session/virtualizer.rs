@@ -531,6 +531,21 @@ impl TurnData {
         }
     }
 
+    /// Drop the tool blocks whose calls were cut off with a failed attempt
+    /// (running or still queued): the retried request re-issues whatever it
+    /// still needs, and the stored reply keeps only the calls that returned,
+    /// so the live turn must not keep a dead spinner in a reply that is going
+    /// to look uninterrupted.
+    pub fn drop_cut_tools(&mut self) {
+        if let Some(blocks) = self.blocks.as_mut() {
+            let before = blocks.len();
+            blocks.retain(|block| !block.tool_is_active());
+            if blocks.len() != before {
+                self.rev += 1;
+            }
+        }
+    }
+
     /// Current layout height: exact from a fresh render cache, otherwise the
     /// last measurement taken at this width, otherwise the O(1) estimate.
     /// The measurement fallback keeps heights stable when the cache is stale

@@ -671,10 +671,13 @@ impl ProviderClient {
         &self,
         model: &str,
         preamble: Option<&str>,
-        prompt: &str,
+        // The request's own last message: the turn's prompt for a fresh send,
+        // or — for a resume — whichever message the interrupted turn's path
+        // ended on (tool results, or the reply's own text as an assistant
+        // prefill). Its role is preserved, so a resumed request appends nothing
+        // the model did not already have.
+        prompt: &ChatMsg,
         history: &[ChatMsg],
-        // Attachments of the prompt message itself (the newest user turn).
-        prompt_attachments: &[crate::attachment::Attachment],
         // Content bytes for every referenced attachment's sha256 — both the
         // prompt's and history's (see `shuvarie_llm::Blobs`).
         blobs: &crate::attachment::Blobs,
@@ -713,9 +716,7 @@ impl ProviderClient {
             tracker.seed(seed, budget.context_length);
         }
         let tracker_for_hook = tracker.clone();
-        let mut prompt_msg = ChatMsg::user(prompt.to_string());
-        prompt_msg.attachments = prompt_attachments.to_vec();
-        let user_msg = crate::message::to_rig_message(prompt_msg, blobs);
+        let prompt_msg = crate::message::to_rig_message(prompt.clone(), blobs);
         let rig_history: Vec<rig_core::message::Message> = history
             .iter()
             .cloned()
@@ -743,7 +744,7 @@ impl ProviderClient {
             context_budget,
             tracker_for_hook,
             file_hook,
-            user_msg,
+            prompt_msg,
             rig_history,
             receivers,
             worker_names,

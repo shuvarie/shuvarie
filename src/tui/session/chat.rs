@@ -312,6 +312,13 @@ pub enum ChatMessage {
         error: String,
     },
     StreamCancelled,
+    /// A retryable failure cut the attempt before the turn committed: the tool
+    /// calls that were still running (or queued) belonged to the cut attempt —
+    /// the retried request re-issues what it still needs, and the finished
+    /// reply keeps only the calls that returned — so the live turn drops their
+    /// blocks instead of keeping dead spinners in a reply that ends up looking
+    /// uninterrupted.
+    AttemptCut,
     Load {
         session: shuvarie_core::Session,
     },
@@ -867,6 +874,11 @@ impl Chat {
             ChatMessage::StreamDone => self.commit_done(),
             ChatMessage::StreamError { .. } | ChatMessage::StreamCancelled => {
                 self.commit_interrupted()
+            }
+            ChatMessage::AttemptCut => {
+                if let Some(turn) = self.in_flight.borrow_mut().as_mut() {
+                    turn.drop_cut_tools();
+                }
             }
             ChatMessage::Load { session } => self.apply_session(session, ScrollInit::Restore),
             ChatMessage::Forked { session } => self.apply_session(session, ScrollInit::Keep),
@@ -5420,6 +5432,53 @@ pub(crate) mod tests {
         assert!(text.contains("partial reply"));
         assert!(!text.contains("Thinking..."), "no frozen thinking header");
         assert!(chat.interrupted);
+    }
+
+    #[test]
+    fn retry_cut_drops_running_tools_and_keeps_the_resumed_reply() {
+        let mut chat = Chat::new();
+        chat.update(ChatMessage::BeginUserTurn {
+            content: "go".into(),
+            attachments: Vec::new(),
+        });
+        chat.update(ChatMessage::TokenReceived {
+            content: "partial reply".into(),
+        });
+        chat.update(ChatMessage::ToolStarted {
+            name: "read_file".into(),
+            args: serde_json::json!({}),
+            worker: None,
+            spawn: None,
+            call_id: Some("c1".into()),
+            waiting: false,
+        });
+        // A retryable failure cuts the attempt: the running call belonged to
+        // it and the retry re-issues whatever it still needs.
+        chat.update(ChatMessage::AttemptCut);
+        chat.update(ChatMessage::TokenReceived {
+            content: "\n\nresumed".into(),
+        });
+        chat.update(ChatMessage::StreamDone);
+
+        assert!(
+            !chat.interrupted,
+            "the retry commits a normal turn, not an interrupted one"
+        );
+        assert!(
+            !chat.has_running_tool_blocks(),
+            "the cut attempt's call is not left spinning"
+        );
+        let turns = chat.turns.borrow();
+        let blocks = turns.last().unwrap().blocks.as_deref().unwrap();
+        assert!(
+            blocks.iter().all(|block| !matches!(block, Block::Tool(_))),
+            "the cut call's block is gone from the reply"
+        );
+        drop(turns);
+        let text = render_turn_lines(&chat, Some(1), 80).unwrap();
+        assert!(text.contains("partial reply"), "{text}");
+        assert!(text.contains("resumed"), "{text}");
+        assert!(!text.contains("read_file"), "no dead tool block: {text}");
     }
 
     #[test]

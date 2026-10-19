@@ -299,7 +299,10 @@ pub enum Event {
     /// turn node, or a `/tree` tool row walking to its reply). Carries the
     /// reloaded session plus the forked-away node's content to recall into
     /// the input (`prompt: Some`) or `None` for marker forks, walk-to-reply
-    /// forks, and automatic resumes (replay / interrupted retry).
+    /// forks, and automatic resumes (a replay, or the overflow continue after
+    /// compaction — a plain turn retry keeps the pane's in-flight turn
+    /// instead, since it finishes the interrupted reply rather than reloading
+    /// the session).
     Forked {
         session: crate::Session,
         prompt: Option<String>,

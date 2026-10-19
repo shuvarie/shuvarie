@@ -259,6 +259,7 @@ async fn stream_events_forward_and_accumulate_usage() {
             SteerSignal::default(),
             DenyCut::default(),
             1,
+            None,
         )
         .await;
     });
@@ -357,6 +358,7 @@ async fn committed_turn_records_model_use_and_broadcasts() {
             SteerSignal::default(),
             DenyCut::default(),
             1,
+            None,
         )
         .await;
     });
@@ -451,6 +453,7 @@ async fn committed_turn_persists_the_last_main_request_usage() {
             SteerSignal::default(),
             DenyCut::default(),
             1,
+            None,
         )
         .await;
     });
@@ -516,6 +519,7 @@ async fn stream_error_schedules_turn_retry_and_leaves_session_clean() {
             SteerSignal::default(),
             DenyCut::default(),
             1,
+            None,
         )
         .await;
     });
@@ -620,6 +624,7 @@ async fn stream_done_waits_for_queued_worker_items_to_drain() {
             SteerSignal::default(),
             DenyCut::default(),
             1,
+            None,
         )
         .await;
     });
@@ -745,6 +750,7 @@ async fn worker_events_forward_and_usage_accumulates() {
             SteerSignal::default(),
             DenyCut::default(),
             1,
+            None,
         )
         .await;
     });
@@ -843,6 +849,7 @@ async fn overflow_without_plan_reports_error_without_compaction_events() {
             SteerSignal::default(),
             DenyCut::default(),
             1,
+            None,
         )
         .await;
     });
@@ -938,6 +945,7 @@ async fn spawn_stream_core(
             steer,
             deny_cut,
             tool_concurrency,
+            None,
         )
         .await;
     });
@@ -1643,6 +1651,7 @@ async fn steered_prompt_cuts_mid_stream_when_armed_between_actions() {
             steer_shared,
             DenyCut::default(),
             1,
+            None,
         )
         .await;
     });
@@ -1846,6 +1855,7 @@ async fn tool_result_clears_the_pending_call() {
             SteerSignal::default(),
             DenyCut::default(),
             1,
+            None,
         )
         .await;
     });
@@ -2119,6 +2129,7 @@ async fn committed_turn_reports_and_persists_its_meta() {
             SteerSignal::default(),
             DenyCut::default(),
             1,
+            None,
         )
         .await;
     });
@@ -2227,6 +2238,7 @@ async fn text_runs_seal_at_tool_gaps() {
             SteerSignal::default(),
             DenyCut::default(),
             1,
+            None,
         )
         .await;
     });
@@ -2257,6 +2269,232 @@ async fn text_runs_seal_at_tool_gaps() {
         guard.text_segments.get(&1).map(Vec::as_slice),
         Some(assistant.text_segments.as_slice())
     );
+}
+
+/// Drive one turn attempt to its outcome over a fixed item list, with a store
+/// and session shared across attempts (the client, channels and turn state are
+/// per attempt, as in production).
+async fn drive_turn_attempt(
+    store: &Store,
+    session: &Arc<Mutex<Session>>,
+    items: Vec<StreamItem>,
+    continuation: Option<Continuation>,
+) -> StreamOutcome {
+    let client =
+        ProviderClient::build(ProviderKind::new(ProviderType::Ollama, None), None, None).unwrap();
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let (stream_done_tx, mut stream_done_rx) = tokio::sync::mpsc::channel(1);
+    stream_stream_to_events(
+        Box::pin(futures_util::stream::iter(items)),
+        session.clone(),
+        client,
+        None,
+        store.clone(),
+        "ollama-model".into(),
+        shuvarie_db::Attribution::default(),
+        20_000,
+        Arc::new(std::sync::Mutex::new(TokenUsage::default())),
+        None,
+        event_tx,
+        Arc::new(Mutex::new(TurnState::default())),
+        stream_done_tx,
+        SteerSignal::default(),
+        DenyCut::default(),
+        1,
+        continuation,
+    )
+    .await;
+    stream_done_rx.recv().await.expect("outcome reported")
+}
+
+/// A retried attempt seeded with the interrupted reply row finishes that row:
+/// the partial and the resumed run end up in one committed reply — the row a
+/// turn that never failed would have written — with its interrupted marker
+/// cleared and its calls kept once.
+#[tokio::test]
+async fn resumed_attempt_finishes_the_interrupted_reply_row() {
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store
+        .create_session("resume", None, None, None)
+        .await
+        .unwrap();
+    let prompt = store
+        .append_message(id, None, shuvarie_llm::Role::User, "go")
+        .await
+        .unwrap();
+    let partial = store
+        .append_assistant_message(
+            id,
+            Some(prompt.id),
+            "start",
+            &[],
+            &[shuvarie_db::TextSegment {
+                after_tool: 0,
+                text: "start".into(),
+            }],
+            true,
+            TokenUsage::default(),
+            0.0,
+            &TokenUsage::default(),
+            &shuvarie_db::Attribution::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .append_tool_call(
+            id,
+            partial.id,
+            0,
+            "read_file",
+            "{}",
+            "content",
+            "",
+            true,
+            false,
+            None,
+            "",
+            None,
+            None,
+            5,
+        )
+        .await
+        .unwrap();
+
+    let session = Arc::new(Mutex::new(Session::from_stored(
+        store.load_session(id).await.unwrap(),
+    )));
+    let continuation = session
+        .lock()
+        .await
+        .resume_continuation()
+        .expect("the partial reply row is continued");
+    assert_eq!(continuation.message_id, partial.id);
+    assert_eq!(continuation.tool_records.len(), 1);
+
+    // The first retry drops again after streaming some text: the partial row
+    // keeps growing instead of a second partial appearing under it.
+    let outcome = drive_turn_attempt(
+        &store,
+        &session,
+        vec![
+            StreamItem::Delta {
+                text: "first".into(),
+            },
+            StreamItem::Error {
+                message: "dropped again".into(),
+                reason: "Connection reset".into(),
+            },
+        ],
+        Some(continuation),
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        StreamOutcome::RetryableFailure {
+            reason: "Connection reset".into(),
+            message: "dropped again".into(),
+        }
+    );
+    let stored = store.load_session(id).await.unwrap();
+    assert_eq!(
+        stored.messages.len(),
+        2,
+        "the failed retry did not append a second partial reply"
+    );
+    let partial_after_failure = &stored.messages[1];
+    assert_eq!(partial_after_failure.id, partial.id);
+    assert!(partial_after_failure.interrupted);
+    assert_eq!(partial_after_failure.content, "start\n\nfirst");
+
+    // The next retry resumes the reloaded session (as the run loop does after
+    // a failure) and finishes the turn.
+    *session.lock().await = Session::from_stored(stored);
+    let continuation = session
+        .lock()
+        .await
+        .resume_continuation()
+        .expect("the grown partial reply row is continued");
+    let outcome = drive_turn_attempt(
+        &store,
+        &session,
+        vec![
+            StreamItem::Delta {
+                text: "second".into(),
+            },
+            main_tool_start("grep", "c2"),
+            main_tool_result("grep", "c2"),
+            StreamItem::Delta {
+                text: "\n\ndone".into(),
+            },
+            StreamItem::Done {
+                text: "second\n\ndone".into(),
+                usage: TokenUsage::default(),
+            },
+        ],
+        Some(continuation),
+    )
+    .await;
+    assert_eq!(outcome, StreamOutcome::Finished);
+
+    let stored = store.load_session(id).await.unwrap();
+    assert_eq!(
+        stored.messages.len(),
+        2,
+        "one prompt and one reply: the retries did not append a second reply"
+    );
+    let reply = &stored.messages[1];
+    assert_eq!(reply.id, partial.id, "the partial row is the reply row");
+    assert!(
+        !reply.interrupted,
+        "the successful retry clears the interrupted marker"
+    );
+    assert_eq!(reply.content, "start\n\nfirst\n\nsecond\n\ndone");
+    assert_eq!(
+        reply.text_segments,
+        vec![
+            shuvarie_db::TextSegment {
+                after_tool: 0,
+                text: "start".into(),
+            },
+            shuvarie_db::TextSegment {
+                after_tool: 1,
+                text: "\n\nfirst\n\nsecond".into(),
+            },
+            shuvarie_db::TextSegment {
+                after_tool: 2,
+                text: "\n\ndone".into(),
+            },
+        ],
+        "each resumed run starts a new paragraph after the text it continues"
+    );
+    let calls: Vec<_> = stored
+        .tool_calls
+        .iter()
+        .filter(|call| call.message_id == partial.id)
+        .collect();
+    assert_eq!(calls.len(), 2, "the partial's call plus the resumed one");
+    assert_eq!(
+        calls[0].name, "read_file",
+        "the partial's call is kept once"
+    );
+    assert_eq!(
+        calls[1].name, "grep",
+        "the resumed call continues the row's calls"
+    );
+    assert_eq!(calls[1].seq, 1, "the resumed call takes the next ordinal");
+
+    let guard = session.lock().await;
+    assert_eq!(guard.messages.len(), 2, "no second reply in memory either");
+    assert_eq!(
+        guard.messages[1].content,
+        "start\n\nfirst\n\nsecond\n\ndone"
+    );
+    assert!(
+        !guard.interrupted.get(&1).copied().unwrap_or(false),
+        "the interrupted marker is cleared in memory"
+    );
+    assert_eq!(guard.tool_records.len(), 2, "the calls are not duplicated");
 }
 
 async fn chain_session() -> (Store, uuid::Uuid, Vec<u64>) {
@@ -2861,7 +3099,7 @@ async fn turn_retry_resume_keeps_the_interrupted_partial_branch() {
     assert_eq!(session.messages.len(), 2, "path counts the partial too");
     let (mut ctx, mut event_rx) = resume_ctx(store, session).await;
 
-    ctx.resume_last_turn().await;
+    ctx.resume_last_turn(ResumeMode::TurnRetry).await;
 
     let stored = ctx.store.load_session(sid).await.unwrap();
     // The partial reply and its tool calls survive on the active path.
@@ -2908,29 +3146,55 @@ async fn turn_retry_resume_keeps_the_interrupted_partial_branch() {
         1,
         "the partial's tool call is on the active path"
     );
+    // A turn retry continues the interrupted row instead of starting a second
+    // reply under it; the pane keeps its in-flight turn (no reload). The
+    // request appends nothing: the partial's last message — the tool results
+    // answering its cut-off call — is re-sent as the prompt itself.
+    let request = resume_request(&guard, ResumeMode::TurnRetry).expect("a turn to resume");
+    assert_eq!(
+        request.prompt.role,
+        shuvarie_llm::Role::User,
+        "the path ends on the tool results, so the prompt is that user message"
+    );
+    assert_eq!(
+        request
+            .prompt
+            .tool_results
+            .iter()
+            .map(|result| result.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["read_file"],
+        "the cut-off call's result is what the model continues from"
+    );
+    let continuation = request.continuation.expect("the partial is continued");
+    assert_eq!(continuation.message_id, partial.id);
+    assert_eq!(continuation.seq, 1);
+    assert!(
+        !continuation.prefilled,
+        "a tool-result prompt opens a new run after the tool gap"
+    );
+    assert_eq!(
+        continuation.text_segments,
+        vec![shuvarie_db::TextSegment {
+            after_tool: 0,
+            text: "partial".into(),
+        }],
+        "the row's content stands in for its runs"
+    );
+    assert_eq!(continuation.tool_records.len(), 1);
+    assert!(
+        request.prior.iter().any(|m| m.content == "partial"),
+        "the partial's text rides the history"
+    );
     drop(guard);
 
-    // The pane reload keeps the partial bubble, and the replay attempt hits
-    // the harness's no-active-provider guard (no network).
-    let first = event_rx.recv().await.expect("Forked event");
-    match first {
-        Event::Forked { session, prompt } => {
-            assert!(prompt.is_none(), "a retry resume recalls nothing");
-            assert_eq!(
-                session
-                    .messages
-                    .iter()
-                    .map(|m| m.content.as_str())
-                    .collect::<Vec<_>>(),
-                vec!["hi", "partial"],
-            );
-        }
-        other => panic!("expected Forked first, got: {other:?}"),
-    }
-    let second = event_rx.recv().await.expect("replay guard error");
+    // No pane reload for a retry — the resumed attempt appends to the pane's
+    // in-flight turn — and the replay attempt hits the harness's
+    // no-active-provider guard (no network).
+    let first = event_rx.recv().await.expect("replay guard error");
     assert!(
-        matches!(second, Event::StreamError { ref error } if error == "no active provider"),
-        "unexpected event: {second:?}"
+        matches!(first, Event::StreamError { ref error } if error == "no active provider"),
+        "unexpected event: {first:?}"
     );
 }
 
@@ -2952,7 +3216,7 @@ async fn turn_retry_resume_does_not_rewind_past_a_user_tip() {
     let session = Session::from_stored(store.load_session(sid).await.unwrap());
     let (mut ctx, mut event_rx) = resume_ctx(store, session).await;
 
-    ctx.resume_last_turn().await;
+    ctx.resume_last_turn(ResumeMode::TurnRetry).await;
 
     let stored = ctx.store.load_session(sid).await.unwrap();
     assert_eq!(
@@ -2964,21 +3228,20 @@ async fn turn_retry_resume_does_not_rewind_past_a_user_tip() {
     assert_eq!(guard.messages.len(), 1, "the prompt survives the resume");
     assert_eq!(guard.messages[0].content, "hi");
     drop(guard);
-    // The pane reload re-derives the same single-message path, and the
-    // replay attempt hits the harness's no-active-provider guard.
-    let first = event_rx.recv().await.expect("Forked event");
-    match first {
-        Event::Forked { session, prompt } => {
-            assert!(prompt.is_none(), "a retry resume recalls nothing");
-            assert_eq!(session.messages.len(), 1);
-            assert_eq!(session.messages[0].content, "hi");
-        }
-        other => panic!("expected Forked first, got: {other:?}"),
-    }
-    let second = event_rx.recv().await.expect("replay guard error");
+    // Nothing to continue: the resume replays the prompt with no reply row
+    // attached — the request is the original one, unchanged — and the attempt
+    // hits the harness's no-active-provider guard.
+    let guard = ctx.session.as_ref().unwrap().lock().await;
+    let request = resume_request(&guard, ResumeMode::TurnRetry).expect("a turn to resume");
+    assert_eq!(request.prompt.role, shuvarie_llm::Role::User);
+    assert_eq!(request.prompt.content, "hi");
+    assert!(request.prior.is_empty(), "the prompt itself is replayed");
+    assert!(request.continuation.is_none(), "no reply row to continue");
+    drop(guard);
+    let first = event_rx.recv().await.expect("replay guard error");
     assert!(
-        matches!(second, Event::StreamError { ref error } if error == "no active provider"),
-        "unexpected event: {second:?}"
+        matches!(first, Event::StreamError { ref error } if error == "no active provider"),
+        "unexpected event: {first:?}"
     );
 }
 
@@ -3037,7 +3300,7 @@ async fn turn_retry_resume_continues_the_interrupted_reply() {
     assert_eq!(session.leaf_id, Some(partial.id));
     let (mut ctx, mut event_rx) = resume_ctx(store, session).await;
 
-    ctx.resume_last_turn().await;
+    ctx.resume_last_turn(ResumeMode::TurnRetry).await;
 
     let stored = ctx.store.load_session(sid).await.unwrap();
     assert_eq!(
@@ -3045,31 +3308,28 @@ async fn turn_retry_resume_continues_the_interrupted_reply() {
         Some(partial.id),
         "the partial stays the active tip (the retry continues the branch)"
     );
-    let first = event_rx.recv().await.expect("Forked event");
-    match first {
-        Event::Forked { session, prompt } => {
-            assert!(prompt.is_none(), "a retry resume recalls nothing");
-            let contents: Vec<&str> = session
-                .messages
-                .iter()
-                .map(|m| m.content.as_str())
-                .collect();
-            assert_eq!(contents, vec!["one", "r1", "two", "r2*"]);
-            // The retried request continues the interrupted reply: the whole
-            // path is the history and the cue is the prompt, so the model
-            // picks up where it was cut off instead of replaying the turn.
-            let Some(TurnResume::Continue { prior }) = session.last_turn_resume() else {
-                panic!("the partial tip is continued, not replayed");
-            };
-            let prior: Vec<&str> = prior.iter().map(|m| m.content.as_str()).collect();
-            assert_eq!(prior, vec!["one", "r1", "two", "r2*"]);
-        }
-        other => panic!("expected Forked first, got: {other:?}"),
-    }
-    let second = event_rx.recv().await.expect("replay guard error");
+    let guard = ctx.session.as_ref().unwrap().lock().await;
+    // The retried request continues the interrupted reply with no cue at all:
+    // the reply's own text is re-sent as an assistant prefill, so the model
+    // simply carries on with that sentence.
+    let request = resume_request(&guard, ResumeMode::TurnRetry).expect("a turn to resume");
+    assert_eq!(request.prompt.role, shuvarie_llm::Role::Assistant);
+    assert_eq!(request.prompt.content, "r2*");
+    let prior: Vec<&str> = request.prior.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(prior, vec!["one", "r1", "two"]);
+    // The retry fills the partial row, it does not write a second reply.
+    let continuation = request.continuation.expect("the partial row is continued");
+    assert_eq!(continuation.message_id, partial.id);
+    assert_eq!(continuation.seq, 3);
     assert!(
-        matches!(second, Event::StreamError { ref error } if error == "no active provider"),
-        "unexpected event: {second:?}"
+        continuation.prefilled,
+        "the prefill continues the partial's trailing run mid-way"
+    );
+    drop(guard);
+    let first = event_rx.recv().await.expect("replay guard error");
+    assert!(
+        matches!(first, Event::StreamError { ref error } if error == "no active provider"),
+        "unexpected event: {first:?}"
     );
 }
 
@@ -3127,7 +3387,7 @@ async fn turn_retry_resume_keeps_the_turn_after_an_empty_retry_tip() {
     assert_eq!(session.leaf_id, Some(empty.id));
     let (mut ctx, mut event_rx) = resume_ctx(store, session).await;
 
-    ctx.resume_last_turn().await;
+    ctx.resume_last_turn(ResumeMode::TurnRetry).await;
 
     let stored = ctx.store.load_session(sid).await.unwrap();
     assert_eq!(
@@ -3135,26 +3395,28 @@ async fn turn_retry_resume_keeps_the_turn_after_an_empty_retry_tip() {
         Some(empty.id),
         "the tip (with its tool records) stays the active branch node"
     );
-    let first = event_rx.recv().await.expect("Forked event");
-    match first {
-        Event::Forked { session, prompt } => {
-            assert!(prompt.is_none(), "a retry resume recalls nothing");
-            let Some(TurnResume::Continue { prior }) = session.last_turn_resume() else {
-                panic!("an empty retry tip replayed the task prompt — the task would restart");
-            };
-            let prior: Vec<&str> = prior.iter().map(|m| m.content.as_str()).collect();
-            assert_eq!(
-                prior,
-                vec!["do the task", "halfway through the task"],
-                "the request continues the turn from the first partial"
-            );
-        }
-        other => panic!("expected Forked first, got: {other:?}"),
-    }
-    let second = event_rx.recv().await.expect("replay guard error");
+    let guard = ctx.session.as_ref().unwrap().lock().await;
+    let request = resume_request(&guard, ResumeMode::TurnRetry).expect("a turn to resume");
+    // The empty tip carries nothing, so the path ends on the first partial's
+    // text: that is what the model is handed back, mid-turn, to continue.
+    assert_eq!(request.prompt.role, shuvarie_llm::Role::Assistant);
+    assert_eq!(request.prompt.content, "halfway through the task");
+    let prior: Vec<&str> = request.prior.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(prior, vec!["do the task"]);
+    // The empty tip is still the turn's reply row: the retry fills it instead
+    // of leaving a blank row and appending a second reply under it.
+    let continuation = request.continuation.expect("the empty tip is continued");
+    assert_eq!(continuation.message_id, empty.id);
+    assert_eq!(continuation.seq, 2);
     assert!(
-        matches!(second, Event::StreamError { ref error } if error == "no active provider"),
-        "unexpected event: {second:?}"
+        continuation.prefilled,
+        "the first partial's text is re-sent as the assistant prefill"
+    );
+    drop(guard);
+    let first = event_rx.recv().await.expect("replay guard error");
+    assert!(
+        matches!(first, Event::StreamError { ref error } if error == "no active provider"),
+        "unexpected event: {first:?}"
     );
 }
 

@@ -162,18 +162,48 @@ pub enum TurnResume {
     /// `prior`, so re-sending its attachments is the caller's to arrange.
     Replay { prompt: String, prior: Vec<ChatMsg> },
     /// The attempt left a reply row on the active path after the turn's
-    /// prompt: everything before the tip — the prompt node included — rides
-    /// the request's history, so the model continues the interrupted turn
-    /// instead of replaying it from its prompt. A replay redid the work the
-    /// attempt had already finished and, for a session whose turn is its
-    /// first prompt (the common single-task session), re-sent the whole task
-    /// with no history at all — the model read it as a fresh request and
-    /// started the task over. A tip that wrote text is the request's last
-    /// history message; a tip that only reasoned or ran tools is dropped
+    /// prompt: the whole active path — the prompt node included, an empty tip
+    /// dropped — is the request's conversation, so the model continues the
+    /// interrupted turn instead of replaying it from its prompt. A replay redid
+    /// the work the attempt had already finished and, for a session whose turn
+    /// is its first prompt (the common single-task session), re-sent the whole
+    /// task with no history at all — the model read it as a fresh request and
+    /// started the task over. The resume re-sends the path with its *last*
+    /// message promoted to the request's prompt, so nothing at all is appended
+    /// to the conversation. A tip that only reasoned or ran tools is dropped
     /// when it left no tool activity behind either, since a blank assistant
-    /// message with nothing to replay carries nothing. The caller prompts
-    /// with the resume cue.
+    /// message with nothing to replay carries nothing.
     Continue { prior: Vec<ChatMsg> },
+}
+
+/// The reply row an interrupted turn attempt left on the active path, ready to
+/// be continued by the retried attempt.
+///
+/// A failed attempt persists what it produced before the cut (its text runs,
+/// reasoning, completed tool calls) as an interrupted row. Instead of starting
+/// a second reply row under it, the resumed attempt appends to this one — runs
+/// and calls alike — so a turn that finally succeeds commits a single reply
+/// row, the one a turn that never failed would have written. The row's
+/// interrupted marker is cleared when the retry lands.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Continuation {
+    /// The DB row of the partial reply.
+    pub message_id: u64,
+    /// The row's dense index on the active path.
+    pub seq: u64,
+    /// The text runs the cut attempt streamed, with their tool-call
+    /// boundaries.
+    pub text_segments: Vec<TextSegment>,
+    /// The reasoning segments the cut attempt produced.
+    pub reasoning: Vec<ReasoningSegment>,
+    /// The calls the cut attempt completed, in return order, already recorded
+    /// on the active path.
+    pub tool_records: Vec<ToolRecord>,
+    /// The resumed request re-sends the row's trailing text run as its own
+    /// assistant prompt (a prefill), so the model picks the sentence back up
+    /// exactly where it stopped: the resumed deltas then continue that run
+    /// directly instead of opening a new one. Set by the resume, not here.
+    pub prefilled: bool,
 }
 
 impl Session {
@@ -457,6 +487,56 @@ impl Session {
         Some(TurnResume::Replay {
             prompt: self.messages[end].content.clone(),
             prior: self.history_for_send_until(end),
+        })
+    }
+
+    /// The interrupted reply row a retry continues, when the active path's tip
+    /// is an assistant row: its DB id, dense index and the runs/calls the cut
+    /// attempt left. The resumed attempt appends to that row instead of
+    /// writing a second reply under it, so a successful retry commits exactly
+    /// the reply a turn that never failed would have. `None` when the turn
+    /// failed before producing a reply row — its prompt is then the tip and
+    /// there is nothing to continue — or when the tip is a compaction summary
+    /// rather than a reply.
+    pub(crate) fn resume_continuation(&self) -> Option<Continuation> {
+        let seq = self.messages.len().checked_sub(1)?;
+        if self.messages[seq].role != Role::Assistant {
+            return None;
+        }
+        // The path's tip node is the leaf (`from_stored` walks it from there),
+        // and a compaction summary is an assistant row too — but not a reply.
+        let message_id = self.leaf_id?;
+        if self
+            .nodes
+            .iter()
+            .any(|node| node.id == message_id && node.summary)
+        {
+            return None;
+        }
+        let seq = seq as u64;
+        // A row from before text segments were stored (or one persisted by a
+        // path that did not record runs) still has its joined `content`: keep
+        // it as a single run so the resumed attempt appends after it instead
+        // of the reply losing its partial.
+        let mut text_segments = self.text_segments.get(&seq).cloned().unwrap_or_default();
+        if text_segments.is_empty() && !self.messages[seq as usize].content.is_empty() {
+            text_segments.push(TextSegment {
+                after_tool: 0,
+                text: self.messages[seq as usize].content.clone(),
+            });
+        }
+        Some(Continuation {
+            message_id,
+            seq,
+            text_segments,
+            reasoning: self.reasoning.get(&seq).cloned().unwrap_or_default(),
+            tool_records: self
+                .tool_records
+                .iter()
+                .filter(|record| record.message_seq == seq)
+                .cloned()
+                .collect(),
+            prefilled: false,
         })
     }
 

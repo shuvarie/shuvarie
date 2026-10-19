@@ -224,8 +224,9 @@ pub enum SessionMessage {
     Forked {
         session: shuvarie_core::Session,
         /// The forked-away user prompt, recalled into the input area; `None`
-        /// when the fork re-sends automatically (replay / retry resume) or
-        /// recalls nothing (marker, tool-row, and reply-row walks).
+        /// when the fork re-sends automatically (replay / overflow continue) or
+        /// recalls nothing (marker, tool-row, and reply-row walks). A turn
+        /// retry does not reload the pane — it continues the in-flight turn.
         prompt: Option<String>,
     },
     /// A manual compaction (`/compact`) finished: the summary sits in the
@@ -1135,6 +1136,11 @@ impl SessionScreen {
                 max_attempts,
                 delay_ms,
             } => {
+                // The attempt was cut: its still-running tool calls are not
+                // part of the turn (the retry re-issues them), so the live
+                // turn drops their blocks. The partial text and reasoning stay
+                // — they are the reply the retry continues.
+                self.chat.update(ChatMessage::AttemptCut);
                 self.retry = Some(RetryWait {
                     reason,
                     attempt,

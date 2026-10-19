@@ -3423,8 +3423,9 @@ fn spawn_flaky_openai(
 /// turn from its prompt. For a session whose turn is its first prompt — the
 /// common single-task session — that re-sent the bare task with no history at
 /// all, so the model read it as a fresh request and started the whole task
-/// over. The retry carries the interrupted reply as the history above the
-/// resume cue instead, and the turn finishes.
+/// over. The retry instead re-sends the turn's own path, the interrupted reply
+/// as its last message, so the request looks exactly like the conversation the
+/// model was writing and the turn finishes.
 #[tokio::test]
 async fn a_retried_turn_carries_the_interrupted_reply() {
     let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -3480,6 +3481,8 @@ async fn a_retried_turn_carries_the_interrupted_reply() {
     // then finishes the turn.
     let mut saw_retry = false;
     let mut finished = false;
+    let mut done_text = String::new();
+    let mut reloaded_pane = false;
     let mut seen: Vec<String> = Vec::new();
     for _ in 0..64 {
         match tokio::time::timeout(std::time::Duration::from_secs(30), event_rx.recv()).await {
@@ -3487,8 +3490,13 @@ async fn a_retried_turn_carries_the_interrupted_reply() {
                 seen.push("RetryScheduled".into());
                 saw_retry = true;
             }
-            Ok(Some(Event::StreamDone { .. })) => {
+            Ok(Some(Event::Forked { .. })) => {
+                seen.push("Forked".into());
+                reloaded_pane = true;
+            }
+            Ok(Some(Event::StreamDone { text, .. })) => {
                 seen.push("StreamDone".into());
+                done_text = text;
                 finished = true;
                 break;
             }
@@ -3514,6 +3522,16 @@ async fn a_retried_turn_carries_the_interrupted_reply() {
         "the failed attempt must schedule a turn retry: {seen:?} chat requests: {chats:?}"
     );
     assert!(finished, "the retried attempt must finish the turn");
+    assert!(
+        !reloaded_pane,
+        "a retry must keep the pane's in-flight turn (no session reload): {seen:?}"
+    );
+    assert_eq!(
+        done_text, "HALFWAY-THROUGH-THE-TASKthe finished reply",
+        "the retry finishes the interrupted reply as one uninterrupted-looking reply: the \
+         partial is re-sent as an assistant prefill, so the continuation is byte-continuous \
+         and nothing (no cue, no separator) is inserted between the two halves"
+    );
     assert_eq!(
         chats.len(),
         2,
@@ -3535,6 +3553,36 @@ async fn a_retried_turn_carries_the_interrupted_reply() {
          the turn from its prompt: {}",
         chats[1]
     );
+    // The retried request is the conversation itself: it ends on the model's
+    // own partial reply, re-sent as an assistant prefill, so the model just
+    // carries on writing it.
+    let retried_body: serde_json::Value =
+        serde_json::from_str(chats[1]).expect("the retried request is JSON");
+    let messages = retried_body["messages"]
+        .as_array()
+        .expect("the request carries messages");
+    let last = messages.last().expect("the request carries the turn");
+    assert_eq!(
+        last["role"], "assistant",
+        "the request ends on the model's own turn"
+    );
+    assert_eq!(last["content"], "HALFWAY-THROUGH-THE-TASK");
+    // Nothing in the retried request may tell the model that anything went
+    // wrong: the resume appends no cue and no repeated prompt.
+    let retried = chats[1].to_lowercase();
+    for cue in [
+        "cut off",
+        "connection failure",
+        "connection reset",
+        "previous attempt",
+        "continue from",
+    ] {
+        assert!(
+            !retried.contains(cue),
+            "the retried request must not mention the interruption (`{cue}`): {}",
+            chats[1]
+        );
+    }
     drop(bodies);
 
     drop(cmd_tx);

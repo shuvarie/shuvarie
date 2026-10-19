@@ -18,7 +18,7 @@ use crate::permissions::{
     Access, AskScope, DenyCut, PermissionAnswer, PermissionGate, PermissionRequest,
 };
 use crate::question::{AnswerResponse, QuestionGate, QuestionRequest};
-use crate::session::{Session, TurnResume};
+use crate::session::{Continuation, Session, TurnResume};
 use crate::shell::Shell;
 use shuvarie_config::Config;
 use shuvarie_config::{Connections, ProviderConfig, TitleConfig, TrustGrants};
@@ -46,6 +46,21 @@ enum StreamOutcome {
     /// `[retry].max-retries`; on exhaustion the error surfaces as
     /// `StreamError`.
     RetryableFailure { reason: String, message: String },
+}
+
+/// How a resumed turn picks up after an interrupted attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResumeMode {
+    /// A turn retry after a connection/provider failure: the resumed attempt
+    /// continues the interrupted reply row in place ([`Continuation`]) and the
+    /// pane keeps its in-flight turn, so the retry looks like the cut attempt
+    /// never stopped.
+    TurnRetry,
+    /// An auto-continue after a context overflow: compaction changed the
+    /// history under the turn, so the pane reloads the compacted session and
+    /// the resumed attempt appends its own reply row under the interrupted
+    /// one.
+    Overflow,
 }
 
 /// A scheduled turn retry: when it fires plus the original error
@@ -1490,7 +1505,12 @@ pub async fn run(
                                     ctx.turn_started = Some(std::time::Instant::now());
                                     ctx
                                         .self_replay_send(
-                                            content, attachments, true, None, None,
+                                            ChatMsg::user(content),
+                                            attachments,
+                                            true,
+                                            None,
+                                            None,
+                                            None,
                                         )
                                         .await;
                                 }
@@ -1706,7 +1726,7 @@ pub async fn run(
                     StreamOutcome::Overflowed { compacted } => {
                         if compacted && overflow_retries < MAX_OVERFLOW_RETRIES {
                             overflow_retries += 1;
-                            ctx.resume_last_turn().await;
+                            ctx.resume_last_turn(ResumeMode::Overflow).await;
                         } else {
                             overflow_retries = 0;
                             ctx.steer.reset();
@@ -1759,7 +1779,10 @@ pub async fn run(
                 }
             }, if retry_deadline.is_some() => {
                 pending_retry = None;
-                ctx.resume_last_turn().await;
+                // A retry continues the interrupted reply row in place and the
+                // pane keeps its in-flight turn: a turn that finally succeeds
+                // commits one reply, as if the cut never happened.
+                ctx.resume_last_turn(ResumeMode::TurnRetry).await;
             }
         }
     }
@@ -1860,6 +1883,10 @@ fn preamble_notes(base: String, web_search: bool, headless: bool) -> String {
 struct TurnState {
     assistant_message_id: Option<u64>,
     assistant_seq: u64,
+    /// The dense index of the reply row this attempt continues (a turn retry),
+    /// `None` for a fresh attempt: the resumed attempt fills that row in place
+    /// instead of pushing a second partial reply under it.
+    continuing_seq: Option<u64>,
     /// Which model (and scene) this turn streams under; persisted with the
     /// assistant row and recorded in the session's per-model usage list.
     attribution: shuvarie_db::Attribution,
@@ -2431,14 +2458,87 @@ async fn reload_and_emit(
     Ok(())
 }
 
-/// The synthetic prompt that resumes an interrupted turn. The turn's own
-/// output — the prompt node and every reply row the attempt left, empty ones
-/// aside — is the request history above it, so the prompt only has to say
-/// where to pick it up: without it the model would read the turn's prompt
-/// again as a fresh request and start the turn over.
-const RESUME_PROMPT: &str = "(Your previous attempt was cut off by a connection failure — everything \
-     you had produced when it dropped is above. Continue from exactly that point: don't repeat \
-     the steps you already completed and don't start the task over.)";
+/// What a resume hands the retried attempt: the request's own prompt message,
+/// the history above it, the prompt's attachment metadata (the blobs resolve
+/// separately), and the interrupted reply row a turn retry continues.
+struct ResumeRequest {
+    prompt: ChatMsg,
+    prior: Vec<ChatMsg>,
+    prompt_metas: Vec<shuvarie_llm::Attachment>,
+    continuation: Option<Continuation>,
+}
+
+/// Build the request that resumes `loaded`'s last turn so that it appends
+/// nothing to the conversation: the turn's own path is re-sent as-is, with its
+/// last message promoted to the request's prompt. The model therefore reads a
+/// conversation that stops exactly where it stopped — no error notice, no
+/// resume cue, no repeated task — and carries on from there, which is what
+/// keeps a retried turn indistinguishable from one that never dropped.
+///
+/// What that last message is decides how the model is asked to go on, and every
+/// case is the shape the provider would have received had nothing failed:
+///
+/// - A turn that produced nothing ends on its user prompt, re-sent as the
+///   request's prompt: the original request, unchanged.
+/// - A turn that stopped after a tool batch ends on the tool results answering
+///   its calls, re-sent as the prompt — the very user message the agent loop
+///   continues from.
+/// - A turn that stopped mid-reply ends on its own trailing text run, re-sent
+///   as an **assistant** prompt: a prefill, so the model continues that
+///   sentence instead of starting a new one.
+///
+/// The prefill is the one shape not every provider accepts (a server that
+/// insists the last message be a user turn refuses it, exactly as it would
+/// refuse any other trailing-assistant request). Such a refusal is reported and
+/// retried like every other turn error rather than silently trading the
+/// seamlessness away for a cue the model could read.
+///
+/// A [`ResumeMode::TurnRetry`] also continues the interrupted reply row, while
+/// an [`ResumeMode::Overflow`] starts a fresh reply row under it. `None` when
+/// the path has no user turn to resume.
+fn resume_request(loaded: &Session, mode: ResumeMode) -> Option<ResumeRequest> {
+    match loaded.last_turn_resume()? {
+        TurnResume::Replay { prompt, prior } => Some(ResumeRequest {
+            prompt: ChatMsg::user(prompt),
+            prior,
+            // A replay re-sends the turn's stored prompt, which the leaf no
+            // longer reaches: its attachment metadata must ride the retried
+            // request explicitly — pruned blobs arrive metadata-only.
+            prompt_metas: loaded
+                .last_user_node()
+                .map(|node| node.attachments.clone())
+                .unwrap_or_default(),
+            continuation: None,
+        }),
+        TurnResume::Continue { mut prior } => {
+            // The path's last message becomes the request's prompt; the rest is
+            // history. Nothing is appended to the conversation.
+            let prompt = prior.pop()?;
+            // Only a re-sent prompt carries attachments of its own (tool
+            // results and a prefill never do).
+            let prompt_metas = if prompt.is_user_prompt() {
+                prompt.attachments.clone()
+            } else {
+                Vec::new()
+            };
+            let continuation = (mode == ResumeMode::TurnRetry)
+                .then(|| loaded.resume_continuation())
+                .flatten()
+                .map(|mut continuation| {
+                    // An assistant prompt re-sends the reply's trailing run, so
+                    // the resumed text continues that run mid-way.
+                    continuation.prefilled = prompt.role == shuvarie_llm::Role::Assistant;
+                    continuation
+                });
+            Some(ResumeRequest {
+                prompt,
+                prior,
+                prompt_metas,
+                continuation,
+            })
+        }
+    }
+}
 
 impl CoreCtx {
     /// The turn's codemode wiring, or `None` when the feature is off (the
@@ -2671,31 +2771,38 @@ impl CoreCtx {
                 steered,
             })
             .await;
-        self.self_replay_send(content, Vec::new(), false, model, None)
+        self.self_replay_send(ChatMsg::user(content), Vec::new(), false, model, None, None)
             .await;
     }
 
-    /// Build a stream for the given user content and spawn the event-forwarding
-    /// task. When `push_user` is set, the content is first appended as a user
-    /// message carrying `attachments`' metadata (used by replay of the last
-    /// user turn); otherwise the content is re-sent as-is (used by a steered
-    /// prompt's dispatch and by resume) and the prompt's attachments ride the
-    /// session's newest message. The request's prompt attachments are the
-    /// `attachments` set the caller resolved when present — a replayed turn
-    /// re-sends its prompt's stored attachments — else the session's newest
-    /// message's metadata. A turn resume passes `prior` explicitly — the
-    /// request [`Session::last_turn_resume`] built — while a fresh send leaves
-    /// it `None` and the active path minus its pending prompt tip is used.
-    /// `model_override` is a per-turn
-    /// `<provider_kind>/<model>` spec (a custom command's `model`
-    /// frontmatter); `None` streams on the active provider.
+    /// Build a stream for `prompt` and spawn the event-forwarding task. The
+    /// prompt is the request's own last message, and its role decides how the
+    /// model reads the request: a fresh turn sends a user message, while a
+    /// resume sends whichever message its path ended on ([`resume_request`]) —
+    /// a user message carrying tool results, the turn's prompt again, or an
+    /// assistant prefill. When `push_user` is set, the content is first
+    /// appended as a user message carrying `attachments`' metadata (used by
+    /// replay of the last user turn); otherwise the content is re-sent as-is
+    /// (used by a steered prompt's dispatch and by resume) and the prompt's
+    /// attachments ride the session's newest message. The request's prompt
+    /// attachments are the `attachments` set the caller resolved when present —
+    /// a replayed turn re-sends its prompt's stored attachments — else the
+    /// session's newest message's metadata. A turn resume passes `prior`
+    /// explicitly — the request [`Session::last_turn_resume`] built — while a
+    /// fresh send leaves it `None` and the active path minus its pending prompt
+    /// tip is used. `model_override` is a per-turn `<provider_kind>/<model>`
+    /// spec (a custom command's `model` frontmatter); `None` streams on the
+    /// active provider. `continuation` is the interrupted reply row a retry
+    /// appends to, `None` for a fresh turn (or one that failed before producing
+    /// a reply).
     async fn self_replay_send(
         &mut self,
-        content: String,
+        prompt: ChatMsg,
         attachments: Vec<crate::attachments::Prepared>,
         push_user: bool,
         model_override: Option<String>,
         prior: Option<Vec<ChatMsg>>,
+        continuation: Option<Continuation>,
     ) {
         let Some(s) = &self.session else {
             return;
@@ -2713,7 +2820,7 @@ impl CoreCtx {
                 .map(|prepared| (prepared.meta, prepared.bytes))
                 .collect();
             guard.push_user_with(
-                content.clone(),
+                prompt.content.clone(),
                 attachment_items
                     .iter()
                     .map(|(meta, _)| meta.clone())
@@ -2728,7 +2835,7 @@ impl CoreCtx {
                         id,
                         parent,
                         guard.messages.last().expect("cannot be poisoned").role,
-                        &content,
+                        &prompt.content,
                     )
                     .await
                 {
@@ -3028,15 +3135,25 @@ impl CoreCtx {
             accepts_tool_images,
             &self.skills,
         );
-        let prior = crate::scenes::inject_history(&scene, &prior, Some(&content), announce);
+        // The scene's per-prompt hooks belong to a pending user *prompt*: a
+        // resumed request may instead end on tool results or on the reply's own
+        // prefill, which the model simply continues.
+        let pending_prompt = prompt.is_user_prompt().then_some(prompt.content.as_str());
+        let prior = crate::scenes::inject_history(&scene, &prior, pending_prompt, announce);
         let tool_concurrency = scene.tool_concurrency();
+        // The request's own prompt carries the attachments the model should see
+        // on it — the replayed prompt's, or none for a resumed tool-result /
+        // prefill prompt.
+        let prompt = ChatMsg {
+            attachments: prompt_attachments,
+            ..prompt
+        };
         let stream = client
             .stream(
                 &model,
                 Some(&preamble),
-                &content,
+                &prompt,
                 &prior,
-                &prompt_attachments,
                 &blobs,
                 tools,
                 &mut worker_set.workers,
@@ -3061,6 +3178,24 @@ impl CoreCtx {
         let embedding_shared = self.embedding_setup.clone();
         let turn_state_shared = Arc::new(Mutex::new(TurnState {
             attribution: attribution.clone(),
+            // A retry picks the interrupted reply row back up: the resumed
+            // attempt appends to that row (its runs, calls and session index)
+            // instead of starting a second reply under it.
+            assistant_message_id: continuation.as_ref().map(|c| c.message_id),
+            assistant_seq: continuation.as_ref().map_or(0, |c| c.seq),
+            continuing_seq: continuation.as_ref().map(|c| c.seq),
+            text_segments: continuation
+                .as_ref()
+                .map(|c| c.text_segments.clone())
+                .unwrap_or_default(),
+            pending_reasoning: continuation
+                .as_ref()
+                .map(|c| c.reasoning.clone())
+                .unwrap_or_default(),
+            tool_records: continuation
+                .as_ref()
+                .map(|c| c.tool_records.clone())
+                .unwrap_or_default(),
             // The turn's clock: the prompt's accept time when the run loop has
             // one (and across a retry's resume, the original attempt's), else
             // now — a turn dispatched outside the send path still times
@@ -3092,6 +3227,7 @@ impl CoreCtx {
                     steer_shared,
                     deny_cut_shared,
                     tool_concurrency,
+                    continuation,
                 )
                 .await;
             })
@@ -3106,18 +3242,27 @@ impl CoreCtx {
     /// the active path and in the chat view (a retry must not hide or destroy
     /// the history after the last user prompt).
     ///
-    /// A retry *continues* the interrupted turn rather than replaying it: the
-    /// resumed request carries everything the attempt produced — the model's
-    /// progress log for the turn — as the history above the resume cue, so the
-    /// model picks the turn up where it was cut off instead of redoing the work
-    /// the attempt had already finished (or, for a turn that is the session's
-    /// first prompt, re-sending the whole task with no history and starting
-    /// over). With no reply row at all there is nothing to continue: the
-    /// request replays the turn's stored prompt — its attachments included —
-    /// with the history that precedes it ([`Session::last_turn_resume`]), and
+    /// A retry *continues* the interrupted turn rather than replaying it, and
+    /// it does so without telling the model anything: the resumed request is
+    /// the turn's own path re-sent, its last message promoted to the request's
+    /// prompt ([`resume_request`]) — the tool results a tool batch would have
+    /// continued from, or the reply's trailing text run as an assistant prefill
+    /// so the model resumes that very sentence. A failure therefore costs the
+    /// model nothing it had already done, and leaves no trace in its view of
+    /// the conversation. With no reply row at all there is nothing to continue:
+    /// the request replays the turn's stored prompt — its attachments included
+    /// — with the history that precedes it ([`Session::last_turn_resume`]), and
     /// no prompt node is re-appended. Used by the auto-continue path after a
     /// context overflow and the turn-retry resume.
-    async fn resume_last_turn(&mut self) {
+    ///
+    /// A [`ResumeMode::TurnRetry`] also hands the resumed attempt the
+    /// interrupted reply row to append to ([`Session::resume_continuation`])
+    /// and keeps the pane's in-flight turn: the retry then finishes the turn's
+    /// one reply row instead of writing a second one under the interrupted
+    /// partial. An [`ResumeMode::Overflow`] reloads the pane instead (the
+    /// compacted history changed what it shows) and starts a fresh reply row
+    /// under the partial.
+    async fn resume_last_turn(&mut self, mode: ResumeMode) {
         let Some(s) = &self.session else {
             return;
         };
@@ -3128,34 +3273,32 @@ impl CoreCtx {
             Ok(stored) => Session::from_stored(stored),
             Err(_) => return,
         };
-        let (content, prior, prompt_metas) = match loaded.last_turn_resume() {
-            // A replay re-sends the turn's stored prompt, which the leaf no
-            // longer reaches: the prompt's attachment metadata must ride the
-            // retried request explicitly — pruned blobs arrive metadata-only.
-            Some(TurnResume::Replay { prompt, prior }) => {
-                let metas = loaded
-                    .last_user_node()
-                    .map(|node| node.attachments.clone())
-                    .unwrap_or_default();
-                (prompt, prior, metas)
-            }
-            // A continuation prompts with the cue and sends the whole path —
-            // the turn's prompt node, attachments included — as history, so
-            // the prompt's blobs resolve with the rest of the history.
-            Some(TurnResume::Continue { prior }) => (RESUME_PROMPT.to_string(), prior, Vec::new()),
-            None => return,
+        let Some(ResumeRequest {
+            prompt,
+            prior,
+            prompt_metas,
+            continuation,
+        }) = resume_request(&loaded, mode)
+        else {
+            return;
         };
         let attachments =
             crate::attachments::resolve_stored_prepared(&mut self.store, prompt_metas).await;
         *s.lock().await = loaded.clone();
-        let _ = self
-            .event_tx
-            .send(Event::Forked {
-                session: loaded,
-                prompt: None,
-            })
-            .await;
-        self.self_replay_send(content, attachments, false, None, Some(prior))
+        // A retry keeps the pane's in-flight turn (the attempt was never
+        // committed as interrupted), so the resumed output appends to it. The
+        // overflow continue replaced the history under the turn, so the pane
+        // reloads the compacted session.
+        if mode == ResumeMode::Overflow {
+            let _ = self
+                .event_tx
+                .send(Event::Forked {
+                    session: loaded,
+                    prompt: None,
+                })
+                .await;
+        }
+        self.self_replay_send(prompt, attachments, false, None, Some(prior), continuation)
             .await;
     }
 }
@@ -3477,16 +3620,51 @@ async fn stream_stream_to_events(
     steer: SteerSignal,
     deny_cut: crate::permissions::DenyCut,
     tool_concurrency: usize,
+    continuation: Option<Continuation>,
 ) {
     use futures_util::StreamExt;
 
-    let mut assistant_message_id: Option<u64> = None;
-    let mut assistant_seq: u64 = 0;
-    let mut pending_reasoning: Vec<shuvarie_db::ReasoningSegment> = Vec::new();
+    // A retry appends to the interrupted reply row: its runs, reasoning, calls
+    // and session index seed this attempt's accumulators, so the row ends up
+    // holding the whole turn — the partial the cut attempt streamed plus what
+    // this attempt adds — rather than a second reply row appearing under it.
+    let continuation_seq = continuation.as_ref().map(|c| c.seq);
+    let mut assistant_message_id: Option<u64> = continuation.as_ref().map(|c| c.message_id);
+    let mut assistant_seq: u64 = continuation.as_ref().map_or(0, |c| c.seq);
+    let mut pending_reasoning: Vec<shuvarie_db::ReasoningSegment> = continuation
+        .as_ref()
+        .map(|c| c.reasoning.clone())
+        .unwrap_or_default();
     let mut reasoning_started: Option<std::time::Instant> = None;
-    let mut text_segments: Vec<shuvarie_db::TextSegment> = Vec::new();
-    let mut tool_seq: u64 = 0;
-    let mut turn_tool_records: Vec<crate::tool_record::ToolRecord> = Vec::new();
+    let mut text_segments: Vec<shuvarie_db::TextSegment> = continuation
+        .as_ref()
+        .map(|c| c.text_segments.clone())
+        .unwrap_or_default();
+    // The resumed attempt's first run either continues the reply mid-sentence
+    // — the request re-sent the trailing run as an assistant prefill, so the
+    // text joins with no gap — or opens a new run after the tool batch the cut
+    // attempt's last run ended on, where a fresh paragraph is what separates
+    // two runs of one turn. The seam travels inside the first delta, so the
+    // TUI's blocks and the stored runs join exactly like the reply's text.
+    let mut text_seam = continuation.as_ref().is_some_and(|c| !c.prefilled)
+        && text_segments
+            .iter()
+            .rev()
+            .find(|segment| !segment.text.is_empty())
+            .is_some_and(|segment| !segment.text.ends_with('\n'));
+    let mut reasoning_seam = pending_reasoning
+        .iter()
+        .rev()
+        .find(|segment| !segment.text.is_empty())
+        .is_some_and(|segment| !segment.text.ends_with('\n'));
+    let mut turn_tool_records: Vec<crate::tool_record::ToolRecord> = continuation
+        .as_ref()
+        .map(|c| c.tool_records.clone())
+        .unwrap_or_default();
+    let mut tool_seq: u64 = turn_tool_records.len() as u64;
+    // Whether this attempt streamed any text delta of its own; a provider that
+    // reports the reply only in its final item needs that text kept.
+    let mut streamed_text = false;
     let mut pending_tool_args: std::collections::HashMap<String, PendingTool> =
         std::collections::HashMap::new();
     // Worker-internal tool calls tracked apart from the main agent's batch:
@@ -3528,6 +3706,12 @@ async fn stream_stream_to_events(
         }
         match item {
             shuvarie_llm::StreamItem::Delta { text } if !text.is_empty() => {
+                let text = if std::mem::take(&mut text_seam) {
+                    resume_seam(&text)
+                } else {
+                    text
+                };
+                streamed_text = true;
                 let after_tool = turn_tool_records.len() as u64;
                 match text_segments.last_mut() {
                     Some(segment) if segment.after_tool == after_tool => {
@@ -3549,6 +3733,11 @@ async fn stream_stream_to_events(
             }
             shuvarie_llm::StreamItem::Delta { .. } => {}
             shuvarie_llm::StreamItem::Reasoning { text } if !text.is_empty() => {
+                let text = if std::mem::take(&mut reasoning_seam) {
+                    resume_seam(&text)
+                } else {
+                    text
+                };
                 let after_tool = turn_tool_records.len() as u64;
                 let now = std::time::Instant::now();
                 match pending_reasoning.last_mut() {
@@ -3880,8 +4069,32 @@ async fn stream_stream_to_events(
                     })
                     .await;
             }
-            shuvarie_llm::StreamItem::Done { text, usage } => {
-                let text = if text.is_empty() && !text_segments.is_empty() {
+            shuvarie_llm::StreamItem::Done { mut text, usage } => {
+                // A provider that reports the reply only in its final item
+                // (no text deltas) still gets it into the run list, after the
+                // partial's text a retry continues.
+                if continuation_seq.is_some() && !streamed_text && !text.is_empty() {
+                    if std::mem::take(&mut text_seam) {
+                        text = resume_seam(&text);
+                    }
+                    let after_tool = turn_tool_records.len() as u64;
+                    match text_segments.last_mut() {
+                        Some(segment) if segment.after_tool == after_tool => {
+                            segment.text.push_str(&text);
+                        }
+                        _ => text_segments.push(shuvarie_db::TextSegment {
+                            after_tool,
+                            text: text.clone(),
+                        }),
+                    }
+                }
+                // A continued turn joins the runs instead of using the
+                // attempt's own final text: the runs already carry the partial
+                // reply the retry picked up. A run whose final item is its only
+                // text falls back to the runs too.
+                let text = if !text_segments.is_empty()
+                    && (continuation_seq.is_some() || text.is_empty())
+                {
                     shuvarie_db::join_text_segments(&text_segments)
                 } else {
                     text
@@ -3894,6 +4107,7 @@ async fn stream_stream_to_events(
             shuvarie_llm::StreamItem::Error { message, reason } => {
                 persist_stream_error(
                     assistant_message_id,
+                    continuation_seq,
                     &text_segments,
                     &pending_reasoning,
                     &session,
@@ -3909,6 +4123,7 @@ async fn stream_stream_to_events(
             shuvarie_llm::StreamItem::Overflow => {
                 persist_stream_error(
                     assistant_message_id,
+                    continuation_seq,
                     &text_segments,
                     &pending_reasoning,
                     &session,
@@ -4010,7 +4225,19 @@ async fn stream_stream_to_events(
         // times over the window. A run that reported no per-call usage leaves
         // the payload empty so the reader falls back to the row's columns.
         let request_usage = main_request_usage.unwrap_or_default();
-        guard.push_assistant(text.clone());
+        // A continued turn fills the reply row the retry picked up instead of
+        // appending a second one: the row ends up holding the whole turn, its
+        // interrupted marker cleared.
+        let seq = match continuation_seq {
+            Some(seq) if (seq as usize) < guard.messages.len() => {
+                guard.messages[seq as usize].content = text.clone();
+                seq
+            }
+            _ => {
+                guard.push_assistant(text.clone());
+                (guard.messages.len() - 1) as u64
+            }
+        };
         let cost = catalog_provider
             .as_ref()
             .map(|p| crate::catalog::estimate_cost(p, &model, &combined))
@@ -4024,17 +4251,23 @@ async fn stream_stream_to_events(
         let usage_snapshot = guard.usage();
         let cost_snapshot = guard.cost;
         let id = guard.id;
-        let seq = guard.messages.len() - 1;
         let reasoning = pending_reasoning.clone();
-        guard.reasoning.insert(seq as u64, reasoning.clone());
+        guard.reasoning.insert(seq, reasoning.clone());
         if !text_segments.is_empty() {
+            guard.text_segments.insert(seq, text_segments.clone());
+        }
+        if continuation_seq.is_some() {
+            // The seeded calls are already on the path: replace them with the
+            // attempt's full list so the row keeps one call sequence, and drop
+            // the interrupted marker the cut attempt set.
             guard
-                .text_segments
-                .insert(seq as u64, text_segments.clone());
+                .tool_records
+                .retain(|record| record.message_seq != seq);
+            guard.interrupted.remove(&seq);
         }
         guard.tool_records.append(&mut turn_tool_records);
         if !meta.is_empty() {
-            guard.message_meta.insert(seq as u64, meta.clone());
+            guard.message_meta.insert(seq, meta.clone());
         }
         let parent = guard.leaf_id;
         drop(guard);
@@ -4072,7 +4305,7 @@ async fn stream_stream_to_events(
                             &setup_idx,
                             msg_id,
                             id,
-                            seq as u64,
+                            seq,
                             &content_idx,
                         )
                         .await;
@@ -4107,7 +4340,7 @@ async fn stream_stream_to_events(
                                     &setup_idx,
                                     msg.id,
                                     id,
-                                    seq as u64,
+                                    seq,
                                     &content_idx,
                                 )
                                 .await;
@@ -4215,6 +4448,18 @@ fn serialize_file_change(fc: &Option<FileChange>) -> (String, Option<String>, Op
     }
 }
 
+/// The blank line a resumed attempt's first text (or reasoning) run opens
+/// with: it continues the partial a connection cut, and a fresh paragraph is
+/// how two runs of one turn read apart. The seam travels inside the delta, so
+/// every accumulator of the turn joins the reply exactly like the store does.
+fn resume_seam(delta: &str) -> String {
+    if delta.starts_with('\n') {
+        delta.to_string()
+    } else {
+        format!("\n\n{delta}")
+    }
+}
+
 /// Killed records for the tool calls of an interrupted turn that never
 /// returned: no output, `ok: false`, flagged killed, duration up to the cut.
 fn killed_records(
@@ -4276,6 +4521,7 @@ async fn persist_interrupted_turn(
         tool_records,
         pending_tools,
         assistant_seq,
+        continuing_seq,
         attribution,
         meta,
     ) = match turn_state {
@@ -4288,6 +4534,7 @@ async fn persist_interrupted_turn(
                 ts.tool_records.clone(),
                 ts.pending_tools.clone(),
                 ts.assistant_seq,
+                ts.continuing_seq,
                 ts.attribution.clone(),
                 ts.meta(),
             )
@@ -4348,17 +4595,30 @@ async fn persist_interrupted_turn(
         }
         {
             let mut g = s.lock().await;
-            g.push_assistant(text.clone());
-            let seq = g.messages.len() - 1;
-            g.reasoning.insert(seq as u64, reasoning);
+            // A continued attempt's reply row is already on the path: fill it
+            // instead of pushing a second partial reply under it.
+            let seq = match continuing_seq.filter(|&seq| (seq as usize) < g.messages.len()) {
+                Some(seq) => {
+                    g.messages[seq as usize].content = text.clone();
+                    seq
+                }
+                None => {
+                    g.push_assistant(text.clone());
+                    (g.messages.len() - 1) as u64
+                }
+            };
+            g.reasoning.insert(seq, reasoning);
             if !text_segments.is_empty() {
-                g.text_segments.insert(seq as u64, text_segments);
+                g.text_segments.insert(seq, text_segments);
             }
-            g.interrupted.insert(seq as u64, true);
+            g.interrupted.insert(seq, true);
+            // The continued row's calls were seeded into `tool_records` and
+            // are already on the path: keep one sequence for the row.
+            g.tool_records.retain(|record| record.message_seq != seq);
             g.tool_records.extend(tool_records);
             g.tool_records.extend(killed);
             if !meta.is_empty() {
-                g.message_meta.insert(seq as u64, meta.clone());
+                g.message_meta.insert(seq, meta.clone());
             }
         }
     } else if !text.is_empty() || !reasoning.is_empty() {
@@ -4536,8 +4796,15 @@ async fn handle_auth_provider_login(
     });
 }
 
+/// Persist the partial reply a cut attempt streamed before its error, so the
+/// turn's progress survives the retry wait and a reload shows it. The row is
+/// marked interrupted; a retry that continues it keeps updating that same row
+/// (`continuation_seq`) and clears the marker when the retry lands, so the turn
+/// ends with one uninterrupted-looking reply.
+#[allow(clippy::too_many_arguments)]
 async fn persist_stream_error(
     assistant_message_id: Option<u64>,
+    continuation_seq: Option<u64>,
     text_segments: &[shuvarie_db::TextSegment],
     pending_reasoning: &[shuvarie_db::ReasoningSegment],
     session: &Arc<Mutex<Session>>,
@@ -4595,15 +4862,25 @@ async fn persist_stream_error(
         }
     }
     let mut g = session.lock().await;
-    g.push_assistant(text);
-    let seq = g.messages.len() - 1;
+    // A continued attempt already has its reply row on the path: update it in
+    // place rather than pushing a second partial under it.
+    let seq = match continuation_seq.filter(|&seq| (seq as usize) < g.messages.len()) {
+        Some(seq) => {
+            g.messages[seq as usize].content = text;
+            seq
+        }
+        None => {
+            g.push_assistant(text);
+            (g.messages.len() - 1) as u64
+        }
+    };
     if !pending_reasoning.is_empty() {
-        g.reasoning.insert(seq as u64, pending_reasoning.to_vec());
+        g.reasoning.insert(seq, pending_reasoning.to_vec());
     }
     if !text_segments.is_empty() {
-        g.text_segments.insert(seq as u64, text_segments.to_vec());
+        g.text_segments.insert(seq, text_segments.to_vec());
     }
-    g.interrupted.insert(seq as u64, true);
+    g.interrupted.insert(seq, true);
     drop(g);
     record_and_broadcast_model_use(session, attribution, event_tx).await;
 }
