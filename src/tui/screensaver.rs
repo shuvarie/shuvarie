@@ -33,6 +33,12 @@ use super::welcome::art;
 /// cannot.
 const CAPTION: &str = "Press any key to exit";
 
+/// How many entrance lengths [`Screensaver::hold_at_start`] parks the sweep in
+/// the future: a test-only margin, wide enough that no plausible scheduling gap
+/// can settle the sweep before the test draws.
+#[cfg(test)]
+const HELD_ENTRANCES: u32 = 100;
+
 pub enum ScreensaverMessage {
     /// A key press dismissed the scene.
     Close,
@@ -83,13 +89,18 @@ impl Screensaver {
     }
 
     /// Holds the scene at the very start of its entrance, so a test can read the
-    /// screen it has not covered yet. A loaded machine can otherwise be hundreds of
-    /// milliseconds into the sweep by the time a test draws it; an instant in the
-    /// future reads as an age of zero for as long as it stays there.
+    /// screen it has not covered yet. A loaded machine can otherwise be hundreds
+    /// of milliseconds into the sweep by the time a test draws it; an instant in
+    /// the future reads as an age of zero for as long as it stays there.
+    ///
+    /// The margin is far larger than one entrance: the whole suite runs its
+    /// tests in parallel, and a thread that spawns a child process (or waits on
+    /// a 3-second timeout) can be descheduled for longer than [`art::ENTRANCE`],
+    /// which would settle the sweep and wipe the session before the draw.
     #[cfg(test)]
     pub(crate) fn hold_at_start(&mut self) {
         if self.open {
-            self.opened_at = Some(Instant::now() + art::ENTRANCE);
+            self.opened_at = Some(Instant::now() + art::ENTRANCE * HELD_ENTRANCES);
         }
     }
 
