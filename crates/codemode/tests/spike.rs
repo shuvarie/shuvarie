@@ -701,6 +701,43 @@ fn mutating_methods_return_nothing_and_the_rest_return_a_value() {
     assert_eq!(eval(&engine, r#"[1, 2, 3].extract(0, 2).len"#), json!(2));
 }
 
+/// Two habits a JavaScript-fluent reader brings that do not survive here, pinned
+/// because the card and the skill teach *against* them: `_` is not a binding, so
+/// `catch (_)` is a parse error like `let _ = x`, and the one-ended trimming
+/// methods have no Rhai equivalent.
+#[test]
+fn a_catch_variable_must_be_named_and_one_ended_trims_do_not_exist() {
+    let engine = Engine::new();
+
+    // `catch (_)` is the natural JavaScript shorthand for "I do not need it".
+    assert!(matches!(
+        *engine.compile("try { } catch (_) { }").unwrap_err().0,
+        rhai::ParseErrorType::VariableExpected
+    ));
+    // Naming it is what both documents show.
+    assert!(engine.compile("try { } catch (err) { }").is_ok());
+
+    for script in [
+        r#"let s = "abc"; s.trim_end_matches("c")"#,
+        r#"let s = "abc"; s.strip_suffix("c")"#,
+        r#"let s = "abc"; s.trim_end()"#,
+    ] {
+        let err = engine.eval::<Dynamic>(script).unwrap_err();
+        assert!(
+            matches!(*err, EvalAltResult::ErrorFunctionNotFound(..)),
+            "`{script}` should not resolve: {err}"
+        );
+    }
+
+    // The replacements the documents give: `trim()` for both ends, `sub_string`
+    // for one.
+    assert_eq!(eval(&engine, r#"let s = "  x  "; s.trim(); s"#), json!("x"));
+    assert_eq!(
+        eval(&engine, r#"let s = "abc"; s.sub_string(0, s.len - 1)"#),
+        json!("ab")
+    );
+}
+
 /// The container accessors, which are inconsistent between arrays, strings and
 /// maps -- and the reason the documents spell out `.len` versus `.len()`.
 #[test]

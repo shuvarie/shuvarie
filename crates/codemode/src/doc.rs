@@ -26,7 +26,7 @@ when the tool returned structured content.
 ```rhai
 let src = tools::read_file(#{ path: "src/main.rs" });
 let hits = tools::grep(#{ pattern: "fn main", path: "src" });
-let lines = hits.split("\n").filter(|line| line.trim() != "");
+let lines = hits.split("\n").filter(|line| line.starts_with("src/"));
 `main.rs is ${src.len} characters; ${lines.len} lines matched`
 ```
 
@@ -48,7 +48,7 @@ Methods: `.len()` (maps), `.len` (arrays), `.push(v)`, `.get("k")`,
 
 ```rhai
 let paths = tools::glob(#{ pattern: "src/**/*.rs" });
-let files = paths.split("\n").filter(|line| line.trim() != "");
+let files = paths.split("\n").filter(|line| line.ends_with(".rs"));
 `${files.len} files, first is ${files[0]}`
 ```
 
@@ -84,9 +84,11 @@ if found.matched == 0 {
 ## Traps
 
 - **Some methods return nothing.** `.trim()` and `.replace()` change the string
-  in place and hand back `()`, so `line.trim() != ""` is always true and
-  `line.trim().split(",")` fails outright. Bind first, or use a method that
-  returns a value.
+  in place and hand back `()`, so `line.trim() != ""` is always true. Bind
+  first, or use a method that returns a value.
+- **Tool output can end with a note.** `glob` stops at 100 paths, `grep` at 200,
+  and each appends a sentence saying so — filter for what a match looks like
+  (`line.ends_with(".rs")`), not just `line != ""`.
 - A missing map key reads as `()`, silently: `hit.tool` on a map without that
   key is not an error. Check with `hit.contains("tool")` when it matters.
 - Property access on a map is a key lookup, so `m.len` is `()`; write
@@ -105,9 +107,9 @@ try { out = tools::read_file(#{ path: "maybe.txt" }); } catch (err) { out = `mis
 out
 ```
 
-- A wrong operator is silently a no-op rather than an error: `"a" - "b"` is
-  `"a"`. Use the method you meant.
-- `let _ = x;` does not parse; name the binding or drop the statement.
+- A wrong operator is a no-op, not an error: `"a" - "b"` is `"a"`.
+- `_` is not a binding: `let _ = x;` and `catch (_)` do not parse. Name it, or
+  drop the statement.
 
 For the fuller reference — values and types, the methods that exist, error
 handling, and worked patterns — load the `codemode` skill."#;

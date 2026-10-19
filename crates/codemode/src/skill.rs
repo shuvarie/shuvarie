@@ -102,7 +102,7 @@ value:** `.split(",")`, `.sub_string(0, 4)` (or `.sub_string(2)` to the end),
 
 ```rhai
 let paths = tools::glob(#{ pattern: "src/**/*.rs" });
-let files = paths.split("\n").filter(|line| line != "");
+let files = paths.split("\n").filter(|line| line.ends_with(".rs"));
 let joined = files.reduce(|acc, file| `${acc} ${file}`, "");
 `${files.len} files, upper is ${joined.to_upper()}`
 ```
@@ -136,9 +136,11 @@ let empty = [];
 (there is no `mut`, and no immutability to opt out of).
 
 ```rhai
-let lines = tools::glob(#{ pattern: "src/**/*.rs" }).split("\n");
+let paths = tools::glob(#{ pattern: "src/**/*.rs" })
+    .split("\n")
+    .filter(|line| line.starts_with("src/"));
 let kinds = #{ rust: 0, other: 0 };
-for path in lines {
+for path in paths {
     if path.ends_with(".rs") {
         kinds.rust += 1;
     } else {
@@ -254,7 +256,17 @@ let previous = load("last_checked");
 - **Integer division**, as above.
 - **A wrong operator is a no-op, not an error.** `"a" - "b"` is `"a"`. Reach for
   the method you meant.
-- **`let _ = x;` does not parse.** Name the binding, or drop the statement.
+- **`let _ = x;` and `catch (_)` do not parse.** `_` is not a binding; name the
+  variable (`catch (err) { }`) or drop the statement.
+- **Tool text output can trail a note.** `glob` returns at most 100 paths and
+  `grep` at most 200, and each ends its string with a sentence saying so. That
+  note is a line like any other, so filtering `line != ""` counts it and an
+  aggregate comes out one too high. Filter for what a *path* looks like
+  (`.ends_with(".rs")`, `.starts_with("src/")`) and narrow the query
+  (`path`, a tighter pattern) when 100 is not enough.
+- **There is no one-ended trim.** `trim_end_matches`, `strip_suffix` and
+  `trim_end` do not exist; `trim()` takes both ends. Drop a single character
+  with `s.sub_string(0, s.len - 1)`.
 - **A map is not iterable** and its entries do not destructure, which is why the
   examples above walk `.keys()`.
 "#;

@@ -256,5 +256,14 @@ out), captured rather than streamed `run_shell`, and attachment/image output.
   nested reads must opt out of it.
 - **`store` is in-memory per session.** Durable keys would ride the session
   record (Pi appends a store entry per successful script).
+- **Line-oriented tool output is text, not data.** `glob` caps at 100 paths and
+  `grep` at 200, each trailing a sentence saying so. Worse, `glob` breaks out of
+  its walk at the cap and *then* sorts, so the 100 a script sees are an arbitrary
+  subset shown in alphabetical order — they read like a complete inventory. An
+  aggregate over `.split("\n")` can therefore be both short and silently so; a
+  live test run counted 102 paths where there were 154. Until the tools report
+  structured output, the card teaches filtering for the shape of a real match and
+  narrowing the query (a tighter pattern, a per-directory `path`) over widening
+  the cap.
 - **Nothing is undone.** Calls made before a failure are real, as in the
   references.
