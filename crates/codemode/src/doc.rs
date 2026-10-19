@@ -30,9 +30,8 @@ let lines = hits.split("\n").filter(|line| line.starts_with("src/"));
 `main.rs is ${src.len} characters; ${lines.len} lines matched`
 ```
 
-The last expression is the script's value. `text(v)` emits a value as well, so
-a script can report several things; `return v` ends early. `exit(v)` ends
-early with a value too.
+The last expression is the script's value; `text(v)` emits another, so a script
+can report several things, and `return v` ends early.
 
 ## Rhai essentials
 
@@ -56,8 +55,7 @@ let files = paths.split("\n").filter(|line| line.ends_with(".rs"));
 
 - `text(value)` — emit a value into the result.
 - `console.log/info/warn/error(...)` — captured, shown in the result.
-- `store(key, value)` / `load(key)` — small JSON state that survives between
-  scripts in this session.
+- `store(key, value)` / `load(key)` — JSON state surviving between scripts.
 - `exit(value)` — end the script now, with a value.
 
 ## Finding a tool
@@ -65,10 +63,9 @@ let files = paths.split("\n").filter(|line| line.ends_with(".rs"));
 The roster above is only what fit: the rest is callable by name. `ALL_TOOLS`
 lists every callable name; `search_tools(query)` ranks the roster and answers
 `#{ matched: int, tools: [ #{ name, description } ] }` (`matched` counts all
-matches, so it says when the list was cut short); `describe_tool(name)` spells
-one out with its parameter descriptions; `describe_namespace(name)` lists a
-whole namespace (`mcp::server`). An unknown name is an error naming the
-near-misses, not a silent `()`.
+matches, so a cut list is visible); `describe_tool(name)` spells one out with
+its parameter descriptions; `describe_namespace(name)` lists a whole namespace
+(`mcp::server`). An unknown name is an error naming the near-misses.
 
 ```rhai
 let found = search_tools("file", #{ limit: 5 });
@@ -83,22 +80,20 @@ if found.matched == 0 {
 ## Traps
 
 - **Some methods return nothing.** `.trim()`/`.replace()` change the string in
-  place and hand back `()`, so `line.trim() != ""` is always true. Bind first.
+  place and hand back `()`; bind first.
 - **A capped `glob` looks exact.** It stops at 100 paths (`grep` at 200) and
   appends a note — but the note is a line a path filter drops, so a truncated
   tally reads as exactly 100. Filter paths, and check `out.contains("truncated")`
   before trusting a count. One pattern over many directories hits the cap
-  sooner than the same work split per directory.
-- On a map, a missing key is `()` silently and `.len` is a key lookup — write
-  `m.len()`, and check `hit.contains("tool")` when it matters. Arrays and
-  strings take the property.
-- A map is not iterable, and its entries do not destructure: iterate
-  `for k in m.keys() { }` and read `m[k]`.
+  sooner than per-directory queries.
+- On a map a missing key is `()` and `.len` is a key lookup, so write `m.len()`
+  and check `hit.contains("tool")`. Arrays and strings take the property. A map
+  is not iterable and its entries do not destructure: `for k in m.keys() { }`.
 - **A closure cannot read the variable it is iterating.** `m.keys().map(|k|
   m[k])` is a data-race error; bind first (`let ks = m.keys();`) or use `for`.
 - `/` on integers is integer division: `7 / 2 == 3`.
 - No ternary, no truthiness: `if () { }` is a syntax error. Use `if c { a } else
-  { b }`, and compare explicitly (`if x == () { }`).
+  { b }`, and compare explicitly.
 - `try`/`catch` is a statement whose value is `()`, so assign the fallback to a
   variable declared before it:
 
@@ -108,8 +103,11 @@ try { out = tools::read_file(#{ path: "maybe.txt" }); } catch (err) { out = `mis
 out
 ```
 
-- A wrong operator is a no-op, not an error: `"a" - "b"` is `"a"`.
+- A map literal's keys are **literals**, never expressions: `#{ `${d}/f`: 1 }`
+  will not parse, and `#{ k: 1 }` is the key `"k"` even when `k` is a
+  variable. Assign instead: `m[`${d}/f`] = 1`, or `m.set(k, 1)`.
 - `_` is not a binding: `let _ = x;` and `catch (_)` do not parse.
+- A wrong operator is a no-op, not an error: `"a" - "b"` is `"a"`.
 
 For the fuller reference — values and types, the methods that exist, error
 handling, and worked patterns — load the `codemode` skill."#;

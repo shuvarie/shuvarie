@@ -129,6 +129,26 @@ let empty = [];
 `${[1, 2].len} ${empty.is_empty} ${#{ a: 1 }.len()}`
 ```
 
+### Building a map with computed keys
+
+A map literal's keys are **literals**: a bare name or a quoted string. They are
+never evaluated, so an interpolated key is a parse error and — the quiet case —
+a bare name is the word itself, not a variable of that name.
+
+```rhai
+let dir = "docs";
+// #{ `${dir}/a.md`: 1 }   parse error: "Expecting name of a property"
+// #{ dir: 1 }            builds #{"dir": 1}, not #{"docs": 1}
+
+// Assign through the index (chaining works) or call `.set` (returns `()`).
+let files = #{};
+files[`${dir}/a.md`] = "one";
+files.set("b.md", "two");
+files
+```
+
+To add a literal key to a map that already exists, `m += #{ b: 2 }` merges.
+
 ## Control flow
 
 `let` and `const`, `if`/`else` as an expression, `for`, `while`, `loop`, and

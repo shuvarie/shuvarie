@@ -821,8 +821,9 @@ fn container_accessors_are_not_uniform() {
     );
 }
 
-/// A string does not convert with `to_int`: the card teaches `.to_string()` and
-/// `.to_int()` as a pair, and only the first one exists.
+/// A string does not convert with `to_int` -- `.parse_int(10)` is the method.
+/// Pinned because `to_int` is the name anyone would reach for, and the card used
+/// to list it alongside `.to_string()`.
 #[test]
 fn a_string_has_no_to_int() {
     let engine = Engine::new();
@@ -901,5 +902,73 @@ fn a_closure_cannot_touch_the_value_it_is_iterating() {
                total"#
         ),
         json!(8)
+    );
+}
+
+/// A map literal's keys are literals, not expressions.
+///
+/// Two failure modes, and the quiet one matters more:
+///
+/// - An interpolated key is a *parse* error, so it costs a round trip and says
+///   so plainly ("Expecting name of a property").
+/// - A bare name is the literal word, never the variable of the same name, so
+///   `let k = "other"; #{ k: 1 }` builds `#{"k": 1}` — a wrong map with no
+///   complaint at all.
+///
+/// The fix is to assign through the index or `.set`, which do evaluate their key.
+#[test]
+fn map_literal_keys_are_literals_not_expressions() {
+    let engine = Engine::new();
+
+    // The forms that exist: a bare name and a quoted string. A backtick string
+    // is only a literal while it has no `${...}` in it.
+    assert_eq!(eval(&engine, "#{ a: 1 }"), json!({ "a": 1 }));
+    assert_eq!(eval(&engine, r#"#{ "a b": 1 }"#), json!({ "a b": 1 }));
+    assert_eq!(eval(&engine, "#{ `f.md`: 1 }"), json!({ "f.md": 1 }));
+
+    // Interpolation and concatenation are both parse errors, each with its own
+    // wording -- neither evaluates to a key.
+    for script in [
+        r#"let d = "x"; #{ `${d}/f.md`: 1 }"#,
+        r#"let d = "x"; #{ d + "/f.md": 1 }"#,
+    ] {
+        let err = engine.eval::<Dynamic>(script).unwrap_err();
+        assert!(
+            matches!(*err, EvalAltResult::ErrorParsing(..)),
+            "a computed key cannot be a literal key: {err}"
+        );
+    }
+
+    // Silence: the bare name is the word `k`, not the value `"other"`.
+    assert_eq!(
+        eval(&engine, r#"let k = "other"; #{ k: 1 }"#),
+        json!({ "k": 1 }),
+        "a bare key is the literal name, never the variable's value"
+    );
+
+    // Both escapes evaluate the key, which is what a per-directory map needs.
+    assert_eq!(
+        eval(
+            &engine,
+            r#"let d = "x"; let m = #{}; m[`${d}/f.md`] = 1; m"#
+        ),
+        json!({ "x/f.md": 1 })
+    );
+    assert_eq!(
+        eval(&engine, r#"let k = "other"; let m = #{}; m.set(k, 1); m"#),
+        json!({ "other": 1 })
+    );
+    // ...but `.set` returns `()`, so it cannot be chained.
+    assert_eq!(
+        eval(&engine, r#"let m = #{}; m.set("a", 1)"#),
+        json!(null),
+        "`set` returns unit"
+    );
+
+    // Maps also merge, which is the other way to add a computed key after the
+    // fact when the key itself came from a literal.
+    assert_eq!(
+        eval(&engine, "let m = #{ a: 1 }; m += #{ b: 2 }; m"),
+        json!({ "a": 1, "b": 2 })
     );
 }
