@@ -12,6 +12,7 @@
 - `./crates/highlight/` (`shuvarie-highlight`): Highlight module
 - `./crates/lsp/` (`shuvarie-lsp`): LSP module
 - `./crates/mcp/` (`shuvarie-mcp`): MCP module
+- `./crates/codemode/` (`shuvarie-codemode`): Codemode module
 
 ## Architecture
 
