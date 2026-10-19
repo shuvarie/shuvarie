@@ -383,7 +383,14 @@ pub fn all_tools(
         }
     }
     match codemode {
-        Some(wiring) => codemode::install(tools, &wiring, mcp_roster, max_output_chars, &access),
+        Some(wiring) => codemode::install(
+            tools,
+            &wiring,
+            mcp_roster,
+            stdio_tools,
+            max_output_chars,
+            &access,
+        ),
         None => tools,
     }
 }

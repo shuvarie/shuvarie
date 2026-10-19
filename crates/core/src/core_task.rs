@@ -2456,6 +2456,9 @@ impl CoreCtx {
         Some(crate::tools::codemode::Wiring {
             mode: match config.mode {
                 shuvarie_config::CodemodeMode::Declared => crate::tools::codemode::Mode::Declared,
+                shuvarie_config::CodemodeMode::DeclareBuiltin => {
+                    crate::tools::codemode::Mode::DeclareBuiltin
+                }
                 shuvarie_config::CodemodeMode::Only => crate::tools::codemode::Mode::Only,
             },
             limits: shuvarie_codemode::Limits {

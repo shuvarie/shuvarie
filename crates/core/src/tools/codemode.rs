@@ -44,6 +44,12 @@ pub enum Mode {
     /// model chooses between a script and a direct call.
     #[default]
     Declared,
+    /// The built-in tools stay callable directly; stdio and MCP tools are
+    /// reachable only through a script. The builtins are few and stable, while a
+    /// connected MCP server (or a handful of configured subprocess tools) is
+    /// where the roster bloats and where a typed API in a script reads better
+    /// than a schema per tool.
+    DeclareBuiltin,
     /// Tools are hidden from the model and reachable only through a script.
     Only,
 }
@@ -79,13 +85,15 @@ impl Wiring {
 /// Take the roster the turn built and return the roster the model sees, with
 /// the tool added.
 ///
-/// `mcp` is the per-server roster those tools were built from, used only to
-/// give an MCP tool its namespace (`mcp::dev_radius::search`) rather than the
-/// composite name it dispatches by.
+/// `mcp` is the per-server roster those tools were built from, used to give an
+/// MCP tool its namespace (`mcp::dev_radius::search`) rather than the composite
+/// name it dispatches by, and `stdio` is the configured `tool` entries — the two
+/// sources [`Mode::DeclareBuiltin`] hides behind scripts.
 pub fn install(
     tools: Vec<DynamicTool>,
     wiring: &Wiring,
     mcp: &BTreeMap<String, shuvarie_mcp::McpToolMap>,
+    stdio: &BTreeMap<String, shuvarie_config::StdioToolConfig>,
     max_output_chars: usize,
     access: &Access,
 ) -> Vec<DynamicTool> {
@@ -124,25 +132,57 @@ pub fn install(
         },
     );
 
+    // Only tools a script can actually run may leave the model's roster. A tool
+    // a script may not orchestrate has to stay visible, or it would be reachable
+    // by neither route -- gone rather than hidden.
+    let hide = |target: BTreeSet<String>| -> BTreeSet<String> {
+        target
+            .into_iter()
+            .filter(|name| roster.contains_key(name))
+            .collect()
+    };
+
     match wiring.mode {
         Mode::Declared => {
             let mut tools = tools;
             tools.push(codemode);
             tools
         }
-        Mode::Only => {
-            // What a script cannot run has to stay in the model's roster:
-            // dropping it would leave a tool the model may not call and no
-            // script can either, which is gone rather than hidden.
-            let scriptable: BTreeSet<String> = roster.keys().cloned().collect();
+        Mode::DeclareBuiltin => {
+            // The roster's own builtins stay; the two configured sources become
+            // script-only.
+            let hidden = hide(script_only(stdio, mcp));
             let mut kept: Vec<DynamicTool> = tools
                 .into_iter()
-                .filter(|tool| !scriptable.contains(&tool.definition().name.to_string()))
+                .filter(|tool| !hidden.contains(&tool.definition().name.to_string()))
+                .collect();
+            kept.push(codemode);
+            kept
+        }
+        Mode::Only => {
+            let hidden = hide(roster.keys().cloned().collect());
+            let mut kept: Vec<DynamicTool> = tools
+                .into_iter()
+                .filter(|tool| !hidden.contains(&tool.definition().name.to_string()))
                 .collect();
             kept.push(codemode);
             kept
         }
     }
+}
+
+/// The roster names that come from config rather than code: the configured
+/// `tool` subprocess entries plus every connected MCP server's tools (keyed in
+/// the roster by their composite name).
+fn script_only(
+    stdio: &BTreeMap<String, shuvarie_config::StdioToolConfig>,
+    mcp: &BTreeMap<String, shuvarie_mcp::McpToolMap>,
+) -> BTreeSet<String> {
+    stdio
+        .keys()
+        .cloned()
+        .chain(mcp.values().flat_map(|roster| roster.keys().cloned()))
+        .collect()
 }
 
 /// The tool's callable roster as a catalog, with MCP tools in their server's
@@ -406,6 +446,40 @@ mod tests {
         }
     }
 
+    /// A wiring in `mode`, with no per-tool script gating.
+    fn mode_wiring(mode: Mode) -> Wiring {
+        Wiring {
+            mode,
+            ..Wiring::new(Arc::new(Store::new()), None)
+        }
+    }
+
+    /// A one-server MCP roster carrying one tool, keyed by the composite name
+    /// the roster registers it under.
+    fn mcp_roster(server: &str, tool_name: &str) -> BTreeMap<String, shuvarie_mcp::McpToolMap> {
+        let composite = shuvarie_mcp::composite_tool_name(server, tool_name);
+        let info = shuvarie_mcp::McpToolInfo {
+            name: tool_name.to_string(),
+            title: None,
+            description: Some("An MCP tool.".to_string()),
+            input_schema: None,
+        };
+        BTreeMap::from([(server.to_string(), BTreeMap::from([(composite, info)]))])
+    }
+
+    /// The configured `tool` entries a turn would pass, by name.
+    fn stdio(names: &[&str]) -> BTreeMap<String, shuvarie_config::StdioToolConfig> {
+        names
+            .iter()
+            .map(|name| {
+                (
+                    (*name).to_string(),
+                    shuvarie_config::StdioToolConfig::default(),
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn the_catalog_carries_the_roster() {
         let tools = vec![tool("read_file", "Read a file."), tool("grep", "Search.")];
@@ -455,7 +529,8 @@ mod tests {
     fn declared_mode_keeps_every_tool_and_adds_the_one() {
         let tools = install(
             vec![tool("read_file", "Read a file."), tool("grep", "Search.")],
-            &Wiring::new(Arc::new(Store::new()), None),
+            &mode_wiring(Mode::Declared),
+            &BTreeMap::new(),
             &BTreeMap::new(),
             100,
             &access(),
@@ -484,17 +559,111 @@ mod tests {
             ],
             &only("run_shell"),
             &BTreeMap::new(),
+            &BTreeMap::new(),
             100,
             &access(),
         );
         assert_eq!(names(&tools), ["run_shell", NAME]);
     }
 
+    /// `declare-builtin` is the split that pays for itself: the roster's own
+    /// tools stay directly callable, while the two configured sources (a `tool`
+    /// subprocess entry and an MCP server's tools) are reachable only from a
+    /// script.
+    #[test]
+    fn declare_builtin_hides_stdio_and_mcp_but_keeps_the_builtins() {
+        let mcp = mcp_roster("dev-radius", "resolve-library-id");
+        let composite = shuvarie_mcp::composite_tool_name("dev-radius", "resolve-library-id");
+        let tools = install(
+            vec![
+                tool("read_file", "Read a file."),
+                tool("grep", "Search."),
+                tool("fetch-json", "A configured tool."),
+                tool(&composite, "An MCP tool."),
+            ],
+            &mode_wiring(Mode::DeclareBuiltin),
+            &mcp,
+            &stdio(&["fetch-json"]),
+            100,
+            &access(),
+        );
+
+        assert_eq!(names(&tools), ["read_file", "grep", NAME]);
+        // ... and the hidden ones are still callable from a script, under the
+        // names the catalog prints.
+        let description = tools.last().unwrap().definition().description.clone();
+        assert!(description.contains("tools::read_file"), "{description}");
+        assert!(description.contains("tools::fetch_json"), "{description}");
+        assert!(
+            description.contains("mcp::dev_radius::resolve_library_id"),
+            "{description}"
+        );
+    }
+
+    /// The same rule `only` mode follows: a configured tool a script may not run
+    /// has to stay directly callable, or it would be reachable by neither route.
+    #[test]
+    fn declare_builtin_keeps_a_configured_tool_a_script_may_not_run() {
+        let mcp = mcp_roster("dev-radius", "resolve-library-id");
+        let composite = shuvarie_mcp::composite_tool_name("dev-radius", "resolve-library-id");
+        let tools = install(
+            vec![
+                tool("read_file", "Read a file."),
+                tool("fetch-json", "A configured tool."),
+                tool(&composite, "An MCP tool."),
+            ],
+            // The script may not orchestrate the MCP tool, so it must stay
+            // visible to the model even though its source is script-only.
+            &Wiring {
+                mode: Mode::DeclareBuiltin,
+                tool_scene: ToolScene::build(Some(&shuvarie_config::SceneToolsConfig {
+                    tools: BTreeMap::from([(
+                        composite.clone(),
+                        shuvarie_config::ToolOverride {
+                            disabled: Some(true),
+                            ask: None,
+                        },
+                    )]),
+                    ..Default::default()
+                })),
+                ..Wiring::new(Arc::new(Store::new()), None)
+            },
+            &mcp,
+            &stdio(&["fetch-json"]),
+            100,
+            &access(),
+        );
+
+        assert_eq!(names(&tools), ["read_file", composite.as_str(), NAME]);
+    }
+
+    /// A configured tool the scene disables never reaches the roster at all, so
+    /// `declare-builtin` has nothing to hide: the configured name is in `stdio`
+    /// but not in `tools`.
+    #[test]
+    fn declare_builtin_ignores_a_tool_the_scene_already_removed() {
+        let tools = install(
+            // `fetch-json` is configured but the scene dropped it, so the roster
+            // the turn built never carried it.
+            vec![tool("read_file", "Read a file.")],
+            &Wiring {
+                mode: Mode::DeclareBuiltin,
+                ..Wiring::new(Arc::new(Store::new()), None)
+            },
+            &BTreeMap::new(),
+            &stdio(&["fetch-json"]),
+            100,
+            &access(),
+        );
+        assert_eq!(names(&tools), ["read_file", NAME]);
+    }
+
     #[test]
     fn the_catalog_never_offers_codemode_itself() {
         let tools = install(
             vec![tool("read_file", "Read a file."), tool(NAME, "Recursive.")],
-            &Wiring::new(Arc::new(Store::new()), None),
+            &mode_wiring(Mode::Declared),
+            &BTreeMap::new(),
             &BTreeMap::new(),
             100,
             &access(),

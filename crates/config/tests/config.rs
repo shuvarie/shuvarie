@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use shuvarie_config::{
-    Active, Config, ConfigError, Connections, LspConfigRepr, LspServerSpecRepr, ProviderConfig,
-    RankingConfig,
+    Active, CodemodeMode, Config, ConfigError, Connections, LspConfigRepr, LspServerSpecRepr,
+    ProviderConfig, RankingConfig,
 };
 
 fn sample_connections() -> Connections {
@@ -382,6 +382,59 @@ fn round_trip(config: &Config) -> Config {
     let path = dir.path().join("config.kdl");
     config.save_to(&path).expect("save");
     Config::load_from(&path).expect("load")
+}
+
+/// Every `codemode` mode round-trips by the name the file spells, so the mode a
+/// user wrote is the mode a later save keeps.
+#[test]
+fn codemode_modes_round_trip_under_their_own_names() {
+    for (mode, written) in [
+        (CodemodeMode::Declared, "declared"),
+        (CodemodeMode::DeclareBuiltin, "declare-builtin"),
+        (CodemodeMode::Only, "only"),
+    ] {
+        let mut config = Config::default();
+        config.codemode.enabled = true;
+        config.codemode.mode = mode;
+        assert_eq!(config.codemode.mode.as_str(), written);
+
+        let parsed = round_trip(&config);
+        assert_eq!(parsed.codemode.mode, mode, "`{written}` did not survive");
+        assert_eq!(parsed, config);
+    }
+}
+
+#[test]
+fn codemode_mode_is_parsed_from_a_hand_written_file() {
+    let config = parse_config(
+        r#"
+        codemode {
+            enabled #true
+            mode "declare-builtin"
+        }
+        "#,
+    )
+    .expect("parse");
+    assert!(config.codemode.enabled);
+    assert_eq!(config.codemode.mode, CodemodeMode::DeclareBuiltin);
+}
+
+#[test]
+fn an_unknown_codemode_mode_names_the_valid_set() {
+    let err = parse_config(
+        r#"
+        codemode {
+            mode "builtin-only"
+        }
+        "#,
+    )
+    .expect_err("should fail");
+    let message = err.to_string();
+    assert!(message.contains("declare-builtin"), "{message}");
+    assert!(
+        message.contains("builtin-only"),
+        "the offending value: {message}"
+    );
 }
 
 #[test]

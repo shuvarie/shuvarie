@@ -195,12 +195,7 @@ impl CodemodeEditor {
     fn flip(&mut self) {
         match self.selected_row() {
             Row::Enabled => self.prefs.enabled = !self.prefs.enabled,
-            Row::Mode => {
-                self.prefs.mode = match self.prefs.mode {
-                    CodemodeMode::Declared => CodemodeMode::Only,
-                    CodemodeMode::Only => CodemodeMode::Declared,
-                }
-            }
+            Row::Mode => self.prefs.mode = self.prefs.mode.next(),
             Row::Store => self.prefs.store = !self.prefs.store,
             // The budgets are shown, not edited.
             Row::InlineBudget | Row::Timeout | Row::MaxOperations | Row::MaxToolCalls => {}
@@ -223,12 +218,7 @@ impl CodemodeEditor {
                 .collect();
             Paragraph::new(rows).render(list_area, buf);
 
-            let note = if self.prefs.enabled {
-                "Budgets and per-tool scriptability live in `shuvarie.kdl`."
-            } else {
-                "Off: the tool is not offered, and no script can run."
-            };
-            Paragraph::new(note)
+            Paragraph::new(self.note())
                 .fg(theme::text_muted())
                 .wrap(Wrap { trim: true })
                 .render(note_area, buf);
@@ -238,6 +228,35 @@ impl CodemodeEditor {
                 .fg(theme::text_muted())
                 .render(hint_area, buf);
         });
+    }
+
+    /// The note for the selected row: what the highlighted setting means. The
+    /// values themselves stay short enough for the label column, so the sentence
+    /// that explains them lives here instead of widening the row past the popup.
+    fn note(&self) -> &'static str {
+        if !self.prefs.enabled {
+            return "Off: the tool is not offered, and no script can run.";
+        }
+        match self.selected_row() {
+            Row::Enabled => "Whether the model is offered the tool at all.",
+            Row::Mode => match self.prefs.mode {
+                CodemodeMode::Declared => {
+                    "Every tool stays in the roster; the model picks a script or a direct call."
+                }
+                CodemodeMode::DeclareBuiltin => {
+                    "Built-in tools stay in the roster; stdio and MCP tools are reachable only \
+                     from a script."
+                }
+                CodemodeMode::Only => {
+                    "Only codemode is in the roster; every other tool is reachable only from a \
+                     script."
+                }
+            },
+            Row::Store => "Whether a script's `store`/`load` values survive between scripts.",
+            Row::InlineBudget | Row::Timeout | Row::MaxOperations | Row::MaxToolCalls => {
+                "Set in `shuvarie.kdl`, under `codemode { }`."
+            }
+        }
     }
 
     fn render_row(&self, row: Row, is_selected: bool) -> Line<'static> {
@@ -269,8 +288,9 @@ impl CodemodeEditor {
             Row::Enabled => on_off(self.prefs.enabled),
             Row::Store => on_off(self.prefs.store),
             Row::Mode => match self.prefs.mode {
-                CodemodeMode::Declared => "declared (tools stay callable)".to_string(),
-                CodemodeMode::Only => "only (scripts reach them)".to_string(),
+                CodemodeMode::Declared => "all tools".to_string(),
+                CodemodeMode::DeclareBuiltin => "builtins only".to_string(),
+                CodemodeMode::Only => "codemode only".to_string(),
             },
             Row::InlineBudget => format!("{} tokens", self.prefs.inline_budget),
             Row::Timeout => match self.prefs.timeout_ms {
@@ -319,19 +339,83 @@ mod tests {
         assert_eq!(prefs.inline_budget, 3000);
     }
 
+    /// The overlay walks the modes in the order the config declares, wrapping
+    /// back to the top: every mode has to be reachable from every other.
     #[test]
-    fn the_mode_cycles_between_the_two_presentations() {
+    fn the_mode_cycles_through_all_three_and_wraps() {
         let mut editor = opened();
         editor.update(CodemodeMessage::Next);
-        let Some(CodemodeEffect::Changed(prefs)) = editor.update(CodemodeMessage::Toggle) else {
-            panic!("expected a change");
-        };
-        assert_eq!(prefs.mode, CodemodeMode::Only);
 
-        let Some(CodemodeEffect::Changed(prefs)) = editor.update(CodemodeMessage::Toggle) else {
-            panic!("expected a change back");
-        };
-        assert_eq!(prefs.mode, CodemodeMode::Declared);
+        let mut seen = vec![editor.prefs.mode];
+        for _ in 0..CodemodeMode::ALL.len() {
+            let Some(CodemodeEffect::Changed(prefs)) = editor.update(CodemodeMessage::Toggle)
+            else {
+                panic!("expected a change");
+            };
+            seen.push(prefs.mode);
+        }
+
+        assert_eq!(
+            seen,
+            vec![
+                CodemodeMode::Declared,
+                CodemodeMode::DeclareBuiltin,
+                CodemodeMode::Only,
+                CodemodeMode::Declared,
+            ],
+            "a full cycle visits each mode once and wraps"
+        );
+    }
+
+    #[test]
+    fn the_mode_row_names_the_mode_and_the_note_explains_it() {
+        let mut editor = opened();
+        assert_eq!(editor.value(Row::Mode), "all tools");
+
+        editor.prefs.mode = CodemodeMode::DeclareBuiltin;
+        assert_eq!(editor.value(Row::Mode), "builtins only");
+        editor.selected = Row::ALL.iter().position(|r| *r == Row::Mode).unwrap();
+        assert!(
+            editor.note().contains("stdio and MCP tools"),
+            "the note says what the mode hides: {}",
+            editor.note()
+        );
+
+        editor.prefs.mode = CodemodeMode::Only;
+        assert_eq!(editor.value(Row::Mode), "codemode only");
+        assert!(
+            editor.note().contains("Only codemode is in the roster"),
+            "the note says what the mode hides: {}",
+            editor.note()
+        );
+    }
+
+    /// The row is `prefix(2) + label(24) + value`, and the popup body is 49
+    /// columns on an 80-column terminal: a value past 23 is cut off rather than
+    /// wrapped, so every value the overlay can show has to fit.
+    #[test]
+    fn every_value_fits_the_row_inside_the_popup() {
+        let mut editor = opened();
+        for mode in CodemodeMode::ALL {
+            editor.prefs.mode = mode;
+            for row in Row::ALL {
+                let value = editor.value(row);
+                assert!(
+                    value.chars().count() <= 23,
+                    "`{value}` ({} chars) would be clipped in the {row:?} row",
+                    value.chars().count()
+                );
+            }
+        }
+    }
+
+    /// With the tool off nothing else matters, so the note says why rather than
+    /// describing a setting that cannot take effect.
+    #[test]
+    fn the_note_says_off_first() {
+        let mut editor = opened();
+        editor.prefs.enabled = false;
+        assert!(editor.note().starts_with("Off:"), "{}", editor.note());
     }
 
     /// A budget row is shown, not edited: Enter there must not pretend to have

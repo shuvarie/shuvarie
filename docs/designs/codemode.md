@@ -13,7 +13,7 @@ Prior art, and what we take from each:
 | --- | --- | --- |
 | Cloudflare | Typed TS API built from tool schemas; V8 isolate per script; `search` + `execute` for APIs too large to inline | One tool; schema→typed API; keep huge catalogs out of context |
 | OpenCode | Own interpreter for a JS subset; `tools.orders.lookup({...})`; `catalog()` + `search()`; `{ok, value, logs, warnings, truncated, toolCalls}` | Namespaced call tree; structured result with a per-call trace |
-| Pi | QuickJS sandbox; `tools.<name>()`, `text()`, `console`, `store`/`load`, `ALL_TOOLS`, `searchTools`, `describeTool`; ~3000-token inline budget; `declared`/`only` modes | The globals, the budget, and the modes |
+| Pi | QuickJS sandbox; `tools.<name>()`, `text()`, `console`, `store`/`load`, `ALL_TOOLS`, `searchTools`, `describeTool`; ~3000-token inline budget; `declared`/`only` modes | The globals, the budget, and the modes (`declare-builtin` is ours: Pi's `declared` is all-or-nothing) |
 
 We differ in one place: the interpreter is **Rhai**, embedded directly
 (`crates/codemode`, `shuvarie-codemode`). No JS engine, no subprocess, no
@@ -127,8 +127,10 @@ and eval errors carry Rhai's line/column.
 codemode {
   enabled #true      // default #false — inert until opted in
   mode "declared"    // "declared": tools stay in the roster, described as
-                     //   scriptable. "only": tools are hidden from the model
-                     //   and reachable only through a script.
+                     //   scriptable. "declare-builtin": the builtins stay, and
+                     //   stdio/MCP tools are reachable only from a script.
+                     //   "only": tools are hidden from the model and reachable
+                     //   only through a script.
   inline-budget 3000 // estimated tokens of inlined declarations
   timeout-ms 0       // 0 = unset
   max-operations 0
@@ -146,6 +148,32 @@ codemode {
 Scenes need nothing new: `tools { disable-all; tool "codemode" { enabled #true } }`,
 and per-tool `disabled` / `ask` overrides, all work through `ToolScene`/`Access`
 as they do today.
+
+### The three modes
+
+`mode` decides how much of the roster the model sees directly, and every mode
+puts the same catalog in front of the script — the difference is only what the
+model can call *without* writing one.
+
+| mode | the model sees | a script reaches |
+| --- | --- | --- |
+| `declared` (default) | everything, described as scriptable | everything |
+| `declare-builtin` | the builtins only | everything |
+| `only` | `codemode` alone | everything |
+
+`declare-builtin` is the one that pays for itself. The builtins are few and
+stable — `read_file`, `edit_file`, `grep`, `run_shell` — and a schema each is
+cheap; a connected MCP server or a pile of configured `tool` subprocess entries
+is where the roster bloats into dozens of schemas the model mostly does not
+call, and where a typed call in a script reads better than one schema per tool.
+The split is drawn by *provenance*, not by size: configured sources (MCP servers
+and `tool` entries) go script-only, tools written in Rust stay declared.
+
+One rule holds across all three modes: **a tool a script may not run never
+leaves the model's roster.** `codemode { tools { tool "x" { disabled #true } } }`
+means no script can reach `x`, so hiding it as well would make it reachable by
+neither route — gone rather than hidden. Whatever a mode hides, it hides only
+what is left in the script's roster.
 
 ## Telling the model about Rhai
 

@@ -864,6 +864,11 @@ pub enum CodemodeMode {
     /// model picks between a script and a direct call.
     #[default]
     Declared,
+    /// The roster's own built-in tools stay callable directly; stdio and MCP
+    /// tools are reachable only through a script. This is the split that pays
+    /// for itself: the builtins are few and stable, while a connected MCP server
+    /// or a pile of configured subprocess tools is where the catalog bloats.
+    DeclareBuiltin,
     /// Tools are hidden from the model and reachable only through a script.
     Only,
 }
@@ -872,8 +877,23 @@ impl CodemodeMode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Declared => "declared",
+            Self::DeclareBuiltin => "declare-builtin",
             Self::Only => "only",
         }
+    }
+
+    /// Every mode, in the order the TUI's `/codemode` overlay cycles through
+    /// them: most permissive first, ending at the one that hides everything.
+    pub const ALL: [CodemodeMode; 3] = [
+        CodemodeMode::Declared,
+        CodemodeMode::DeclareBuiltin,
+        CodemodeMode::Only,
+    ];
+
+    /// The next mode in [`Self::ALL`], wrapping back to the first.
+    pub fn next(self) -> Self {
+        let index = Self::ALL.iter().position(|mode| *mode == self).unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
     }
 }
 
@@ -884,7 +904,7 @@ pub struct CodemodeConfig {
     /// and it changes the roster it is added to.
     pub enabled: bool,
 
-    /// `mode "declared" | "only"`.
+    /// `mode "declared" | "declare-builtin" | "only"`.
     pub mode: CodemodeMode,
 
     /// Estimated tokens of inlined tool declarations. Whatever does not fit is

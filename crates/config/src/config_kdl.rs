@@ -1145,6 +1145,7 @@ fn parse_registry_headers(node: &KdlNode, input: &str) -> Result<Vec<(String, St
 /// `codemode { enabled #true; mode "declared"; inline-budget 3000; timeout-ms
 /// 0; max-operations 0; max-tool-calls 0; store #true; tools { … } }` — one
 /// tool that runs a Rhai script, where the script calls the other tools.
+/// `mode` is `declared`, `declare-builtin`, or `only`.
 fn parse_codemode(node: &KdlNode, input: &str) -> Result<CodemodeConfig> {
     let mut enabled = None;
     let mut mode = None;
@@ -1198,12 +1199,15 @@ fn parse_codemode(node: &KdlNode, input: &str) -> Result<CodemodeConfig> {
         None => CodemodeMode::default(),
         Some(mode) => match mode.as_str() {
             "declared" => CodemodeMode::Declared,
+            "declare-builtin" => CodemodeMode::DeclareBuiltin,
             "only" => CodemodeMode::Only,
             other => {
                 return Err(node_error(
                     input,
                     node,
-                    format!("`mode` must be `declared` or `only` (got `{other}`)"),
+                    format!(
+                        "`mode` must be `declared`, `declare-builtin`, or `only` (got `{other}`)"
+                    ),
                     None,
                 ));
             }
