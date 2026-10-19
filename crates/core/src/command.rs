@@ -1,4 +1,4 @@
-use shuvarie_config::{CodemodeMode, ProviderConfig};
+use shuvarie_config::{CodemodeEnabled, CodemodeMode, ProviderConfig};
 use shuvarie_db::StoredScroll;
 
 #[derive(Debug, Clone)]
@@ -69,7 +69,7 @@ pub enum Command {
     /// file is written; a request that matches the current settings is a no-op
     /// and writes nothing.
     SetCodemode {
-        enabled: bool,
+        enabled: CodemodeEnabled,
         mode: CodemodeMode,
         store: bool,
     },

@@ -22,13 +22,13 @@ use super::{popup, theme};
 use crate::tui::add_provider::centered_rect;
 use crate::tui::utils::ctrl;
 
-use shuvarie_core::{CodemodeConfig, CodemodeMode};
+use shuvarie_core::{CodemodeConfig, CodemodeEnabled, CodemodeMode};
 
 /// The settings the overlay edits and reports, in the shape the core needs to
 /// write them back. The budgets ride along so the overlay can show them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CodemodePrefs {
-    pub enabled: bool,
+    pub enabled: CodemodeEnabled,
     pub mode: CodemodeMode,
     pub store: bool,
     /// Estimated tokens of inlined declarations (`0` = nothing inlined).
@@ -194,7 +194,7 @@ impl CodemodeEditor {
 
     fn flip(&mut self) {
         match self.selected_row() {
-            Row::Enabled => self.prefs.enabled = !self.prefs.enabled,
+            Row::Enabled => self.prefs.enabled = self.prefs.enabled.next(),
             Row::Mode => self.prefs.mode = self.prefs.mode.next(),
             Row::Store => self.prefs.store = !self.prefs.store,
             // The budgets are shown, not edited.
@@ -234,11 +234,18 @@ impl CodemodeEditor {
     /// values themselves stay short enough for the label column, so the sentence
     /// that explains them lives here instead of widening the row past the popup.
     fn note(&self) -> &'static str {
-        if !self.prefs.enabled {
+        if self.prefs.enabled == CodemodeEnabled::Off {
             return "Off: the tool is not offered, and no script can run.";
         }
         match self.selected_row() {
-            Row::Enabled => "Whether the model is offered the tool at all.",
+            Row::Enabled => match self.prefs.enabled {
+                CodemodeEnabled::Auto => {
+                    "Offered only on turns that have a configured tool or an MCP server to \
+                     orchestrate."
+                }
+                CodemodeEnabled::On => "Offered on every turn, whether or not one is configured.",
+                CodemodeEnabled::Off => "Never offered.",
+            },
             Row::Mode => match self.prefs.mode {
                 CodemodeMode::Declared => {
                     "Every tool stays in the roster; the model picks a script or a direct call."
@@ -285,7 +292,7 @@ impl CodemodeEditor {
     fn value(&self, row: Row) -> String {
         let on_off = |flag: bool| if flag { "on" } else { "off" }.to_string();
         match row {
-            Row::Enabled => on_off(self.prefs.enabled),
+            Row::Enabled => self.prefs.enabled.label().to_string(),
             Row::Store => on_off(self.prefs.store),
             Row::Mode => match self.prefs.mode {
                 CodemodeMode::Declared => "all tools".to_string(),
@@ -321,7 +328,7 @@ mod tests {
     fn opened() -> CodemodeEditor {
         let mut editor = CodemodeEditor::new();
         editor.open(CodemodePrefs::from_config(&CodemodeConfig {
-            enabled: true,
+            enabled: CodemodeEnabled::On,
             ..CodemodeConfig::default()
         }));
         editor
@@ -334,9 +341,49 @@ mod tests {
         let CodemodeEffect::Changed(prefs) = effect else {
             panic!("expected a change");
         };
-        assert!(!prefs.enabled);
+        // `on` walks to `off`, the next value in the declaration order.
+        assert_eq!(prefs.enabled, CodemodeEnabled::Off);
         // The switch travels with the settings, so the core writes one value.
         assert_eq!(prefs.inline_budget, 3000);
+    }
+
+    /// `enabled` is three-valued now, so the row has to walk all three and come
+    /// back around — a plain toggle would strand `auto`.
+    #[test]
+    fn the_enabled_row_cycles_through_auto_on_and_off() {
+        let mut editor = opened();
+        assert_eq!(editor.prefs.enabled, CodemodeEnabled::On);
+
+        let mut seen = Vec::new();
+        for _ in 0..CodemodeEnabled::ALL.len() {
+            let Some(CodemodeEffect::Changed(prefs)) = editor.update(CodemodeMessage::Toggle)
+            else {
+                panic!("expected a change");
+            };
+            seen.push(prefs.enabled);
+        }
+
+        assert_eq!(
+            seen,
+            vec![
+                CodemodeEnabled::Off,
+                CodemodeEnabled::Auto,
+                CodemodeEnabled::On,
+            ],
+            "a full cycle visits each value once and wraps"
+        );
+    }
+
+    /// The overlay reads `on`/`off`, not the config file's `true`/`false`:
+    /// the row is prose beside the other switches, not a dump of the file.
+    #[test]
+    fn the_enabled_row_speaks_on_and_off_not_kdl_booleans() {
+        let mut editor = opened();
+        assert_eq!(editor.value(Row::Enabled), "on");
+        editor.prefs.enabled = CodemodeEnabled::Auto;
+        assert_eq!(editor.value(Row::Enabled), "auto");
+        editor.prefs.enabled = CodemodeEnabled::Off;
+        assert_eq!(editor.value(Row::Enabled), "off");
     }
 
     /// The overlay walks the modes in the order the config declares, wrapping
@@ -344,7 +391,9 @@ mod tests {
     #[test]
     fn the_mode_cycles_through_all_three_and_wraps() {
         let mut editor = opened();
-        editor.update(CodemodeMessage::Next);
+        editor.selected = Row::ALL.iter().position(|r| *r == Row::Mode).unwrap();
+        // `declare-builtin` is the default, so the cycle starts with it.
+        assert_eq!(editor.prefs.mode, CodemodeMode::DeclareBuiltin);
 
         let mut seen = vec![editor.prefs.mode];
         for _ in 0..CodemodeMode::ALL.len() {
@@ -358,10 +407,10 @@ mod tests {
         assert_eq!(
             seen,
             vec![
-                CodemodeMode::Declared,
                 CodemodeMode::DeclareBuiltin,
                 CodemodeMode::Only,
                 CodemodeMode::Declared,
+                CodemodeMode::DeclareBuiltin,
             ],
             "a full cycle visits each mode once and wraps"
         );
@@ -370,11 +419,19 @@ mod tests {
     #[test]
     fn the_mode_row_names_the_mode_and_the_note_explains_it() {
         let mut editor = opened();
+        // The default mode is the one this configuration exists for.
+        assert_eq!(editor.value(Row::Mode), "builtins only");
+
+        editor.prefs.mode = CodemodeMode::Declared;
         assert_eq!(editor.value(Row::Mode), "all tools");
+        editor.selected = Row::ALL.iter().position(|r| *r == Row::Mode).unwrap();
+        assert!(
+            editor.note().contains("tool stays in the roster"),
+            "the note says what the mode leaves callable: {}",
+            editor.note()
+        );
 
         editor.prefs.mode = CodemodeMode::DeclareBuiltin;
-        assert_eq!(editor.value(Row::Mode), "builtins only");
-        editor.selected = Row::ALL.iter().position(|r| *r == Row::Mode).unwrap();
         assert!(
             editor.note().contains("stdio and MCP tools"),
             "the note says what the mode hides: {}",
@@ -414,8 +471,22 @@ mod tests {
     #[test]
     fn the_note_says_off_first() {
         let mut editor = opened();
-        editor.prefs.enabled = false;
+        editor.prefs.enabled = CodemodeEnabled::Off;
         assert!(editor.note().starts_with("Off:"), "{}", editor.note());
+    }
+
+    /// `auto` is the default, so its note has to explain the condition rather
+    /// than claim the tool is always offered.
+    #[test]
+    fn the_note_explains_what_auto_waits_for() {
+        let mut editor = opened();
+        editor.prefs.enabled = CodemodeEnabled::Auto;
+        editor.selected = 0;
+        assert!(
+            editor.note().contains("MCP server"),
+            "auto's condition: {}",
+            editor.note()
+        );
     }
 
     /// A budget row is shown, not edited: Enter there must not pretend to have
@@ -491,7 +562,7 @@ mod tests {
     #[test]
     fn settings_round_trip_from_the_config() {
         let config = CodemodeConfig {
-            enabled: true,
+            enabled: CodemodeEnabled::On,
             mode: CodemodeMode::Only,
             store: false,
             inline_budget: 900,
@@ -504,7 +575,7 @@ mod tests {
         assert_eq!(
             prefs,
             CodemodePrefs {
-                enabled: true,
+                enabled: CodemodeEnabled::On,
                 mode: CodemodeMode::Only,
                 store: false,
                 inline_budget: 900,
@@ -521,6 +592,8 @@ mod tests {
         assert_eq!(editor.value(Row::Timeout), "none");
         assert_eq!(editor.value(Row::MaxOperations), "unlimited");
         assert_eq!(editor.value(Row::MaxToolCalls), "unlimited");
-        assert_eq!(editor.value(Row::Enabled), "off");
+        // A fresh editor shows the shipped defaults: `auto`, on until a turn
+        // has configured sources.
+        assert_eq!(editor.value(Row::Enabled), "auto");
     }
 }

@@ -2824,6 +2824,42 @@ async fn failed_turn_state() -> (Store, uuid::Uuid, shuvarie_db::StoredMessage) 
     (store, sid, partial)
 }
 
+/// `enabled "auto"` is the shipped default and keys off the turn's configured
+/// sources: the tool is offered exactly when a script would have a configured
+/// tool to orchestrate. The two absolute values ignore the roster.
+#[tokio::test]
+async fn auto_offers_codemode_only_when_a_configured_tool_exists() {
+    let store = Store::open_in_memory().await.unwrap();
+    let (mut ctx, _rx) = resume_ctx(store, Session::new()).await;
+
+    assert_eq!(
+        ctx.config.codemode.enabled,
+        shuvarie_config::CodemodeEnabled::Auto,
+        "the shipping default"
+    );
+    assert!(
+        ctx.codemode_wiring(None, false).is_none(),
+        "no stdio or MCP tools: nothing to orchestrate"
+    );
+    let wiring = ctx
+        .codemode_wiring(None, true)
+        .expect("a configured tool to orchestrate");
+    // The default mode is the split that pays for itself.
+    assert_eq!(wiring.mode, crate::tools::codemode::Mode::DeclareBuiltin);
+
+    ctx.config.codemode.enabled = shuvarie_config::CodemodeEnabled::On;
+    assert!(
+        ctx.codemode_wiring(None, false).is_some(),
+        "`on` ignores the roster"
+    );
+
+    ctx.config.codemode.enabled = shuvarie_config::CodemodeEnabled::Off;
+    assert!(
+        ctx.codemode_wiring(None, true).is_none(),
+        "`off` ignores the roster"
+    );
+}
+
 #[tokio::test]
 async fn turn_retry_resume_keeps_the_interrupted_partial_branch() {
     // A connection error mid-turn must not destroy the history after the

@@ -357,7 +357,7 @@ pub async fn run(
     lock_beat.reset();
 
     let skills = crate::skills::Skills::load(&workspace_root, &config.skills, &trust)
-        .with_builtins(config.codemode.enabled);
+        .with_builtins(config.codemode.is_possible());
     let _ = event_tx
         .send(Event::SkillsLoaded {
             skills: skills.skills.clone(),
@@ -1511,7 +1511,7 @@ pub async fn run(
                             &ctx.config.skills,
                             &ctx.trust,
                         )
-                        .with_builtins(ctx.config.codemode.enabled);
+                        .with_builtins(ctx.config.codemode.is_possible());
                         let _ = ctx
                             .event_tx
                             .send(Event::SkillsLoaded {
@@ -2448,9 +2448,12 @@ impl CoreCtx {
     fn codemode_wiring(
         &self,
         activity: Option<Sender<shuvarie_llm::StreamItem>>,
+        has_configured_tools: bool,
     ) -> Option<crate::tools::codemode::Wiring> {
         let config = &self.config.codemode;
-        if !config.is_enabled() {
+        // `auto` only offers the tool when this turn has configured sources for
+        // it to orchestrate; `on`/`off` ignore the roster.
+        if !config.is_enabled(has_configured_tools) {
             return None;
         }
         Some(crate::tools::codemode::Wiring {
@@ -2942,6 +2945,11 @@ impl CoreCtx {
             .and_then(|p| crate::catalog::find_model(p, &model));
         let accepts_tool_images =
             crate::attachments::supports_images(client.provider_type(), catalog_model);
+        // What `enabled "auto"` keys off, and what `declare-builtin` hides: the
+        // tools that come from configuration rather than from code — the
+        // `tool` subprocess entries plus every connected MCP server's tools.
+        let has_configured_tools = !self.config.tools.tools.is_empty()
+            || mcp_roster.values().any(|roster| !roster.is_empty());
         let tools = crate::tools::all_tools(
             self.lsp.clone(),
             file_locks.clone(),
@@ -2961,7 +2969,7 @@ impl CoreCtx {
             &self.config.tools.tools,
             Some(&self.mcp),
             &mcp_roster,
-            self.codemode_wiring(Some(codemode_activity)),
+            self.codemode_wiring(Some(codemode_activity), has_configured_tools),
         );
         // The turn's attribution: the catalog's model code for the resolved
         // model (absent for providers outside the catalog) plus the scene the

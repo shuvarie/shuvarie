@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use shuvarie_config::{
-    Active, CodemodeMode, Config, ConfigError, Connections, LspConfigRepr, LspServerSpecRepr,
-    ProviderConfig, RankingConfig,
+    Active, CodemodeConfig, CodemodeEnabled, CodemodeMode, Config, ConfigError, Connections,
+    LspConfigRepr, LspServerSpecRepr, ProviderConfig, RankingConfig,
 };
 
 fn sample_connections() -> Connections {
@@ -394,7 +394,7 @@ fn codemode_modes_round_trip_under_their_own_names() {
         (CodemodeMode::Only, "only"),
     ] {
         let mut config = Config::default();
-        config.codemode.enabled = true;
+        config.codemode.enabled = CodemodeEnabled::On;
         config.codemode.mode = mode;
         assert_eq!(config.codemode.mode.as_str(), written);
 
@@ -402,6 +402,92 @@ fn codemode_modes_round_trip_under_their_own_names() {
         assert_eq!(parsed.codemode.mode, mode, "`{written}` did not survive");
         assert_eq!(parsed, config);
     }
+}
+
+/// `enabled` round-trips by the spelling the file uses: the two absolute values
+/// stay KDL booleans, so a file written before `auto` existed keeps parsing, and
+/// only the new value is a string.
+#[test]
+fn codemode_enabled_round_trips_and_keeps_its_boolean_spelling() {
+    for (value, written) in [
+        (CodemodeEnabled::Auto, "enabled \"auto\""),
+        (CodemodeEnabled::On, "enabled #true"),
+        (CodemodeEnabled::Off, "enabled #false"),
+    ] {
+        let mut config = Config::default();
+        config.codemode.enabled = value;
+
+        let parsed = round_trip(&config);
+        assert_eq!(
+            parsed.codemode.enabled, value,
+            "`{written}` did not survive"
+        );
+        assert_eq!(parsed, config);
+    }
+}
+
+/// `auto` writes a string, `on`/`off` write booleans — checking the bytes a user
+/// would read in `shuvarie.kdl`, not just the round-tripped value.
+#[test]
+fn codemode_enabled_is_written_in_the_spelling_a_user_would_type() {
+    let write = |value: CodemodeEnabled| -> String {
+        let mut config = Config::default();
+        config.codemode.enabled = value;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.kdl");
+        config.save_to(&path).expect("save");
+        std::fs::read_to_string(&path).expect("read")
+    };
+
+    // The default is `auto`, and a default section writes nothing.
+    let default_file = write(CodemodeConfig::default().enabled);
+    assert!(
+        !default_file.contains("enabled"),
+        "the default writes nothing: {default_file}"
+    );
+
+    assert!(write(CodemodeEnabled::On).contains("enabled #true"));
+    assert!(write(CodemodeEnabled::Off).contains("enabled #false"));
+    // Only a non-default `auto` needs to be written at all, and it is a string.
+    assert!(
+        !write(CodemodeEnabled::Auto).contains("enabled"),
+        "still the default"
+    );
+}
+
+/// `auto` is the shipping default and reads the roster it is given; the two
+/// absolute values ignore it.
+#[test]
+fn codemode_auto_follows_the_configured_tools() {
+    let defaults = CodemodeConfig::default();
+    assert_eq!(defaults.enabled, CodemodeEnabled::Auto);
+    assert!(!defaults.is_enabled(false), "nothing to orchestrate");
+    assert!(
+        defaults.is_enabled(true),
+        "a configured tool to orchestrate"
+    );
+    // The skill is included whenever the feature could still turn on.
+    assert!(defaults.is_possible());
+
+    let on = CodemodeConfig {
+        enabled: CodemodeEnabled::On,
+        ..CodemodeConfig::default()
+    };
+    assert!(on.is_enabled(false), "`on` ignores the roster");
+
+    let off = CodemodeConfig {
+        enabled: CodemodeEnabled::Off,
+        ..CodemodeConfig::default()
+    };
+    assert!(!off.is_enabled(true), "`off` ignores the roster");
+    assert!(!off.is_possible(), "`off` rules the feature out entirely");
+}
+
+/// The mode default is the split that pays for itself.
+#[test]
+fn codemode_defaults_to_declare_builtin() {
+    assert_eq!(CodemodeMode::default(), CodemodeMode::DeclareBuiltin);
+    assert_eq!(CodemodeConfig::default().mode, CodemodeMode::DeclareBuiltin);
 }
 
 #[test]
@@ -415,8 +501,38 @@ fn codemode_mode_is_parsed_from_a_hand_written_file() {
         "#,
     )
     .expect("parse");
-    assert!(config.codemode.enabled);
+    assert_eq!(config.codemode.enabled, CodemodeEnabled::On);
     assert_eq!(config.codemode.mode, CodemodeMode::DeclareBuiltin);
+}
+
+#[test]
+fn codemode_auto_is_parsed_from_a_hand_written_file() {
+    let config = parse_config(
+        r#"
+        codemode {
+            enabled "auto"
+        }
+        "#,
+    )
+    .expect("parse");
+    assert_eq!(config.codemode.enabled, CodemodeEnabled::Auto);
+}
+
+/// A value that is neither a bool nor `auto` names what is accepted, and the
+/// error points at the node the user wrote.
+#[test]
+fn an_unknown_codemode_enabled_names_the_valid_set() {
+    let err = parse_config(
+        r#"
+        codemode {
+            enabled "yes"
+        }
+        "#,
+    )
+    .expect_err("should fail");
+    let message = err.to_string();
+    assert!(message.contains("auto"), "the accepted values: {message}");
+    assert!(message.contains("yes"), "the offending value: {message}");
 }
 
 #[test]

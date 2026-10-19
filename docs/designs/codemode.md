@@ -125,12 +125,14 @@ and eval errors carry Rhai's line/column.
 
 ```
 codemode {
-  enabled #true      // default #false — inert until opted in
-  mode "declared"    // "declared": tools stay in the roster, described as
-                     //   scriptable. "declare-builtin": the builtins stay, and
+  enabled "auto"    // default "auto" — offered on turns that have a configured
+                     //   tool (a `tool` entry or an MCP server) for it to
+                     //   orchestrate. `#true` offers it always, `#false` never.
+  mode "declare-builtin" // default. "declare-builtin": the builtins stay, and
                      //   stdio/MCP tools are reachable only from a script.
-                     //   "only": tools are hidden from the model and reachable
-                     //   only through a script.
+                     //   "declared": every tool stays in the roster, described
+                     //   as scriptable. "only": tools are hidden from the model
+                     //   and reachable only through a script.
   inline-budget 3000 // estimated tokens of inlined declarations
   timeout-ms 0       // 0 = unset
   max-operations 0
@@ -157,17 +159,24 @@ model can call *without* writing one.
 
 | mode | the model sees | a script reaches |
 | --- | --- | --- |
-| `declared` (default) | everything, described as scriptable | everything |
-| `declare-builtin` | the builtins only | everything |
+| `declared` | everything, described as scriptable | everything |
+| `declare-builtin` (default) | the builtins only | everything |
 | `only` | `codemode` alone | everything |
 
-`declare-builtin` is the one that pays for itself. The builtins are few and
-stable — `read_file`, `edit_file`, `grep`, `run_shell` — and a schema each is
-cheap; a connected MCP server or a pile of configured `tool` subprocess entries
-is where the roster bloats into dozens of schemas the model mostly does not
-call, and where a typed call in a script reads better than one schema per tool.
-The split is drawn by *provenance*, not by size: configured sources (MCP servers
-and `tool` entries) go script-only, tools written in Rust stay declared.
+`declare-builtin` is the one that pays for itself, and it is the default. The
+builtins are few and stable — `read_file`, `edit_file`, `grep`, `run_shell` — and
+a schema each is cheap; a connected MCP server or a pile of configured `tool`
+subprocess entries is where the roster bloats into dozens of schemas the model
+mostly does not call, and where a typed call in a script reads better than one
+schema per tool. The split is drawn by *provenance*, not by size: configured
+sources (MCP servers and `tool` entries) go script-only, tools written in Rust
+stay declared.
+
+That default pairs with `enabled "auto"`: the feature switches itself on when
+there is a configured source to hide, and stays out of the roster when there is
+not — so a fresh install pays nothing, and connecting an MCP server is the whole
+opt-in. `auto` reads the config, not the scene-pruned roster, so a scene cannot
+silently flip a setting the user wrote down.
 
 One rule holds across all three modes: **a tool a script may not run never
 leaves the model's roster.** `codemode { tools { tool "x" { disabled #true } } }`

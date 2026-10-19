@@ -435,7 +435,9 @@ pub struct Config {
     /// calls the other tools. Intermediate results stay in the script, so
     /// several dependent calls cost one round trip and one summary.
     ///
-    /// Off unless the section turns it on (`enabled #true`); see
+    /// `auto` by default: offered on the turns that have configured tools (a
+    /// stdio `tool` entry or a connected MCP server) for it to orchestrate, and
+    /// in `declare-builtin` mode, which is where that pays off — see
     /// [`CodemodeConfig::is_enabled`].
     pub codemode: CodemodeConfig,
 
@@ -862,12 +864,12 @@ pub const CODEMODE_DEFAULT_INLINE_BUDGET: usize = 3000;
 pub enum CodemodeMode {
     /// Tools stay in the model's roster and are described as scriptable, so the
     /// model picks between a script and a direct call.
-    #[default]
     Declared,
     /// The roster's own built-in tools stay callable directly; stdio and MCP
     /// tools are reachable only through a script. This is the split that pays
     /// for itself: the builtins are few and stable, while a connected MCP server
     /// or a pile of configured subprocess tools is where the catalog bloats.
+    #[default]
     DeclareBuiltin,
     /// Tools are hidden from the model and reachable only through a script.
     Only,
@@ -897,12 +899,59 @@ impl CodemodeMode {
     }
 }
 
+/// How the feature is switched on.
+///
+/// A plain bool could not express the useful middle: `codemode` costs context
+/// (a catalog in the tool's description) and only pays that back when there is
+/// something worth scripting. `auto` is that trade made for the user — offered
+/// exactly on the turns where a configured source gives it a job.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CodemodeEnabled {
+    /// Offered only when the turn's roster has tools from configuration: a
+    /// configured `tool` subprocess entry, or a connected MCP server's tools.
+    /// A turn with neither keeps the plain roster, so a fresh install pays
+    /// nothing for a feature it cannot use.
+    #[default]
+    Auto,
+    /// Offered on every turn, configured sources or not.
+    On,
+    /// Never offered.
+    Off,
+}
+
+impl CodemodeEnabled {
+    /// The word a person reads, for the `/codemode` overlay. There is no
+    /// `as_str` counterpart on purpose: the file spells the two absolute values
+    /// as KDL booleans (`#true` / `#false`), not strings, so a single "spelling"
+    /// helper could only be wrong for one of its callers.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+
+    /// Every value, in the order the `/codemode` overlay cycles through them:
+    /// the default first, then the two absolutes.
+    pub const ALL: [CodemodeEnabled; 3] = [Self::Auto, Self::On, Self::Off];
+
+    /// The next value in [`Self::ALL`], wrapping back to the first.
+    pub fn next(self) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|value| *value == self)
+            .unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+}
+
 /// `codemode { … }`: the scripting tool's own configuration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodemodeConfig {
-    /// `enabled #true`. Off by default: the tool is one the model may not want,
-    /// and it changes the roster it is added to.
-    pub enabled: bool,
+    /// `enabled "auto" | #true | #false`. `auto` by default: the tool appears
+    /// once a turn has configured sources for it to orchestrate.
+    pub enabled: CodemodeEnabled,
 
     /// `mode "declared" | "declare-builtin" | "only"`.
     pub mode: CodemodeMode,
@@ -932,7 +981,7 @@ pub struct CodemodeConfig {
 impl Default for CodemodeConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: CodemodeEnabled::default(),
             mode: CodemodeMode::default(),
             inline_budget: CODEMODE_DEFAULT_INLINE_BUDGET,
             timeout_ms: 0,
@@ -945,8 +994,27 @@ impl Default for CodemodeConfig {
 }
 
 impl CodemodeConfig {
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
+    /// Whether the tool is offered on a turn whose roster does or does not carry
+    /// configured tools (`has_configured_tools`: a stdio `tool` entry or a
+    /// connected MCP server's tool). Only [`CodemodeEnabled::Auto`] reads it.
+    ///
+    /// The gate is evaluated against what the *config* declares, not against what
+    /// a scene later pruned from the roster, so one scene cannot silently flip a
+    /// setting whose value the user wrote down.
+    pub fn is_enabled(&self, has_configured_tools: bool) -> bool {
+        match self.enabled {
+            CodemodeEnabled::Auto => has_configured_tools,
+            CodemodeEnabled::On => true,
+            CodemodeEnabled::Off => false,
+        }
+    }
+
+    /// Whether the feature can be offered on *any* turn. Decided once per config
+    /// rather than once per roster, so it answers for the things that cannot see
+    /// a turn: the built-in reference skill's inclusion. Only `off` rules the
+    /// feature out entirely.
+    pub fn is_possible(&self) -> bool {
+        self.enabled != CodemodeEnabled::Off
     }
 }
 

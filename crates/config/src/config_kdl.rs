@@ -231,6 +231,25 @@ fn scalar_string(input: &str, node: &KdlNode) -> Result<Option<String>> {
     }
 }
 
+/// `codemode`'s `enabled`: a KDL boolean (`#true` = on, `#false` = off) or the
+/// string `"auto"`. The booleans stay booleans so files written before this
+/// value existed keep parsing and keep their meaning.
+fn scalar_codemode_enabled(input: &str, node: &KdlNode) -> Result<Option<CodemodeEnabled>> {
+    match scalar_value(input, node)? {
+        None => Ok(None),
+        Some(KdlValue::Bool(true)) => Ok(Some(CodemodeEnabled::On)),
+        Some(KdlValue::Bool(false)) => Ok(Some(CodemodeEnabled::Off)),
+        Some(KdlValue::String(value)) if value == "auto" => Ok(Some(CodemodeEnabled::Auto)),
+        Some(KdlValue::String(value)) => Err(node_error(
+            input,
+            node,
+            format!("`enabled` must be `auto`, `#true`, or `#false` (got `\"{value}\"`)"),
+            None,
+        )),
+        Some(_) => Err(type_error(input, node, "`auto`, `#true`, or `#false`")),
+    }
+}
+
 fn scalar_string_vec(input: &str, node: &KdlNode) -> Result<Option<Vec<String>>> {
     let mut values = Vec::new();
     for entry in node.entries().iter().filter(|entry| entry.name().is_none()) {
@@ -1142,10 +1161,11 @@ fn parse_registry_headers(node: &KdlNode, input: &str) -> Result<Vec<(String, St
     Ok(headers)
 }
 
-/// `codemode { enabled #true; mode "declared"; inline-budget 3000; timeout-ms
-/// 0; max-operations 0; max-tool-calls 0; store #true; tools { … } }` — one
-/// tool that runs a Rhai script, where the script calls the other tools.
-/// `mode` is `declared`, `declare-builtin`, or `only`.
+/// `codemode { enabled "auto"; mode "declare-builtin"; inline-budget 3000;
+/// timeout-ms 0; max-operations 0; max-tool-calls 0; store #true; tools { … } }`
+/// — one tool that runs a Rhai script, where the script calls the other tools.
+/// `enabled` is `"auto"`, `#true`, or `#false`; `mode` is `declared`,
+/// `declare-builtin`, or `only`.
 fn parse_codemode(node: &KdlNode, input: &str) -> Result<CodemodeConfig> {
     let mut enabled = None;
     let mut mode = None;
@@ -1158,7 +1178,12 @@ fn parse_codemode(node: &KdlNode, input: &str) -> Result<CodemodeConfig> {
 
     for child in child_nodes(node) {
         match child.name().value() {
-            "enabled" => set_once(input, child, &mut enabled, scalar_bool(input, child))?,
+            "enabled" => set_once(
+                input,
+                child,
+                &mut enabled,
+                scalar_codemode_enabled(input, child),
+            )?,
             "mode" => set_once(input, child, &mut mode, scalar_string(input, child))?,
             "inline-budget" => {
                 set_once(input, child, &mut inline_budget, scalar_usize(input, child))?
@@ -4562,7 +4587,13 @@ fn codemode_node(cfg: &CodemodeConfig) -> Option<KdlNode> {
     let defaults = CodemodeConfig::default();
     let mut children = Vec::new();
     if cfg.enabled != defaults.enabled {
-        children.push(value_node("enabled", cfg.enabled));
+        // The absolute values stay KDL booleans so files written before `auto`
+        // existed keep their spelling; only the new value is a string.
+        children.push(match cfg.enabled {
+            CodemodeEnabled::Auto => value_node("enabled", "auto"),
+            CodemodeEnabled::On => value_node("enabled", true),
+            CodemodeEnabled::Off => value_node("enabled", false),
+        });
     }
     if cfg.mode != defaults.mode {
         children.push(value_node("mode", cfg.mode.as_str()));
