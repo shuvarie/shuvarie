@@ -2447,7 +2447,6 @@ impl CoreCtx {
     /// [`crate::tools::codemode::install`] takes.
     fn codemode_wiring(
         &self,
-        activity: Option<Sender<shuvarie_llm::StreamItem>>,
         has_configured_tools: bool,
     ) -> Option<crate::tools::codemode::Wiring> {
         let config = &self.config.codemode;
@@ -2483,7 +2482,6 @@ impl CoreCtx {
             // model's direct access to them is untouched.
             tool_scene: crate::scenes::ToolScene::build(Some(&config.tools)),
             store: std::sync::Arc::clone(&self.codemode_store),
-            activity,
         })
     }
 
@@ -2897,12 +2895,6 @@ impl CoreCtx {
         let preamble = crate::context::build_preamble(&base, &loaded_context);
         let question_gate = (!self.headless).then(|| QuestionGate::new(self.question_tx.clone()));
         let (shell_tx, shell_rx) = tokio::sync::mpsc::channel::<crate::tools::ShellChunk>(64);
-        // A script's nested calls are announced here and merged into the turn
-        // stream below, so the transcript, the sidebar and the session's tool
-        // records see a nested call exactly as they see a direct one. Dropped
-        // unused when codemode is off, which just closes the channel.
-        let (codemode_activity, codemode_rx) =
-            tokio::sync::mpsc::channel::<shuvarie_llm::StreamItem>(64);
         let file_locks = crate::tools::FileLocks::new();
         let tool_scene = scene.tools();
         // Connect the configured MCP servers before the roster is built so
@@ -2969,7 +2961,7 @@ impl CoreCtx {
             &self.config.tools.tools,
             Some(&self.mcp),
             &mcp_roster,
-            self.codemode_wiring(Some(codemode_activity), has_configured_tools),
+            self.codemode_wiring(has_configured_tools),
         );
         // The turn's attribution: the catalog's model code for the resolved
         // model (absent for providers outside the catalog) plus the scene the
@@ -3055,10 +3047,10 @@ impl CoreCtx {
             )
             .await;
         // Live `run_shell` output flows through the same merged turn stream as
-        // the tool activity, so a chunk is always processed after its call's
-        // `ToolStart` (earlier sub-streams poll first) and resolves to its own
-        // call id in the stream loop.
-        let stream = merge_turn_channels(stream, shell_rx, codemode_rx);
+        // the agent's own items, so a chunk is always processed after its call's
+        // `ToolStart` (the sub-streams poll after the agent stream) and resolves
+        // to its own call id in the stream loop.
+        let stream = merge_turn_channels(stream, shell_rx);
         let tx = self.event_tx.clone();
         let session_shared = s.clone();
         let client_shared = client.clone();
@@ -3444,14 +3436,13 @@ fn args_command(args_json: &str) -> Option<String> {
 }
 
 /// Merge the turn's live side channels into the turn stream: `run_shell`'s
-/// output chunks and codemode's nested-call activity both become `StreamItem`s
-/// the stream loop handles like any other item. `select_all` polls the
-/// LLM/worker sub-streams first, so a call's `ToolStart` is always processed
-/// before its own chunks and the chunk resolves to its call id.
+/// output chunks become `StreamItem`s the stream loop handles like any other
+/// item. `select_all` polls the LLM/worker sub-streams first, so a call's
+/// `ToolStart` is always processed before its own chunks and the chunk resolves
+/// to its call id.
 fn merge_turn_channels(
     stream: shuvarie_llm::StreamStream,
     shell_rx: tokio::sync::mpsc::Receiver<crate::tools::ShellChunk>,
-    codemode_rx: tokio::sync::mpsc::Receiver<shuvarie_llm::StreamItem>,
 ) -> shuvarie_llm::StreamStream {
     let chunks = futures_util::stream::unfold(shell_rx, |mut rx| async move {
         let chunk = rx.recv().await?;
@@ -3465,17 +3456,7 @@ fn merge_turn_channels(
             rx,
         ))
     });
-    // A nested call's items are already `StreamItem`s, so they pass through as
-    // they were announced.
-    let activity = futures_util::stream::unfold(codemode_rx, |mut rx| async move {
-        let item = rx.recv().await?;
-        Some((item, rx))
-    });
-    Box::pin(futures_util::stream::select_all([
-        stream,
-        Box::pin(chunks),
-        Box::pin(activity),
-    ]))
+    Box::pin(futures_util::stream::select_all([stream, Box::pin(chunks)]))
 }
 
 #[allow(clippy::too_many_arguments)]

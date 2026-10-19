@@ -2654,11 +2654,9 @@ async fn ambiguous_shell_chunk_stays_unresolved() {
 
 #[tokio::test]
 async fn merged_turn_channels_follow_their_tool_start() {
-    // The shell and codemode sub-streams poll after the LLM stream, so a
-    // call's ToolStart event precedes its own chunk (or a nested call's
-    // activity) even when both are ready at the same poll — the block the
-    // chunk streams into, and the call a nested result resolves against,
-    // exist by then.
+    // The shell sub-stream polls after the LLM stream, so a call's ToolStart
+    // event precedes its own chunk even when both are ready at the same poll —
+    // the block the chunk streams into exists by then.
     let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel::<crate::tools::ShellChunk>(4);
     let _ = chunk_tx
         .send(crate::tools::ShellChunk {
@@ -2669,17 +2667,6 @@ async fn merged_turn_channels_follow_their_tool_start() {
         })
         .await;
     drop(chunk_tx);
-    let (activity_tx, activity_rx) = tokio::sync::mpsc::channel::<StreamItem>(4);
-    let _ = activity_tx
-        .send(StreamItem::ToolStart {
-            name: "read_file".into(),
-            args: serde_json::json!({ "path": "src/main.rs" }),
-            worker: None,
-            spawn: None,
-            call_id: "s1:1".into(),
-        })
-        .await;
-    drop(activity_tx);
     let llm: shuvarie_llm::StreamStream =
         Box::pin(futures_util::stream::iter(vec![StreamItem::ToolStart {
             name: "run_shell".into(),
@@ -2688,14 +2675,18 @@ async fn merged_turn_channels_follow_their_tool_start() {
             spawn: Some(1),
             call_id: "s1".into(),
         }]));
-    let merged = merge_turn_channels(llm, chunk_rx, activity_rx);
+    let merged = merge_turn_channels(llm, chunk_rx);
 
     let mut items = Vec::new();
     let mut merged = merged;
     while let Some(item) = merged.next().await {
         items.push(item);
     }
-    assert_eq!(items.len(), 3, "both side streams end after senders drop");
+    assert_eq!(
+        items.len(),
+        2,
+        "the side stream ends after its sender drops"
+    );
     assert!(
         matches!(&items[0], StreamItem::ToolStart { call_id, .. } if call_id == "s1"),
         "the ToolStart is polled first: {items:?}"
@@ -2703,11 +2694,6 @@ async fn merged_turn_channels_follow_their_tool_start() {
     assert!(
         matches!(&items[1], StreamItem::ShellOutput { command, .. } if command == "cargo test"),
         "the chunk follows: {items:?}"
-    );
-    assert!(
-        matches!(&items[2], StreamItem::ToolStart { name, call_id, .. }
-            if name == "read_file" && call_id == "s1:1"),
-        "a nested call's activity arrives as its own ToolStart: {items:?}"
     );
 }
 
@@ -2838,24 +2824,24 @@ async fn auto_offers_codemode_only_when_a_configured_tool_exists() {
         "the shipping default"
     );
     assert!(
-        ctx.codemode_wiring(None, false).is_none(),
+        ctx.codemode_wiring(false).is_none(),
         "no stdio or MCP tools: nothing to orchestrate"
     );
     let wiring = ctx
-        .codemode_wiring(None, true)
+        .codemode_wiring(true)
         .expect("a configured tool to orchestrate");
     // The default mode is the split that pays for itself.
     assert_eq!(wiring.mode, crate::tools::codemode::Mode::DeclareBuiltin);
 
     ctx.config.codemode.enabled = shuvarie_config::CodemodeEnabled::On;
     assert!(
-        ctx.codemode_wiring(None, false).is_some(),
+        ctx.codemode_wiring(false).is_some(),
         "`on` ignores the roster"
     );
 
     ctx.config.codemode.enabled = shuvarie_config::CodemodeEnabled::Off;
     assert!(
-        ctx.codemode_wiring(None, true).is_none(),
+        ctx.codemode_wiring(true).is_none(),
         "`off` ignores the roster"
     );
 }

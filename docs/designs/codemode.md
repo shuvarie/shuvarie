@@ -81,12 +81,19 @@ Consequences that make this worth the thread:
   (`authorize_tool` / `authorize_path` / `authorize_shell` / `confirm_scene`), so
   a mid-script permission prompt is the ordinary prompt, the scene's `ask` and
   `disable-all` still apply, and a denial is a catchable Rhai error.
-- Nested results must reach the transcript, the sidebar, the DB tool-call
-  records, LSP notifications, and file-change summaries exactly as a direct call
-  does. `FileChangeHook` is already a generic `tokio::sync::mpsc::Sender<StreamItem>`
-  sink, so either it is driven from here or a shared `ToolInvoker` is extracted
-  for both paths — the extraction is preferred, and it is the sharpest
-  integration point in this feature.
+- Nested calls are **silent**. They emit no stream item, so a script's calls are
+  not transcript blocks, sidebar rows or session tool records of their own — a
+  turn has one block per script, not one per call. The script's own result
+  carries the trace (`Tool calls (N)`: each call's name, arguments, duration and
+  outcome), which the model, the live transcript and a replayed session all read
+  from the same text. Suppressing at the source rather than in the TUI is what
+  keeps the live turn and the reloaded one identical.
+
+The trade this makes: a file a script edited shows in the trace by path, but its
+**diff is not rendered** — diffs are drawn from a tool block's `FileChange`, and
+a nested call has no block. The alternative (forwarding nested calls as blocks)
+is what the trace exists to replace; rendering an aggregated diff inside the
+`codemode` block is the follow-up if it is missed in practice.
 
 Rhai is a **capability** sandbox, not an OS sandbox: a script cannot touch the
 filesystem, network, clock, or processes, and `import` cannot resolve anything
@@ -226,9 +233,8 @@ enabled.
    the `ToolInvoker` trait. Unit tests: schema→signature rendering (optionals,
    enums, arrays, nesting), conversion round-trips, limits, error paths.
 2. **Core wiring.** The tool, the roster→catalog snapshot, the dispatcher
-   (scene-gated `DynamicTool`, permissions, `FileChange`/`ShellStreams`
-   forwarding, truncation), and the per-turn store. Integration tests with a
-   stub roster.
+   (scene-gated `DynamicTool`, permissions, truncation), and the per-turn store.
+   Integration tests with a stub roster.
 3. **Config, modes, discovery.** `enabled` / `mode`, the budget, and the
    `search_tools` / `describe_tool` / `ALL_TOOLS` fallbacks.
 4. **Docs as code.** The dialect card, the embedded skill, and the tests that
