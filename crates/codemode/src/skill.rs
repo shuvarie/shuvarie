@@ -278,12 +278,23 @@ for k in counts.keys() {
   loop, but not inside a closure that also holds `m`.
 - **`let _ = x;` and `catch (_)` do not parse.** `_` is not a binding; name the
   variable (`catch (err) { }`) or drop the statement.
-- **Tool text output can trail a note.** `glob` returns at most 100 paths and
-  `grep` at most 200, and each ends its string with a sentence saying so. That
-  note is a line like any other, so filtering `line != ""` counts it and an
-  aggregate comes out one too high. Filter for what a *path* looks like
-  (`.ends_with(".rs")`, `.starts_with("src/")`) and narrow the query
-  (`path`, a tighter pattern) when 100 is not enough.
+- **A capped result looks exact.** `glob` returns at most 100 paths and `grep`
+  at most 200, and each ends its string with a sentence saying so. That note is a
+  line like any other, so the filter that makes the rest usable
+  (`.ends_with(".rs")`) drops exactly the line that says the answer is partial —
+  a truncated tally reads as exactly `100` and looks like a real count. Check the
+  text before you count, and keep one query to one directory: a single pattern
+  spanning ten directories reaches the cap far sooner than ten queries do.
+
+```rhai
+let found = tools::glob(#{ pattern: "src/**/*.rs" });
+let files = found.split("\n").filter(|line| line.ends_with(".rs"));
+if found.contains("truncated") {
+    `partial: ${files.len} — narrow the pattern`
+} else {
+    `${files.len} files`
+}
+```
 - **There is no one-ended trim.** `trim_end_matches`, `strip_suffix` and
   `trim_end` do not exist; `trim()` takes both ends. Drop a single character
   with `s.sub_string(0, s.len - 1)`.

@@ -42,9 +42,9 @@ expression, `for item in array { }`, `while c { }`, `break`, `continue`,
 arrays `[1, 2, 3]`, `switch x { 1 => "one", _ => "other" }`,
 `try { } catch (err) { }`, and strings with backtick interpolation.
 Methods: `.len()` (maps), `.len` (arrays), `.push(v)`, `.get("k")`,
-`.contains("k")`, `.keys()`, `.values()`, `.map(|v| ...)`, `.filter(|v| ...)`,
-`.join(",")`, `.split(",")`, `.trim()`, `.contains("s")`, `.to_string()`,
-`.to_int()`, `.starts_with("s")`.
+`.keys()`, `.values()`, `.map(|v| ...)`, `.filter(|v| ...)`,
+`.split(",")`, `.trim()`, `.contains("s")`, `.to_string()`,
+`.parse_int(10)`, `.starts_with("s")`.
 
 ```rhai
 let paths = tools::glob(#{ pattern: "src/**/*.rs" });
@@ -62,13 +62,12 @@ let files = paths.split("\n").filter(|line| line.ends_with(".rs"));
 
 ## Finding a tool
 
-The roster above is only the part that fit: the rest is callable and reachable
-by name. `ALL_TOOLS` is the flat list of callable names, `search_tools(query)`
-ranks the roster against a query and answers
-`#{ matched: int, tools: [ #{ name, description } ] }` — `matched` counts every
-match, so it says when the list was cut short — `describe_tool(name)` spells one
-tool out with its parameter descriptions, and `describe_namespace(name)` lists a
-whole namespace (`mcp::server`). A name nobody knows is an error naming the
+The roster above is only what fit: the rest is callable by name. `ALL_TOOLS`
+lists every callable name; `search_tools(query)` ranks the roster and answers
+`#{ matched: int, tools: [ #{ name, description } ] }` (`matched` counts all
+matches, so it says when the list was cut short); `describe_tool(name)` spells
+one out with its parameter descriptions; `describe_namespace(name)` lists a
+whole namespace (`mcp::server`). An unknown name is an error naming the
 near-misses, not a silent `()`.
 
 ```rhai
@@ -85,12 +84,13 @@ if found.matched == 0 {
 
 - **Some methods return nothing.** `.trim()`/`.replace()` change the string in
   place and hand back `()`, so `line.trim() != ""` is always true. Bind first.
-- **Tool output can end with a note.** `glob` stops at 100 paths, `grep` at 200,
-  and each appends a sentence saying so — filter for what a match looks like
-  (`line.ends_with(".rs")`), not just `line != ""`.
-- A missing map key is `()` silently: `hit.tool` is not an error. Check
-  `hit.contains("tool")` when it matters.
-- On a map a bare `.len` is a key lookup (`()`); write `m.len()`. Arrays and
+- **A capped `glob` looks exact.** It stops at 100 paths (`grep` at 200) and
+  appends a note — but the note is a line a path filter drops, so a truncated
+  tally reads as exactly 100. Filter paths, and check `out.contains("truncated")`
+  before trusting a count. One pattern over many directories hits the cap
+  sooner than the same work split per directory.
+- On a map, a missing key is `()` silently and `.len` is a key lookup — write
+  `m.len()`, and check `hit.contains("tool")` when it matters. Arrays and
   strings take the property.
 - A map is not iterable, and its entries do not destructure: iterate
   `for k in m.keys() { }` and read `m[k]`.

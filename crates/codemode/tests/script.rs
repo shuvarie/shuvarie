@@ -83,6 +83,21 @@ fn catalog() -> Arc<Catalog> {
     ]))
 }
 
+/// A roster whose `glob` answers with the given text, for the tests about what a
+/// capped result looks like once a script has filtered it.
+fn stub_with_glob(reply: String) -> Arc<Stub> {
+    Arc::new(Stub::with([("glob", json!(reply))]))
+}
+
+/// The stub roster plus `glob`, which only those tests need.
+fn glob_catalog() -> Arc<Catalog> {
+    Arc::new(Catalog::new([ToolEntry::roster(
+        "glob",
+        "List matching paths.",
+        json!({ "type": "object", "properties": { "pattern": { "type": "string" } } }),
+    )]))
+}
+
 fn stub() -> Arc<Stub> {
     Arc::new(Stub::with([
         ("read_file", json!("fn main() {}\n")),
@@ -634,4 +649,70 @@ async fn the_discovery_globals_only_see_this_scripts_catalog() {
         json!({ "matched": 0, "tools": [] }),
         "a tool outside the catalog is unknown"
     );
+}
+
+/// A capped `glob` returns a note on its own line, and the filter that makes the
+/// rest of the output usable drops exactly that line — so the count comes back
+/// as a clean `100` with nothing to say it is partial.
+///
+/// This is the shape of a real miss: a session tallied per-crate file counts,
+/// three crates came back as exactly 100, and the summary was wrong. The guard
+/// the documents now teach is checked here, because the prose is only true if
+/// `contains` still sees the note after the filter has run.
+#[tokio::test]
+async fn a_truncated_glob_counts_as_a_clean_number_unless_checked() {
+    let mut capped = String::new();
+    for index in 0..100 {
+        capped.push_str(&format!("crates/core/src/file_{index}.rs\n"));
+    }
+    capped.push_str(
+        "\n\n(Results are truncated: showing first 100 results. Consider using a more specific \
+         path or pattern.)",
+    );
+
+    let invoker = stub_with_glob(capped);
+    let outcome = run(
+        ScriptRequest {
+            script: r#"let found = tools::glob(#{ pattern: "crates/*/src/**" });
+let files = found.split("\n").filter(|line| line.ends_with(".rs"));
+if found.contains("truncated") { `partial: ${files.len}` } else { `${files.len}` }"#
+                .to_string(),
+            catalog: glob_catalog(),
+            store: None,
+            limits: Limits::default(),
+        },
+        invoker,
+        Stop::new(),
+    )
+    .await;
+
+    // The filter alone would have said `100`; the guard is what makes it honest.
+    assert_eq!(value(&outcome), json!("partial: 100"));
+}
+
+/// The same tally without the guard, to pin the trap itself: a filter that looks
+/// for paths cannot distinguish "100 matches" from "100 of many".
+#[tokio::test]
+async fn an_unchecked_truncated_glob_lies_about_its_count() {
+    let mut capped = String::new();
+    for index in 0..100 {
+        capped.push_str(&format!("crates/core/src/file_{index}.rs\n"));
+    }
+    capped.push_str("\n\n(Results are truncated: showing first 100 results.)");
+
+    let outcome = run(
+        ScriptRequest {
+            script:
+                r#"tools::glob(#{ pattern: "crates/*/src/**" }).split("\n").filter(|line| line.ends_with(".rs")).len"#
+                    .to_string(),
+            catalog: glob_catalog(),
+            store: None,
+            limits: Limits::default(),
+        },
+        stub_with_glob(capped),
+        Stop::new(),
+    )
+    .await;
+
+    assert_eq!(value(&outcome), json!(100), "the count carries no warning");
 }

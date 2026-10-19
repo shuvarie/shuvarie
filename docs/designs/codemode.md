@@ -272,13 +272,17 @@ out), captured rather than streamed `run_shell`, and attachment/image output.
 - **`store` is in-memory per session.** Durable keys would ride the session
   record (Pi appends a store entry per successful script).
 - **Line-oriented tool output is text, not data.** `glob` caps at 100 paths and
-  `grep` at 200, each trailing a sentence saying so. Worse, `glob` breaks out of
-  its walk at the cap and *then* sorts, so the 100 a script sees are an arbitrary
-  subset shown in alphabetical order — they read like a complete inventory. An
-  aggregate over `.split("\n")` can therefore be both short and silently so; a
-  live test run counted 102 paths where there were 154. Until the tools report
-  structured output, the card teaches filtering for the shape of a real match and
-  narrowing the query (a tighter pattern, a per-directory `path`) over widening
-  the cap.
+  `grep` at 200, each trailing a sentence saying so. The note is itself a line,
+  so the filter that makes the output usable (`.ends_with(".rs")`) discards
+  exactly the warning: a truncated tally comes back as a clean `100` that reads
+  like a real count. A live run hit this three times and reported an undercount
+  for the crates whose paths fell past the cap. The walk is sorted now, so the
+  truncated subset is a stable prefix rather than an arbitrary one — the answer
+  is still incomplete, but it is the same incomplete answer twice — and the card
+  teaches checking `contains("truncated")` before trusting a count, keeping one
+  query to one directory. Merging directories into one pattern reaches the cap
+  sooner: `crates/*/src/**` matches 140 files, so it reports 100 for a tree that
+  ten per-crate queries count exactly. Until the tools report structured counts,
+  aggregates over `.split("\n")` remain a checked guess.
 - **Nothing is undone.** Calls made before a failure are real, as in the
   references.
