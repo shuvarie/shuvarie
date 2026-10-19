@@ -49,6 +49,9 @@ pub enum HitKind {
     /// Toggle a tool header's title lines: a multi-line title (a `run_shell`
     /// command with line feeds) collapses and expands on its own control.
     Title,
+    /// Toggle a tool's code listing: a `codemode` script collapses and expands
+    /// on its own control, independently of the output below it.
+    Code,
     /// Open the media viewer at the addressed image slot.
     Media(u16),
 }
@@ -132,6 +135,18 @@ pub enum BodySource {
     },
     /// Numbered file-content rows (`    12 code`).
     Numbered { rows: TextRows },
+    /// Highlighted code rows behind a line-number gutter: what [`Numbered`]
+    /// shows for plain contents, with the spans syntect produced.
+    ///
+    /// `numbered` counts the leading rows that *are* code. Any rows after it (a
+    /// `… +N more lines` hint) keep the gutter's width but carry no number, so
+    /// they align under the code without claiming to be a line of it.
+    ///
+    /// [`Numbered`]: BodySource::Numbered
+    Code {
+        lines: Rc<[Line<'static>]>,
+        numbered: usize,
+    },
     /// Diff rows: gutter numbers, a kind marker, and the row text.
     Diff { lines: Rc<[DiffLine]> },
     /// Pre-rendered styled lines (markdown output) shared through an `Rc`;
@@ -145,6 +160,7 @@ impl BodySource {
             BodySource::Text { rows, .. } | BodySource::Numbered { rows } => rows.row_count(),
             BodySource::Diff { lines } => lines.len() as u32,
             BodySource::Lines { lines } => lines.len() as u32,
+            BodySource::Code { lines, .. } => lines.len() as u32,
         }
     }
 
@@ -164,6 +180,13 @@ impl BodySource {
                 .iter()
                 .map(|span| span.content.as_ref())
                 .collect(),
+            BodySource::Code { lines, numbered } => {
+                format!(
+                    "{}{}",
+                    code_gutter(index, *numbered),
+                    code_text(&lines[index as usize])
+                )
+            }
         }
     }
 
@@ -176,6 +199,7 @@ impl BodySource {
                 format!("{prefix}{}", rows.row_str(index))
             }
             BodySource::Numbered { rows } => rows.row_str(index).to_string(),
+            BodySource::Code { lines, .. } => code_text(&lines[index as usize]),
             BodySource::Diff { lines } => diff_row_copy_text(&lines[index as usize]),
             BodySource::Lines { lines } => lines[index as usize]
                 .spans
@@ -201,6 +225,12 @@ impl BodySource {
             ]),
             BodySource::Diff { lines } => diff_row_line(&lines[index as usize]),
             BodySource::Lines { lines } => lines[index as usize].clone(),
+            BodySource::Code { lines, numbered } => {
+                let mut spans =
+                    vec![Span::raw(code_gutter(index, *numbered)).fg(theme::text_muted())];
+                spans.extend(lines[index as usize].spans.iter().cloned());
+                Line::from(spans)
+            }
         }
     }
 }
@@ -310,6 +340,26 @@ fn gutter_number(value: Option<u64>) -> String {
     value
         .map(|n| format!("{n:>4}"))
         .unwrap_or_else(|| "    ".to_string())
+}
+
+/// The line-number gutter for a [`BodySource::Code`] row, matching the one
+/// [`BodySource::Numbered`] paints so the two listings line up. Rows past
+/// `numbered` (a trailing hint) get the same width, blank.
+fn code_gutter(index: u32, numbered: usize) -> String {
+    if (index as usize) < numbered {
+        format!("    {:>4} ", index + 1)
+    } else {
+        "         ".to_string()
+    }
+}
+
+/// A highlighted row's text without its gutter — what wrap counting measures
+/// and what a copy puts on the clipboard.
+fn code_text(line: &Line<'static>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
 }
 
 /// One chunk of a segment body. Fixed chunks keep their lines resident (they
@@ -1331,6 +1381,35 @@ pub(crate) mod tests {
         };
         assert_eq!(diff.row_copy_text(0), "+let z = 3;");
         assert_eq!(diff.row_copy_text(1), " kept");
+    }
+
+    /// A code row is the numbered listing's layout with the highlighting kept:
+    /// the gutter is decoration (never copied), the spans are the code. Rows
+    /// past `numbered` (a hint) keep the gutter's width but no number.
+    #[test]
+    fn code_rows_keep_their_spans_behind_a_gutter() {
+        let code = BodySource::Code {
+            lines: Rc::from(vec![
+                Line::from(vec![
+                    Span::raw("let").fg(shuvarie_highlight::theme::code_keyword()),
+                    Span::raw(" x = 1;"),
+                ]),
+                Line::from("second"),
+                Line::from("… +4 more lines"),
+            ]),
+            numbered: 2,
+        };
+        assert_eq!(code.row_count(), 3);
+        assert_eq!(code.row_copy_text(0), "let x = 1;");
+        assert_eq!(code.row_text(0), "       1 let x = 1;");
+        // The copy text carries no gutter, and the painted row does.
+        assert_eq!(code.row_copy_text(1), "second");
+        let painted = code.row(1);
+        assert_eq!(painted.spans[0].content.as_ref(), "       2 ");
+        assert_eq!(painted.spans[1].content.as_ref(), "second");
+        // An unnumbered row lines up with the code but claims no line number.
+        assert_eq!(code.row_text(2), "         … +4 more lines");
+        assert_eq!(code.row_copy_text(2), "… +4 more lines");
     }
 
     fn emphasis_diff_source() -> BodySource {

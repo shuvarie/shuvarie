@@ -1,5 +1,4 @@
 use std::str::FromStr;
-use std::sync::LazyLock;
 
 use ratatui::prelude::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -167,8 +166,9 @@ fn syntect_theme() -> SyntectTheme {
 }
 
 fn syntax_set() -> &'static SyntaxSet {
-    static SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
-    &SET
+    // The default set plus the one grammar syntect does not ship: Rhai, which is
+    // what a codemode script is written in.
+    crate::rhai::syntax_set()
 }
 
 fn highlight_line<'a>(
@@ -204,14 +204,22 @@ pub fn highlight_code(lang: &str, code_text: &str) -> Vec<Line<'static>> {
     let mut parse_state = ParseState::new(syntax);
 
     let mut lines = Vec::new();
-    for line in code_text.lines() {
+    let last = code_text.lines().count();
+    for (index, line) in code_text.lines().enumerate() {
         let line = code::expand_tabs(line);
+        // The set is built with `lines_include_newline`, so a grammar's rules may
+        // anchor on the line feed. Feeding one back gives them what they expect;
+        // without it, a line-comment rule whose end is `$` never closes and the
+        // rest of the block inherits the comment's scope (which is how a
+        // JavaScript fence ends up one flat color per row).
+        let terminated = (index + 1 < last).then(|| format!("{line}\n"));
+        let source = terminated.as_deref().unwrap_or(&line);
         let range = match highlight_line(
             &mut highlight_state,
             &mut parse_state,
             set,
             &highlighter,
-            &line,
+            source,
         ) {
             Some(r) => r,
             None => {
@@ -224,7 +232,11 @@ pub fn highlight_code(lang: &str, code_text: &str) -> Vec<Line<'static>> {
         let mut spans = Vec::with_capacity(range.len());
         for (style, text) in range {
             let style = to_ratatui_style(to_ratatui_color(style.foreground), style.font_style);
-            spans.push(Span::styled(text.to_string(), style));
+            // The line feed belongs to the source, not to the row.
+            let text = text.strip_suffix('\n').unwrap_or(text);
+            if !text.is_empty() {
+                spans.push(Span::styled(text.to_string(), style));
+            }
         }
         lines.push(code::keep_indent(Line::from(spans)));
     }

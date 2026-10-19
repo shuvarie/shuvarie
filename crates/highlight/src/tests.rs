@@ -470,6 +470,31 @@ fn kept_text(line: &Line<'static>) -> String {
 }
 
 #[test]
+fn a_line_comment_does_not_swallow_the_rest_of_a_fence() {
+    // The syntax set is built with `lines_include_newline`, so grammars may
+    // anchor a rule's end on the line feed. When the highlighter fed them
+    // newline-stripped lines, JavaScript's `//` comment never closed and every
+    // following row in the fence inherited its scope — one flat color for the
+    // whole block.
+    let lines = render("```js\n// a comment\nif (x) { return \"yes\"; }\n```");
+    let text = rows(&lines);
+    assert!(text[2].contains("if"), "{text:?}");
+
+    let keyword = theme::code_keyword();
+    let comment_row: Vec<_> = lines[2].spans.iter().map(|s| s.style.fg).collect();
+    assert!(
+        comment_row.contains(&Some(keyword)),
+        "`if` on the row after a comment must still be a keyword: {comment_row:?}"
+    );
+    let string = theme::code_string();
+    assert!(
+        lines[2].spans.iter().any(|s| s.style.fg == Some(string)),
+        "and the string literal must still be a string: {:?}",
+        lines[2].spans
+    );
+}
+
+#[test]
 fn syntax_lang_detection() {
     assert!(syntax::is_supported("rust"));
     assert!(syntax::is_supported("rs"));

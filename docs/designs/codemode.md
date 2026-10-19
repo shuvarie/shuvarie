@@ -88,6 +88,12 @@ Consequences that make this worth the thread:
   outcome), which the model, the live transcript and a replayed session all read
   from the same text. Suppressing at the source rather than in the TUI is what
   keeps the live turn and the reloaded one identical.
+- The block **leads with the script as code**: highlighted (a bundled Rhai
+  grammar, since syntect ships none) behind a line-number gutter, then the value,
+  console output and trace below it. Collapsed keeps three script lines so the
+  block still says what ran; expanding shows the whole script. Moving the script
+  out of the block's title is what makes the highlighting possible at all — a
+  title is plain text.
 
 The trade this makes: a file a script edited shows in the trace by path, but its
 **diff is not rendered** — diffs are drawn from a tool block's `FileChange`, and

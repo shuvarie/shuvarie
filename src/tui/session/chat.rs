@@ -458,6 +458,15 @@ impl SelRange {
 /// estimated lazy slots so long sessions scroll without full-content
 /// rebuilds. Scroll position and the scrollbar derive from mixed exact and
 /// estimated row heights.
+/// Which of a tool block's collapse axes a toggle addresses. The body (output),
+/// a multi-line title, and a code listing each collapse on their own.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Axis {
+    Body,
+    Title,
+    Code,
+}
+
 pub struct Chat {
     turns: RefCell<Vec<TurnData>>,
     in_flight: RefCell<Option<TurnData>>,
@@ -484,6 +493,11 @@ pub struct Chat {
     /// The same for tool titles expanded past the collapse cap (a multi-line
     /// `run_shell` command): a title expands independently of its body.
     title_toggled: BTreeSet<(usize, usize)>,
+    /// The same for code listings past the collapse cap: a `codemode` script
+    /// collapses independently of the output below it. A listing is expanded by
+    /// default, so absence here means "expanded" — the set records the blocks a
+    /// reader collapsed.
+    code_collapsed: BTreeSet<(usize, usize)>,
     /// Live drag selection in content space; survives scrolling.
     selection: RefCell<Option<SelRange>>,
     /// A mouse button is down inside the history pane.
@@ -585,6 +599,7 @@ impl Chat {
             env_rev: 0,
             toggled: BTreeSet::new(),
             title_toggled: BTreeSet::new(),
+            code_collapsed: BTreeSet::new(),
             selection: RefCell::new(None),
             dragging: Cell::new(false),
             last_click: RefCell::new(None),
@@ -865,6 +880,7 @@ impl Chat {
                 self.interrupted = false;
                 self.toggled.clear();
                 self.title_toggled.clear();
+                self.code_collapsed.clear();
                 self.clear_selection();
                 let mut scroll = self.scroll.borrow_mut();
                 scroll.offset = 0;
@@ -1038,6 +1054,7 @@ impl Chat {
             let stored = self.stored.as_ref();
             let toggled = &self.toggled;
             let title_toggled = &self.title_toggled;
+            let code_collapsed = &self.code_collapsed;
             let mut y = 0u32;
             for (i, slot) in turns.iter_mut().enumerate() {
                 let h = heights[i];
@@ -1049,6 +1066,7 @@ impl Chat {
                             || materialize_blocks(session, i),
                             toggled,
                             title_toggled,
+                            code_collapsed,
                             i,
                             marker,
                         );
@@ -1129,6 +1147,7 @@ impl Chat {
             let stored = self.stored.as_ref();
             let toggled = &self.toggled;
             let title_toggled = &self.title_toggled;
+            let code_collapsed = &self.code_collapsed;
             let mut y = 0u32;
             for (i, slot) in turns.iter_mut().enumerate() {
                 let mut h = heights[i];
@@ -1139,6 +1158,7 @@ impl Chat {
                             || materialize_blocks(session, i),
                             toggled,
                             title_toggled,
+                            code_collapsed,
                             i,
                             interrupted && !streaming && i + 1 == turns_len,
                         );
@@ -1701,6 +1721,7 @@ impl Chat {
             || materialize_blocks(session, turn_idx),
             &self.toggled,
             &self.title_toggled,
+            &self.code_collapsed,
             turn_idx,
             marker,
         );
@@ -1827,6 +1848,7 @@ impl Chat {
         self.interrupted = interrupted;
         self.toggled.clear();
         self.title_toggled.clear();
+        self.code_collapsed.clear();
         let mut scroll_state = self.scroll.borrow_mut();
         match scroll {
             ScrollInit::Restore => {
@@ -2210,6 +2232,7 @@ impl Chat {
                 }
                 HitKind::Body => self.toggle_block(addr),
                 HitKind::Title => self.toggle_title(addr),
+                HitKind::Code => self.toggle_code(addr),
             }
         }
     }
@@ -2224,13 +2247,23 @@ impl Chat {
         self.toggle_at(addr, BlockMessage::ToggleTitle);
     }
 
+    /// Toggle a tool's code listing (its own control, for a `codemode` script
+    /// past the collapse cap) instead of its output.
+    fn toggle_code(&mut self, addr: BlockAddr) {
+        self.toggle_at(addr, BlockMessage::ToggleCode);
+    }
+
     /// Apply a toggle to the addressed block — in a committed turn or the
     /// in-flight one — record the resulting expansion in the matching side-set
     /// so an evicted turn materializes back in the state the user left it in,
     /// and refresh the turn's layout estimate.
     fn toggle_at(&mut self, addr: BlockAddr, msg: BlockMessage) {
         self.clear_selection();
-        let title = matches!(msg, BlockMessage::ToggleTitle);
+        let axis = match msg {
+            BlockMessage::ToggleTitle => Axis::Title,
+            BlockMessage::ToggleCode => Axis::Code,
+            _ => Axis::Body,
+        };
         let turns_len = self.turns.borrow().len();
         if addr.turn > turns_len {
             return;
@@ -2260,19 +2293,23 @@ impl Chat {
             .blocks
             .as_ref()
             .and_then(|blocks| blocks.get(addr.block))
-            .is_some_and(|block| {
-                if title {
-                    block.is_title_expanded()
-                } else {
-                    block.is_expanded()
-                }
+            .is_some_and(|block| match axis {
+                Axis::Title => block.is_title_expanded(),
+                Axis::Code => block.is_code_expanded(),
+                Axis::Body => block.is_expanded(),
             });
-        let set = if title {
-            &mut self.title_toggled
-        } else {
-            &mut self.toggled
+        // The code axis defaults to expanded, so its set records collapsing.
+        let set = match axis {
+            Axis::Title => &mut self.title_toggled,
+            Axis::Code => &mut self.code_collapsed,
+            Axis::Body => &mut self.toggled,
         };
-        if expanded {
+        let present = if axis == Axis::Code {
+            !expanded
+        } else {
+            expanded
+        };
+        if present {
             set.insert((addr.turn, addr.block));
         } else {
             set.remove(&(addr.turn, addr.block));
@@ -5768,7 +5805,7 @@ mod media_hits_tests {
     fn media_slot(hit: &HitRegion) -> Option<u16> {
         match hit.kind {
             HitKind::Media(slot) => Some(slot),
-            HitKind::Body | HitKind::Title => None,
+            HitKind::Body | HitKind::Title | HitKind::Code => None,
         }
     }
     fn image_attachment(sha: &str) -> shuvarie_llm::Attachment {

@@ -57,25 +57,15 @@ pub(super) fn shell_command_rows(args: &serde_json::Value) -> usize {
     cmd.unwrap_or("").lines().count().max(1)
 }
 
-/// Title rows a `codemode` script feeds its header onto, mirroring
-/// [`shell_command_rows`]: a script is multi-line by nature, so its header
-/// shows its line feeds rather than collapsing a whole program onto one row.
-pub(super) fn codemode_script_rows(args: &serde_json::Value) -> usize {
-    let script = args.get("script").and_then(serde_json::Value::as_str);
-    script.unwrap_or("").lines().count().max(1)
-}
-
-/// The rows a tool header's title renders over: one for most tools, but one per
-/// line feed for the two whose argument is a multi-line program (`run_shell`'s
-/// command, `codemode`'s script) — capped at [`TITLE_COLLAPSE_LINES`] plus the
-/// hint row while the title is collapsed. Mirrors what `ToolBlock`'s header
-/// renders.
+/// The rows a tool header's title renders over: one for every tool but
+/// `run_shell`, whose command's line feeds feed the title onto a row per line
+/// — capped at [`TITLE_COLLAPSE_LINES`] plus the hint row while the title is
+/// collapsed. Mirrors what `ToolBlock`'s header renders.
 pub(super) fn title_rows(name: &str, args: &serde_json::Value, expanded: bool) -> u32 {
-    let lines = match name {
-        "run_shell" => shell_command_rows(args),
-        "codemode" => codemode_script_rows(args),
-        _ => return 1,
-    } as u32;
+    if name != "run_shell" {
+        return 1;
+    }
+    let lines = shell_command_rows(args) as u32;
     if expanded || lines <= TITLE_COLLAPSE_LINES as u32 {
         lines
     } else {
@@ -93,11 +83,7 @@ pub(super) fn title_rows_json(name: &str, args_json: &str, expanded: bool) -> u3
 /// Whether a tool header's title holds more lines than the collapse cap, so it
 /// carries its own expand/collapse control.
 pub(super) fn title_collapsible(name: &str, args: &serde_json::Value) -> bool {
-    match name {
-        "run_shell" => shell_command_rows(args) > TITLE_COLLAPSE_LINES,
-        "codemode" => codemode_script_rows(args) > TITLE_COLLAPSE_LINES,
-        _ => false,
-    }
+    name == "run_shell" && shell_command_rows(args) > TITLE_COLLAPSE_LINES
 }
 
 /// One chat block: a TEA model per variant for the stateful kinds, unit
@@ -125,6 +111,9 @@ pub enum BlockMessage {
     /// Flip a tool header's title lines — the control a multi-line `run_shell`
     /// command carries independently of its output.
     ToggleTitle,
+    /// Flip a tool's code listing — a `codemode` block's script, which collapses
+    /// independently of the result below it.
+    ToggleCode,
     Tool(ToolMessage),
     Text(TextMessage),
     Reasoning(ReasoningMessage),
@@ -159,6 +148,13 @@ impl Block {
             BlockMessage::ToggleTitle => match self {
                 Block::Tool(tool) => {
                     tool.toggle_title();
+                    true
+                }
+                _ => false,
+            },
+            BlockMessage::ToggleCode => match self {
+                Block::Tool(tool) => {
+                    tool.toggle_code();
                     true
                 }
                 _ => false,
@@ -304,6 +300,22 @@ impl Block {
 
     pub fn is_title_expanded(&self) -> bool {
         matches!(self, Block::Tool(tool) if tool.is_title_expanded())
+    }
+
+    pub fn set_code_expanded(&mut self, expanded: bool) {
+        if let Block::Tool(tool) = self {
+            tool.set_code_expanded(expanded);
+        }
+    }
+
+    pub fn is_code_expanded(&self) -> bool {
+        matches!(self, Block::Tool(tool) if tool.is_code_expanded())
+    }
+
+    /// Whether the block carries a code listing with rows hidden behind its own
+    /// control (a `codemode` script past the collapse cap).
+    pub fn code_collapsible(&self) -> bool {
+        matches!(self, Block::Tool(tool) if tool.code_collapsible())
     }
 }
 
