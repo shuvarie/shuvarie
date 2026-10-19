@@ -86,7 +86,7 @@ impl Row {
 
     fn label(self) -> &'static str {
         match self {
-            Row::Enabled => "Offer the tool",
+            Row::Enabled => "Offered",
             Row::Mode => "Roster",
             Row::Store => "Keep state",
             Row::InlineBudget => "Inline budget",
@@ -239,11 +239,11 @@ impl CodemodeEditor {
         }
         match self.selected_row() {
             Row::Enabled => match self.prefs.enabled {
+                CodemodeEnabled::On => "Offered on every turn; `disabled #true` turns it off.",
                 CodemodeEnabled::Auto => {
                     "Offered only on turns that have a configured tool or an MCP server to \
                      orchestrate."
                 }
-                CodemodeEnabled::On => "Offered on every turn, whether or not one is configured.",
                 CodemodeEnabled::Off => "Never offered.",
             },
             Row::Mode => match self.prefs.mode {
@@ -341,8 +341,8 @@ mod tests {
         let CodemodeEffect::Changed(prefs) = effect else {
             panic!("expected a change");
         };
-        // `on` walks to `off`, the next value in the declaration order.
-        assert_eq!(prefs.enabled, CodemodeEnabled::Off);
+        // `on` walks to `auto`, the next value in the declaration order.
+        assert_eq!(prefs.enabled, CodemodeEnabled::Auto);
         // The switch travels with the settings, so the core writes one value.
         assert_eq!(prefs.inline_budget, 3000);
     }
@@ -366,8 +366,8 @@ mod tests {
         assert_eq!(
             seen,
             vec![
-                CodemodeEnabled::Off,
                 CodemodeEnabled::Auto,
+                CodemodeEnabled::Off,
                 CodemodeEnabled::On,
             ],
             "a full cycle visits each value once and wraps"
@@ -592,8 +592,8 @@ mod tests {
         assert_eq!(editor.value(Row::Timeout), "none");
         assert_eq!(editor.value(Row::MaxOperations), "unlimited");
         assert_eq!(editor.value(Row::MaxToolCalls), "unlimited");
-        // A fresh editor shows the shipped defaults: `auto`, on until a turn
-        // has configured sources.
-        assert_eq!(editor.value(Row::Enabled), "auto");
+        // A fresh editor shows the shipped defaults: offered, and the roster
+        // split that pays for itself.
+        assert_eq!(editor.value(Row::Enabled), "on");
     }
 }

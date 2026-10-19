@@ -2810,39 +2810,42 @@ async fn failed_turn_state() -> (Store, uuid::Uuid, shuvarie_db::StoredMessage) 
     (store, sid, partial)
 }
 
-/// `enabled "auto"` is the shipped default and keys off the turn's configured
-/// sources: the tool is offered exactly when a script would have a configured
-/// tool to orchestrate. The two absolute values ignore the roster.
+/// Codemode is offered by default, and `disabled "auto"` narrows it to the
+/// turn's configured sources: the tool is then offered exactly when a script
+/// would have a configured tool to orchestrate. `disabled #true` ignores the
+/// roster and rules it out.
 #[tokio::test]
-async fn auto_offers_codemode_only_when_a_configured_tool_exists() {
+async fn codemode_is_offered_by_default_and_auto_narrows_it() {
     let store = Store::open_in_memory().await.unwrap();
     let (mut ctx, _rx) = resume_ctx(store, Session::new()).await;
 
     assert_eq!(
         ctx.config.codemode.enabled,
-        shuvarie_config::CodemodeEnabled::Auto,
+        shuvarie_config::CodemodeEnabled::On,
         "the shipping default"
     );
     assert!(
-        ctx.codemode_wiring(false).is_none(),
-        "no stdio or MCP tools: nothing to orchestrate"
+        ctx.codemode_wiring(false).is_some(),
+        "the default offers the tool whether or not a source is configured"
     );
-    let wiring = ctx
-        .codemode_wiring(true)
-        .expect("a configured tool to orchestrate");
+    let wiring = ctx.codemode_wiring(false).expect("offered by default");
     // The default mode is the split that pays for itself.
     assert_eq!(wiring.mode, crate::tools::codemode::Mode::DeclareBuiltin);
 
-    ctx.config.codemode.enabled = shuvarie_config::CodemodeEnabled::On;
+    ctx.config.codemode.enabled = shuvarie_config::CodemodeEnabled::Auto;
     assert!(
-        ctx.codemode_wiring(false).is_some(),
-        "`on` ignores the roster"
+        ctx.codemode_wiring(false).is_none(),
+        "auto needs a configured tool to orchestrate"
+    );
+    assert!(
+        ctx.codemode_wiring(true).is_some(),
+        "a configured tool satisfies auto"
     );
 
     ctx.config.codemode.enabled = shuvarie_config::CodemodeEnabled::Off;
     assert!(
         ctx.codemode_wiring(true).is_none(),
-        "`off` ignores the roster"
+        "`disabled #true` ignores the roster"
     );
 }
 

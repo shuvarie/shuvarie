@@ -138,9 +138,10 @@ and eval errors carry Rhai's line/column.
 
 ```
 codemode {
-  enabled "auto"    // default "auto" — offered on turns that have a configured
-                     //   tool (a `tool` entry or an MCP server) for it to
-                     //   orchestrate. `#true` offers it always, `#false` never.
+  disabled #true   // omitted = offered. `#true` turns the tool off, `#false`
+                     //   states it on, and `"auto"` narrows it to the turns that
+                     //   have a configured tool (a `tool` entry or an MCP server)
+                     //   for it to orchestrate.
   mode "declare-builtin" // default. "declare-builtin": the builtins stay, and
                      //   stdio/MCP tools are reachable only from a script.
                      //   "declared": every tool stays in the roster, described
@@ -160,7 +161,7 @@ codemode {
 }
 ```
 
-Scenes need nothing new: `tools { disable-all; tool "codemode" { enabled #true } }`,
+Scenes need nothing new: `tools { disable-all; tool "codemode" { disabled #false } }`,
 and per-tool `disabled` / `ask` overrides, all work through `ToolScene`/`Access`
 as they do today.
 
@@ -185,11 +186,13 @@ schema per tool. The split is drawn by *provenance*, not by size: configured
 sources (MCP servers and `tool` entries) go script-only, tools written in Rust
 stay declared.
 
-That default pairs with `enabled "auto"`: the feature switches itself on when
-there is a configured source to hide, and stays out of the roster when there is
-not — so a fresh install pays nothing, and connecting an MCP server is the whole
-opt-in. `auto` reads the config, not the scene-pruned roster, so a scene cannot
-silently flip a setting the user wrote down.
+That split is the default, and the tool is **offered by default** with it: an
+absent `disabled` node means on, so codemode is there without the user asking,
+and the configured sources it would otherwise flood the roster with are already
+behind it. `disabled "auto"` remains the narrower opt-in — offered only on the
+turns that have a configured source to hide — and reads the config rather than
+the scene-pruned roster, so a scene cannot silently flip a setting the user
+wrote down.
 
 One rule holds across all three modes: **a tool a script may not run never
 leaves the model's roster.** `codemode { tools { tool "x" { disabled #true } } }`
@@ -241,7 +244,7 @@ enabled.
 2. **Core wiring.** The tool, the roster→catalog snapshot, the dispatcher
    (scene-gated `DynamicTool`, permissions, truncation), and the per-turn store.
    Integration tests with a stub roster.
-3. **Config, modes, discovery.** `enabled` / `mode`, the budget, and the
+3. **Config, modes, discovery.** `disabled` / `mode`, the budget, and the
    `search_tools` / `describe_tool` / `ALL_TOOLS` fallbacks.
 4. **Docs as code.** The dialect card, the embedded skill, and the tests that
    execute every snippet.

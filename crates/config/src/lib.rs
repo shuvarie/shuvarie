@@ -435,10 +435,11 @@ pub struct Config {
     /// calls the other tools. Intermediate results stay in the script, so
     /// several dependent calls cost one round trip and one summary.
     ///
-    /// `auto` by default: offered on the turns that have configured tools (a
-    /// stdio `tool` entry or a connected MCP server) for it to orchestrate, and
-    /// in `declare-builtin` mode, which is where that pays off — see
-    /// [`CodemodeConfig::is_enabled`].
+    /// Offered by default, in `declare-builtin` mode, which keeps the roster's
+    /// own tools callable and puts the configured ones (stdio `tool` entries and
+    /// MCP servers) behind a script. `codemode { disabled #true }` turns it off
+    /// and `disabled "auto"` narrows it to the turns that have a configured
+    /// source — see [`CodemodeConfig::is_enabled`].
     pub codemode: CodemodeConfig,
 
     /// `decisions { … }` — named, reusable questions for decision models,
@@ -901,20 +902,24 @@ impl CodemodeMode {
 
 /// How the feature is switched on.
 ///
-/// A plain bool could not express the useful middle: `codemode` costs context
-/// (a catalog in the tool's description) and only pays that back when there is
-/// something worth scripting. `auto` is that trade made for the user — offered
-/// exactly on the turns where a configured source gives it a job.
+/// Written as a `disabled` node in the file, which is why the default is the
+/// `On` variant: an absent node means the tool is offered, and the file only
+/// says something when the user wants less. A plain bool could not express the
+/// useful middle: `codemode` costs context (a catalog in the tool's description)
+/// and only pays that back when there is something worth scripting, so `auto`
+/// remains available as an opt-in for exactly the turns where a configured
+/// source gives it a job.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CodemodeEnabled {
+    /// Offered on every turn, configured sources or not. The default: the tool
+    /// appears without the user having to ask for it.
+    #[default]
+    On,
     /// Offered only when the turn's roster has tools from configuration: a
     /// configured `tool` subprocess entry, or a connected MCP server's tools.
-    /// A turn with neither keeps the plain roster, so a fresh install pays
-    /// nothing for a feature it cannot use.
-    #[default]
+    /// A turn with neither keeps the plain roster, so `auto` pays nothing for a
+    /// feature it has nothing to script.
     Auto,
-    /// Offered on every turn, configured sources or not.
-    On,
     /// Never offered.
     Off,
 }
@@ -933,8 +938,8 @@ impl CodemodeEnabled {
     }
 
     /// Every value, in the order the `/codemode` overlay cycles through them:
-    /// the default first, then the two absolutes.
-    pub const ALL: [CodemodeEnabled; 3] = [Self::Auto, Self::On, Self::Off];
+    /// the default first.
+    pub const ALL: [CodemodeEnabled; 3] = [Self::On, Self::Auto, Self::Off];
 
     /// The next value in [`Self::ALL`], wrapping back to the first.
     pub fn next(self) -> Self {
@@ -949,8 +954,9 @@ impl CodemodeEnabled {
 /// `codemode { … }`: the scripting tool's own configuration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodemodeConfig {
-    /// `enabled "auto" | #true | #false`. `auto` by default: the tool appears
-    /// once a turn has configured sources for it to orchestrate.
+    /// `disabled #true | #false | "auto"`. Absent by default, which leaves the
+    /// tool offered — the file only has to say something when the user wants it
+    /// off, or wants `auto`'s narrower gate.
     pub enabled: CodemodeEnabled,
 
     /// `mode "declared" | "declare-builtin" | "only"`.
@@ -1011,8 +1017,8 @@ impl CodemodeConfig {
 
     /// Whether the feature can be offered on *any* turn. Decided once per config
     /// rather than once per roster, so it answers for the things that cannot see
-    /// a turn: the built-in reference skill's inclusion. Only `off` rules the
-    /// feature out entirely.
+    /// a turn: the built-in reference skill's inclusion. Only `disabled #true`
+    /// rules the feature out entirely.
     pub fn is_possible(&self) -> bool {
         self.enabled != CodemodeEnabled::Off
     }
