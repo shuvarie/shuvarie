@@ -8,6 +8,16 @@
 //!
 //! Like the card, it is code: `tests/doc.rs` executes every fenced snippet in
 //! it, so a reference that drifts from the engine fails the build.
+//!
+//! The shape of this document follows the Rhai cheat sheet
+//! (<https://optozorax.github.io/rhai_cheats/>) where a lookup table is the
+//! right form. Every claim here has been checked against the Rhai this tool
+//! actually builds (1.26.1, default features), which is behind the sheet in
+//! places: a table entry the engine rejects is worse than no entry, so the
+//! sheet's `zip`, `round(x, n)`, `PI`, `E`, `substr`, string `find`, `get(k, d)`,
+//! `for key in map`, `this` methods, method-call sugar on script functions,
+//! `let x = try { }`, and BLOBs are all absent here because they do not run.
+//! `tests/spike.rs` pins the ones worth arguing about.
 
 /// The skill's name, as `skill` invocations and the roster see it.
 pub const NAME: &str = "codemode";
@@ -17,7 +27,7 @@ pub const DESCRIPTION: &str = "Writing Rhai scripts for the `codemode` tool: typ
      control flow, error handling, and the patterns that keep a script's result small.";
 
 /// The skill's body, without the frontmatter a `SKILL.md` would carry.
-pub const BODY: &str = r#"# Writing codemode scripts
+pub const BODY: &str = r##"# Writing codemode scripts
 
 A `codemode` script is Rhai. It calls the same tools you can call directly, and
 its value -- not its transcript -- comes back to you. Use it when the steps
@@ -52,87 +62,209 @@ the callable name, and `search_tools` finds it either way.
 
 **A tool returns text or structure.** A tool that answers in prose returns a
 string. One that returns data returns a map or an array. There is no way to know
-from the signature (`-> Dynamic` is honest), so read what you got:
+from the signature (`-> Dynamic` is honest), so read what you got -- `type_of`
+answers it:
 
 ```rhai
 let todos = tools::todos();
-let open = todos.filter(|todo| !todo.done);
-`${open.len} of ${todos.len} still open`
+if type_of(todos) == "string" {
+    `${todos.len} characters of text`
+} else {
+    let open = todos.filter(|todo| !todo.done);
+    `${open.len} of ${todos.len} still open`
+}
 ```
 
 ## Values and types
 
-Rhai has `int` (64-bit), `float`, `bool`, `String`, arrays, maps, and `()` --
-the unit value, which is also what a missing map key reads as.
+Rhai has `int` (64-bit), `float`, `bool`, `char`, `String`, arrays, maps, and
+`()` -- the unit value, which is also what a missing map key reads as. A type is
+never declared and never checked until an operation needs it.
 
 ```rhai
 let n = 7;              // int
 let ratio = 0.5;        // float
 let name = "main";      // String
+let ch = 'a';           // char -- single quotes, an Unicode scalar
 let paths = ["a", "b"]; // array
 let spec = #{ path: "src/main.rs", limit: 20 }; // map
+`${type_of(n)} ${type_of(ratio)} ${type_of(ch)} ${type_of(spec)}`
 ```
+
+`type_of` returns `"i64"`, `"f64"`, `"bool"`, `"char"`, `"string"`, `"array"`,
+`"map"`, or `"()"`. `is_def_var("x")` says whether a name is bound.
+
+A `let` with no value starts as `()` -- a common way to declare the variable a
+`try`/`catch` will assign:
+
+```rhai
+let out;
+try { out = tools::read_file(#{ path: "maybe.txt" }); } catch (err) { out = `no: ${err}`; }
+out
+```
+
+`let` is mutable; `const` is not, and its initializer must be constant. Both are
+block-scoped, and an inner `let` shadows an outer one without touching it. A
+block is an expression, so it can compute something once and hand it out:
+
+```rhai
+let x = 1;
+let shadowed = { let x = 2; x };   // 2; the outer x is still 1
+let spec = { let path = "src/main.rs"; #{ path: path, depth: x } };
+`${shadowed} ${x} ${spec.depth}`
+```
+
+## Numbers and operators
+
+| Literal | Example |
+| --- | --- |
+| decimal, `_` separators | `42`, `1_000_000` |
+| binary | `0b1010` |
+| octal | `0o755` |
+| hexadecimal | `0xFF` |
+| float, with exponent | `1.0`, `1.23e-4`, `2e-3` |
+
+```rhai
+let bits = 0b1010; let hex = 0xFF; let big = 1_000_000;
+`${bits} ${hex} ${big} ${1 << 4} ${2 ** 10}`
+```
+
+`+ - * / %` on numbers; `**` is power; `<< >> & | ^` work on integers, but
+there is **no bitwise NOT** (`!` is boolean only). `+= -= *= /= %= **= &= |= ^=
+<<= >>=` assign in place. `== != < <= > >=` compare. `&&` and `||` short-circuit.
 
 `/` on two integers is integer division, and there is no implicit promotion:
 `7 / 2` is `3`, and `7.0 / 2` is `3.5`. Use `.to_float()` to force it.
 
 ```rhai
-let pages = 7 / 2;          // 3
+let pages = 7 / 2;               // 3
 let exact = 7.to_float() / 2.0;  // 3.5
 `${pages} pages, ${exact} exactly`
 ```
 
-Strings interpolate with backticks and `${...}`. For everything else, `+` only
-concatenates a string with a string: `"n=" + 1` is an error, so use
-`.to_string()` or interpolation.
+There is no `PI` or `E` constant. `abs`, `min`, `max`, `sqrt`, `floor`,
+`ceiling`, `round(x)`, `exp`, `ln`, `log(x)`, and `.is_even` / `.is_odd` exist;
+`round` takes no digits argument. `to_hex()`, `to_binary()` and `to_octal()`
+format an integer. `"255".parse_int(16)` and `"1.5".parse_float()` parse back.
+
+### The null-coalescing operator
+
+`a ?? b` is `a` unless it is `()`, in which case it is `b`. Because a missing
+map key already reads as `()`, it reads as "this key, or the fallback". After
+`??` you can put `break`, `continue`, `return` or `throw` instead of a value, to
+leave a loop or function at the first absent one:
 
 ```rhai
-let count = 2;
-`count is ${count}; n=${count.to_string()}`
+let counts = #{ a: 1 };
+let total = 0;
+for v in [1, 2, ()] { total += v ?? break; }
+`${counts.b ?? 0} for a missing key, ${counts.a ?? 0} for a real one, ${total}`
 ```
 
-Useful methods, in the two groups that matter. **In place, returning `()`:**
-`.trim()`, `.replace(a, b)`, `.truncate(n)`, `.remove(s)`, `.clear()` on a
-string, and `.push(v)`, `.sort()`, `.reverse()` on an array. **Returning a new
-value:** `.split(",")`, `.sub_string(0, 4)` (or `.sub_string(2)` to the end),
-`.to_upper()`, `.to_lower()`, `.index_of("s")`, `.parse_int(10)`,
-`.starts_with("s")`, `.ends_with("s")`, `.contains("s")` on a string, and
-`.map(|v| ...)`, `.filter(|v| ...)`, `.reduce(|acc, v| ..., seed)`,
-`.extract(0, 2)` on an array.
+## Strings
+
+Double quotes for a plain string, backticks for interpolation. `len` is the
+character count and `bytes` the byte count -- they differ on non-ASCII text.
 
 ```rhai
-let paths = tools::glob(#{ pattern: "src/**/*.rs" });
-let files = paths.split("\n").filter(|line| line.ends_with(".rs"));
-let joined = files.reduce(|acc, file| `${acc} ${file}`, "");
-`${files.len} files, upper is ${joined.to_upper()}`
+let who = "Rhai";
+`Hello, ${who}! ${"héllo".len} chars, ${"héllo".bytes} bytes`
 ```
 
-A map is read with `.get("k")`, `.keys()` and `.values()` (both new arrays),
-`.contains("k")` (a bool), `.remove("k")` (which does hand back what it
-removed) and `.len()`. It is not iterable, and its entries do not destructure:
-iterate `for k in m.keys() { }` and index.
+`+` joins a string with either side being the non-string: `"n=" + 1` is `"n=1"`
+and `1 + "n"` is `"1n"`. A string has no `*` repeat.
+
+**The methods that change the string in place return `()`** -- chaining one is
+the classic mistake, because `line.trim().split(",")` fails at the `split`:
+
+| Mutates, returns `()` | Returns a new value |
+| --- | --- |
+| `trim()`, `replace(a, b)`, `truncate(n)`, `remove(s)`, `clear()` | `to_upper()`, `to_lower()`, `sub_string(start[, len])`, `sub_string(range)` |
+| `pad(width, ch)`, `crop(start[, len])`, `append(s)` | `split(delim[, max])`, `split_rev(delim, max)`, `index_of(needle[, from])` |
+| `make_upper()`, `make_lower()` | `contains(s)`, `starts_with(s)`, `ends_with(s)`, `to_string()`, `parse_int([radix])`, `to_chars()` |
 
 ```rhai
-let todo = tools::todos()[0];
-for key in todo.keys() {
-    console.log(`${key}`);
-}
-if todo.contains("done") && !todo.done { `${todo.text} is open` } else { "all done" }
+let parts = "a, b, c".split(",");
+let padded = "abc";
+padded.pad(6, "-");          // in place; the call itself is ()
+`${parts.len} parts, ${parts[1].trim()} unpadded, ${padded}`
 ```
 
-`.len` is a **property** on arrays and strings but a **method** on maps
-(`m.len()`), because on a map a bare `.len` is a key lookup. `.is_empty` exists
-on arrays and strings.
+`sub_string(1, 3)` is start-and-length (not end), `sub_string(2)` runs to the
+end, and `sub_string(1..3)` takes a range. `chars(start)` is an iterable of
+characters for a `for` loop; `to_chars()` is the array. `trim()` takes both
+ends -- there is no one-ended trim. A char converts with `.to_int()` and back
+with `.to_string()`.
+
+## Arrays
+
+Zero-based, and a **negative index counts from the end**. Indexing out of bounds
+is an error, unlike a missing map key. `len` and `is_empty` are properties.
 
 ```rhai
-let empty = [];
-`${[1, 2].len} ${empty.is_empty} ${#{ a: 1 }.len()}`
+let a = [3, 1, 2];
+a.push(4); a.sort();          // both in place
+`${a[0]} first, ${a[-1]} last, ${a.len} total, empty is ${[].is_empty}`
+```
+
+| Mutates, returns `()` | Returns |
+| --- | --- |
+| `push(v)`, `insert(i, v)`, `clear()`, `sort()`, `sort(cmp)`, `reverse()` | `pop()`, `shift()`, `remove(i)` |
+| `truncate(n)`, `chop(n)`, `pad(n, v)`, `dedup()` (consecutive only) | `extract(start[, len])`, `extract(range)` |
+
+`for_each` also returns `()` -- it is for effect, not for building a new array.
+
+Higher-order: `map(|v| ...)`, `filter(|v| ...)`, `for_each(|v| ...)`,
+`reduce(|acc, v| ..., seed)`, `reduce_rev(|acc, v| ..., seed)`,
+`some(|v| ...)`, `all(|v| ...)`, `find(|v| ...)` and `find_map(|v| ...)` (which
+give `()` when nothing matches), `index_of(v)`, `contains(v)`.
+
+```rhai
+let scores = [3, 8, 5];
+let best = scores.reduce(|acc, v| if v > acc { v } else { acc }, 0);
+`scores [${scores}], best ${best}, any over 6: ${scores.some(|v| v > 6)}`
+```
+
+`a += [1, 2]` extends with an array and `a += 1` appends a single item. There is
+no `zip`, no `join`, and no sum helper: build a string with `reduce` and a total
+with a `for` loop.
+
+## Object maps
+
+String-keyed. `m.key` and `m["key"]` both read, but only the index form
+evaluates an expression. A **missing key is `()`**, not an error -- check with
+`.contains("k")` or `"k" in m` when that matters. Keys come back **sorted**, not
+in the order they were written. `len()` and `is_empty()` are methods here (a
+bare `.len` would be a key lookup).
+
+| Returns | Mutates, returns `()` |
+| --- | --- |
+| `keys()`, `values()`, `get(k)`, `remove(k)`, `filter(|k, v| ...)`, `drain(|k, v| ...)` | `set(k, v)`, `clear()`, `retain(|k, v| ...)`, `mixin(other)`, `fill_with(other)` |
+
+```rhai
+let by_kind = #{ rs: 3, md: 1 };
+if by_kind.contains("toml") { "has toml" } else { `${by_kind.len()} kinds, ${by_kind.rs}` }
+```
+
+`mixin` overwrites with the other map's values; `fill_with` only adds the keys
+that are missing. `drain` hands back what it removed. `m += #{ k: v }` merges.
+There is no `get(k, default)` -- write `m.get(k) ?? default`. `to_json()` renders
+a map as a JSON string.
+
+**A map is not iterable** and its entries do not destructure: walk `m.keys()` and
+index. This is the one place Rhai differs from JavaScript most sharply.
+
+```rhai
+let counts = #{ core: 2, db: 1 };
+let lines = [];
+for k in counts.keys() { lines.push(`${k}=${counts[k]}`); }
+lines.reduce(|acc, line| `${acc} ${line}`, "")
 ```
 
 ### Building a map with computed keys
 
 A map literal's keys are **literals**: a bare name or a quoted string. They are
-never evaluated, so an interpolated key is a parse error and — the quiet case —
+never evaluated, so an interpolated key is a parse error and -- the quiet case --
 a bare name is the word itself, not a variable of that name.
 
 ```rhai
@@ -147,47 +279,86 @@ files.set("b.md", "two");
 files
 ```
 
-To add a literal key to a map that already exists, `m += #{ b: 2 }` merges.
-
 ## Control flow
 
-`let` and `const`, `if`/`else` as an expression, `for`, `while`, `loop`, and
-`switch`. `break` and `continue` work in the loops. A `let` binding is mutable
-(there is no `mut`, and no immutability to opt out of).
+`if`/`else` is an expression and its condition must be a `bool` -- there is no
+truthiness, so `if () { }` and `if 1 { }` are both errors. There is no ternary;
+`if` is the ternary. `if` with no `else` and a false condition is `()`.
+
+`while`, `loop` and `do { } while` all exist, with `break` and `continue`.
+`for` walks an array, a string, or a range, and a second binding takes the index:
 
 ```rhai
-let paths = tools::glob(#{ pattern: "src/**/*.rs" })
-    .split("\n")
-    .filter(|line| line.starts_with("src/"));
-let kinds = #{ rust: 0, other: 0 };
-for path in paths {
-    if path.ends_with(".rs") {
-        kinds.rust += 1;
-    } else {
-        kinds.other += 1;
-    }
-}
-kinds
+let total = 0;
+for (value, index) in [10, 20] { total += value * index; }  // 0 + 20
+let letters = 0;
+for c in "abc" { letters += 1; }
+`${total} ${letters}`
 ```
 
-`fn` defines a function. Closures are `|x| ...` and capture by value. `for`
-yields the value, or the value and its index with `for (v, i) in array { }`.
+A range is `0..n` (exclusive) or `0..=n` (inclusive); it is only good for
+iterating and for `in`, so there is no `.len` or `.map` on one.
+
+`switch` matches literals (strings included), ranges, `|` unions of them, and `_`
+for the rest. It is an expression. **Guards are not supported** -- `x if x > 3`
+is a syntax error, so write the conditions as an `if` chain.
+
+```rhai
+fn bucket(n) {
+    switch n {
+        0 => "zero",
+        1 | 2 | 3 => "small",
+        4..=10 => "medium",
+        _ => "large",
+    }
+}
+`${bucket(0)} ${bucket(2)} ${bucket(7)} ${bucket(99)}`
+```
+
+## Functions and closures
+
+`fn` defines a function; its last statement is the value, or use `return` to
+leave early. Parameters are dynamically typed and there are no default values
+(`x ?? fallback` at the top of the body covers that).
 
 ```rhai
 fn slug(text) {
-    text.replace(" ", "-");
-    text
+    text.replace(" ", "-");   // in place; the next line reads the same variable
+    text.to_lower()
 }
-let hits = ["Main Rs", "Lib Rs"].map(|name| slug(name));
-hits[0]
+["Main Rs", "Lib Rs"].map(|name| slug(name))
 ```
+
+**A function receives copies.** A map or array edited inside one is the caller's
+value only if the function returns it; `fn bump(m) { m.x = 1; }` leaves the
+caller's map untouched. Build state in the calling scope instead.
+
+**A script function is called by name, never as a method.** `slug("x")` works;
+`"x".slug()` is `Function not found`, and `this` is reserved, so the
+method-receiver form cannot be declared either. Only the built-in types have
+methods.
+
+Closures are `|x| x * 2` and capture the variable they use. A closure held in a
+variable is called with **`.call()`**: `f(2)` is `Function not found: f`. A
+closure is also what `map`, `filter`, `some` and `reduce` take, where the
+argument form is the only form.
+
+```rhai
+let base = 10;
+let add_base = |x| x + base;
+`${add_base.call(5)}`
+```
+
+`Fn("name")` makes a function pointer from a named function, `.call(...)`
+invokes it, and `.curry(fixed)` pre-applies arguments. That is worth reaching
+for only when a function has to be chosen at runtime.
 
 ## Handling failure
 
 A tool that fails -- denied by a permission rule, missing, or erroring -- raises
 a **runtime error** in the script, which stops it unless you catch it. `try` and
-`catch` are statements, and a statement's value is `()`, so assign to a variable
-declared before it:
+`catch` are *statements*, not expressions: `let x = try { } catch { }` will not
+parse, and a statement's value is `()`, so assign to a variable declared before.
 
 ```rhai
 let src = "unreadable";
@@ -199,21 +370,22 @@ Catching is how a script keeps going after a call it expected might fail. Let an
 unexpected failure through instead: the error comes back to you with the line it
 happened on, which is more useful than a script that quietly returned nothing.
 
-`throw` raises your own error, and is the right way to end a script that found
-something it cannot work with.
+`throw "message"` raises your own error, and the `catch` variable binds what was
+thrown. It is the right way to end a script that found something it cannot work
+with. `import` is not available -- there is no module resolver, and the tools are
+already reachable.
 
 ## Reporting the result
 
 The script's value is its **last expression**, or a top-level `return`, or
-`exit(value)`. `text(value)` reports a value without ending the script, so a
-script can report several things; `console.log(...)` writes a line to the
-result's console section. Values reported by `text` come back in order, and the
-last expression comes back as the value.
+`exit(value)`. `text(value)` reports a value without ending the script.
+`console.log(...)`, `print(...)` and `debug(...)` all write a line to the
+result's log section, so they are for progress rather than for the answer.
 
 ```rhai
 let todos = tools::todos();
 text(`${todos.len} todos`);
-console.log("checked the list");
+print("checked the list");
 todos.filter(|todo| !todo.done).len
 ```
 
@@ -257,27 +429,11 @@ let previous = load("last_checked");
 
 ## Traps
 
-- **Some methods return nothing.** `trim`, `replace`, `truncate`, `remove`,
-  `clear`, and an array's `push`, `sort` and `reverse` all change the value in
-  place and hand back `()`, while `to_upper`, `split`, `sub_string`, `index_of`,
-  `map`, `filter` and `extract` return a new value. A chained mutating call is
-  the classic mistake: `line.trim().split(",")` fails, because `trim()` is `()`
-  by the time `split` sees it.
-- **There is no `join`.** Build a string with `reduce`, or interpolate an array.
-- **A string has no `to_int`.** Use `.parse_int(10)`, which throws on input that
-  is not a number.
-- **A missing map key is `()`, silently.** `todo.done` on a map without that key
-  is not an error; it is `()`, which is falsy-looking but not `false`. Check with
-  `todo.contains("done")` when it matters.
-- **No truthiness.** `if () { }` is a syntax error, and numbers are not
-  booleans. Compare explicitly: `if count > 0 { }`, `if value == () { }`.
-- **No ternary.** Use `if c { a } else { b }`, which is an expression.
-- **No `?.`.** Guard with `if` or `contains` before dereferencing.
-- **Integer division**, as above.
-- **A wrong operator is a no-op, not an error.** `"a" - "b"` is `"a"`. Reach for
-  the method you meant.
-- **A closure cannot touch the variable it is iterating.** `m.keys().map(|k|
-  m[k])` fails with a data-race error, and so do `.filter` and `.reduce` on
+Everything above states the language; these are the failures that surprise, and
+the ones a script most often loses a round trip to.
+
+- **A closure cannot touch the value it is iterating.** `m.keys().map(|k| m[k])`
+  fails with a data-race error, and so do `.filter` and `.reduce` on
   `m.keys()`/`m.values()` when the closure reads `m`: the method's result holds
   the map while the closure runs. Two escapes, both idiomatic:
 
@@ -296,8 +452,6 @@ for k in counts.keys() {
 
   The same rule catches a map being *built*: `m[k] = v` is fine inside a `for`
   loop, but not inside a closure that also holds `m`.
-- **`let _ = x;` and `catch (_)` do not parse.** `_` is not a binding; name the
-  variable (`catch (err) { }`) or drop the statement.
 - **A capped result looks exact.** `glob` returns at most 100 paths and `grep`
   at most 200, and each ends its string with a sentence saying so. That note is a
   line like any other, so the filter that makes the rest usable
@@ -315,19 +469,10 @@ if found.contains("truncated") {
     `${files.len} files`
 }
 ```
-- **There is no one-ended trim.** `trim_end_matches`, `strip_suffix` and
-  `trim_end` do not exist; `trim()` takes both ends. Drop a single character
-  with `s.sub_string(0, s.len - 1)`.
-- **A map is not iterable** and its entries do not destructure, which is why the
-  examples above walk `.keys()`.
-- **A stored closure is called with `.call()`.** `let f = |x| x + 1;` then
-  `f.call(2)` — `f(2)` is `Function not found: f`, because Rhai does not treat a
-  variable holding a closure as a callable name.
-- **A function gets values, not references.** `fn bump(m, k) { m[k] = 1; }`
-  leaves the caller's map untouched: the parameter is a copy. Build state in the
-  calling scope (a `for` loop) or return the new value.
-- **Do not mutate a captured variable inside a closure.** Rhai borrows it for the
-  closure, so changing it there fails with `Data race detected` rather than
-  corrupting it — the fix is a plain `for` loop, which is also the readable
-  idiom for building a map.
-"#;
+
+- **A wrong operator is a no-op, not an error.** `"a" - "b"` is `"a"`, and the
+  result looks like a successful computation. Reach for the method you meant.
+- **`let _ = x;` and `catch (_)` do not parse.** `_` is a binding only in a
+  `switch` arm; name the variable (`catch (err) { }`) or drop the statement.
+- **There is no `?.`.** Guard with `if` or `contains` before dereferencing.
+"##;

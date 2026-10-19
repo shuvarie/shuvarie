@@ -699,6 +699,40 @@ fn mutating_methods_return_nothing_and_the_rest_return_a_value() {
         json!("array")
     );
     assert_eq!(eval(&engine, r#"[1, 2, 3].extract(0, 2).len"#), json!(2));
+
+    // The ones the skill's table lists that are easy to guess wrong: `pad` and
+    // `crop` mutate like `trim`, and `make_upper` is the mutating half of the
+    // pair whose returning half is `to_upper`.
+    assert_eq!(
+        eval(&engine, r#"let s = "ab"; s.pad(4, "-"); s"#),
+        json!("ab--")
+    );
+    assert_eq!(eval(&engine, r#"type_of("ab".pad(4, "-"))"#), json!("()"));
+    assert_eq!(
+        eval(&engine, r#"let s = "hello"; s.crop(1); s"#),
+        json!("ello")
+    );
+    assert_eq!(
+        eval(&engine, r#"let s = "ab"; s.make_upper(); s"#),
+        json!("AB")
+    );
+    assert_eq!(
+        eval(&engine, r#"let a = [1, 2, 3, 4]; a.chop(2); a"#),
+        json!([3, 4])
+    );
+    assert_eq!(
+        eval(&engine, r#"let a = [1]; a.pad(3, 0); a"#),
+        json!([1, 0, 0])
+    );
+    // `dedup` only collapses *consecutive* duplicates, as its name promises.
+    assert_eq!(
+        eval(&engine, r#"let a = [1, 1, 2, 1]; a.dedup(); a"#),
+        json!([1, 2, 1])
+    );
+    // ...and the ones that hand back what they took.
+    assert_eq!(eval(&engine, r#"let a = [1, 2]; a.pop()"#), json!(2));
+    assert_eq!(eval(&engine, r#"let a = [1, 2]; a.shift()"#), json!(1));
+    assert_eq!(eval(&engine, r#"let a = [1, 2]; a.remove(0)"#), json!(1));
 }
 
 /// Three habits that cost a live agent a rewrite each, pinned because the skill
@@ -971,4 +1005,170 @@ fn map_literal_keys_are_literals_not_expressions() {
         eval(&engine, "let m = #{ a: 1 }; m += #{ b: 2 }; m"),
         json!({ "a": 1, "b": 2 })
     );
+}
+
+/// The skill's tables are a lookup aid, so an entry that does not run costs a
+/// whole round trip. These are the Rhai cheat sheet entries that this engine
+/// does **not** have -- the sheet tracks a newer Rhai than the one codemode
+/// builds (1.26.1, default features).
+///
+/// Pinned rather than merely omitted: if an upgrade adds one, the reference
+/// should gain the row, and this test is where that shows up.
+#[test]
+fn the_reference_names_only_what_this_engine_has() {
+    let engine = Engine::new();
+    let absent = [
+        // Newer-Rhai array and map helpers.
+        ("zip", "[1, 2].zip([3, 4])"),
+        ("get with a default", r#"#{ a: 1 }.get("z", 9)"#),
+        ("round with digits", "round(3.456, 2)"),
+        // String helpers under their other names. `find` exists for arrays and
+        // closures, which is why a model reaches for it on a string.
+        ("string find", r#""hello".find("ll")"#),
+        ("substr", r#""hello".substr(1, 3)"#),
+        ("join", r#"["a", "b"].join(",")"#),
+        ("to_int on a string", r#""12".to_int()"#),
+        // Constants and blobs.
+        ("PI", "PI"),
+        ("E", "E"),
+        ("BLOB literals", "#[1, 2]"),
+        // Numeric bit twiddling.
+        ("bitwise NOT on an integer", "!0"),
+        // Module resolution: there is no file access to resolve against.
+        ("import", r#"import "x" as y; 1"#),
+        ("timestamp", "now()"),
+    ];
+    for (name, script) in absent {
+        assert!(
+            engine.eval::<Dynamic>(script).is_err(),
+            "{name} now works; the skill's tables should say so: {script}"
+        );
+    }
+}
+
+/// A script function is called by name. The cheat sheet's "Functions & Methods"
+/// section describes method-call sugar and `this` receivers, and neither is
+/// available here -- which matters because the sugar *is* available on every
+/// built-in type, so it reads as a language feature rather than a gap.
+#[test]
+fn a_script_function_is_called_by_name_not_as_a_method() {
+    let engine = Engine::new();
+
+    assert_eq!(eval(&engine, r#"fn dbl(n) { n * 2 } dbl(5)"#), json!(10));
+    for script in [
+        r#"fn dbl(n) { n * 2 } let v = 5; v.dbl()"#,
+        r#"fn dbl(n) { n * 2 } (5).dbl()"#,
+        r#"fn shout(s) { s.to_upper() } "hi".shout()"#,
+    ] {
+        let err = engine.eval::<Dynamic>(script).unwrap_err();
+        assert!(
+            matches!(*err, EvalAltResult::ErrorFunctionNotFound(..)),
+            "method sugar should not reach a script function: {err}"
+        );
+    }
+
+    // The receiver form cannot even be declared: `this` is reserved.
+    let err = engine
+        .eval::<Dynamic>("fn inc(this) { this + 1 } 1.inc()")
+        .unwrap_err();
+    assert!(
+        matches!(*err, EvalAltResult::ErrorParsing(..)),
+        "`this` is a reserved keyword: {err}"
+    );
+}
+
+/// `try` is a statement, so it cannot be the right-hand side of a `let`. The
+/// cheat sheet shows `let result = try { ... } catch { ... }`, which is a parse
+/// error here -- and the skill's "assign to a variable declared before it" only
+/// makes sense if that is said out loud.
+#[test]
+fn try_is_a_statement_not_an_expression() {
+    let engine = Engine::new();
+
+    let err = engine
+        .eval::<Dynamic>("let x = try { 1 } catch (e) { 2 }; x")
+        .unwrap_err();
+    assert!(
+        matches!(*err, EvalAltResult::ErrorParsing(..)),
+        "`try` cannot be an expression: {err}"
+    );
+
+    // The working shape, and what the caught value is.
+    assert_eq!(
+        eval(
+            &engine,
+            r#"let x = 0; try { throw "boom"; } catch (e) { x = e.len; } x"#
+        ),
+        json!(4)
+    );
+}
+
+/// A map is not iterable, so there is no `for k in map` -- only `keys()`.
+#[test]
+fn a_map_iterates_only_through_its_keys() {
+    let engine = Engine::new();
+
+    let err = engine
+        .eval::<Dynamic>("for k in #{ a: 1 } { k }")
+        .unwrap_err();
+    assert!(
+        matches!(*err, EvalAltResult::ErrorParsing(..)),
+        "an object map is not iterable: {err}"
+    );
+    assert_eq!(
+        eval(
+            &engine,
+            "let n = 0; for k in #{ a: 1 }.keys() { n += 1; } n"
+        ),
+        json!(1)
+    );
+}
+
+/// Concatenation accepts the non-string on either side, which is the opposite of
+/// what a "strong typing, no implicit casts" language suggests -- and the skill
+/// used to say `"n=" + 1` was an error until a probe showed it building `"n=1"`.
+#[test]
+fn a_string_concatenates_with_a_number_either_way_round() {
+    let engine = Engine::new();
+    assert_eq!(eval(&engine, r#""n=" + 1"#), json!("n=1"));
+    assert_eq!(eval(&engine, r#"1 + "n""#), json!("1n"));
+    assert_eq!(eval(&engine, r#""n=" + 1.5"#), json!("n=1.5"));
+    // But two numbers still add, and a map has no `+` with a string.
+    assert_eq!(eval(&engine, "1 + 2"), json!(3));
+}
+
+/// The operator set the reference documents: power and shifts exist, bitwise NOT
+/// on an integer does not.
+#[test]
+fn numbers_have_power_and_bits_but_no_bitwise_not() {
+    let engine = Engine::new();
+    assert_eq!(eval(&engine, "2 ** 10"), json!(1024));
+    assert_eq!(eval(&engine, "let x = 2; x **= 3; x"), json!(8));
+    assert_eq!(eval(&engine, "1 << 4"), json!(16));
+    assert_eq!(eval(&engine, "(6 & 3) + (6 | 3) + (6 ^ 3)"), json!(14));
+    // Literal forms, including the separators.
+    assert_eq!(eval(&engine, "0b1010"), json!(10));
+    assert_eq!(eval(&engine, "0o755"), json!(493));
+    assert_eq!(eval(&engine, "0xFF"), json!(255));
+    assert_eq!(eval(&engine, "1_000_000"), json!(1_000_000));
+    let err = engine.eval::<Dynamic>("!0").unwrap_err();
+    assert!(
+        matches!(*err, EvalAltResult::ErrorFunctionNotFound(..)),
+        "there is no bitwise NOT on an integer: {err}"
+    );
+}
+
+/// Map keys come back sorted, not in the order they were written, so a script
+/// that reports "the first key" gets an alphabetical one.
+#[test]
+fn map_keys_come_back_sorted() {
+    let engine = Engine::new();
+    assert_eq!(
+        eval(&engine, "#{ z: 1, a: 2, m: 3 }.keys()"),
+        json!(["a", "m", "z"])
+    );
+    // And `is_empty` is a method here, because a bare `.is_empty` is a key
+    // lookup like any other property on a map.
+    assert_eq!(eval(&engine, "#{}.is_empty()"), json!(true));
+    assert_eq!(eval(&engine, r#"type_of(#{}.is_empty)"#), json!("()"));
 }

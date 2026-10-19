@@ -248,4 +248,185 @@ mod tests {
             scopes_at(line, line.len() - 1)
         );
     }
+
+    /// Every byte of `needle`, as it appears in `line`, carries `scope`.
+    fn every_byte_has(line: &str, needle: &str, scope: &str) -> bool {
+        let start = line
+            .find(needle)
+            .unwrap_or_else(|| panic!("`{needle}` is not in `{line}`"));
+        (start..start + needle.len()).all(|at| {
+            scopes_at(line, at)
+                .iter()
+                .any(|found| found.contains(scope))
+        })
+    }
+
+    /// No byte of `needle`, as it appears in `line`, carries `scope`.
+    fn no_byte_has(line: &str, needle: &str, scope: &str) -> bool {
+        let start = line.find(needle).expect("the needle is in the line");
+        (start..start + needle.len()).all(|at| {
+            !scopes_at(line, at)
+                .iter()
+                .any(|found| found.contains(scope))
+        })
+    }
+
+    /// A char literal is one token, and `'"'` in particular must not read as a
+    /// string opener.
+    ///
+    /// This is a leak rather than a color: `let q = '"';` opened a double string
+    /// that only a later `"` could close, so everything after it rendered as
+    /// string text — the same failure the interpolation fix above addresses.
+    #[test]
+    fn a_char_literal_does_not_open_a_string() {
+        for line in [
+            r#"let q = '"';"#,
+            "let c = 'a';",
+            "let e = '\\n';",
+            "let u = '❤';",
+        ] {
+            assert!(
+                every_byte_has(line, "'", "string.quoted.single"),
+                "a char literal is not one string token: {line}"
+            );
+            assert!(
+                !scopes_at(line, line.len() - 1)
+                    .iter()
+                    .any(|scope| scope.contains("string")),
+                "the char literal stayed open: {line}"
+            );
+        }
+
+        // The line after a char literal still highlights, which it does not if
+        // the literal left a string context pushed.
+        let pushed = pushed_per_line("let q = '\"';\nlet t = 1;\n");
+        assert!(
+            pushed[1]
+                .iter()
+                .any(|scope| scope.contains("keyword.control")),
+            "the line after a char literal did not highlight: {:?}",
+            pushed[1]
+        );
+    }
+
+    /// A literal string `#"…"#` keeps its inner quotes and ends only at `"#`.
+    /// Read from the first `"` it would end early and cascade into a new string.
+    #[test]
+    fn a_literal_string_keeps_its_quotes() {
+        let line = r##"let s = #"a "b" c"#;"##;
+        assert!(
+            every_byte_has(line, r##"a "b" c"##, "string.quoted.other"),
+            "the inner quotes left the literal: {:?}",
+            scopes_at(line, line.find('b').unwrap())
+        );
+        assert!(
+            !scopes_at(line, line.len() - 1)
+                .iter()
+                .any(|scope| scope.contains("string")),
+            "the literal string stayed open: {:?}",
+            scopes_at(line, line.len() - 1)
+        );
+    }
+
+    /// Block comments nest, so the first `*/` closes the inner one rather than
+    /// ending the whole comment.
+    #[test]
+    fn a_nested_block_comment_closes_once_per_opener() {
+        // Code after the comment, on the same line, is the sharp check: the old
+        // grammar popped at the inner `*/`, which made `c` read as code.
+        let line = "/* a /* b */ c */ let t = 1;";
+        assert!(
+            every_byte_has(line, "c", "comment.block"),
+            "text after the inner comment was treated as code: {:?}",
+            scopes_at(line, line.find('c').unwrap())
+        );
+        assert!(
+            every_byte_has(line, "let", "keyword.control"),
+            "the comment did not close before the statement: {:?}",
+            scopes_at(line, line.find("let").unwrap())
+        );
+
+        let pushed = pushed_per_line("/* a /* b */ c */\nlet t = 1;\n");
+        assert!(
+            pushed[1]
+                .iter()
+                .any(|scope| scope.contains("keyword.control")),
+            "the line after a nested comment did not highlight: {:?}",
+            pushed[1]
+        );
+    }
+
+    /// Every numeric form Rhai 1.26 accepts is one span, not a digit followed by
+    /// a name (`0b1010`) or a number cut at the exponent (`1.23e-4`).
+    #[test]
+    fn every_numeric_literal_is_one_token() {
+        for literal in ["0b1010", "0o755", "0xFF", "1.23e-4", "2e-3", "1_000_000"] {
+            let line = format!("let n = {literal};");
+            assert!(
+                every_byte_has(&line, literal, "constant.numeric"),
+                "`{literal}` was split: {:?}",
+                scopes_at(&line, line.find(literal).unwrap())
+            );
+        }
+    }
+
+    /// A range is a number, an operator, and a number — never a float.
+    #[test]
+    fn a_range_is_not_a_float() {
+        for line in ["let r = 1..3;", "let r = 1..=3;"] {
+            assert!(every_byte_has(line, "1", "constant.numeric"), "{line}");
+            assert!(every_byte_has(line, "3", "constant.numeric"), "{line}");
+            assert!(
+                no_byte_has(line, "..", "constant.numeric"),
+                "a range was read as a float: {line}"
+            );
+            let range = if line.contains("..=") { "..=" } else { ".." };
+            assert!(
+                every_byte_has(line, range, "keyword.operator"),
+                "`{range}` is not one operator: {line}"
+            );
+        }
+    }
+
+    /// The operators 1.26 has, including the multi-character ones a reader would
+    /// otherwise see as stray punctuation.
+    #[test]
+    fn multi_character_operators_are_one_token() {
+        for (line, operator) in [
+            ("let a = x ?? y;", "??"),
+            ("let m = #{ a: 1 }; m?.a;", "?."),
+            ("let m = #{ a: 1 }; m?[\"a\"];", "?["),
+            ("x **= 2;", "**="),
+            ("x |= 2;", "|="),
+            ("x <<= 2;", "<<="),
+            ("let f = |v| v * 2;", "|"),
+        ] {
+            assert!(
+                every_byte_has(line, operator, "keyword.operator"),
+                "`{operator}` is not one operator in: {line}"
+            );
+        }
+    }
+
+    /// `///` and `//!` are documentation, and a plain `//` is not.
+    #[test]
+    fn doc_comments_are_distinguished_from_plain_ones() {
+        for line in ["/// docs", "//! module docs", "/** docs */"] {
+            assert!(
+                every_byte_has(line, "docs", "comment"),
+                "{line} is not a comment"
+            );
+            assert!(
+                scopes_at(line, line.find("docs").unwrap())
+                    .iter()
+                    .any(|scope| scope.contains("documentation")),
+                "{line} is not documentation: {:?}",
+                scopes_at(line, line.find("docs").unwrap())
+            );
+        }
+        assert!(
+            no_byte_has("// plain", "plain", "documentation"),
+            "a plain comment was painted as documentation"
+        );
+    }
 }
