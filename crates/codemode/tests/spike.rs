@@ -1018,8 +1018,9 @@ fn map_literal_keys_are_literals_not_expressions() {
 fn the_reference_names_only_what_this_engine_has() {
     let engine = Engine::new();
     let absent = [
-        // Newer-Rhai array and map helpers.
-        ("zip", "[1, 2].zip([3, 4])"),
+        // Newer-Rhai array and map helpers. `zip` exists but takes a combiner
+        // closure -- `a.zip(b, |x, y| ...)` -- so the pairing form is the trap.
+        ("zip without a combiner", "[1, 2].zip([3, 4])"),
         ("get with a default", r#"#{ a: 1 }.get("z", 9)"#),
         ("round with digits", "round(3.456, 2)"),
         // String helpers under their other names. `find` exists for arrays and
@@ -1028,9 +1029,9 @@ fn the_reference_names_only_what_this_engine_has() {
         ("substr", r#""hello".substr(1, 3)"#),
         ("join", r#"["a", "b"].join(",")"#),
         ("to_int on a string", r#""12".to_int()"#),
-        // Constants and blobs.
-        ("PI", "PI"),
-        ("E", "E"),
+        // Constants. Both are *functions*, so only the bare form is missing.
+        ("bare PI", "PI"),
+        ("bare E", "E"),
         ("BLOB literals", "#[1, 2]"),
         // Numeric bit twiddling.
         ("bitwise NOT on an integer", "!0"),
@@ -1171,4 +1172,134 @@ fn map_keys_come_back_sorted() {
     // lookup like any other property on a map.
     assert_eq!(eval(&engine, "#{}.is_empty()"), json!(true));
     assert_eq!(eval(&engine, r#"type_of(#{}.is_empty)"#), json!("()"));
+}
+
+/// The numeric helpers the skill tabulates, in the form it claims for each.
+///
+/// The property/method split here is not guessable -- `.is_nan` is a property
+/// while `to_degrees()` is a method, and `.sign` is neither -- so the table is
+/// only worth having if these stay true.
+#[test]
+fn numeric_helpers_are_properties_or_methods_as_documented() {
+    let engine = Engine::new();
+
+    // Constants are functions in this build: `PI()` works, bare `PI` does not,
+    // which the absent-features test covers from the other side.
+    assert_eq!(eval(&engine, "PI() > 3.14 && PI() < 3.15"), json!(true));
+    assert_eq!(eval(&engine, "E() > 2.71 && E() < 2.72"), json!(true));
+
+    // Properties.
+    assert_eq!(eval(&engine, "(0.0 / 0.0).is_nan"), json!(true));
+    assert_eq!(eval(&engine, "(1.0).is_finite"), json!(true));
+    assert_eq!(eval(&engine, "(0).is_zero"), json!(true));
+    assert_eq!(eval(&engine, "(3.75).fraction"), json!(0.75));
+    assert_eq!(eval(&engine, "(3.7).int"), json!(3.0));
+
+    // Methods.
+    assert_eq!(eval(&engine, "(3.2).ceiling()"), json!(4.0));
+    assert_eq!(eval(&engine, "180.0.to_radians() > 3.14"), json!(true));
+    assert_eq!(eval(&engine, "PI().to_degrees() > 179.9"), json!(true));
+    assert_eq!(eval(&engine, "hypot(3.0, 4.0)"), json!(5.0));
+
+    // `sign` is a function; neither property nor method form exists.
+    assert_eq!(eval(&engine, "sign(-5)"), json!(-1));
+    let err = engine.eval::<Dynamic>("(-5).sign").unwrap_err().to_string();
+    assert!(err.contains("Unknown property 'sign'"), "{err}");
+
+    // `log` takes an optional base, and `round` refuses digits.
+    assert_eq!(eval(&engine, "log(8.0, 2.0)"), json!(3.0));
+    assert_eq!(eval(&engine, "log(100.0)"), json!(2.0));
+    assert!(engine.eval::<Dynamic>("round(3.456, 2)").is_err());
+}
+
+/// The container helpers added from the book: the whitespace split, the char
+/// accessors, in-place `retain`, the three sorting levels, and `parse_json`.
+#[test]
+fn container_helpers_follow_the_reference() {
+    let engine = Engine::new();
+
+    // `split()` with no argument is the whitespace split, and the second
+    // argument caps the pieces -- both are easy to assume away.
+    assert_eq!(eval(&engine, r#""  a  b ".split()"#), json!(["a", "b"]));
+    assert_eq!(
+        eval(&engine, r#""a=b=c".split("=", 2)"#),
+        json!(["a", "b=c"])
+    );
+
+    // Characters: `get` reads, `set` replaces in place, `pop` hands one back.
+    assert_eq!(eval(&engine, r#""abc".get(1)"#), json!('b'));
+    assert_eq!(
+        eval(&engine, r#"let s = "abc"; s.set(0, 'X'); s"#),
+        json!("Xbc")
+    );
+    assert_eq!(
+        eval(
+            &engine,
+            r#"let s = "ab"; let last = s.pop(); `${last}${s}`"#
+        ),
+        json!("ba")
+    );
+    // Strings compare alphabetically, unlike numbers.
+    assert_eq!(eval(&engine, r#""10".min("9")"#), json!("10"));
+
+    // `retain` filters in place, and returns nothing.
+    assert_eq!(
+        eval(&engine, "let a = [1, 2, 3, 4]; a.retain(|v| v % 2 == 0); a"),
+        json!([2, 4])
+    );
+    assert_eq!(
+        eval(
+            &engine,
+            "let a = [1, 2, 3]; let gone = a.drain(|v| v > 1); [gone, a]"
+        ),
+        json!([[2, 3], [1]])
+    );
+
+    // Sorting takes a comparator. One parameter is accepted and sorts nothing,
+    // so the second assertion is the one that matters: it pins the silence.
+    assert_eq!(
+        eval(&engine, "let a = [3, 1, 2]; a.sort_by(|x, y| x - y); a"),
+        json!([1, 2, 3])
+    );
+    assert_eq!(
+        eval(&engine, "let a = [3, 1, 2]; a.sort_by(|x| x); a"),
+        json!([3, 1, 2]),
+        "a one-parameter closure silently sorts nothing"
+    );
+    // `order_by` returns a copy; `sort_by` sorts in place.
+    assert_eq!(
+        eval(
+            &engine,
+            r#"let rows = [#{ n: 2, s: "b" }, #{ n: 1, s: "a" }];
+               let sorted = rows.order_by(|x, y| x.n - y.n);
+               `${sorted[0].s}${rows[0].s}`"#
+        ),
+        json!("ab")
+    );
+
+    // `get` is total where indexing is not, `split(at)` halves, and `zip`
+    // takes its combiner rather than building pairs.
+    assert_eq!(eval(&engine, "type_of([1].get(5))"), json!("()"));
+    assert_eq!(eval(&engine, "[1, 2, 3, 4].split(2)"), json!([3, 4]));
+    assert_eq!(
+        eval(&engine, r#"[1, 2].zip([10, 20], |a, b| a + b)"#),
+        json!([11, 22])
+    );
+
+    // `map(|k, v| ...)` rebuilds a map; `parse_json` insists on an object.
+    assert_eq!(
+        eval(&engine, "#{ a: 1 }.map(|k, v| v * 2)"),
+        json!({ "a": 2 })
+    );
+    assert_eq!(
+        eval(&engine, r#"parse_json("{\"a\": [1, 2]}").a[1]"#),
+        json!(2)
+    );
+    let err = engine
+        .eval::<Dynamic>(r#"parse_json("[1, 2]")"#)
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("expecting map"),
+        "a top-level JSON array is rejected: {err}"
+    );
 }

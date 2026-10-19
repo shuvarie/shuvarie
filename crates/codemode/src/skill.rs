@@ -11,13 +11,18 @@
 //!
 //! The shape of this document follows the Rhai cheat sheet
 //! (<https://optozorax.github.io/rhai_cheats/>) where a lookup table is the
-//! right form. Every claim here has been checked against the Rhai this tool
-//! actually builds (1.26.1, default features), which is behind the sheet in
-//! places: a table entry the engine rejects is worse than no entry, so the
-//! sheet's `zip`, `round(x, n)`, `PI`, `E`, `substr`, string `find`, `get(k, d)`,
-//! `for key in map`, `this` methods, method-call sugar on script functions,
-//! `let x = try { }`, and BLOBs are all absent here because they do not run.
-//! `tests/spike.rs` pins the ones worth arguing about.
+//! right form, and the function lists were taken from the Rhai Book
+//! (<https://rhai.rs/book/>), which documents this same 1.26 series.
+//!
+//! Every claim has been checked against the Rhai this tool actually builds
+//! (1.26.1, default features) by running it, because both sources describe the
+//! language in general and this build is behind in places. A table entry the
+//! engine rejects is worse than no entry, so `round(x, n)`, `substr`, string
+//! `find`, `get(k, d)`, `for key in map`, `this` methods, method-call sugar on
+//! script functions, `let x = try { }`, and BLOBs are all absent here because
+//! they do not run -- and `tests/spike.rs` pins each one that would otherwise
+//! be tempting, so an upgrade that adds one fails the build instead of leaving
+//! this document quietly wrong.
 
 /// The skill's name, as `skill` invocations and the roster see it.
 pub const NAME: &str = "codemode";
@@ -142,10 +147,26 @@ let exact = 7.to_float() / 2.0;  // 3.5
 `${pages} pages, ${exact} exactly`
 ```
 
-There is no `PI` or `E` constant. `abs`, `min`, `max`, `sqrt`, `floor`,
-`ceiling`, `round(x)`, `exp`, `ln`, `log(x)`, and `.is_even` / `.is_odd` exist;
-`round` takes no digits argument. `to_hex()`, `to_binary()` and `to_octal()`
-format an integer. `"255".parse_int(16)` and `"1.5".parse_float()` parse back.
+The numeric helpers, in the form that works. Several read as properties rather
+than methods, and the difference is not guessable:
+
+| Call | Gives |
+| --- | --- |
+| `abs(x)`, `min(a, b)`, `max(a, b)`, `sign(x)` | `sign` is a function, not `.sign` |
+| `sqrt(x)`, `exp(x)`, `ln(x)`, `log(x)` (base 10), `log(x, base)` | |
+| `hypot(x, y)`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan(y, x)` | radians |
+| `floor(x)`, `ceiling(x)`, `round(x)` | `round` takes **no** digits argument |
+| `.int`, `.fraction` | truncate, and the part after the point |
+| `.is_even`, `.is_odd`, `.is_zero`, `.is_nan`, `.is_finite`, `.is_infinite` | properties |
+| `PI()`, `E()` | functions; bare `PI` is `Variable not found` |
+| `to_degrees()`, `to_radians()` | method form only |
+| `to_hex()`, `to_binary()`, `to_octal()` | an integer, as text |
+| `parse_int(radix)`, `parse_float()` | the inverse, from a string |
+
+```rhai
+let r = 2.0;
+`${r.sqrt()} ${PI().round()} ${sign(-3)} ${(3.75).fraction} ${255.to_hex()}`
+```
 
 ### The null-coalescing operator
 
@@ -196,6 +217,20 @@ characters for a `for` loop; `to_chars()` is the array. `trim()` takes both
 ends -- there is no one-ended trim. A char converts with `.to_int()` and back
 with `.to_string()`.
 
+**`split` with no argument splits on whitespace**, which is the way to read a
+tool's prose output into words or numbers. With an argument it splits on that
+delimiter, and a second argument caps the number of pieces:
+
+```rhai
+let words = "  3 files   found ".split();
+let pair = "key=value=extra".split("=", 2);
+`${words.len} words, then ${pair[1]}`
+```
+
+Single characters have their own forms: `get(i)` returns a char, `set(i, ch)`
+replaces one in place, and `pop()` removes and hands back the last. `min(s)` and
+`max(s)` compare two strings alphabetically.
+
 ## Arrays
 
 Zero-based, and a **negative index counts from the end**. Indexing out of bounds
@@ -213,11 +248,32 @@ a.push(4); a.sort();          // both in place
 | `truncate(n)`, `chop(n)`, `pad(n, v)`, `dedup()` (consecutive only) | `extract(start[, len])`, `extract(range)` |
 
 `for_each` also returns `()` -- it is for effect, not for building a new array.
+`retain(|v| ...)` is the exception worth knowing: it filters **in place**,
+keeping what the closure accepts.
 
 Higher-order: `map(|v| ...)`, `filter(|v| ...)`, `for_each(|v| ...)`,
 `reduce(|acc, v| ..., seed)`, `reduce_rev(|acc, v| ..., seed)`,
 `some(|v| ...)`, `all(|v| ...)`, `find(|v| ...)` and `find_map(|v| ...)` (which
 give `()` when nothing matches), `index_of(v)`, `contains(v)`.
+
+**Sorting** is `sort()` and `sort_desc()` for plain values, and a **comparator**
+closure -- two parameters, negative/zero/positive -- for anything else.
+`sort_by(|a, b| ...)` sorts in place and `order_by(|a, b| ...)` hands back an
+ordered copy, leaving the original alone. A one-parameter closure is accepted
+and sorts nothing at all, which is the trap: it looks like a key extractor and
+silently returns the list in the order it arrived. `order_by` is the one to
+reach for on tool results:
+
+```rhai
+let rows = [#{ name: "b", n: 2 }, #{ name: "a", n: 3 }];
+let by_name = rows.order_by(|x, y| if x.name < y.name { -1 } else { 1 });
+let by_n = rows.order_by(|x, y| x.n - y.n);
+`first by name ${by_name[0].name}, biggest ${by_n[by_n.len - 1].name}`
+```
+
+`get(i)` returns `()` rather than erroring when the index is out of range,
+`set(i, v)` assigns in place, `split(at)` cuts into head and tail, and
+`drain(...)` removes by position, range, or predicate and hands back what went.
 
 ```rhai
 let scores = [3, 8, 5];
@@ -226,8 +282,16 @@ let best = scores.reduce(|acc, v| if v > acc { v } else { acc }, 0);
 ```
 
 `a += [1, 2]` extends with an array and `a += 1` appends a single item. There is
-no `zip`, no `join`, and no sum helper: build a string with `reduce` and a total
-with a `for` loop.
+no `join` and no sum helper: build a string with `reduce` and a total with a
+`for` loop. `zip` exists but takes the combiner, so it pairs lazily instead of
+building an array of pairs:
+
+```rhai
+let names = ["a", "b", "c"];
+let sizes = [10, 20];
+let labelled = names.zip(sizes, |name, size| `${name}=${size}`);
+labelled
+```
 
 ## Object maps
 
@@ -248,8 +312,12 @@ if by_kind.contains("toml") { "has toml" } else { `${by_kind.len()} kinds, ${by_
 
 `mixin` overwrites with the other map's values; `fill_with` only adds the keys
 that are missing. `drain` hands back what it removed. `m += #{ k: v }` merges.
-There is no `get(k, default)` -- write `m.get(k) ?? default`. `to_json()` renders
-a map as a JSON string.
+There is no `get(k, default)` -- write `m.get(k) ?? default`. `map(|k, v| ...)`
+builds a new map from the old one's entries. `to_json()` renders a map as a JSON
+string, and `parse_json(text)` turns one back into a map -- useful when a tool
+answers in JSON rather than prose. It insists on an object at the top level: a
+bare JSON array is a type error, so wrap it (`{"rows": [...]}`) or leave the
+text alone.
 
 **A map is not iterable** and its entries do not destructure: walk `m.keys()` and
 index. This is the one place Rhai differs from JavaScript most sharply.
