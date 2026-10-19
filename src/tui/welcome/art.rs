@@ -39,7 +39,7 @@ use frameplay::{FrameIndexer, FrameTimeReference, FrameplayOptions};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Position, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 use tachyonfx::{Effect, EffectTimer, Interpolation, Motion, fx};
@@ -233,13 +233,13 @@ pub fn rain_frame() -> usize {
 /// Built fresh on every paint rather than kept between frames: the jitter comes
 /// from a fixed seed, so rebuilding costs nothing but the edge is identical
 /// either way. See the module docs.
-fn entrance(area: Rect) -> Effect {
+fn entrance(area: Rect, plate: Color) -> Effect {
     let tear = (area.height * ENTRANCE_TEAR_PERCENT / 100).max(1);
     fx::sweep_in(
         Motion::UpToDown,
         ENTRANCE_GRADIENT,
         tear,
-        theme::bg(),
+        plate,
         EffectTimer::from_ms(ENTRANCE.as_millis() as u32, Interpolation::CubicOut),
     )
 }
@@ -300,9 +300,16 @@ pub fn paint(buf: &mut Buffer, area: Rect, rain_frame: usize, age: Duration, cap
     // Part way in, the page is built off the buffer and the entrance applied to
     // *that*: `sweep_in` paints the cells its edge has not reached, so running it
     // over the caller's own pixels would bury what the page is covering.
+    //
+    // The plate is read once and threaded through: the palette is process-global
+    // and can be swapped from another thread at any point (a theme preview), and
+    // a `theme::bg()` that changes between building the sweep and reading the
+    // edge back would make every cell look like ink — burying the screen the
+    // scene is supposed to be sweeping over.
+    let plate = theme::bg();
     let mut page = Buffer::empty(area);
     paint_page(&mut page, area, rain_frame, caption);
-    entrance(area).process(age, &mut page, area);
+    entrance(area, plate).process(age, &mut page, area);
 
     for pos in area.positions() {
         let painted = &page[pos];
@@ -312,7 +319,7 @@ pub fn paint(buf: &mut Buffer, area: Rect, rain_frame: usize, age: Duration, cap
         // the page is ever drawn in the plate's own colour, which is what makes
         // that readable — `the_plate_is_never_painted_as_ink` holds the scene to
         // it.
-        if painted.fg == theme::bg() && painted.bg == theme::bg() {
+        if painted.fg == plate && painted.bg == plate {
             continue;
         }
         buf[pos] = painted.clone();

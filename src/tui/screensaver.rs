@@ -83,9 +83,9 @@ impl Screensaver {
     }
 
     /// Holds the scene at the very start of its entrance, so a test can read the
-    /// screen it has not covered yet. A loaded machine can otherwise be hundreds of
-    /// milliseconds into the sweep by the time a test draws it; an instant in the
-    /// future reads as an age of zero for as long as it stays there.
+    /// screen it has not covered yet. A loaded machine can otherwise be hundreds
+    /// of milliseconds into the sweep by the time a test draws it; an instant in
+    /// the future reads as an age of zero for as long as it stays there.
     #[cfg(test)]
     pub(crate) fn hold_at_start(&mut self) {
         if self.open {
