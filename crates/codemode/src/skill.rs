@@ -256,6 +256,26 @@ let previous = load("last_checked");
 - **Integer division**, as above.
 - **A wrong operator is a no-op, not an error.** `"a" - "b"` is `"a"`. Reach for
   the method you meant.
+- **A closure cannot touch the variable it is iterating.** `m.keys().map(|k|
+  m[k])` fails with a data-race error, and so do `.filter` and `.reduce` on
+  `m.keys()`/`m.values()` when the closure reads `m`: the method's result holds
+  the map while the closure runs. Two escapes, both idiomatic:
+
+```rhai
+let counts = #{ core: 55, db: 15 };
+// Bind the receiver first, then the closure may read the map.
+let keys = counts.keys();
+let widest = keys.reduce(|a, k| if counts[k] > counts[a] { k } else { a }, "core");
+// Or walk it with a loop, which never creates a closure at all.
+let biggest = "";
+for k in counts.keys() {
+    if biggest == "" || counts[k] > counts[biggest] { biggest = k; }
+}
+`${widest} / ${biggest}`
+```
+
+  The same rule catches a map being *built*: `m[k] = v` is fine inside a `for`
+  loop, but not inside a closure that also holds `m`.
 - **`let _ = x;` and `catch (_)` do not parse.** `_` is not a binding; name the
   variable (`catch (err) { }`) or drop the statement.
 - **Tool text output can trail a note.** `glob` returns at most 100 paths and
@@ -269,4 +289,14 @@ let previous = load("last_checked");
   with `s.sub_string(0, s.len - 1)`.
 - **A map is not iterable** and its entries do not destructure, which is why the
   examples above walk `.keys()`.
+- **A stored closure is called with `.call()`.** `let f = |x| x + 1;` then
+  `f.call(2)` — `f(2)` is `Function not found: f`, because Rhai does not treat a
+  variable holding a closure as a callable name.
+- **A function gets values, not references.** `fn bump(m, k) { m[k] = 1; }`
+  leaves the caller's map untouched: the parameter is a copy. Build state in the
+  calling scope (a `for` loop) or return the new value.
+- **Do not mutate a captured variable inside a closure.** Rhai borrows it for the
+  closure, so changing it there fails with `Data race detected` rather than
+  corrupting it — the fix is a plain `for` loop, which is also the readable
+  idiom for building a map.
 "#;

@@ -701,10 +701,47 @@ fn mutating_methods_return_nothing_and_the_rest_return_a_value() {
     assert_eq!(eval(&engine, r#"[1, 2, 3].extract(0, 2).len"#), json!(2));
 }
 
-/// Two habits a JavaScript-fluent reader brings that do not survive here, pinned
-/// because the card and the skill teach *against* them: `_` is not a binding, so
-/// `catch (_)` is a parse error like `let _ = x`, and the one-ended trimming
-/// methods have no Rhai equivalent.
+/// Three habits that cost a live agent a rewrite each, pinned because the skill
+/// teaches against them: a stored closure is not callable by name, a function
+/// receives copies so mutating a parameter reaches nobody, and Rhai's borrow
+/// checker turns "mutate a captured variable inside a closure" into a data-race
+/// error rather than a silent wrong answer.
+#[test]
+fn closures_are_called_with_dot_call_and_functions_receive_copies() {
+    let engine = Engine::new();
+
+    // The call form: `.call(...)`, not `f(...)`.
+    assert_eq!(eval(&engine, r#"let f = |x| x + 1; f.call(2)"#), json!(3));
+    let err = engine
+        .eval::<Dynamic>(r#"let f = |x| x + 1; f(2)"#)
+        .unwrap_err();
+    assert!(
+        matches!(*err, EvalAltResult::ErrorFunctionNotFound(..)),
+        "a variable holding a closure is not a callable name: {err}"
+    );
+
+    // Arguments are values: a map mutated inside a function stays mutated only
+    // in there, which reads as "the map never got built" at the call site.
+    assert_eq!(
+        eval(
+            &engine,
+            r#"fn bump(m, k) { m[k] = 1; } let m = #{}; bump(m, "a"); m.len()"#
+        ),
+        json!(0)
+    );
+
+    // Building a map in a `for` loop is the idiom the skill recommends.
+    assert_eq!(
+        eval(
+            &engine,
+            r#"let m = #{}; for v in ["a", "b", "a"] { m[v] = 1; } m.len()"#
+        ),
+        json!(2)
+    );
+}
+
+/// The catch-variable and one-ended-trim habits, pinned because the card and the
+/// skill teach *against* them.
 #[test]
 fn a_catch_variable_must_be_named_and_one_ended_trims_do_not_exist() {
     let engine = Engine::new();
@@ -795,5 +832,74 @@ fn a_string_has_no_to_int() {
     assert!(
         matches!(*err, EvalAltResult::ErrorFunctionNotFound(..)),
         "unexpected error: {err}"
+    );
+}
+
+/// Whether a data race sits at the bottom of a chain of call frames.
+fn innermost_is_data_race(error: &EvalAltResult) -> bool {
+    match error {
+        EvalAltResult::ErrorDataRace(..) => true,
+        EvalAltResult::ErrorInFunctionCall(_, _, cause, ..) => innermost_is_data_race(cause),
+        _ => false,
+    }
+}
+
+/// A method call on a variable, whose own closure also touches that variable, is
+/// a data race: the method's result holds the value while the closure runs.
+///
+/// Pinned because it is easy to hit while aggregating — `m.keys().reduce(|a, k|
+/// if m[k] > m[a] { k } else { a }, "")` reads naturally and dies at runtime —
+/// and because the two escapes the documents give have to keep working.
+#[test]
+fn a_closure_cannot_touch_the_value_it_is_iterating() {
+    let engine = Engine::new();
+
+    for method in ["keys", "values"] {
+        let script = format!("let m = #{{ a: 1, b: 5, c: 2 }}; m.{method}().map(|_v| m.len()).len");
+        let err = engine.eval::<Dynamic>(&script).unwrap_err();
+        // The race arrives wrapped in the call frames (`map`, then the closure),
+        // so it has to be found down the chain -- the same walk `classify` does
+        // to name it in the result block.
+        assert!(
+            innermost_is_data_race(&err),
+            "`{method}` should hold the map: {err}"
+        );
+        // ...and the frames are why the result block has to unwrap: the race's
+        // own variable name is empty here, so it can only describe the shape.
+        assert_eq!(err.position().line(), Some(1));
+    }
+
+    // A plain array reduce that reads its own accumulator is fine: nothing
+    // outlives the closure.
+    assert_eq!(
+        eval(
+            &engine,
+            r#"let a = [3, 5]; a.reduce(|acc, v| if v > acc { v } else { acc }, 0)"#
+        ),
+        json!(5)
+    );
+
+    // Escape 1: bind the receiver first, so the temporary is gone by the time
+    // the closure runs.
+    assert_eq!(
+        eval(
+            &engine,
+            r#"let m = #{ a: 1, b: 5, c: 2 };
+               let ks = m.keys();
+               ks.reduce(|a, k| if m[k] > m[a] { k } else { a }, "a")"#
+        ),
+        json!("b")
+    );
+
+    // Escape 2: no closure at all.
+    assert_eq!(
+        eval(
+            &engine,
+            r#"let m = #{ a: 1, b: 5, c: 2 };
+               let total = 0;
+               for k in m.keys() { total += m[k]; }
+               total"#
+        ),
+        json!(8)
     );
 }

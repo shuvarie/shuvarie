@@ -824,6 +824,27 @@ fn classify(error: &EvalAltResult) -> ScriptError {
             ErrorKind::Limit,
             "the script recursed past the call-depth limit".to_string(),
         ),
+        // A value that is already borrowed (a method call on a variable its own
+        // closure also uses) reads as a bare "Data race detected", which says
+        // nothing about what to do — and its `name` is often empty, so the
+        // condition has to be described rather than pointed at. The receiver is
+        // the borrow holder: `m.keys().map(|k| m[k])` collides because the
+        // temporary from `keys()` outlives the closure's call.
+        EvalAltResult::ErrorDataRace(name, ..) => {
+            let named = match name.is_empty() {
+                true => String::new(),
+                false => format!(" (`{name}`)"),
+            };
+            (
+                ErrorKind::Eval,
+                format!(
+                    "a value was in use while the script used it again{named} — a method call \
+                     whose own closure touches the same variable, as in `m.keys().map(|k| \
+                     m[k])`, holds the borrow. Bind the receiver first \
+                     (`let ks = m.keys(); ks.map(...)`) or use a `for` loop"
+                ),
+            )
+        }
         // The payload is the message: `Display` would prefix it, and a host
         // failure raised this way is already a whole sentence.
         EvalAltResult::ErrorRuntime(payload, ..) => (ErrorKind::Eval, describe(payload)),

@@ -83,21 +83,22 @@ if found.matched == 0 {
 
 ## Traps
 
-- **Some methods return nothing.** `.trim()` and `.replace()` change the string
-  in place and hand back `()`, so `line.trim() != ""` is always true. Bind
-  first, or use a method that returns a value.
+- **Some methods return nothing.** `.trim()`/`.replace()` change the string in
+  place and hand back `()`, so `line.trim() != ""` is always true. Bind first.
 - **Tool output can end with a note.** `glob` stops at 100 paths, `grep` at 200,
   and each appends a sentence saying so — filter for what a match looks like
   (`line.ends_with(".rs")`), not just `line != ""`.
-- A missing map key reads as `()`, silently: `hit.tool` on a map without that
-  key is not an error. Check with `hit.contains("tool")` when it matters.
-- Property access on a map is a key lookup, so `m.len` is `()`; write
-  `m.len()`. On an array or a string `.len` is the property you want.
+- A missing map key is `()` silently: `hit.tool` is not an error. Check
+  `hit.contains("tool")` when it matters.
+- On a map a bare `.len` is a key lookup (`()`); write `m.len()`. Arrays and
+  strings take the property.
 - A map is not iterable, and its entries do not destructure: iterate
   `for k in m.keys() { }` and read `m[k]`.
+- **A closure cannot read the variable it is iterating.** `m.keys().map(|k|
+  m[k])` is a data-race error; bind first (`let ks = m.keys();`) or use `for`.
 - `/` on integers is integer division: `7 / 2 == 3`.
-- There is no ternary and no truthiness: `if () { }` is a syntax error. Use
-  `if c { a } else { b }` and compare explicitly (`if x == () { }`).
+- No ternary, no truthiness: `if () { }` is a syntax error. Use `if c { a } else
+  { b }`, and compare explicitly (`if x == () { }`).
 - `try`/`catch` is a statement whose value is `()`, so assign the fallback to a
   variable declared before it:
 
@@ -108,8 +109,7 @@ out
 ```
 
 - A wrong operator is a no-op, not an error: `"a" - "b"` is `"a"`.
-- `_` is not a binding: `let _ = x;` and `catch (_)` do not parse. Name it, or
-  drop the statement.
+- `_` is not a binding: `let _ = x;` and `catch (_)` do not parse.
 
 For the fuller reference — values and types, the methods that exist, error
 handling, and worked patterns — load the `codemode` skill."#;
