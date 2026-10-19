@@ -2358,13 +2358,20 @@ async fn compact_active_path(
         .iter()
         .filter_map(|id| by_id.get(id).map(|m| (*m).clone()))
         .collect();
-    let Some(plan) = crate::compaction::select_plan(&path, keep_recent_tokens) else {
+    let chain_index: HashMap<u64, usize> =
+        chain.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+    // The whole path's tool activity sizes the tail: the kept tail is what the
+    // next request replays, tool calls and results included.
+    let path_records = span_tool_records(&stored, &chain_index, 0..chain.len());
+    let Some(plan) = crate::compaction::select_plan(&path, &path_records, keep_recent_tokens)
+    else {
         return Ok(false);
     };
     let head = &path[plan.start..plan.cut];
-    let chain_index: HashMap<u64, usize> =
-        chain.iter().enumerate().map(|(i, id)| (*id, i)).collect();
-    let records = span_tool_records(&stored, &chain_index, plan.start..plan.cut);
+    let records: Vec<crate::tool_record::ToolRecord> = path_records
+        .into_iter()
+        .filter(|record| (plan.start..plan.cut).contains(&(record.message_seq as usize)))
+        .collect();
     let head_text = crate::compaction::serialize_head(head, &records, plan.start);
     if let Some(event_tx) = events {
         let _ = event_tx.send(Event::CompactionStarted).await;

@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use shuvarie_db::{ReasoningSegment, StoredMessage, StoredScroll, StoredSession, TextSegment};
-use shuvarie_llm::ChatMsg;
+use shuvarie_llm::{ChatMsg, ChatToolCall, ChatToolResult};
 use shuvarie_llm::{Role, TokenUsage};
 
 use crate::tool_record::ToolRecord;
@@ -169,9 +169,10 @@ pub enum TurnResume {
     /// first prompt (the common single-task session), re-sent the whole task
     /// with no history at all — the model read it as a fresh request and
     /// started the task over. A tip that wrote text is the request's last
-    /// history message; a tip that wrote none (a reasoning- or tool-only
-    /// attempt) is dropped, since a blank assistant message carries nothing.
-    /// The caller prompts with the resume cue.
+    /// history message; a tip that only reasoned or ran tools is dropped
+    /// when it left no tool activity behind either, since a blank assistant
+    /// message with nothing to replay carries nothing. The caller prompts
+    /// with the resume cue.
     Continue { prior: Vec<ChatMsg> },
 }
 
@@ -291,6 +292,11 @@ impl Session {
                 role: m.role.into(),
                 content: m.content.clone(),
                 attachments: m.attachments.clone(),
+                // Stored rows carry text alone: a turn's tool activity lives in
+                // its tool records and is spliced back in when a request is
+                // built (`replay_tool_activity`).
+                tool_calls: Vec::new(),
+                tool_results: Vec::new(),
             });
             let idx = idx as u64;
             if !m.reasoning.is_empty() {
@@ -415,28 +421,35 @@ impl Session {
     /// finished.
     ///
     /// An assistant tip is the failed attempt's own reply row — the model's
-    /// progress log for the turn — and empty when the attempt reasoned or
-    /// called tools but never wrote text. Either way the request continues
-    /// the turn ([`TurnResume::Continue`]): the whole active path —
-    /// summary-truncated, prompt node included, an empty tip dropped — rides
-    /// the history, so the model picks the work already on the branch back up
-    /// instead of reading the turn's prompt as a fresh request. Only a path
-    /// whose tip is the user prompt itself — the attempt left no reply row at
-    /// all — replays that prompt ([`TurnResume::Replay`]) with the history
-    /// before it ([`Self::history_for_send_until`]). `None` when the path has
-    /// no user prompt to resume from.
+    /// progress log for the turn, which the replayed request rebuilds from the
+    /// row's text runs and tool records. A tip that produced neither text nor a
+    /// tool call is empty and dropped, since a blank assistant message carries
+    /// nothing. Either way the request continues the turn
+    /// ([`TurnResume::Continue`]): the whole active path — summary-truncated,
+    /// prompt node included, an empty tip dropped — rides the history, so the
+    /// model picks the work already on the branch back up instead of reading
+    /// the turn's prompt as a fresh request. Only a path whose tip is the user
+    /// prompt itself — the attempt left no reply row at all — replays that
+    /// prompt ([`TurnResume::Replay`]) with the history before it
+    /// ([`Self::history_for_send_until`]). `None` when the path has no user
+    /// prompt to resume from.
     pub fn last_turn_resume(&self) -> Option<TurnResume> {
         if let Some(tip) = self.messages.last()
             && tip.role == Role::Assistant
         {
-            let end = if tip.content.is_empty() {
-                self.messages.len() - 1
+            let tip_idx = self.messages.len() - 1;
+            let carries_activity = self
+                .tool_records
+                .iter()
+                .any(|record| record.message_seq as usize == tip_idx);
+            let end = if tip.content.is_empty() && !carries_activity {
+                tip_idx
             } else {
                 self.messages.len()
             };
             let prior = self.history_for_send_until(end);
             // A lone empty assistant row has no turn behind it to resume.
-            if prior.iter().any(|m| m.role == Role::User) {
+            if prior.iter().any(ChatMsg::is_user_prompt) {
                 return Some(TurnResume::Continue { prior });
             }
         }
@@ -500,6 +513,9 @@ impl Session {
     /// Build the chat history to send to the LLM for a new turn: everything
     /// before the pending user message (the active path's tip), truncated at
     /// the newest summary node — the summary replaces the history before it.
+    /// Each assistant row that ran tools is expanded back into the
+    /// assistant/tool-result run it stands for, so the request carries the
+    /// earlier turns' tool activity and not just their text.
     pub fn history_for_send(&self) -> Vec<ChatMsg> {
         self.history_for_send_until(self.messages.len().saturating_sub(1))
     }
@@ -520,7 +536,130 @@ impl Session {
             .find(|&&s| (s as usize) < end)
             .map(|&s| s as usize)
             .unwrap_or(0);
-        self.messages[begin..end].to_vec()
+        self.replay_tool_activity(begin, end)
+    }
+
+    /// The path span `messages[begin..end]` as a request sees it: every
+    /// message as stored, except an assistant row that ran tools, which is
+    /// expanded into the run it streamed as — a text-less assistant message
+    /// plus its results when the row called tools before writing anything,
+    /// then one assistant message per stored text run carrying the calls that
+    /// run made, each followed by the results answering them.
+    ///
+    /// The run boundaries come from [`Session::text_segments`], whose
+    /// `after_tool` counts the calls completed before each run started, and
+    /// from [`Session::tool_records`], which hold the calls in the order they
+    /// returned. A row from before text segments were stored falls back to its
+    /// joined `content` as a single run of all its calls. Call ids are derived
+    /// from the row and the call's position in it, so a call and the result
+    /// answering it always pair.
+    fn replay_tool_activity(&self, begin: usize, end: usize) -> Vec<ChatMsg> {
+        let mut out: Vec<ChatMsg> = Vec::with_capacity(end - begin + self.tool_records.len());
+        for idx in begin..end {
+            let msg = &self.messages[idx];
+            let tools: Vec<&ToolRecord> = self
+                .tool_records
+                .iter()
+                .filter(|record| record.message_seq as usize == idx)
+                .collect();
+            if msg.role != Role::Assistant || tools.is_empty() {
+                out.push(msg.clone());
+                continue;
+            }
+            let joined;
+            let segments: &[TextSegment] = match self.text_segments.get(&(idx as u64)) {
+                Some(segments) if !segments.is_empty() => segments,
+                _ => {
+                    joined = [TextSegment {
+                        after_tool: 0,
+                        text: msg.content.clone(),
+                    }];
+                    &joined
+                }
+            };
+            // Calls completed before the row's first run: the row called them
+            // from a text-less assistant message that came first.
+            let mut cursor = call_bound(segments.first().map(|s| s.after_tool), tools.len());
+            if cursor > 0 {
+                push_replayed_round(&mut out, idx, "", 0, cursor, &tools);
+            }
+            for (k, segment) in segments.iter().enumerate() {
+                // The calls the run made run up to the next run's boundary, or
+                // to the end of the row's calls when this is the last run.
+                let boundary = segments
+                    .get(k + 1)
+                    .map_or(tools.len(), |s| call_bound(Some(s.after_tool), tools.len()));
+                let next = boundary.max(cursor);
+                push_replayed_round(&mut out, idx, &segment.text, cursor, next, &tools);
+                cursor = next;
+            }
+        }
+        out
+    }
+}
+
+/// A stored `after_tool` run boundary clamped into the row's call list.
+fn call_bound(after_tool: Option<u64>, calls: usize) -> usize {
+    (after_tool.unwrap_or(0) as usize).min(calls)
+}
+
+/// Push one replayed step of an assistant row: the assistant message carrying
+/// `text` and the calls `from..to` of the row, then — when the step called
+/// anything — the user message carrying their results.
+fn push_replayed_round(
+    out: &mut Vec<ChatMsg>,
+    message: usize,
+    text: &str,
+    from: usize,
+    to: usize,
+    tools: &[&ToolRecord],
+) {
+    let calls: Vec<ChatToolCall> = (from..to)
+        .map(|at| replayed_call(message, at, tools[at]))
+        .collect();
+    out.push(ChatMsg::assistant_with(text, calls));
+    if to > from {
+        let results: Vec<ChatToolResult> = (from..to)
+            .map(|at| replayed_result(message, at, tools[at]))
+            .collect();
+        out.push(ChatMsg::tool_results(results));
+    }
+}
+
+/// The id a replayed call takes: its message's dense index plus its position in
+/// that message's call list, stable across the session's requests so the result
+/// answering it always pairs up.
+fn replayed_call_id(message: usize, at: usize) -> String {
+    format!("call_{message}_{at}")
+}
+
+fn replayed_call(message: usize, at: usize, record: &ToolRecord) -> ChatToolCall {
+    ChatToolCall {
+        id: replayed_call_id(message, at),
+        name: record.name.clone(),
+        args_json: record.args_json.clone(),
+    }
+}
+
+fn replayed_result(message: usize, at: usize, record: &ToolRecord) -> ChatToolResult {
+    ChatToolResult {
+        call: replayed_call_id(message, at),
+        name: record.name.clone(),
+        output: replayed_output(record),
+        is_error: !record.ok,
+    }
+}
+
+/// The result text a replayed call reports: the recorded output, or a note when
+/// the call returned nothing — an interrupted turn's cut-off call.
+fn replayed_output(record: &ToolRecord) -> String {
+    if !record.output.is_empty() {
+        return record.output.clone();
+    }
+    if record.killed {
+        "(no result — the call was cut off when its turn was interrupted)".to_string()
+    } else {
+        "(no output)".to_string()
     }
 }
 
@@ -919,6 +1058,188 @@ mod tests {
             "history up to the turn's prompt, partial tip excluded"
         );
         assert!(session.history_for_send_until(0).is_empty());
+    }
+
+    fn stored_tool_call(
+        message_id: u64,
+        seq: u64,
+        name: &str,
+        output: &str,
+    ) -> shuvarie_db::StoredToolCall {
+        shuvarie_db::StoredToolCall {
+            id: 100 + seq,
+            message_id,
+            session_id: uuid::Uuid::nil(),
+            seq,
+            name: name.into(),
+            args_json: format!(r#"{{"path":"{name}"}}"#),
+            output: output.into(),
+            stderr: String::new(),
+            ok: true,
+            killed: false,
+            worker: None,
+            file_change_json: String::new(),
+            original_content: None,
+            new_content: None,
+            duration_ms: 0,
+        }
+    }
+
+    fn text_run(after_tool: u64, text: &str) -> TextSegment {
+        TextSegment {
+            after_tool,
+            text: text.into(),
+        }
+    }
+
+    /// A follow-up turn's request carries the earlier turn's tool activity: the
+    /// assistant row is spliced back into the message and the results answering
+    /// it, not sent as its text alone.
+    #[test]
+    fn history_for_send_replays_a_turns_tool_activity() {
+        let mut stored = stored_session(vec![
+            stored_message(0, MsgRole::User, "u1"),
+            stored_message(1, MsgRole::Assistant, "looking"),
+            stored_message(2, MsgRole::User, "pending"),
+        ]);
+        chain(&mut stored.messages);
+        stored.messages[1].text_segments = vec![text_run(0, "looking")];
+        let assistant_id = stored.messages[1].id;
+        stored.tool_calls = vec![stored_tool_call(
+            assistant_id,
+            0,
+            "read_file",
+            "fn main() {}",
+        )];
+        stored.leaf_id = Some(stored.messages[2].id);
+
+        let session = Session::from_stored(stored);
+        let history = session.history_for_send();
+        assert_eq!(history.len(), 3, "{history:?}");
+        assert_eq!(history[0].content, "u1");
+        assert_eq!(history[1].content, "looking");
+        assert_eq!(history[1].tool_calls.len(), 1);
+        assert_eq!(history[1].tool_calls[0].name, "read_file");
+        assert_eq!(
+            history[1].tool_calls[0].args_json,
+            r#"{"path":"read_file"}"#
+        );
+        assert_eq!(history[2].tool_results.len(), 1);
+        assert_eq!(
+            history[2].tool_results[0].call, history[1].tool_calls[0].id,
+            "the result pairs with the call it answers"
+        );
+        assert_eq!(history[2].tool_results[0].output, "fn main() {}");
+        assert!(!history[2].tool_results[0].is_error);
+    }
+
+    /// Text runs are separated by the tool round that ran between them: the
+    /// calls sit under the run that made them, their results under that.
+    #[test]
+    fn history_for_send_interleaves_runs_and_tool_rounds() {
+        let mut stored = stored_session(vec![
+            stored_message(0, MsgRole::User, "u1"),
+            stored_message(1, MsgRole::Assistant, "read it\n\nit is fine"),
+            stored_message(2, MsgRole::User, "pending"),
+        ]);
+        chain(&mut stored.messages);
+        stored.messages[1].text_segments =
+            vec![text_run(0, "read it\n\n"), text_run(1, "it is fine")];
+        let assistant_id = stored.messages[1].id;
+        stored.tool_calls = vec![stored_tool_call(assistant_id, 0, "read_file", "contents")];
+        stored.leaf_id = Some(stored.messages[2].id);
+
+        let session = Session::from_stored(stored);
+        let history = session.history_for_send();
+        let shape: Vec<(&str, usize, usize)> = history
+            .iter()
+            .map(|m| (m.content.as_str(), m.tool_calls.len(), m.tool_results.len()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("u1", 0, 0),
+                ("read it\n\n", 1, 0),
+                ("", 0, 1),
+                ("it is fine", 0, 0),
+            ]
+        );
+    }
+
+    /// A turn that called tools before writing anything: the calls come first,
+    /// with no text above them.
+    #[test]
+    fn history_for_send_replays_calls_made_before_the_first_text() {
+        let mut stored = stored_session(vec![
+            stored_message(0, MsgRole::User, "u1"),
+            stored_message(1, MsgRole::Assistant, "done"),
+            stored_message(2, MsgRole::User, "pending"),
+        ]);
+        chain(&mut stored.messages);
+        stored.messages[1].text_segments = vec![text_run(1, "done")];
+        let assistant_id = stored.messages[1].id;
+        stored.tool_calls = vec![
+            stored_tool_call(assistant_id, 0, "read_file", "a"),
+            stored_tool_call(assistant_id, 1, "grep", "b"),
+        ];
+        stored.leaf_id = Some(stored.messages[2].id);
+
+        let session = Session::from_stored(stored);
+        let history = session.history_for_send();
+        let shape: Vec<(&str, usize, usize)> = history
+            .iter()
+            .map(|m| (m.content.as_str(), m.tool_calls.len(), m.tool_results.len()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("u1", 0, 0),
+                ("", 1, 0),
+                ("", 0, 1),
+                ("done", 1, 0),
+                ("", 0, 1),
+            ]
+        );
+    }
+
+    /// An interrupted tip that wrote no text but ran tools is still the turn's
+    /// progress log: the resume continues it with the calls and their results,
+    /// the call the cut killed among them.
+    #[test]
+    fn last_turn_resume_continues_a_tool_only_tip() {
+        let mut stored = stored_session(vec![
+            stored_message(0, MsgRole::User, "u1"),
+            stored_message(1, MsgRole::Assistant, ""),
+        ]);
+        chain(&mut stored.messages);
+        stored.messages[1].interrupted = true;
+        let assistant_id = stored.messages[1].id;
+        let mut cut = stored_tool_call(assistant_id, 1, "run_shell", "");
+        cut.ok = false;
+        cut.killed = true;
+        stored.tool_calls = vec![
+            stored_tool_call(assistant_id, 0, "read_file", "contents"),
+            cut,
+        ];
+        stored.leaf_id = Some(stored.messages[1].id);
+
+        let session = Session::from_stored(stored);
+        let Some(TurnResume::Continue { prior }) = session.last_turn_resume() else {
+            panic!("a tool-only tip must be continued, not dropped");
+        };
+        let shape: Vec<(&str, usize, usize)> = prior
+            .iter()
+            .map(|m| (m.content.as_str(), m.tool_calls.len(), m.tool_results.len()))
+            .collect();
+        assert_eq!(shape, vec![("u1", 0, 0), ("", 2, 0), ("", 0, 2)]);
+        assert_eq!(prior[2].tool_results[0].output, "contents");
+        assert!(!prior[2].tool_results[0].is_error);
+        assert!(prior[2].tool_results[1].is_error, "the killed call failed");
+        assert!(
+            prior[2].tool_results[1].output.contains("cut off"),
+            "a call that never returned says so: {}",
+            prior[2].tool_results[1].output
+        );
     }
 
     #[test]

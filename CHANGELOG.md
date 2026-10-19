@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.4.3] - 2026-10-19
+
+### 🐛 Bug Fixes
+
+- *(session)* Keep last turn messages after interruption
 ## [0.4.2] - 2026-10-15
 
 ### 🚀 Features

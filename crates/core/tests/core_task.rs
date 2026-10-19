@@ -4009,6 +4009,111 @@ async fn a_new_prompt_after_a_restart_carries_the_loaded_sessions_replies() {
     }
 }
 
+/// A follow-up prompt's request carries the earlier turn's tool activity: the
+/// calls it made and the results answering them ride the history, so the model
+/// keeps the work that produced them instead of the turn's text alone.
+#[tokio::test]
+async fn a_new_prompt_replays_the_previous_turns_tool_activity() {
+    let (addr, bodies) = spawn_recording_openai(None);
+    let store = Store::open_in_memory().await.unwrap();
+
+    // A session as a restart finds it: one turn that read a file and reported
+    // what it found.
+    let mut seed = store.clone();
+    let session_id = seed
+        .create_session("t", Some("mock"), Some("test-model"), None)
+        .await
+        .unwrap();
+    let prompt = seed
+        .append_message(session_id, None, shuvarie_llm::Role::User, "read the file")
+        .await
+        .unwrap();
+    let assistant = seed
+        .append_assistant_message(
+            session_id,
+            Some(prompt.id),
+            "reading it",
+            &[],
+            &[shuvarie_db::TextSegment {
+                after_tool: 0,
+                text: "reading it".into(),
+            }],
+            false,
+            shuvarie_llm::TokenUsage::default(),
+            0.0,
+            &shuvarie_llm::TokenUsage::default(),
+            &shuvarie_db::Attribution::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    seed.append_tool_call(
+        session_id,
+        assistant.id,
+        0,
+        "read_file",
+        r#"{"path":"src/main.rs"}"#,
+        "REPLAYED-TOOL-OUTPUT",
+        "",
+        true,
+        false,
+        None,
+        "",
+        None,
+        None,
+        0,
+    )
+    .await
+    .unwrap();
+    seed.set_active_leaf(session_id, Some(assistant.id))
+        .await
+        .unwrap();
+
+    let (cmd_tx, mut event_rx, handle) =
+        core_with_mock_store(addr, store.clone(), StartupSession::MostRecent).await;
+    recv_skills_loaded(&mut event_rx).await;
+    let loaded = recv_session_loaded(&mut event_rx).await;
+    assert_eq!(
+        loaded.tool_records.len(),
+        1,
+        "the reload keeps the turn's tool record"
+    );
+
+    send_and_drain(&cmd_tx, &mut event_rx, "and the rest?").await;
+    drop(cmd_tx);
+    let _ = handle.await;
+
+    let chats = recorded_chats(&bodies);
+    assert_eq!(chats.len(), 1, "the new prompt's turn: {chats:?}");
+    let request = &chats[0];
+    assert!(
+        request.contains(
+            r#"{"role":"assistant","content":"reading it","tool_calls":[{"type":"function","id":"call_1_0","function":{"name":"read_file","arguments":"{\"path\":\"src/main.rs\"}"}}]}"#
+        ),
+        "the earlier turn's call rides the request: {request}"
+    );
+    assert!(
+        request.contains(
+            r#"{"role":"tool","tool_call_id":"call_1_0","content":"REPLAYED-TOOL-OUTPUT"}"#
+        ),
+        "the result answering it rides the request too: {request}"
+    );
+    assert!(
+        request.contains("tool_calls") && request.contains("read_file"),
+        "the earlier turn's call rides the request: {request}"
+    );
+    assert!(
+        request.contains("REPLAYED-TOOL-OUTPUT"),
+        "the result answering it rides the request too: {request}"
+    );
+    for carried in ["read the file", "and the rest?"] {
+        assert!(
+            request.contains(carried),
+            "the session's {carried:?} still rides the request: {request}"
+        );
+    }
+}
+
 /// Switching to a stored session reloads its path; the next prompt's request is
 /// the loaded session's history — its earlier replies included — and not the
 /// session that was active a moment ago.

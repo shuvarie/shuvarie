@@ -517,8 +517,12 @@ impl ToolScene {
 ///
 /// Hooks fire around every prior user prompt / assistant reply. The turn
 /// markers wrap each turn: a turn starts with its user prompt (so
-/// `before-each.turn` composes before it) and ends with its assistant reply
-/// (so `after-each.turn` composes after the reply hook).
+/// `before-each.turn` composes before it) and ends with the last message the
+/// turn produced (so `after-each.turn` composes after the reply hook). A
+/// replayed turn spans several messages — the assistant messages that carried
+/// its tool calls and the user messages answering them — so the turn marker
+/// fires on the turn's last message only, and a user message carrying tool
+/// results is not a prompt: no turn starts at it.
 pub fn inject_history(
     scene: &Scene,
     prior: &[ChatMsg],
@@ -532,9 +536,21 @@ pub fn inject_history(
     if announce_scene && let Some(interlude) = scene.interlude() {
         out.push(ChatMsg::system(interlude));
     }
-    for msg in prior {
+    for (i, msg) in prior.iter().enumerate() {
+        // Whether the turn this message belongs to ends here: the next user
+        // prompt starts the next turn, so the message before it (or the
+        // history's last message) closes this one. A user prompt's own turn
+        // runs on past it, and the pending prompt is not part of the history.
+        let closes_turn = if msg.is_user_prompt() {
+            false
+        } else {
+            match prior[i + 1..].iter().position(ChatMsg::is_user_prompt) {
+                Some(gap) => gap == 0,
+                None => i + 1 == prior.len(),
+            }
+        };
         match msg.role {
-            Role::User => {
+            Role::User if msg.is_user_prompt() => {
                 if let Some(hooks) = before {
                     if let Some(turn) = &hooks.turn {
                         out.push(ChatMsg::system(turn));
@@ -550,6 +566,19 @@ pub fn inject_history(
                     out.push(ChatMsg::system(user));
                 }
             }
+            // A user message carrying the results of a replayed turn's calls:
+            // mid-turn context, not a prompt. When it is where the turn ends
+            // (the turn ran tools and never wrote a closing reply), it closes
+            // the turn like an assistant reply would.
+            Role::User => {
+                out.push(msg.clone());
+                if closes_turn
+                    && let Some(hooks) = after
+                    && let Some(turn) = &hooks.turn
+                {
+                    out.push(ChatMsg::system(turn));
+                }
+            }
             Role::Assistant => {
                 if let Some(hooks) = before
                     && let Some(assistant) = &hooks.assistant_prompt
@@ -561,7 +590,7 @@ pub fn inject_history(
                     if let Some(assistant) = &hooks.assistant_prompt {
                         out.push(ChatMsg::system(assistant));
                     }
-                    if let Some(turn) = &hooks.turn {
+                    if closes_turn && let Some(turn) = &hooks.turn {
                         out.push(ChatMsg::system(turn));
                     }
                 }
@@ -902,6 +931,107 @@ mod tests {
             later.first().map(|m| m.content.as_str()),
             Some("BT"),
             "hooks still wrap the first turn on later requests"
+        );
+    }
+
+    /// A replayed turn spans several messages: the text-less assistant message,
+    /// the calls it made, and the user message answering them. The turn marker
+    /// closes the turn once — after its last message — and no turn starts at a
+    /// user message carrying tool results.
+    #[test]
+    fn injection_wraps_a_replayed_turn_once() {
+        let scene = plan_scene(
+            r#"
+            scenes {
+                scene name="Plan" {
+                    system-prompts {
+                        before-each {
+                            user-prompt "BU"
+                            assistant-prompt "BA"
+                            turn "BT"
+                        }
+                        after-each {
+                            user-prompt "AU"
+                            assistant-prompt "AA"
+                            turn "AT"
+                        }
+                    }
+                }
+            }
+        "#,
+        );
+        let calls = vec![
+            shuvarie_llm::ChatToolCall {
+                id: "call_1_0".into(),
+                name: "read_file".into(),
+                args_json: "{}".into(),
+            },
+            shuvarie_llm::ChatToolCall {
+                id: "call_1_1".into(),
+                name: "grep".into(),
+                args_json: "{}".into(),
+            },
+        ];
+        let results = vec![
+            shuvarie_llm::ChatToolResult {
+                call: "call_1_0".into(),
+                name: "read_file".into(),
+                output: "contents".into(),
+                is_error: false,
+            },
+            shuvarie_llm::ChatToolResult {
+                call: "call_1_1".into(),
+                name: "grep".into(),
+                output: "hits".into(),
+                is_error: false,
+            },
+        ];
+        let prior = vec![
+            ChatMsg::user("u1"),
+            ChatMsg::assistant_with("looking", calls.clone()),
+            ChatMsg::tool_results(results.clone()),
+            ChatMsg::assistant_with("done", Vec::new()),
+            ChatMsg::user("u2"),
+        ];
+        let injected = inject_history(&scene, &prior, Some("u3"), false);
+        let rendered: Vec<(char, &str)> = injected
+            .iter()
+            .map(|m| {
+                (
+                    match m.role {
+                        Role::System => 's',
+                        Role::User => 'u',
+                        Role::Assistant => 'a',
+                    },
+                    m.content.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rendered,
+            vec![
+                ('s', "BT"),
+                ('s', "BU"),
+                ('u', "u1"),
+                ('s', "AU"),
+                // the turn's first run, still open: no turn marker yet
+                ('s', "BA"),
+                ('a', "looking"),
+                ('s', "AA"),
+                // the results are not a prompt, so no turn starts here...
+                ('u', ""),
+                // ...and the closing run ends the turn
+                ('s', "BA"),
+                ('a', "done"),
+                ('s', "AA"),
+                ('s', "AT"),
+                ('s', "BT"),
+                ('s', "BU"),
+                ('u', "u2"),
+                ('s', "AU"),
+                ('s', "BT"),
+                ('s', "BU"),
+            ]
         );
     }
 

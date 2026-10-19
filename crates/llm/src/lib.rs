@@ -24,7 +24,7 @@ pub use error::{LlmError, Result};
 pub use file_change::{
     DiffLine, DiffLineKind, FileChange, PatchFileChange, PatchFileKind, ShellStreams,
 };
-pub use message::{ChatMsg, Role, to_rig_message};
+pub use message::{ChatMsg, ChatToolCall, ChatToolResult, Role, to_rig_message};
 pub use model::Model;
 pub use provider::{ProviderClient, ProviderKind};
 pub use retry::{ConnectionFailure, classify_connection_error};

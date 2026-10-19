@@ -40,7 +40,7 @@ pub use question::{QuestionPrompt, QuestionRequest};
 pub use session::{MessageMeta, ModelUsage, Session};
 pub use shuvarie_config::*;
 pub use shuvarie_db::{MsgRole, SearchHit, SearchSource, SessionSummary, StoredScroll};
-pub use shuvarie_llm::{ChatMsg, Model, Role, TokenUsage};
+pub use shuvarie_llm::{ChatMsg, ChatToolCall, ChatToolResult, Model, Role, TokenUsage};
 pub use shuvarie_lsp::{DiagnosticInfo, DiagnosticSeverity, LspStatus, ServerStatus};
 pub use shuvarie_mcp::{McpStatus, McpStatusState};
 pub use skills::{Skill, SkillWarning, Skills};
