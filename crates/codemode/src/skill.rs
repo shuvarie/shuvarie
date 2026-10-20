@@ -206,9 +206,11 @@ the classic mistake, because `line.trim().split(",")` fails at the `split`:
 
 ```rhai
 let parts = "a, b, c".split(",");
+let trimmed = parts[1];
+trimmed.trim();              // in place; bind first, because the call is ()
 let padded = "abc";
-padded.pad(6, "-");          // in place; the call itself is ()
-`${parts.len} parts, ${parts[1].trim()} unpadded, ${padded}`
+padded.pad(6, "-");          // likewise
+`${parts.len} parts, ${trimmed} trimmed, ${padded}`
 ```
 
 `sub_string(1, 3)` is start-and-length (not end), `sub_string(2)` runs to the
@@ -225,6 +227,30 @@ delimiter, and a second argument caps the number of pieces:
 let words = "  3 files   found ".split();
 let pair = "key=value=extra".split("=", 2);
 `${words.len} words, then ${pair[1]}`
+```
+
+The delimiter is **literal text, not a pattern**: `split(".")` splits on a dot
+and nothing needs escaping. **Empty pieces are kept**, so a doubled or trailing
+delimiter leaves a `""` to filter out when counting. `split("")` is not the way
+to get characters from a string: it puts an empty piece at **each end** as well
+as between them, so `"hi"` comes back as four pieces -- `to_chars()` is the
+array of characters. There is no `join` to put the pieces back (see the array
+section for the `reduce` that does it).
+
+```rhai
+let fields = "a,,c,".split(",");         // literal delimiter, empties kept
+let kept = fields.filter(|field| field != "");
+let pieces = "hi".split("");             // ["", "h", "i", ""] for two chars
+`${kept.len} of ${fields.len} filled, ${pieces.len} pieces, ${"hi".to_chars().len} chars`
+```
+
+Trimming every piece is the same in-place rule inside a closure: the `trim` is a
+statement of its own, and the piece is what the closure hands back.
+
+```rhai
+let raw = "a, b , c".split(",");
+let cleaned = raw.map(|piece| { piece.trim(); piece });
+`${raw[1]} untouched, ${cleaned[1]} cleaned`
 ```
 
 Single characters have their own forms: `get(i)` returns a char, `set(i, ch)`

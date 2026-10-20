@@ -1226,6 +1226,36 @@ fn container_helpers_follow_the_reference() {
         json!(["a", "b=c"])
     );
 
+    // The delimiter is literal text rather than a pattern, an empty piece is
+    // kept rather than dropped, and `split("")` pads each end with one -- so
+    // it is not a char split, and `to_chars()` is. All three are what a reader
+    // coming from JavaScript's `split` would assume the other way round, and
+    // the skill's strings section now states them.
+    assert_eq!(
+        eval(&engine, r#""a.b.c".split(".")"#),
+        json!(["a", "b", "c"])
+    );
+    assert_eq!(
+        eval(&engine, r#""a,,c,".split(",")"#),
+        json!(["a", "", "c", ""])
+    );
+    assert_eq!(
+        eval(&engine, r#""hi".split("")"#),
+        json!(["", "h", "i", ""]),
+        "the empty ends are why `to_chars()` is the char array"
+    );
+    assert_eq!(eval(&engine, r#""hi".to_chars().len"#), json!(2));
+
+    // Trimming each piece is a statement inside the closure, and it edits the
+    // copy the closure was handed, not the array it came from.
+    assert_eq!(
+        eval(
+            &engine,
+            r#"let raw = "a, b".split(","); let cleaned = raw.map(|piece| { piece.trim(); piece }); [cleaned, raw]"#
+        ),
+        json!([["a", "b"], ["a", " b"]])
+    );
+
     // Characters: `get` reads, `set` replaces in place, `pop` hands one back.
     assert_eq!(eval(&engine, r#""abc".get(1)"#), json!('b'));
     assert_eq!(
