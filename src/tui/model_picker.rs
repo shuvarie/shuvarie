@@ -625,6 +625,7 @@ mod tests {
             doc: None,
             r#type: None,
             dialect: None,
+            peaks: None,
             default_large_model_id: None,
             default_small_model_id: None,
             models: models
@@ -642,6 +643,7 @@ mod tests {
                         output: None,
                     },
                     cost: Default::default(),
+                    peaks: None,
                     options: None,
                 })
                 .collect(),

@@ -216,6 +216,10 @@ where
     // across the spinners currently animating. `None` when none are. Armed
     // after each draw, before it is ever read.
     let mut spinner_wake;
+    // Drives the sidebar's peak/off-peak countdown: the line follows the wall
+    // clock, so it wakes on its own interval while a catalog schedule governs
+    // the active model. `None` otherwise.
+    let mut peak_wake;
     // Session picker list refresh: while the picker is open the list is
     // re-fetched periodically so lock states stay live.
     let mut picker_wake;
@@ -247,6 +251,9 @@ where
             (spinner, scene) => spinner.or(scene),
         }
         .map(|until| tokio::time::Instant::now() + until);
+        peak_wake = app
+            .peak_wake()
+            .map(|interval| tokio::time::Instant::now() + interval);
         picker_wake = app
             .session_picker
             .open
@@ -311,6 +318,23 @@ where
                         &mut app,
                         rat.backend_mut().terminal_mut(),
                         Some(AppMessage::PickerRefresh),
+                    )
+                }
+                // Peak/off-peak countdown wake: the sidebar's "Peak ends in …"
+                // line is derived from the wall clock, so it is refreshed on
+                // its own interval while a schedule is installed.
+                _ = async {
+                    if let Some(deadline) = peak_wake {
+                        tokio::time::sleep_until(deadline).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                }, if peak_wake.is_some() => {
+                    peak_wake = None;
+                    apply_msg(
+                        &mut app,
+                        rat.backend_mut().terminal_mut(),
+                        Some(AppMessage::PeakTick),
                     )
                 }
                 // Terminal event — draws under the same frame budget as core

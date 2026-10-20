@@ -116,6 +116,10 @@ categories = [
 
 [workspace.dependencies]
 base64 = "0.23"
+# The clock selune's peak/off-peak schedules are expressed in (and the
+# `chrono_tz` timezones it re-exports). Kept direct only where schedule math
+# needs it; timestamps stay on `jiff`.
+chrono = "0.4"
 dirs = "7"
 futures-util = { version = "0.3", default-features = false, features = ["std", "alloc"] }
 http = "1"

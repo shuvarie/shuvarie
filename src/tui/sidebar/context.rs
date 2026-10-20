@@ -1,8 +1,12 @@
+use std::time::{Duration, SystemTime};
+
 use crate::tui::theme;
 use ratatui::prelude::*;
+use shuvarie_core::peaks::{PeakPhase, PeakSchedule};
 use shuvarie_llm::TokenUsage;
 
 use crate::tui::utils::num::{CachedScaledNumber, fmt_cost};
+use crate::tui::utils::time::fmt_relative;
 
 /// The sidebar Context panel: session token usage, estimated cost, and the
 /// active model's context window (from the Selune catalog, mapped through the
@@ -17,6 +21,12 @@ use crate::tui::utils::num::{CachedScaledNumber, fmt_cost};
 /// tokens) show how the last exchange was served; each half is hidden while
 /// unavailable. Display strings come from `utils::num` so token and cost
 /// formatting lives in one place.
+///
+/// Below the cost, a catalog peak/off-peak schedule (provider-wide, or the
+/// model's own override) adds a live countdown to the end of the current
+/// phase (`Peak ends in 2h`, `Off-peak ends in 1d 4h`). The schedule is
+/// static, so the sidebar holds the phase and the time left in it, refreshed
+/// by the render loop's tick. No schedule, no line.
 pub struct ContextDisplay {
     input_tokens: CachedScaledNumber,
     output_tokens: CachedScaledNumber,
@@ -32,6 +42,13 @@ pub struct ContextDisplay {
     /// Cache-hit percentage of that request (rounded, capped at 100); only
     /// when the provider reported cached tokens.
     cached_pct: Option<u64>,
+    /// The peak/off-peak schedule governing the active model, when the
+    /// catalog declares one.
+    peaks: Option<PeakSchedule>,
+    /// Where that schedule stood at the last refresh: the phase, and the time
+    /// left in it. Refreshed by [`Self::set_peaks`] and by the render loop's
+    /// tick so `view` renders cached state only.
+    peak: Option<(PeakPhase, Duration)>,
 }
 
 impl ContextDisplay {
@@ -46,7 +63,38 @@ impl ContextDisplay {
             context_tokens: None,
             read_tokens: None,
             cached_pct: None,
+            peaks: None,
+            peak: None,
         }
+    }
+
+    /// Install (or clear, when `None`) the peak/off-peak schedule that governs
+    /// the active model, and refresh the live phase it puts the model in.
+    pub fn set_peaks(&mut self, peaks: Option<PeakSchedule>) {
+        self.peaks = peaks;
+        self.refresh_peak();
+    }
+
+    /// Whether a peak/off-peak schedule governs the active model: the render
+    /// loop wakes for the countdown only while one does.
+    pub fn has_peak_schedule(&self) -> bool {
+        self.peaks.is_some()
+    }
+
+    /// Recompute the peak phase and the time left in it. The catalog schedule
+    /// is static, so this follows the wall clock: the render loop ticks while
+    /// a schedule is installed.
+    pub fn refresh_peak(&mut self) {
+        self.refresh_peak_at(SystemTime::now());
+    }
+
+    /// Recompute the peak phase and the time left in it as of `now`.
+    pub(crate) fn refresh_peak_at(&mut self, now: SystemTime) {
+        self.peak = self
+            .peaks
+            .as_ref()
+            .and_then(|schedule| schedule.status(now))
+            .map(|status| (status.phase(), status.remaining(now)));
     }
 
     pub fn set_context_length(&mut self, context_length: Option<u64>) {
@@ -168,6 +216,16 @@ impl ContextDisplay {
             lines.push(Line::from(format!("  Cache {}", self.cached_tokens)).fg(theme::text_dim()));
         }
         lines.push(Line::from(format!("  Cost {}", fmt_cost(self.cost))).fg(theme::text_dim()));
+        if let Some((phase, remaining)) = self.peak {
+            lines.push(
+                Line::from(format!(
+                    "  {} ends in {}",
+                    phase_label(phase),
+                    fmt_relative(remaining)
+                ))
+                .fg(theme::text_dim()),
+            );
+        }
         lines.push(Line::from(""));
     }
 
@@ -199,6 +257,24 @@ impl ContextDisplay {
             spans.push(Span::raw(format!(" CH{pct}%")).fg(theme::text_dim()));
         }
         spans.push(Span::raw(format!(" {}", fmt_cost(self.cost))).fg(theme::text_dim()));
+        if let Some((phase, remaining)) = self.peak {
+            spans.push(
+                Span::raw(format!(
+                    " {} ends in {}",
+                    phase_label(phase),
+                    fmt_relative(remaining)
+                ))
+                .fg(theme::text_dim()),
+            );
+        }
         spans
+    }
+}
+
+/// The label a countdown carries for its phase.
+fn phase_label(phase: PeakPhase) -> &'static str {
+    match phase {
+        PeakPhase::Peak => "Peak",
+        PeakPhase::OffPeak => "Off-peak",
     }
 }

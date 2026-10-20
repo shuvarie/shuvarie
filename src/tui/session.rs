@@ -132,6 +132,9 @@ pub enum SessionMessage {
         model_display: Option<String>,
         variant: Option<String>,
         context_length: Option<u64>,
+        /// The peak/off-peak schedule governing the model, when the catalog
+        /// declares one (`None` hides the sidebar's countdown).
+        peaks: Option<shuvarie_core::peaks::PeakSchedule>,
     },
     QuestionAsked {
         id: u64,
@@ -269,6 +272,9 @@ pub enum SessionMessage {
     /// The render loop's spinner wake: refresh the animated spinner renders
     /// (the chat's cached turns and the sidebar's cached lines).
     SpinnerUpdate,
+    /// The render loop's countdown wake: refresh the sidebar's peak/off-peak
+    /// countdown.
+    PeakTick,
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
@@ -1075,13 +1081,16 @@ impl SessionScreen {
                 model_display,
                 variant,
                 context_length,
+                peaks,
             } => {
                 self.provider = provider;
                 self.model = model;
                 self.model_display = model_display;
                 self.variant = variant;
-                self.sidebar
-                    .update(SidebarMessage::UpdateConfig { context_length });
+                self.sidebar.update(SidebarMessage::UpdateConfig {
+                    context_length,
+                    peaks,
+                });
                 None
             }
             SessionMessage::QuestionAsked { id, questions } => {
@@ -1311,6 +1320,10 @@ impl SessionScreen {
             SessionMessage::SpinnerUpdate => {
                 self.chat.update(ChatMessage::SpinnerUpdate);
                 self.sidebar.update(SidebarMessage::SpinnerUpdate);
+                None
+            }
+            SessionMessage::PeakTick => {
+                self.sidebar.update(SidebarMessage::PeakTick);
                 None
             }
             SessionMessage::ThemeChanged => {
@@ -2292,6 +2305,7 @@ mod tests {
         let mut screen = SessionScreen::new();
         screen.sidebar.update(SidebarMessage::UpdateConfig {
             context_length: Some(200_000),
+            peaks: None,
         });
         let mut session = shuvarie_core::Session::new();
         session.push_user("go");
@@ -2334,6 +2348,7 @@ mod tests {
         let mut screen = SessionScreen::new();
         screen.sidebar.update(SidebarMessage::UpdateConfig {
             context_length: Some(200_000),
+            peaks: None,
         });
         screen.update(SessionMessage::UsageUpdate {
             usage: TokenUsage::new().total_tokens(Some(84_000)),
@@ -2364,6 +2379,7 @@ mod tests {
         let mut screen = SessionScreen::new();
         screen.sidebar.update(SidebarMessage::UpdateConfig {
             context_length: Some(200_000),
+            peaks: None,
         });
         screen.update(SessionMessage::UsageUpdate {
             usage: TokenUsage::new().total_tokens(Some(84_000)),
@@ -2483,6 +2499,7 @@ mod tests {
             model_display: None,
             variant: None,
             context_length: Some(200_000),
+            peaks: None,
         });
         assert_eq!(screen.provider.as_deref(), Some("Anthropic"));
         assert_eq!(screen.model.as_deref(), Some("claude-sonnet-4-5"));
@@ -2509,6 +2526,7 @@ mod tests {
             model_display: Some("Claude Sonnet 4.5".into()),
             variant: None,
             context_length: Some(200_000),
+            peaks: None,
         });
 
         let buf = draw(&screen, 80, 24);
@@ -2532,6 +2550,7 @@ mod tests {
             model_display: None,
             variant: Some("high".into()),
             context_length: Some(200_000),
+            peaks: None,
         });
 
         let buf = draw(&screen, 80, 24);
@@ -2547,6 +2566,7 @@ mod tests {
             model_display: None,
             variant: None,
             context_length: Some(200_000),
+            peaks: None,
         });
         let buf = draw(&screen, 80, 24);
         let status_row = content_row_text(&buf, 22);
@@ -2565,6 +2585,7 @@ mod tests {
             model_display: Some("Claude Sonnet 4.5".into()),
             variant: Some("high".into()),
             context_length: Some(200_000),
+            peaks: None,
         });
 
         let buf = draw(&screen, 80, 24);
@@ -3780,6 +3801,7 @@ mod tests {
         let mut screen = SessionScreen::new();
         screen.sidebar.update(SidebarMessage::UpdateConfig {
             context_length: Some(200_000),
+            peaks: None,
         });
         screen.sidebar.update(SidebarMessage::UpdateUsage {
             usage: TokenUsage::new()

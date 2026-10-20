@@ -1023,6 +1023,7 @@ mod tests {
             doc: None,
             r#type: Some(ptype),
             dialect: None,
+            peaks: None,
             default_large_model_id: None,
             default_small_model_id: None,
             models: vec![SeluneModel {
@@ -1034,6 +1035,7 @@ mod tests {
                 attachment: false,
                 limit: ModelLimit::default(),
                 cost: Default::default(),
+                peaks: None,
                 options: None,
             }],
             default_headers: None,

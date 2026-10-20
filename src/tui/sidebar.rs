@@ -3,6 +3,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph};
 use shuvarie_core::{
     LspStatus, McpStatus, McpStatusState, ServerStatus, SidebarPref, Skill, SkillWarning,
+    peaks::PeakSchedule,
 };
 use shuvarie_llm::TokenUsage;
 use termina::event::{KeyCode, KeyEvent};
@@ -52,6 +53,9 @@ pub struct Sidebar {
 pub enum SidebarMessage {
     UpdateConfig {
         context_length: Option<u64>,
+        /// The peak/off-peak schedule governing the active model, when the
+        /// catalog declares one (`None` hides the countdown).
+        peaks: Option<PeakSchedule>,
     },
     UpdateUsage {
         usage: TokenUsage,
@@ -112,6 +116,9 @@ pub enum SidebarMessage {
     Toggle,
     /// The render loop's spinner wake: recapture the animated spinner span.
     SpinnerUpdate,
+    /// The render loop's countdown wake: recompute the active peak phase and
+    /// the time left in it.
+    PeakTick,
     /// The theme palette changed (theme picker preview/apply/restore or a
     /// config reload): the cached body lines carry resolved theme colors, so
     /// they must be rebuilt; handled by the trailing cache rebuild below.
@@ -142,8 +149,12 @@ impl Sidebar {
 
     pub fn update(&mut self, msg: SidebarMessage) {
         match msg {
-            SidebarMessage::UpdateConfig { context_length } => {
+            SidebarMessage::UpdateConfig {
+                context_length,
+                peaks,
+            } => {
                 self.context.set_context_length(context_length);
+                self.context.set_peaks(peaks);
             }
             SidebarMessage::UpdateUsage {
                 usage,
@@ -194,6 +205,9 @@ impl Sidebar {
             SidebarMessage::SpinnerUpdate => {
                 self.spinner_span = super::spinner::spinner();
             }
+            SidebarMessage::PeakTick => {
+                self.context.refresh_peak();
+            }
             SidebarMessage::ThemeChanged => {
                 // Re-bake the stateful pieces (the version bar's captured
                 // line and the spinner span's accent); the trailing rebuild
@@ -214,6 +228,12 @@ impl Sidebar {
             SidebarPref::Expanded => false,
             SidebarPref::Collapsed => true,
         })
+    }
+
+    /// Whether a peak/off-peak schedule governs the active model: the render
+    /// loop wakes for the countdown only while one does.
+    pub fn has_peak_schedule(&self) -> bool {
+        self.context.has_peak_schedule()
     }
 
     pub fn map_event(&self, key: &KeyEvent) -> Option<SidebarMessage> {
@@ -252,8 +272,8 @@ impl Sidebar {
 
     /// The one-line stand-in for the collapsed sidebar, shown between the
     /// status row and the key hint: context info (token totals, window
-    /// fraction, read tokens, cache hit, cost) and LSP server states — no
-    /// skills, no todos. Truncated to `max_width` display columns.
+    /// fraction, read tokens, cache hit, cost, peak countdown) and LSP server
+    /// states — no skills, no todos. Truncated to `max_width` display columns.
     pub fn collapsed_line(&self, max_width: usize) -> Line<'static> {
         let mut spans = self.context.compact_spans();
         if self.lsp_enabled && !self.lsp_servers.is_empty() {
@@ -610,6 +630,7 @@ mod tests {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateConfig {
             context_length: Some(200_000),
+            peaks: None,
         });
         sidebar.update(SidebarMessage::UpdateUsage {
             usage: TokenUsage::new().output_tokens(Some(12_300)),
@@ -642,6 +663,7 @@ mod tests {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateConfig {
             context_length: Some(200_000),
+            peaks: None,
         });
         sidebar.update(SidebarMessage::UpdateUsage {
             usage: TokenUsage::new()
@@ -719,6 +741,7 @@ mod tests {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateConfig {
             context_length: Some(200_000),
+            peaks: None,
         });
         sidebar.update(SidebarMessage::UpdateUsage {
             usage: TokenUsage::new()
@@ -754,6 +777,7 @@ mod tests {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateConfig {
             context_length: Some(1_048_576),
+            peaks: None,
         });
         sidebar.update(SidebarMessage::UpdateUsage {
             usage: TokenUsage::new().output_tokens(Some(5_000_000)),
@@ -827,6 +851,7 @@ mod tests {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateConfig {
             context_length: Some(200_000),
+            peaks: None,
         });
         sidebar.update(SidebarMessage::UpdateUsage {
             usage: TokenUsage::new().total_tokens(Some(84_000)),
@@ -854,6 +879,7 @@ mod tests {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateConfig {
             context_length: Some(200_000),
+            peaks: None,
         });
         sidebar.update(SidebarMessage::UpdateUsage {
             usage: TokenUsage::new().total_tokens(Some(84_000)),
@@ -872,6 +898,7 @@ mod tests {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateConfig {
             context_length: Some(200_000),
+            peaks: None,
         });
         sidebar.update(SidebarMessage::SetUsage {
             usage: TokenUsage::default(),
@@ -907,6 +934,7 @@ mod tests {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateConfig {
             context_length: Some(200_000),
+            peaks: None,
         });
         sidebar.update(SidebarMessage::UpdateUsage {
             usage: TokenUsage::new().total_tokens(Some(84_000)),
@@ -930,6 +958,7 @@ mod tests {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateConfig {
             context_length: Some(200_000),
+            peaks: None,
         });
         sidebar.update(SidebarMessage::UpdateUsage {
             usage: TokenUsage::new().total_tokens(Some(84_000)),
@@ -959,6 +988,111 @@ mod tests {
             diagnostics,
             error: None,
         }
+    }
+
+    /// A peak/off-peak fixture: provider-wide 09:00–12:00 UTC windows, no
+    /// exempt days.
+    fn peak_schedule() -> shuvarie_core::peaks::PeakSchedule {
+        let provider: selune::Provider = serde_json::from_value(serde_json::json!({
+            "name": "Test",
+            "id": "test",
+            "peaks": { "periods": [{ "start": "09:00", "end": "12:00" }] },
+            "models": [{
+                "id": "m",
+                "modelCode": "test-org/m",
+                "name": "M",
+                "reasoning": false,
+                "attachment": false,
+                "limit": {},
+                "cost": {}
+            }]
+        }))
+        .expect("fixture provider");
+        shuvarie_core::peaks::PeakSchedule::resolve(&provider, "m").expect("fixture schedule")
+    }
+
+    /// 2025-06-09 is a Monday; the fixture windows are UTC, so these instants
+    /// read as `10:30`, `13:00` and `02:30` on that day.
+    fn utc(hour: u64, minute: u64) -> std::time::SystemTime {
+        const MONDAY: u64 = 1_749_427_200;
+        std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_secs(MONDAY + hour * 3600 + minute * 60)
+    }
+
+    #[test]
+    fn context_section_shows_the_peak_countdown() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateConfig {
+            context_length: None,
+            peaks: Some(peak_schedule()),
+        });
+        assert!(sidebar.has_peak_schedule());
+        let rendered = text(sidebar.rendered_lines());
+        assert!(
+            rendered.contains("Peak ends in ") || rendered.contains("Off-peak ends in "),
+            "body: {rendered}"
+        );
+    }
+
+    #[test]
+    fn context_section_hides_the_peak_countdown_without_a_schedule() {
+        let sidebar = Sidebar::new();
+        assert!(!sidebar.has_peak_schedule());
+        let rendered = text(sidebar.rendered_lines());
+        assert!(!rendered.contains("ends in"), "body: {rendered}");
+    }
+
+    #[test]
+    fn peak_countdown_reads_the_phase_and_the_time_left() {
+        let mut display = super::context::ContextDisplay::new();
+        display.set_peaks(Some(peak_schedule()));
+        display.refresh_peak_at(utc(10, 30));
+        let mut lines = Vec::new();
+        display.view(&mut lines);
+        let rendered = text(&lines);
+        assert!(rendered.contains("Peak ends in 1h 30m"), "body: {rendered}");
+
+        // Past the window's close the countdown flips to the next opening,
+        // 09:00 the following day.
+        display.refresh_peak_at(utc(13, 0));
+        let mut lines = Vec::new();
+        display.view(&mut lines);
+        let rendered = text(&lines);
+        assert!(
+            rendered.contains("Off-peak ends in 20h"),
+            "body: {rendered}"
+        );
+    }
+
+    #[test]
+    fn peak_countdown_is_the_last_context_line() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateConfig {
+            context_length: Some(200_000),
+            peaks: Some(peak_schedule()),
+        });
+        let lines = sidebar.rendered_lines();
+        let position = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| text(std::slice::from_ref(l)).contains(needle))
+        };
+        let cost = position("Cost $");
+        let ends = position("ends in ");
+        assert!(cost.is_some(), "body: {}", text(lines));
+        assert!(ends.is_some(), "body: {}", text(lines));
+        assert!(ends > cost, "countdown follows cost: {}", text(lines));
+    }
+
+    #[test]
+    fn collapsed_line_carries_the_peak_countdown() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateConfig {
+            context_length: None,
+            peaks: Some(peak_schedule()),
+        });
+        let line = text(std::slice::from_ref(&sidebar.collapsed_line(200)));
+        assert!(line.contains("ends in "), "line: {line:?}");
     }
 
     #[test]
@@ -1032,6 +1166,7 @@ mod tests {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateConfig {
             context_length: Some(200_000),
+            peaks: None,
         });
         sidebar.update(SidebarMessage::UpdateUsage {
             usage: TokenUsage::new()
@@ -1078,6 +1213,7 @@ mod tests {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateConfig {
             context_length: Some(200_000),
+            peaks: None,
         });
         sidebar.update(SidebarMessage::UpdateUsage {
             usage: TokenUsage::new()

@@ -210,6 +210,9 @@ pub enum AppMessage {
     Warning(WarningMessage),
     /// The render loop's spinner wake: refresh the animated spinner renders.
     SpinnerUpdate,
+    /// The render loop's countdown wake: refresh the sidebar's peak/off-peak
+    /// countdown.
+    PeakTick,
     /// The workspace's watched `.git/HEAD` file changed (a checkout or
     /// branch switch made outside the TUI): the sidebar re-reads the branch
     /// label.
@@ -308,6 +311,22 @@ fn catalog_context_length(connections: &Connections) -> Option<u64> {
     shuvarie_core::catalog::context_length(provider, model).map(|c| c.max(0) as u64)
 }
 
+/// The peak/off-peak schedule governing the active model, from the Selune
+/// catalog. `None` without an active provider/model, when the connection
+/// resolves to no catalog provider, or when neither the provider nor the model
+/// declares peak windows (or the model opts out with an empty list).
+fn catalog_peaks(connections: &Connections) -> Option<shuvarie_core::peaks::PeakSchedule> {
+    let active = connections.active.as_ref()?;
+    let model = active.model.as_deref()?;
+    let id = connections
+        .providers
+        .get(&active.provider)
+        .and_then(|pc| pc.catalog_id())?;
+    let providers = shuvarie_core::catalog::providers();
+    let provider = shuvarie_core::catalog::find_provider(&providers, id)?;
+    shuvarie_core::peaks::PeakSchedule::resolve(provider, model)
+}
+
 /// The catalog's human-readable name for a model id (e.g. `Claude Sonnet 4.5`),
 /// or `None` when the connection resolves to no catalog provider or the
 /// catalog names no such model. The id stays the wire value; this is only
@@ -371,6 +390,11 @@ fn catalog_variants(connections: &Connections) -> Option<Vec<String>> {
 /// inside the terminals' notification-length limits).
 const NOTIFY_ERROR_CHARS: usize = 160;
 
+/// How often the render loop refreshes the peak/off-peak countdown. The line
+/// shows whole minutes, so a quarter-minute tick keeps the displayed value at
+/// most that far behind while redrawing rarely.
+const PEAK_REFRESH: Duration = Duration::from_secs(15);
+
 /// The first line of `text`, trimmed and capped for a notification body. A
 /// failure message is often several lines of provider detail; the toast only
 /// carries its opening line.
@@ -417,6 +441,7 @@ impl App {
                 model_display_label(&connections, &HashMap::new(), provider, model)
             });
         let initial_context_length = catalog_context_length(&connections);
+        let initial_peaks = catalog_peaks(&connections);
         let current_theme_pref = ui.theme.clone();
         // One resolution of the image settings for both the chat pane and
         // the fullscreen viewer. tui.rs resolved auto-detection into
@@ -447,6 +472,7 @@ impl App {
                     model_display: initial_model_display,
                     variant: initial_variant,
                     context_length: initial_context_length,
+                    peaks: initial_peaks,
                 });
                 s.sidebar
                     .update(SidebarMessage::SetPref { pref: ui.sidebar });
@@ -1888,6 +1914,7 @@ impl App {
                                 .as_ref()
                                 .and_then(|a| a.variant.clone()),
                             context_length: self.active_context_length(),
+                            peaks: self.active_peaks(),
                         });
                     }
                 }
@@ -2078,6 +2105,9 @@ impl App {
             }
             AppMessage::SpinnerUpdate => {
                 self.session.update(SessionMessage::SpinnerUpdate);
+            }
+            AppMessage::PeakTick => {
+                self.session.update(SessionMessage::PeakTick);
             }
             AppMessage::PickerRefresh => {
                 if self.session_picker.open {
@@ -2362,6 +2392,16 @@ impl App {
             (Some(welcome), Some(screensaver)) => Some(welcome.min(screensaver)),
             (welcome, screensaver) => welcome.or(screensaver),
         }
+    }
+
+    /// The wall-clock delay until the peak/off-peak countdown's next refresh.
+    /// `None` while no schedule governs the active model, so the render loop
+    /// stays asleep instead of redrawing a line that cannot change.
+    pub fn peak_wake(&self) -> Option<Duration> {
+        self.session
+            .sidebar
+            .has_peak_schedule()
+            .then_some(PEAK_REFRESH)
     }
 
     fn update_command_availability(&mut self) {
@@ -2707,6 +2747,12 @@ impl App {
         })
     }
 
+    /// The peak/off-peak schedule governing the active model, if the catalog
+    /// declares one.
+    fn active_peaks(&self) -> Option<shuvarie_core::peaks::PeakSchedule> {
+        catalog_peaks(&self.ctx.connections)
+    }
+
     fn provider_display_name(&self, id: &str) -> Option<String> {
         self.ctx
             .connections
@@ -2758,6 +2804,7 @@ impl App {
                     .as_ref()
                     .and_then(|a| a.variant.clone()),
                 context_length: self.active_context_length(),
+                peaks: self.active_peaks(),
             });
         }
     }
@@ -3276,6 +3323,59 @@ mod tests {
             catalog_context_length(&connections),
             Some(catalog_context_window("ollama-cloud", "glm-5.3-flash")),
             "untagged connection model `glm-5.3-flash` must map to the tagged catalog entry"
+        );
+    }
+
+    /// A connection on `catalog_id`, pinned to that provider's default large
+    /// model so a registry bump renaming models does not fail the test.
+    fn default_model_connection(provider_id: &str, catalog_id: &str) -> Connections {
+        let providers = shuvarie_core::catalog::providers();
+        let provider = shuvarie_core::catalog::find_provider(&providers, catalog_id)
+            .unwrap_or_else(|| panic!("no catalog provider `{catalog_id}`"));
+        let model = provider
+            .default_large_model()
+            .unwrap_or_else(|| panic!("no default model for `{catalog_id}`"))
+            .to_string();
+        let mut connections = Connections::default();
+        let config = shuvarie_core::ProviderConfig::new(provider_id, provider_id, None, None)
+            .with_catalog(Some(catalog_id));
+        connections.providers.insert(provider_id.into(), config);
+        connections.active = Some(shuvarie_core::Active {
+            provider: provider_id.into(),
+            model: Some(model),
+            variant: None,
+        });
+        connections
+    }
+
+    #[test]
+    fn catalog_peaks_resolves_the_active_models_schedule() {
+        let connections = default_model_connection("deepseek", "deepseek");
+        let schedule = catalog_peaks(&connections).expect("deepseek bills peak hours");
+        assert_eq!(schedule.timezone(), selune::Tz::Asia__Shanghai);
+    }
+
+    #[test]
+    fn catalog_peaks_is_none_without_a_schedule() {
+        assert!(
+            catalog_peaks(&connected()).is_none(),
+            "anthropic declares no peak windows"
+        );
+        let mut connections = default_model_connection("ollama-cloud", "ollama-cloud");
+        connections.active.as_mut().unwrap().model = Some("glm-5.3".into());
+        assert!(
+            catalog_peaks(&connections).is_none(),
+            "glm-5.3 carries no model-level schedule"
+        );
+    }
+
+    #[test]
+    fn peak_wake_is_armed_only_while_a_schedule_is_installed() {
+        let app = app_with(default_model_connection("deepseek", "deepseek"));
+        assert_eq!(app.peak_wake(), Some(PEAK_REFRESH));
+        assert!(
+            app_with(connected()).peak_wake().is_none(),
+            "no schedule, no countdown to refresh"
         );
     }
 

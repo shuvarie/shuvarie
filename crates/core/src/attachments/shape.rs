@@ -254,6 +254,7 @@ mod tests {
             attachment: false,
             limit: selune::ModelLimit::default(),
             cost: selune::ModelCost::default(),
+            peaks: None,
             options: None,
         }
     }

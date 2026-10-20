@@ -811,6 +811,7 @@ mod tests {
             r#type,
             dialect: None,
             doc: None,
+            peaks: None,
             default_large_model_id: None,
             default_small_model_id: None,
             models: Vec::new(),
@@ -841,6 +842,7 @@ mod tests {
                         ..Default::default()
                     },
                     cost: selune::ModelCost::default(),
+                    peaks: None,
                     options: None,
                 })
                 .collect(),
@@ -1002,6 +1004,7 @@ mod tests {
             attachment: false,
             limit: selune::ModelLimit::default(),
             cost: selune::ModelCost::default(),
+            peaks: None,
             options: None,
         }
     }

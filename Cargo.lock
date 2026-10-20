@@ -6795,9 +6795,9 @@ checksum = "2ab42ca02749e120097e328d91d415325bdf43b1c72c4c8badf37375fe40a813"
 
 [[package]]
 name = "selune"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5583c8b4f4d72383333a653bdf69cc69a496b13a24ea5a3c6fc0a153ae525cef"
+checksum = "5c4cd528ab6455c4d5b60085f68b84284d0340a4342135fc48866a1560603285"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -7085,6 +7085,7 @@ name = "shuvarie-core"
 version = "0.4.3"
 dependencies = [
  "base64 0.23.1",
+ "chrono",
  "dirs",
  "futures-util",
  "globset",
