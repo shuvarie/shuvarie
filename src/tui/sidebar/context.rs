@@ -24,9 +24,11 @@ use crate::tui::utils::time::fmt_relative;
 ///
 /// Below the cost, a catalog peak/off-peak schedule (provider-wide, or the
 /// model's own override) adds a live countdown to the end of the current
-/// phase (`Peak ends in 2h`, `Off-peak ends in 1d 4h`). The schedule is
+/// phase (`Peak ends in 2h`, `Off-Peak ends in 1d 4h`). The schedule is
 /// static, so the sidebar holds the phase and the time left in it, refreshed
-/// by the render loop's tick. No schedule, no line.
+/// by the render loop's tick. No schedule, no line. The phase label is bold
+/// and tinted by what it costs — peak red, off-peak green — while the
+/// countdown itself stays dim with the rest of the panel.
 pub struct ContextDisplay {
     input_tokens: CachedScaledNumber,
     output_tokens: CachedScaledNumber,
@@ -217,21 +219,14 @@ impl ContextDisplay {
         }
         lines.push(Line::from(format!("  Cost {}", fmt_cost(self.cost))).fg(theme::text_dim()));
         if let Some((phase, remaining)) = self.peak {
-            lines.push(
-                Line::from(format!(
-                    "  {} ends in {}",
-                    phase_label(phase),
-                    fmt_relative(remaining)
-                ))
-                .fg(theme::text_dim()),
-            );
+            lines.push(Line::from(peak_spans("  ", phase, remaining)));
         }
         lines.push(Line::from(""));
     }
 
     /// Dim spans of the essentials — token totals, the context-window
     /// fraction, the latest request's read tokens and cache hit, and the
-    /// cost — for the collapsed-sidebar status line.
+    /// cost plus the peak countdown — for the collapsed-sidebar status line.
     pub(crate) fn compact_spans(&self) -> Vec<Span<'static>> {
         let mut spans = Vec::new();
         spans.push(
@@ -258,23 +253,38 @@ impl ContextDisplay {
         }
         spans.push(Span::raw(format!(" {}", fmt_cost(self.cost))).fg(theme::text_dim()));
         if let Some((phase, remaining)) = self.peak {
-            spans.push(
-                Span::raw(format!(
-                    " {} ends in {}",
-                    phase_label(phase),
-                    fmt_relative(remaining)
-                ))
-                .fg(theme::text_dim()),
-            );
+            spans.extend(peak_spans(" ", phase, remaining));
         }
         spans
     }
+}
+
+/// The countdown spans: `prefix`, the phase label, and the wall-clock time
+/// left in it. The label is bold and tinted by what the phase means for the
+/// bill — red at peak rates, green off-peak — so the state reads at a glance;
+/// the countdown stays dim with the rest of the Context panel.
+fn peak_spans(prefix: &str, phase: PeakPhase, remaining: Duration) -> Vec<Span<'static>> {
+    vec![
+        Span::raw(format!("{prefix}{}", phase_label(phase)))
+            .fg(phase_color(phase))
+            .bold(),
+        Span::raw(format!(" ends in {}", fmt_relative(remaining))).fg(theme::text_dim()),
+    ]
 }
 
 /// The label a countdown carries for its phase.
 fn phase_label(phase: PeakPhase) -> &'static str {
     match phase {
         PeakPhase::Peak => "Peak",
-        PeakPhase::OffPeak => "Off-peak",
+        PeakPhase::OffPeak => "Off-Peak",
+    }
+}
+
+/// The phase label's color: the error tone at peak rates, the success tone
+/// off-peak.
+fn phase_color(phase: PeakPhase) -> Color {
+    match phase {
+        PeakPhase::Peak => theme::error(),
+        PeakPhase::OffPeak => theme::success(),
     }
 }

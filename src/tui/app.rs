@@ -32,6 +32,7 @@ use super::context::UpdateCtx;
 use super::history_search::{HistorySearch, HistorySearchEffect, HistorySearchMessage};
 use super::model_picker::{ModelPicker, ModelPickerEffect, ModelPickerMessage};
 use super::notify;
+use super::peak_table::{PeakTableEffect, PeakTableMessage, PeakTablePopup};
 use super::scene;
 use super::screensaver::{Screensaver, ScreensaverEffect, ScreensaverMessage};
 use super::search::SearchMessage;
@@ -79,6 +80,9 @@ pub enum Overlay {
     /// session, dismissed by a key press.
     Screensaver,
     Todos,
+    /// The `/peak-table` popup: the active model's peak/off-peak windows (only
+    /// reachable while the catalog declares a schedule).
+    PeakTable,
 }
 
 pub enum AppMessage {
@@ -208,6 +212,7 @@ pub enum AppMessage {
     },
     Auth(AuthMessage),
     Warning(WarningMessage),
+    PeakTable(PeakTableMessage),
     /// The render loop's spinner wake: refresh the animated spinner renders.
     SpinnerUpdate,
     /// The render loop's countdown wake: refresh the sidebar's peak/off-peak
@@ -264,6 +269,8 @@ pub struct App {
     /// the App started. The editor keeps its own copy while open.
     codemode_prefs: CodemodePrefs,
     pub todo_popup: TodoPopup,
+    /// The `/peak-table` popup: the active model's peak/off-peak windows.
+    pub peak_table: PeakTablePopup,
     pub warning: WarningPopup,
     pub auth: AuthPopup,
     pub models: HashMap<String, Vec<Model>>,
@@ -506,6 +513,7 @@ impl App {
             codemode_editor: CodemodeEditor::new(),
             codemode_prefs,
             todo_popup: TodoPopup::new(),
+            peak_table: PeakTablePopup::new(),
             media_view: MediaViewer::new(image_cell, image_protocol),
             screensaver: Screensaver::new(),
             theme_choices,
@@ -681,7 +689,8 @@ impl App {
             | Overlay::AssistedBy
             | Overlay::MediaViewer
             | Overlay::Screensaver
-            | Overlay::Todos => {}
+            | Overlay::Todos
+            | Overlay::PeakTable => {}
         }
     }
 
@@ -890,6 +899,9 @@ impl App {
                         }
                         Overlay::Todos => {
                             return self.todo_popup.map_event(&key).map(AppMessage::Todos);
+                        }
+                        Overlay::PeakTable => {
+                            return self.peak_table.map_event(&key).map(AppMessage::PeakTable);
                         }
                         Overlay::None => {}
                     }
@@ -1332,7 +1344,8 @@ impl App {
             | Overlay::AssistedBy
             | Overlay::MediaViewer
             | Overlay::Screensaver
-            | Overlay::Todos => None,
+            | Overlay::Todos
+            | Overlay::PeakTable => None,
             Overlay::ModelPicker => {
                 let flat = super::components::flatten_newlines(text);
                 let mut msg = None;
@@ -1599,6 +1612,13 @@ impl App {
                 if let Some(effect) = self.todo_popup.update(m) {
                     match effect {
                         TodoEffect::Close => self.close_overlay(),
+                    }
+                }
+            }
+            AppMessage::PeakTable(m) => {
+                if let Some(effect) = self.peak_table.update(m) {
+                    match effect {
+                        PeakTableEffect::Close => self.close_overlay(),
                     }
                 }
             }
@@ -2424,6 +2444,12 @@ impl App {
             .set_availability(CommandAction::Export, self.session.session_id.is_some());
         self.command_menu
             .set_availability(CommandAction::Images, self.session.chat.has_images());
+        // `/peak-table` only means something for a model the catalog bills on a
+        // peak/off-peak schedule; without one the table would be empty.
+        self.command_menu.set_availability(
+            CommandAction::PeakTable,
+            self.session.sidebar.has_peak_schedule(),
+        );
     }
 
     /// Runs a built-in command action (from the Ctrl+M menu or the inline
@@ -2576,6 +2602,23 @@ impl App {
                 self.todo_popup.open(self.session.todos().to_vec());
                 self.overlay = Overlay::Todos;
             }
+            CommandAction::PeakTable => {
+                // The command is hidden without a schedule, but typing it by
+                // hand still reaches here: say why instead of opening an empty
+                // table. The schedule itself is the catalog's, resolved through
+                // the active connection.
+                match self.active_peaks() {
+                    Some(peaks) => {
+                        self.peak_table.open(peaks);
+                        self.overlay = Overlay::PeakTable;
+                    }
+                    None => {
+                        self.session.update(SessionMessage::ShowError {
+                            error: "the active model has no peak/off-peak pricing".into(),
+                        });
+                    }
+                }
+            }
             CommandAction::Images => {
                 let effect = self
                     .session
@@ -2713,6 +2756,7 @@ impl App {
         self.theme_picker.close();
         self.codemode_editor.close();
         self.todo_popup.close();
+        self.peak_table.close();
         // Walking away from the theme picker repaints with the palette
         // active at open (already cleared to `None` by a selection).
         if let Some(colors) = self.theme_backup.take() {
@@ -2874,6 +2918,7 @@ impl App {
         self.title_popup.view(frame, area, stacked);
         self.assisted_by.view(frame, area, stacked);
         self.todo_popup.view(frame, area, stacked);
+        self.peak_table.view(frame, area, stacked);
         self.view_popups(frame, area, stacked);
     }
 
@@ -3328,53 +3373,93 @@ mod tests {
 
     /// A connection on `catalog_id`, pinned to that provider's default large
     /// model so a registry bump renaming models does not fail the test.
-    fn default_model_connection(provider_id: &str, catalog_id: &str) -> Connections {
-        let providers = shuvarie_core::catalog::providers();
-        let provider = shuvarie_core::catalog::find_provider(&providers, catalog_id)
-            .unwrap_or_else(|| panic!("no catalog provider `{catalog_id}`"));
-        let model = provider
-            .default_large_model()
-            .unwrap_or_else(|| panic!("no default model for `{catalog_id}`"))
-            .to_string();
+    /// A connection on `provider`'s `model`, read from the embedded catalog
+    /// rather than a pinned id, so a registry revision cannot stale the
+    /// fixture.
+    fn connection_on(provider: &selune::Provider, model: &str) -> Connections {
+        let id = provider.id.0.clone();
+        let config = shuvarie_core::ProviderConfig::new(id.clone(), id.clone(), None, None)
+            .with_catalog(Some(provider.id.0.as_str()));
         let mut connections = Connections::default();
-        let config = shuvarie_core::ProviderConfig::new(provider_id, provider_id, None, None)
-            .with_catalog(Some(catalog_id));
-        connections.providers.insert(provider_id.into(), config);
+        connections.providers.insert(id.clone(), config);
         connections.active = Some(shuvarie_core::Active {
-            provider: provider_id.into(),
-            model: Some(model),
+            provider: id,
+            model: Some(model.to_string()),
             variant: None,
         });
         connections
     }
 
+    /// A catalog model that bills peak hours — provider-wide or its own — with
+    /// its provider.
+    fn scheduled_model() -> (selune::Provider, String) {
+        let providers = shuvarie_core::catalog::providers();
+        providers
+            .iter()
+            .find_map(|provider| {
+                provider
+                    .models
+                    .iter()
+                    .find(|m| provider.peaks_for(m).is_some_and(|p| !p.periods.is_empty()))
+                    .map(|m| (provider.clone(), m.id.clone()))
+            })
+            .expect("the embedded catalog declares a peak schedule")
+    }
+
+    /// A catalog model with no peak schedule at all, exact id first so the
+    /// lookup cannot land on a differently scheduled alias.
+    fn unscheduled_model() -> (selune::Provider, String) {
+        let providers = shuvarie_core::catalog::providers();
+        providers
+            .iter()
+            .find_map(|provider| {
+                provider
+                    .models
+                    .iter()
+                    .find(|m| provider.peaks_for(m).is_none_or(|p| p.periods.is_empty()))
+                    .map(|m| (provider.clone(), m.id.clone()))
+            })
+            .expect("the embedded catalog declares a model without a peak schedule")
+    }
+
     #[test]
     fn catalog_peaks_resolves_the_active_models_schedule() {
-        let connections = default_model_connection("deepseek", "deepseek");
-        let schedule = catalog_peaks(&connections).expect("deepseek bills peak hours");
-        assert_eq!(schedule.timezone(), selune::Tz::Asia__Shanghai);
+        let (provider, model) = scheduled_model();
+        let expected = provider
+            .peaks_for(provider.model(&model).expect("the model"))
+            .expect("a schedule")
+            .timezone;
+        let connections = connection_on(&provider, &model);
+        let schedule = catalog_peaks(&connections).expect("a scheduled catalog model");
+        assert_eq!(schedule.timezone(), expected);
     }
 
     #[test]
     fn catalog_peaks_is_none_without_a_schedule() {
-        assert!(
-            catalog_peaks(&connected()).is_none(),
-            "anthropic declares no peak windows"
-        );
-        let mut connections = default_model_connection("ollama-cloud", "ollama-cloud");
-        connections.active.as_mut().unwrap().model = Some("glm-5.3".into());
+        let (provider, model) = unscheduled_model();
+        let connections = connection_on(&provider, &model);
         assert!(
             catalog_peaks(&connections).is_none(),
-            "glm-5.3 carries no model-level schedule"
+            "{} {model} declares no peak windows",
+            provider.id.0
+        );
+        assert!(
+            catalog_peaks(&connected()).is_none(),
+            "a connection outside the catalog has no schedule"
         );
     }
 
     #[test]
     fn peak_wake_is_armed_only_while_a_schedule_is_installed() {
-        let app = app_with(default_model_connection("deepseek", "deepseek"));
+        let (scheduled, model) = scheduled_model();
+        let app = app_with(connection_on(&scheduled, &model));
         assert_eq!(app.peak_wake(), Some(PEAK_REFRESH));
+
+        let (unscheduled, model) = unscheduled_model();
         assert!(
-            app_with(connected()).peak_wake().is_none(),
+            app_with(connection_on(&unscheduled, &model))
+                .peak_wake()
+                .is_none(),
             "no schedule, no countdown to refresh"
         );
     }
@@ -4143,6 +4228,77 @@ mod tests {
         app.update(msg);
         assert!(matches!(app.overlay, Overlay::None));
         assert!(!app.todo_popup.open);
+    }
+
+    #[test]
+    fn peak_table_command_opens_the_popup_and_escape_closes_it() {
+        let (scheduled, model) = scheduled_model();
+        let (mut app, _rx) = app_with_rx(connection_on(&scheduled, &model));
+        active_session(&mut app);
+
+        app.run_command(CommandAction::PeakTable, None);
+        assert!(matches!(app.overlay, Overlay::PeakTable));
+        assert!(app.peak_table.open, "the popup snapshots the schedule");
+
+        // `t` switches the clock the time columns are rendered in; the popup
+        // keeps its windows across the switch.
+        let key =
+            termina::event::KeyEvent::new(KeyCode::Char('t'), termina::event::Modifiers::NONE);
+        let msg = app
+            .map_event(Event::Terminal(TermEvent::Key(key)))
+            .expect("the overlay captures the key");
+        assert!(matches!(
+            msg,
+            AppMessage::PeakTable(PeakTableMessage::CycleZone)
+        ));
+        app.update(msg);
+        assert_eq!(app.peak_table.zone(), crate::tui::peak_table::PeakZone::Utc);
+        assert!(matches!(app.overlay, Overlay::PeakTable), "still open");
+
+        let key = termina::event::KeyEvent::new(KeyCode::Escape, termina::event::Modifiers::NONE);
+        let msg = app
+            .map_event(Event::Terminal(TermEvent::Key(key)))
+            .expect("the overlay captures the key");
+        assert!(matches!(
+            msg,
+            AppMessage::PeakTable(PeakTableMessage::Close)
+        ));
+        app.update(msg);
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(!app.peak_table.open);
+    }
+
+    #[test]
+    fn peak_table_command_without_a_schedule_reports_why() {
+        let (mut app, _rx) = app_with_rx(connected());
+        active_session(&mut app);
+
+        // Anthropic declares no peak windows, so the command is unavailable —
+        // but typing it by hand must say so instead of opening an empty table.
+        app.run_command(CommandAction::PeakTable, None);
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(!app.peak_table.open);
+        assert_eq!(
+            app.session.error.as_deref(),
+            Some("the active model has no peak/off-peak pricing")
+        );
+    }
+
+    #[test]
+    fn peak_table_is_offered_only_while_a_schedule_applies() {
+        let (mut app, _rx) = app_with_rx(connected());
+        active_session(&mut app);
+        app.update(AppMessage::OpenCommandMenu);
+        assert!(
+            !app.command_menu.available(CommandAction::PeakTable),
+            "no schedule, no table to show"
+        );
+
+        let (scheduled, model) = scheduled_model();
+        let (mut app, _rx) = app_with_rx(connection_on(&scheduled, &model));
+        active_session(&mut app);
+        app.update(AppMessage::OpenCommandMenu);
+        assert!(app.command_menu.available(CommandAction::PeakTable));
     }
 
     #[test]

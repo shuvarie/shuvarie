@@ -1029,7 +1029,7 @@ mod tests {
         assert!(sidebar.has_peak_schedule());
         let rendered = text(sidebar.rendered_lines());
         assert!(
-            rendered.contains("Peak ends in ") || rendered.contains("Off-peak ends in "),
+            rendered.contains("Peak ends in ") || rendered.contains("Off-Peak ends in "),
             "body: {rendered}"
         );
     }
@@ -1059,9 +1059,71 @@ mod tests {
         display.view(&mut lines);
         let rendered = text(&lines);
         assert!(
-            rendered.contains("Off-peak ends in 20h"),
+            rendered.contains("Off-Peak ends in 20h"),
             "body: {rendered}"
         );
+    }
+
+    #[test]
+    fn peak_label_is_red_and_off_peak_label_is_green() {
+        let mut display = super::context::ContextDisplay::new();
+        display.set_peaks(Some(peak_schedule()));
+
+        let label_span = |display: &mut super::context::ContextDisplay| {
+            let mut lines = Vec::new();
+            display.view(&mut lines);
+            let line = lines
+                .iter()
+                .find(|l| text(std::slice::from_ref(l)).contains("ends in "))
+                .expect("a countdown line");
+            line.spans[0].clone()
+        };
+
+        // 10:30 UTC is inside the 09:00–12:00 fixture window.
+        display.refresh_peak_at(utc(10, 30));
+        let peak = label_span(&mut display);
+        assert_eq!(peak.content, "  Peak", "leading indent stays on the line");
+        assert_eq!(
+            peak.style.fg,
+            Some(theme::error()),
+            "peak reads as an alarm"
+        );
+        assert!(
+            peak.style.add_modifier.contains(Modifier::BOLD),
+            "the phase label is bold: {:?}",
+            peak.style
+        );
+
+        // Past the window's close the same span turns green.
+        display.refresh_peak_at(utc(13, 0));
+        let off_peak = label_span(&mut display);
+        assert_eq!(off_peak.content, "  Off-Peak");
+        assert_eq!(off_peak.style.fg, Some(theme::success()));
+        assert!(off_peak.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn collapsed_peak_label_is_colored_too() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateConfig {
+            context_length: None,
+            peaks: Some(peak_schedule()),
+        });
+        let line = sidebar.collapsed_line(200);
+        let label = line
+            .spans
+            .iter()
+            .find(|s| s.content.contains("Peak"))
+            .expect("a phase label span");
+        // The collapsed line renders the phase the wall clock is in, so the
+        // expectation follows the label it carries rather than the time of day.
+        let expected = if label.content.contains("Off-Peak") {
+            theme::success()
+        } else {
+            theme::error()
+        };
+        assert_eq!(label.style.fg, Some(expected));
+        assert!(label.style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]

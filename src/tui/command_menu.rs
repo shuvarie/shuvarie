@@ -80,6 +80,15 @@ impl CommandMenu {
         }
     }
 
+    /// Whether `action` is currently marked available.
+    #[cfg(test)]
+    pub fn available(&self, action: CommandAction) -> bool {
+        self.commands
+            .iter()
+            .find(|cmd| cmd.action == CommandRef::Builtin(action))
+            .is_some_and(|cmd| cmd.available)
+    }
+
     /// Replace the custom-command suffix of the command list (builtins keep
     /// their availability state; custom commands are always available).
     pub fn set_custom_commands(&mut self, commands: &[shuvarie_core::CustomCommand]) {

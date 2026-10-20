@@ -12,6 +12,7 @@ pub enum CommandAction {
     OpenScenePicker,
     OpenVariantPicker,
     OpenThemePicker,
+    PeakTable,
     OpenCodemode,
     NewSession,
     EditTitle,
@@ -31,7 +32,7 @@ pub enum CommandAction {
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 26] = [
+    pub const ALL: [CommandAction; 27] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::AddDecisionProvider,
@@ -42,6 +43,7 @@ impl CommandAction {
         CommandAction::OpenScenePicker,
         CommandAction::OpenVariantPicker,
         CommandAction::OpenThemePicker,
+        CommandAction::PeakTable,
         CommandAction::OpenCodemode,
         CommandAction::NewSession,
         CommandAction::EditTitle,
@@ -72,6 +74,7 @@ impl CommandAction {
             CommandAction::OpenScenePicker => "scene",
             CommandAction::OpenVariantPicker => "variant",
             CommandAction::OpenThemePicker => "theme",
+            CommandAction::PeakTable => "peak-table",
             CommandAction::OpenCodemode => "codemode",
             CommandAction::NewSession => "new",
             CommandAction::EditTitle => "title",
@@ -223,6 +226,11 @@ pub fn default_commands() -> Vec<CommandEntry> {
             "Theme",
             "Pick the TUI theme (previews live)",
             CommandAction::OpenThemePicker,
+        ),
+        CommandEntry::builtin(
+            "Peak periods",
+            "Show the model's peak/off-peak windows; t switches timezone",
+            CommandAction::PeakTable,
         ),
         CommandEntry::builtin(
             "Codemode",

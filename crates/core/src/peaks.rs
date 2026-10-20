@@ -14,7 +14,7 @@
 use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Days, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
-use selune::{Peaks, Provider, Tz};
+use selune::{PeakExemption, Peaks, Provider, Tz};
 
 use crate::catalog::find_model;
 
@@ -74,6 +74,40 @@ impl PeakSchedule {
         self.status(SystemTime::now())
     }
 
+    /// The schedule's windows on the civil day `at` falls on in the schedule's
+    /// timezone, in declared order. This is what a table of the periods shows:
+    /// each window resolved to real instants, so it can be rendered in any
+    /// timezone. Exempt day classes do not remove the windows — they only
+    /// suspend them — so a weekend still lists the day's windows.
+    pub fn windows(&self, at: SystemTime) -> Vec<PeakWindow> {
+        let date = self.peaks.local(DateTime::<Utc>::from(at)).date_naive();
+        self.peaks
+            .periods
+            .iter()
+            .filter_map(|period| {
+                let start_minutes = i64::from(period.start().minutes_since_midnight());
+                let start = self.instant(date, start_minutes)?;
+                let end_date = if period.crosses_midnight() {
+                    date.checked_add_days(Days::new(1))?
+                } else {
+                    date
+                };
+                let end_minutes = i64::from(period.end().minutes_since_midnight());
+                let end = self.instant(end_date, end_minutes)?;
+                Some(PeakWindow {
+                    start: start.into(),
+                    end: end.into(),
+                    crosses_midnight: period.crosses_midnight(),
+                })
+            })
+            .collect()
+    }
+
+    /// The day classes on which no window applies at all.
+    pub fn exemptions(&self) -> &[PeakExemption] {
+        &self.peaks.exempt
+    }
+
     fn status_at(&self, at: DateTime<Utc>) -> Option<PeakStatus> {
         let phase = self.phase_at(at);
         let date = self.peaks.local(at).date_naive();
@@ -128,6 +162,36 @@ impl PeakSchedule {
     fn instant(&self, date: NaiveDate, minutes: i64) -> Option<DateTime<Utc>> {
         let naive = date.and_hms_opt(0, 0, 0)? + chrono::Duration::minutes(minutes);
         local_instant(self.peaks.timezone, naive)
+    }
+}
+
+/// One peak window resolved to instants: `start` inclusive, `end` exclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeakWindow {
+    start: SystemTime,
+    end: SystemTime,
+    crosses_midnight: bool,
+}
+
+impl PeakWindow {
+    /// When the window opens.
+    pub fn start(&self) -> SystemTime {
+        self.start
+    }
+
+    /// When the window closes.
+    pub fn end(&self) -> SystemTime {
+        self.end
+    }
+
+    /// Whether the window runs past midnight in the schedule's timezone.
+    pub fn crosses_midnight(&self) -> bool {
+        self.crosses_midnight
+    }
+
+    /// How long the window stays open.
+    pub fn span(&self) -> Duration {
+        self.end.duration_since(self.start).unwrap_or_default()
     }
 }
 
@@ -408,21 +472,98 @@ mod tests {
     }
 
     #[test]
-    fn resolve_reads_the_embedded_catalog() {
-        let providers = crate::catalog::providers();
-        let deepseek = crate::catalog::find_provider(&providers, "deepseek")
-            .expect("the embedded catalog has deepseek");
-        let model = deepseek.default_large_model().expect("a default model");
-        let schedule = PeakSchedule::resolve(deepseek, model).expect("deepseek bills peak hours");
-        assert_eq!(schedule.timezone(), Tz::Asia__Shanghai);
+    fn windows_resolve_each_period_to_instants() {
+        let provider = provider(Some(weekdays_only()), None);
+        let schedule = PeakSchedule::resolve(&provider, "m").unwrap();
+        let windows = schedule.windows(at(2025, 6, 9, 2, 30));
+        assert_eq!(windows.len(), 1);
+        // 09:00–12:00 in Shanghai is 01:00–04:00 UTC.
+        assert_eq!(windows[0].start(), at(2025, 6, 9, 1, 0));
+        assert_eq!(windows[0].end(), at(2025, 6, 9, 4, 0));
+        assert_eq!(windows[0].span(), Duration::from_secs(3 * 60 * 60));
+        assert!(!windows[0].crosses_midnight());
+    }
 
-        // Ollama Cloud has no provider-wide schedule; some of its models carry
-        // their own windows, stated in UTC.
-        let ollama = crate::catalog::find_provider(&providers, "ollama-cloud")
-            .expect("the embedded catalog has ollama-cloud");
-        let schedule =
-            PeakSchedule::resolve(ollama, "deepseek-v4-pro").expect("a model-level schedule");
-        assert_eq!(schedule.timezone(), Tz::UTC);
-        assert!(PeakSchedule::resolve(ollama, "glm-5.3").is_none());
+    #[test]
+    fn windows_cover_a_period_that_crosses_midnight() {
+        let provider = provider(
+            Some(peaks(
+                Tz::Asia__Shanghai,
+                vec![period((23, 0), (1, 0)), period((9, 0), (10, 30))],
+                Vec::new(),
+            )),
+            None,
+        );
+        let schedule = PeakSchedule::resolve(&provider, "m").unwrap();
+        let windows = schedule.windows(at(2025, 6, 6, 15, 30));
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].start(), at(2025, 6, 6, 15, 0), "23:00 Shanghai");
+        assert_eq!(
+            windows[0].end(),
+            at(2025, 6, 6, 17, 0),
+            "01:00 the next day"
+        );
+        assert!(windows[0].crosses_midnight());
+        assert_eq!(windows[0].span(), Duration::from_secs(2 * 60 * 60));
+        assert_eq!(windows[1].span(), Duration::from_secs(90 * 60));
+    }
+
+    #[test]
+    fn windows_are_the_civil_day_in_the_schedule_timezone() {
+        let provider = provider(Some(weekdays_only()), None);
+        let schedule = PeakSchedule::resolve(&provider, "m").unwrap();
+        // 20:00 UTC is already the next day in Shanghai; the windows belong to
+        // that local day, not the UTC one.
+        let windows = schedule.windows(at(2025, 6, 9, 20, 0));
+        assert_eq!(windows[0].start(), at(2025, 6, 10, 1, 0));
+    }
+
+    #[test]
+    fn exemptions_are_exposed_for_display() {
+        let provider = provider(Some(weekdays_only()), None);
+        let schedule = PeakSchedule::resolve(&provider, "m").unwrap();
+        assert_eq!(schedule.exemptions(), [PeakExemption::Weekends]);
+    }
+
+    #[test]
+    fn resolve_agrees_with_every_embedded_catalog_entry() {
+        // The registry is data, and it is revised between releases (models are
+        // renamed, schedules added or dropped), so this walks whatever the
+        // embedded catalog holds instead of pinning provider or model ids.
+        let providers = crate::catalog::providers();
+        let (mut provider_wide, mut model_level) = (0, 0);
+        for provider in &providers {
+            for model in &provider.models {
+                let declared = provider.peaks_for(model);
+                let resolved = PeakSchedule::resolve(provider, &model.id);
+                match declared.filter(|peaks| !peaks.periods.is_empty()) {
+                    Some(peaks) => {
+                        let schedule = resolved.unwrap_or_else(|| {
+                            panic!("{} {} declares peaks", provider.id.0, model.id)
+                        });
+                        assert_eq!(schedule.peaks, *peaks, "{} {}", provider.id.0, model.id);
+                        if model.peaks.is_some() {
+                            model_level += 1;
+                        } else {
+                            provider_wide += 1;
+                        }
+                    }
+                    None => assert!(
+                        resolved.is_none(),
+                        "{} {} declares no peaks",
+                        provider.id.0,
+                        model.id
+                    ),
+                }
+            }
+        }
+        assert!(
+            provider_wide > 0,
+            "the embedded catalog declares a provider-wide schedule"
+        );
+        assert!(
+            model_level > 0,
+            "the embedded catalog declares model-level schedules"
+        );
     }
 }

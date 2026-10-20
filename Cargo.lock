@@ -7023,6 +7023,7 @@ dependencies = [
 name = "shuvarie"
 version = "0.4.3"
 dependencies = [
+ "chrono",
  "clap",
  "color-eyre",
  "dirs",

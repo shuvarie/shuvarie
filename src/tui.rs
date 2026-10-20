@@ -49,6 +49,9 @@ mod model_picker;
 mod notify;
 /// Classify a paste payload as ordinary text or a dropped file path.
 mod paste_path;
+/// The `/peak-table` popup: the active model's peak/off-peak windows, in the
+/// schedule's timezone, UTC, or the user's local time.
+mod peak_table;
 mod permission;
 mod popup;
 mod question;

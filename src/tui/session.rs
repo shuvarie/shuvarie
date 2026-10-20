@@ -744,6 +744,8 @@ impl SessionScreen {
             .set_availability(CommandAction::Export, self.session_id.is_some());
         self.slash
             .set_availability(CommandAction::Images, self.chat.has_images());
+        self.slash
+            .set_availability(CommandAction::PeakTable, self.sidebar.has_peak_schedule());
         let buffer = self.input.buffer.value.clone();
         self.slash.sync(&buffer);
     }
@@ -2462,6 +2464,77 @@ mod tests {
         screen.update(SessionMessage::Reset);
         screen.update(SessionMessage::SpinnerUpdate);
         assert!(!available(&screen, CommandAction::GenTitle));
+    }
+
+    /// A peak/off-peak schedule fixture, resolved the way the catalog's own
+    /// entries are: a provider-wide window list.
+    fn peak_schedule_fixture() -> shuvarie_core::peaks::PeakSchedule {
+        let provider: selune::Provider = serde_json::from_value(serde_json::json!({
+            "name": "Test",
+            "id": "test",
+            "peaks": { "periods": [{ "start": "09:00", "end": "12:00" }] },
+            "models": [{
+                "id": "m",
+                "modelCode": "test-org/m",
+                "name": "M",
+                "reasoning": false,
+                "attachment": false,
+                "limit": {},
+                "cost": {}
+            }]
+        }))
+        .expect("fixture provider");
+        shuvarie_core::peaks::PeakSchedule::resolve(&provider, "m").expect("fixture schedule")
+    }
+
+    #[test]
+    fn peak_table_availability_follows_the_active_schedule() {
+        fn available(screen: &SessionScreen, action: CommandAction) -> bool {
+            screen.slash.available(action)
+        }
+
+        let mut screen = SessionScreen::new();
+        screen.update(SessionMessage::SpinnerUpdate);
+        assert!(
+            !available(&screen, CommandAction::PeakTable),
+            "no schedule, no table"
+        );
+
+        screen.update(SessionMessage::UpdateConfig {
+            provider: Some("DeepSeek".into()),
+            model: Some("deepseek-v4-pro".into()),
+            model_display: None,
+            variant: None,
+            context_length: None,
+            peaks: Some(peak_schedule_fixture()),
+        });
+        // Availability resyncs on the next update (the sidebar carries the
+        // schedule; `sync_slash` runs before the message is applied).
+        screen.update(SessionMessage::SpinnerUpdate);
+        assert!(available(&screen, CommandAction::PeakTable));
+
+        // Switching to a model the catalog bills flat hides it again.
+        screen.update(SessionMessage::UpdateConfig {
+            provider: Some("Anthropic".into()),
+            model: Some("claude-sonnet-4-5".into()),
+            model_display: None,
+            variant: None,
+            context_length: None,
+            peaks: None,
+        });
+        screen.update(SessionMessage::SpinnerUpdate);
+        assert!(!available(&screen, CommandAction::PeakTable));
+
+        // The alias still parses to the builtin action: whether the model has a
+        // schedule is the app's call (it reports the refusal).
+        screen.input.buffer.set("/peak-table");
+        assert!(matches!(
+            screen.update(SessionMessage::Text(TextAreaMessage::Submit)),
+            Some(SessionEffect::RunCommand {
+                action: CommandRef::Builtin(CommandAction::PeakTable),
+                args: None
+            })
+        ));
     }
 
     #[test]
