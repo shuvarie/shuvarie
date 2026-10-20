@@ -221,8 +221,9 @@ where
     let mut spinner_wake;
     // Drives the sidebar's peak/off-peak countdown: the line follows the wall
     // clock, so it wakes on its own interval while a catalog schedule governs
-    // the active model. `None` otherwise.
-    let mut peak_wake;
+    // the active model. `None` otherwise. Armed by [`arm_peak_wake`], which
+    // keeps a pending deadline instead of re-deriving it on every draw.
+    let mut peak_wake: Option<Instant> = None;
     // Session picker list refresh: while the picker is open the list is
     // re-fetched periodically so lock states stay live.
     let mut picker_wake;
@@ -254,9 +255,7 @@ where
             (spinner, scene) => spinner.or(scene),
         }
         .map(|until| tokio::time::Instant::now() + until);
-        peak_wake = app
-            .peak_wake()
-            .map(|interval| tokio::time::Instant::now() + interval);
+        peak_wake = arm_peak_wake(Instant::now(), app.peak_wake(), peak_wake);
         picker_wake = app
             .session_picker
             .open
@@ -328,7 +327,7 @@ where
                 // its own interval while a schedule is installed.
                 _ = async {
                     if let Some(deadline) = peak_wake {
-                        tokio::time::sleep_until(deadline).await;
+                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
                     } else {
                         std::future::pending::<()>().await;
                     }
@@ -404,6 +403,27 @@ where
     // outlive the process otherwise.
     app.write_kitty_shutdown_deletes(rat.backend_mut().terminal_mut())?;
     Ok(session_id)
+}
+
+/// Arms the peak/off-peak countdown's wake deadline.
+///
+/// The deadline is anchored when it is first armed and then kept across draws
+/// until it fires. Re-deriving `now + PEAK_REFRESH` after every draw would let
+/// any faster wake push it back forever: the busy spinner redraws every ~70 ms
+/// while a turn runs (and the open session picker every 2 s), so the countdown
+/// would never be due and the "Peak ends in …" line would freeze for the whole
+/// turn. A withdrawn schedule — the model switched to one with no peak windows
+/// — disarms it.
+fn arm_peak_wake(
+    now: Instant,
+    interval: Option<Duration>,
+    armed: Option<Instant>,
+) -> Option<Instant> {
+    match (interval, armed) {
+        (Some(_), Some(armed)) => Some(armed),
+        (Some(interval), None) => Some(now + interval),
+        (None, _) => None,
+    }
 }
 
 /// Apply a mapped message, recording a quit request on `AppEffect::Quit`,
@@ -681,6 +701,40 @@ mod tests {
         sync_window_title(&mut out, &mut last, "Shuvarie — fix the bug").unwrap();
         assert!(out.len() > unchanged);
         assert_eq!(last, "Shuvarie — fix the bug");
+    }
+
+    /// The countdown must not be starved by the faster wakes that redraw the
+    /// same loop: while a turn runs the spinner is due every ~70 ms, so a
+    /// deadline re-derived on each draw (`now + PEAK_REFRESH`) would never
+    /// elapse and the line would stay frozen for the whole turn.
+    #[test]
+    fn peak_wake_deadline_is_anchored_while_a_schedule_is_installed() {
+        let interval = Duration::from_secs(15);
+        let start = Instant::now();
+
+        let armed = arm_peak_wake(start, Some(interval), None);
+        assert_eq!(armed, Some(start + interval));
+
+        // A spinner frame 70 ms later redraws and re-arms: the pending
+        // deadline survives instead of sliding forward.
+        let spinner_frame = start + Duration::from_millis(70);
+        assert_eq!(
+            arm_peak_wake(spinner_frame, Some(interval), armed),
+            armed,
+            "a faster wake must not push the countdown's deadline back"
+        );
+
+        // Once the deadline fires the loop clears it and the next draw arms a
+        // fresh interval from the draw.
+        let fired = start + interval;
+        assert_eq!(
+            arm_peak_wake(fired, Some(interval), None),
+            Some(fired + interval)
+        );
+
+        // A model with no peak windows withdraws the schedule: no wake at all,
+        // even if a deadline was already armed.
+        assert_eq!(arm_peak_wake(fired, None, armed), None);
     }
 
     #[test]
