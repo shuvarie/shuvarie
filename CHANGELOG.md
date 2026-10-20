@@ -1,5 +1,21 @@
 # Changelog
 
+## [unreleased]
+
+### 🚀 Features
+
+- *(codemode)* System prompt for only mode
+## [0.5.1] - 2026-10-20
+
+### 🚀 Features
+
+- *(assisted-by)* Show custom model ids also
+- *(codemode)* Add note system prompt
+- *(codemode)* Mark script-only tools
+
+### 🎨 Styling
+
+- *(tui)* Dim builtin skills
 ## [0.5.0] - 2026-10-20
 
 ### 🚀 Features
