@@ -127,6 +127,9 @@ pub enum SessionMessage {
     UpdateConfig {
         provider: Option<String>,
         model: Option<String>,
+        /// The label the status row shows for the model: the catalog's display
+        /// name when it has one, else the model id.
+        model_display: Option<String>,
         variant: Option<String>,
         context_length: Option<u64>,
     },
@@ -331,6 +334,9 @@ pub struct SessionScreen {
     pub sidebar: Sidebar,
     provider: Option<String>,
     model: Option<String>,
+    /// The model's display name (e.g. `Claude Sonnet 4.5`), shown on the status
+    /// row. `None` falls back to the model id.
+    model_display: Option<String>,
     variant: Option<String>,
     pub session_id: Option<uuid::Uuid>,
     pub session_title: Option<String>,
@@ -377,6 +383,7 @@ impl SessionScreen {
             sidebar: Sidebar::new(),
             provider: None,
             model: None,
+            model_display: None,
             variant: None,
             session_id: None,
             session_title: None,
@@ -1065,11 +1072,13 @@ impl SessionScreen {
             SessionMessage::UpdateConfig {
                 provider,
                 model,
+                model_display,
                 variant,
                 context_length,
             } => {
                 self.provider = provider;
                 self.model = model;
+                self.model_display = model_display;
                 self.variant = variant;
                 self.sidebar
                     .update(SidebarMessage::UpdateConfig { context_length });
@@ -1581,7 +1590,10 @@ impl SessionScreen {
             let mut spans = vec![Span::raw(p.clone()).fg(theme::text())];
             if let Some(m) = &self.model {
                 spans.push(Span::raw(":").fg(theme::text_muted()));
-                spans.push(Span::raw(m.clone()).fg(theme::text_dim()));
+                // The model's display name when the catalog has one, else the
+                // id itself.
+                let label = self.model_display.as_deref().unwrap_or(m);
+                spans.push(Span::raw(label.to_string()).fg(theme::text_dim()));
                 if let Some(v) = &self.variant {
                     spans.push(Span::raw(":").fg(theme::text_muted()));
                     spans.push(Span::raw(v.clone()).fg(theme::accent()));
@@ -2468,6 +2480,7 @@ mod tests {
         screen.update(SessionMessage::UpdateConfig {
             provider: Some("Anthropic".into()),
             model: Some("claude-sonnet-4-5".into()),
+            model_display: None,
             variant: None,
             context_length: Some(200_000),
         });
@@ -2488,11 +2501,35 @@ mod tests {
     }
 
     #[test]
+    fn model_display_name_renders_instead_of_the_model_id() {
+        let mut screen = SessionScreen::new();
+        screen.update(SessionMessage::UpdateConfig {
+            provider: Some("Anthropic".into()),
+            model: Some("claude-sonnet-4-5".into()),
+            model_display: Some("Claude Sonnet 4.5".into()),
+            variant: None,
+            context_length: Some(200_000),
+        });
+
+        let buf = draw(&screen, 80, 24);
+        let status_row = content_row_text(&buf, 22);
+        assert!(
+            status_row.ends_with("Anthropic:Claude Sonnet 4.5"),
+            "status row: {status_row:?}"
+        );
+        assert!(
+            !status_row.contains("claude-sonnet-4-5"),
+            "the model id must not show when a display name is known: {status_row:?}"
+        );
+    }
+
+    #[test]
     fn variant_renders_after_the_model_on_status_row() {
         let mut screen = SessionScreen::new();
         screen.update(SessionMessage::UpdateConfig {
             provider: Some("Anthropic".into()),
             model: Some("claude-sonnet-4-5".into()),
+            model_display: None,
             variant: Some("high".into()),
             context_length: Some(200_000),
         });
@@ -2507,6 +2544,7 @@ mod tests {
         screen.update(SessionMessage::UpdateConfig {
             provider: Some("Anthropic".into()),
             model: Some("claude-sonnet-4-5".into()),
+            model_display: None,
             variant: None,
             context_length: Some(200_000),
         });
@@ -2515,6 +2553,25 @@ mod tests {
         assert!(
             status_row.ends_with("Anthropic:claude-sonnet-4-5"),
             "variant dropped from the display when unset: {status_row:?}"
+        );
+    }
+
+    #[test]
+    fn variant_renders_after_the_model_display_name() {
+        let mut screen = SessionScreen::new();
+        screen.update(SessionMessage::UpdateConfig {
+            provider: Some("Anthropic".into()),
+            model: Some("claude-sonnet-4-5".into()),
+            model_display: Some("Claude Sonnet 4.5".into()),
+            variant: Some("high".into()),
+            context_length: Some(200_000),
+        });
+
+        let buf = draw(&screen, 80, 24);
+        let status_row = content_row_text(&buf, 22);
+        assert!(
+            status_row.ends_with("Anthropic:Claude Sonnet 4.5:high"),
+            "status row: {status_row:?}"
         );
     }
 

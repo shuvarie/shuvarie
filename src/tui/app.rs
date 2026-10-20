@@ -308,6 +308,46 @@ fn catalog_context_length(connections: &Connections) -> Option<u64> {
     shuvarie_core::catalog::context_length(provider, model).map(|c| c.max(0) as u64)
 }
 
+/// The catalog's human-readable name for a model id (e.g. `Claude Sonnet 4.5`),
+/// or `None` when the connection resolves to no catalog provider or the
+/// catalog names no such model. The id stays the wire value; this is only
+/// the label a UI shows for it.
+fn catalog_model_display_name(
+    connections: &Connections,
+    provider_id: &str,
+    model: &str,
+) -> Option<String> {
+    let pc = connections.providers.get(provider_id)?;
+    let catalog_id = pc.catalog_id()?;
+    let providers = shuvarie_core::catalog::providers();
+    let provider = shuvarie_core::catalog::find_provider(&providers, catalog_id)?;
+    shuvarie_core::catalog::model_display_name(provider, model).map(str::to_string)
+}
+
+/// The label the status row shows for a model: the catalog's display name when
+/// it has one, else the live listing's, else the model id itself. The id stays
+/// the wire value; this is only the label a UI shows for it.
+fn model_display_label(
+    connections: &Connections,
+    live: &HashMap<String, Vec<Model>>,
+    provider_id: &str,
+    model: &str,
+) -> Option<String> {
+    let catalog_name = catalog_model_display_name(connections, provider_id, model);
+    let live_name = live
+        .get(provider_id)
+        .and_then(|models| {
+            models
+                .iter()
+                .find(|m| m.id == model)
+                .and_then(|m| m.name.clone())
+        })
+        .filter(|name| !name.is_empty());
+    catalog_name
+        .or(live_name)
+        .or_else(|| Some(model.to_string()))
+}
+
 /// The active model's reasoning-effort variants from the Selune catalog, in
 /// declared order — the list the `/variant` selector and its argument
 /// validate against. `None` without an active provider/model or when the
@@ -368,6 +408,14 @@ impl App {
         let initial_display = initial_provider
             .as_deref()
             .and_then(|id| connections.providers.get(id).map(|p| p.name.clone()));
+        // The label the status row shows for the model: the catalog's display
+        // name when it has one, else the live listing's, else the model id.
+        let initial_model_display = initial_provider
+            .as_deref()
+            .zip(initial_model.as_deref())
+            .and_then(|(provider, model)| {
+                model_display_label(&connections, &HashMap::new(), provider, model)
+            });
         let initial_context_length = catalog_context_length(&connections);
         let current_theme_pref = ui.theme.clone();
         // One resolution of the image settings for both the chat pane and
@@ -396,6 +444,7 @@ impl App {
                 s.update(SessionMessage::UpdateConfig {
                     provider: initial_display,
                     model: initial_model,
+                    model_display: initial_model_display,
                     variant: initial_variant,
                     context_length: initial_context_length,
                 });
@@ -1831,6 +1880,7 @@ impl App {
                         self.session.update(SessionMessage::UpdateConfig {
                             provider: self.provider_display_name(&provider_name),
                             model: current.map(|m| m.to_string()),
+                            model_display: self.active_model_display(),
                             variant: self
                                 .ctx
                                 .connections
@@ -2665,6 +2715,15 @@ impl App {
             .map(|p| p.name.clone())
     }
 
+    /// The label the status row shows for the active model: the catalog's
+    /// display name when it has one, else the live listing's, else the model id
+    /// itself.
+    fn active_model_display(&self) -> Option<String> {
+        let active = self.ctx.connections.active.as_ref()?;
+        let model = active.model.as_deref()?;
+        model_display_label(&self.ctx.connections, &self.models, &active.provider, model)
+    }
+
     fn reload_config(&mut self) {
         if let Ok(fresh) = Connections::load() {
             self.ctx.connections = fresh;
@@ -2691,6 +2750,7 @@ impl App {
                     .active
                     .as_ref()
                     .and_then(|a| a.model.clone()),
+                model_display: self.active_model_display(),
                 variant: self
                     .ctx
                     .connections
@@ -2941,6 +3001,17 @@ mod tests {
             .to_vec()
     }
 
+    /// A catalog model's display name, read from the live catalog instead of a
+    /// pinned literal, so a registry bump does not fail the test.
+    fn catalog_model_name(catalog_id: &str, model: &str) -> String {
+        let providers = shuvarie_core::catalog::providers();
+        let provider = shuvarie_core::catalog::find_provider(&providers, catalog_id)
+            .unwrap_or_else(|| panic!("no catalog provider `{catalog_id}`"));
+        shuvarie_core::catalog::model_display_name(provider, model)
+            .unwrap_or_else(|| panic!("no display name for catalog model `{model}`"))
+            .to_string()
+    }
+
     /// The first model the catalog declares for `catalog_id` with no
     /// reasoning-effort variants, so the no-variant cases exercise real catalog
     /// data instead of pinning a model that may gain variants later.
@@ -3103,6 +3174,74 @@ mod tests {
         let mut connections = connected();
         connections.active.as_mut().unwrap().model = None;
         assert_eq!(catalog_context_length(&connections), None);
+    }
+
+    #[test]
+    fn catalog_model_display_name_maps_the_catalog_model_id() {
+        // The registry renames models between bumps, so the alias this test
+        // exercises is the connection's own: a bare `claude-opus-4-5` still has
+        // to resolve to its dated catalog snapshot.
+        let mut connections = connected();
+        connections.active.as_mut().unwrap().model = Some("claude-opus-4-5".into());
+        assert_eq!(
+            catalog_model_display_name(&connections, "anthropic", "claude-opus-4-5"),
+            Some(catalog_model_name("anthropic", "claude-opus-4-5")),
+            "the model's display name must come from the catalog"
+        );
+    }
+
+    #[test]
+    fn catalog_model_display_name_is_none_for_an_unknown_model() {
+        let connections = connected();
+        assert_eq!(
+            catalog_model_display_name(&connections, "anthropic", "not-a-real-model"),
+            None,
+            "an unknown model has no catalog display name"
+        );
+    }
+
+    #[test]
+    fn active_model_display_falls_back_to_the_model_id() {
+        let mut connections = connected();
+        connections.active.as_mut().unwrap().model = Some("not-a-real-model".into());
+        let app = app_with(connections);
+        assert_eq!(
+            app.active_model_display(),
+            Some("not-a-real-model".into()),
+            "an uncatalogued model keeps its id as the label"
+        );
+    }
+
+    #[test]
+    fn active_model_display_prefers_the_catalog_name_over_the_live_listing() {
+        let mut connections = connected();
+        connections.active.as_mut().unwrap().model = Some("claude-opus-4-5".into());
+        let mut app = app_with(connections);
+        app.models.insert(
+            "anthropic".into(),
+            vec![named_live_model("claude-opus-4-5", "Live Claude Opus 4.5")],
+        );
+        assert_eq!(
+            app.active_model_display(),
+            Some(catalog_model_name("anthropic", "claude-opus-4-5")),
+            "the catalog's name wins over the live listing's"
+        );
+    }
+
+    #[test]
+    fn active_model_display_uses_the_live_listing_name_when_the_catalog_has_none() {
+        let mut connections = connected();
+        connections.active.as_mut().unwrap().model = Some("acme-mini".into());
+        let mut app = app_with(connections);
+        app.models.insert(
+            "anthropic".into(),
+            vec![named_live_model("acme-mini", "Acme Mini")],
+        );
+        assert_eq!(
+            app.active_model_display(),
+            Some("Acme Mini".into()),
+            "a model outside the catalog keeps its live listing's name"
+        );
     }
 
     #[test]
@@ -3404,6 +3543,14 @@ mod tests {
             created_at: None,
             owned_by: None,
             max_output_tokens: None,
+        }
+    }
+
+    /// A live model listing entry that carries its own display name.
+    fn named_live_model(id: &str, name: &str) -> Model {
+        Model {
+            name: Some(name.to_string()),
+            ..live_model(id)
         }
     }
 

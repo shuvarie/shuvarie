@@ -452,6 +452,15 @@ pub fn context_length(provider: &Provider, model_id: &str) -> Option<i64> {
     find_model(provider, model_id).and_then(|m| m.limit.context)
 }
 
+/// A catalog model's human-readable name (e.g. `Claude Sonnet 4.5`), if the
+/// catalog declares one. The id stays the wire value; this is the label a UI
+/// shows for it.
+pub fn model_display_name<'a>(provider: &'a Provider, model_id: &str) -> Option<&'a str> {
+    find_model(provider, model_id)
+        .map(|m| m.name.as_str())
+        .filter(|name| !name.is_empty())
+}
+
 /// The reasoning-effort variants of a catalog model, in declared order.
 /// Empty for models without an effort-typed option carrying values.
 pub fn model_variants(model: &selune::Model) -> &[String] {
@@ -892,6 +901,37 @@ mod tests {
         assert_eq!(
             context_length(&provider, "claude-sonnet-4-5"),
             Some(200_000)
+        );
+    }
+
+    #[test]
+    fn model_display_name_resolves_through_dated_alias() {
+        let mut provider = test_provider("anthropic", [("claude-sonnet-4-5-20250929", 200_000)]);
+        provider.models[0].name = "Claude Sonnet 4.5".to_string();
+        assert_eq!(
+            model_display_name(&provider, "claude-sonnet-4-5"),
+            Some("Claude Sonnet 4.5"),
+            "the alias must resolve to the same model's display name"
+        );
+        assert_eq!(
+            model_display_name(&provider, "claude-sonnet-4-5-20250929"),
+            Some("Claude Sonnet 4.5")
+        );
+        assert_eq!(
+            model_display_name(&provider, "unknown"),
+            None,
+            "an unknown model has no display name"
+        );
+    }
+
+    #[test]
+    fn model_display_name_skips_an_empty_name() {
+        let mut provider = test_provider("anthropic", [("claude-sonnet-4-5", 200_000)]);
+        provider.models[0].name = String::new();
+        assert_eq!(
+            model_display_name(&provider, "claude-sonnet-4-5"),
+            None,
+            "a model with no name has no display name"
         );
     }
 
