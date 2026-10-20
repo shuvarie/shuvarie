@@ -7021,7 +7021,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "clap",
@@ -7062,7 +7062,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-codemode"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "rhai",
  "serde",
@@ -7073,7 +7073,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-config"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "dirs",
  "kdl",
@@ -7083,7 +7083,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-core"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -7124,7 +7124,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-db"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -7148,7 +7148,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-decision"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "http",
  "httpmock",
@@ -7161,7 +7161,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-doc"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "calamine",
  "csv",
@@ -7174,7 +7174,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-highlight"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "pulldown-cmark",
  "ratatui",
@@ -7185,7 +7185,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-llm"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "base64 0.23.1",
  "futures-core",
@@ -7204,7 +7204,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-lsp"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "async-lsp",
  "serde",
@@ -7218,7 +7218,7 @@ dependencies = [
 
 [[package]]
 name = "shuvarie-mcp"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "http",
  "rmcp",
