@@ -3447,7 +3447,7 @@ fn codemode_preamble_note_is_appended() {
     assert!(on.starts_with("Base\n\n"), "{on}");
     assert!(on.contains(CODEMODE_NOTE), "{on}");
     assert!(on.contains("complex, multi-step work"), "{on}");
-    assert!(on.contains("only available from a script"), "{on}");
+    assert!(on.contains("for every tool marked `script only`"), "{on}");
     assert!(
         on.contains(
             "For a straightforward call to a tool in your roster, call it directly instead."

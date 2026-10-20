@@ -113,10 +113,30 @@ pub fn install(
             .collect(),
     );
 
+    // Only tools a script can actually run may leave the model's roster. A tool
+    // a script may not orchestrate has to stay visible, or it would be reachable
+    // by neither route -- gone rather than hidden.
+    let hide = |target: BTreeSet<String>| -> BTreeSet<String> {
+        target
+            .into_iter()
+            .filter(|name| roster.contains_key(name))
+            .collect()
+    };
+
+    // What the model's own tool list will not offer: nothing in `declared`, the
+    // configured sources in `declare-builtin`, the whole scriptable roster in
+    // `only`. The catalog marks these, so a script-only tool is stated rather
+    // than left to be inferred from the model's function schemas.
+    let hidden: BTreeSet<String> = match wiring.mode {
+        Mode::Declared => BTreeSet::new(),
+        Mode::DeclareBuiltin => hide(script_only(stdio, mcp)),
+        Mode::Only => hide(roster.keys().cloned().collect()),
+    };
+
     let codemode = into_dynamic(
         NAME,
         CodeMode {
-            description: describe(&catalog, &wiring.render),
+            description: describe(&catalog, &wiring.render, &hidden),
             catalog: Arc::new(catalog),
             roster: Arc::clone(&roster),
             // The tool's own access, so its scene overrides work like any other
@@ -128,43 +148,16 @@ pub fn install(
         },
     );
 
-    // Only tools a script can actually run may leave the model's roster. A tool
-    // a script may not orchestrate has to stay visible, or it would be reachable
-    // by neither route -- gone rather than hidden.
-    let hide = |target: BTreeSet<String>| -> BTreeSet<String> {
-        target
+    let mut kept: Vec<DynamicTool> = match wiring.mode {
+        // Nothing is hidden, so every tool is callable both ways.
+        Mode::Declared => tools,
+        Mode::DeclareBuiltin | Mode::Only => tools
             .into_iter()
-            .filter(|name| roster.contains_key(name))
-            .collect()
+            .filter(|tool| !hidden.contains(&tool.definition().name.to_string()))
+            .collect(),
     };
-
-    match wiring.mode {
-        Mode::Declared => {
-            let mut tools = tools;
-            tools.push(codemode);
-            tools
-        }
-        Mode::DeclareBuiltin => {
-            // The roster's own builtins stay; the two configured sources become
-            // script-only.
-            let hidden = hide(script_only(stdio, mcp));
-            let mut kept: Vec<DynamicTool> = tools
-                .into_iter()
-                .filter(|tool| !hidden.contains(&tool.definition().name.to_string()))
-                .collect();
-            kept.push(codemode);
-            kept
-        }
-        Mode::Only => {
-            let hidden = hide(roster.keys().cloned().collect());
-            let mut kept: Vec<DynamicTool> = tools
-                .into_iter()
-                .filter(|tool| !hidden.contains(&tool.definition().name.to_string()))
-                .collect();
-            kept.push(codemode);
-            kept
-        }
-    }
+    kept.push(codemode);
+    kept
 }
 
 /// The roster names that come from config rather than code: the configured
@@ -539,6 +532,15 @@ mod tests {
                 .contains("tools::read_file"),
             "the description carries the catalog"
         );
+        assert!(
+            !tools
+                .last()
+                .unwrap()
+                .definition()
+                .description
+                .contains("(script only)"),
+            "declared mode hides nothing, so nothing is marked"
+        );
     }
 
     /// In `only` mode the scriptable tools leave the model's roster, but a tool
@@ -558,6 +560,19 @@ mod tests {
             &access(),
         );
         assert_eq!(names(&tools), ["run_shell", NAME]);
+        // `read_file` is hidden, so the catalog has to say a script is the way
+        // in; `run_shell` is not (no script may run it), so it stays unmarked.
+        let description = tools.last().unwrap().definition().description.clone();
+        assert!(
+            description.contains(
+                "tools::read_file(path?: String) -> Dynamic\n    Read a file. (script only)"
+            ),
+            "{description}"
+        );
+        assert!(
+            !description.contains("Run a command. (script only)"),
+            "{description}"
+        );
     }
 
     /// `declare-builtin` is the split that pays for itself: the roster's own
@@ -584,12 +599,30 @@ mod tests {
 
         assert_eq!(names(&tools), ["read_file", "grep", NAME]);
         // ... and the hidden ones are still callable from a script, under the
-        // names the catalog prints.
+        // names the catalog prints, marked as script-only so the model does not
+        // have to infer which tools it cannot call itself.
         let description = tools.last().unwrap().definition().description.clone();
         assert!(description.contains("tools::read_file"), "{description}");
-        assert!(description.contains("tools::fetch_json"), "{description}");
         assert!(
-            description.contains("mcp::dev_radius::resolve_library_id"),
+            description.contains(
+                "tools::fetch_json(path?: String) -> Dynamic\n    \
+                 A configured tool. (tool name \"fetch-json\") (script only)"
+            ),
+            "{description}"
+        );
+        assert!(
+            description.contains(
+                "mcp::dev_radius::resolve_library_id(path?: String) -> Dynamic\n    \
+                 An MCP tool. (tool name \"resolve-library-id\") (script only)"
+            ),
+            "{description}"
+        );
+        assert!(
+            !description.contains("Read a file. (script only)"),
+            "a builtin the model keeps is not script-only: {description}"
+        );
+        assert!(
+            description.contains("not on your own roster"),
             "{description}"
         );
     }

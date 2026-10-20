@@ -1865,10 +1865,11 @@ and proceed.";
 /// which work belongs in a script, and which does not.
 const CODEMODE_NOTE: &str = "\
 The `codemode` tool runs a Rhai script in which the other tools are callable (`tools::read_file(…)`), \
-and its description carries the catalog of what a script can reach. Use it for complex, multi-step \
-work — dependent calls chained together, one call fanned out over many items, or a large result \
-filtered down before it reaches the context — and for any tool that is only available from a script. \
-For a straightforward call to a tool in your roster, call it directly instead.";
+and its description carries the catalog of what a script can reach, marking the tools that are not \
+on your own roster `script only`. Use it for complex, multi-step work — dependent calls chained \
+together, one call fanned out over many items, or a large result filtered down before it reaches \
+the context — and for every tool marked `script only`. For a straightforward call to a tool in \
+your roster, call it directly instead.";
 
 /// Appends the per-turn capability notes to the base preamble: the web-search
 /// note when the tool is available, the codemode note when the script tool is

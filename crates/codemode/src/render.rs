@@ -5,10 +5,15 @@
 //! short enough to pay for itself. Declarations are inlined up to a budget of
 //! estimated tokens; whatever does not fit stays callable and reachable by name.
 
+use std::collections::BTreeSet;
+
 use serde_json::Value;
 
 use crate::doc;
 use crate::spec::{Catalog, ToolSpec};
+
+/// What a declaration says when the model cannot call the tool itself.
+const SCRIPT_ONLY: &str = " (script only)";
 
 /// How much of the catalog is inlined, and how much of a tool's own prose
 /// travels with its signature.
@@ -169,13 +174,27 @@ pub fn brief(description: &str, max_chars: usize) -> String {
 
 /// The `codemode` tool's description for one turn's catalog: the dialect card,
 /// then as much of the catalog as the budget pays for.
-pub fn describe(catalog: &Catalog, options: &RenderOptions) -> String {
+///
+/// `script_only` holds the roster names the model's own tool list does not
+/// offer, so a tool reachable only from a script says so. Without the mark the
+/// model has to infer the split by diffing the catalog against its function
+/// schemas — whose names differ (`mcp__dev__x` vs `mcp::dev::x`) — and in `only`
+/// mode there is nothing to diff against.
+pub fn describe(
+    catalog: &Catalog,
+    options: &RenderOptions,
+    script_only: &BTreeSet<String>,
+) -> String {
+    let marked = |spec: &ToolSpec| script_only.contains(&spec.host_name);
     let mut inlined = Vec::new();
     let mut deferred = Vec::new();
     let mut spent = 0;
+    let mut any_marked = false;
 
     for spec in catalog.tools() {
-        let line = declaration(spec, options);
+        let mark = marked(spec);
+        any_marked |= mark;
+        let line = declaration(spec, options, mark);
         let cost = estimated_tokens(&line) + 1;
         if spent + cost <= options.inline_budget {
             spent += cost;
@@ -202,17 +221,26 @@ pub fn describe(catalog: &Catalog, options: &RenderOptions) -> String {
         out.push('\n');
     }
 
+    if any_marked {
+        out.push_str(
+            "\nTools marked `script only` are not on your own roster: call them from a script. \
+             Every other tool can also be called directly.\n",
+        );
+    }
+
     if !deferred.is_empty() {
         out.push_str(&format!("\n# Also callable ({})\n\n", deferred.len()));
-        let names: Vec<String> = deferred.iter().map(|spec| spec.qualified()).collect();
-        let listing = names.join(", ");
-        if estimated_tokens(&listing) <= options.inline_budget {
-            out.push_str(&listing);
-            out.push('\n');
-        } else {
-            // Even the names are too many: say what is there and by which
-            // route to reach it, rather than spending the whole budget on names.
-            out.push_str(&namespace_summary(&deferred));
+        let (plain, script): (Vec<&ToolSpec>, Vec<&ToolSpec>) =
+            deferred.iter().partition(|spec| !marked(spec));
+        if !plain.is_empty() {
+            out.push_str(&name_listing(&plain, options.inline_budget));
+        }
+        if !script.is_empty() {
+            // A name list carries no room for a per-name mark, so the script-only
+            // ones get a listing of their own.
+            let lead = if plain.is_empty() { "" } else { "\n" };
+            out.push_str(&format!("{lead}Script only ({}): ", script.len()));
+            out.push_str(&name_listing(&script, options.inline_budget));
         }
         out.push_str(
             "\nCall `describe_tool(name)` for a signature, or \
@@ -225,7 +253,7 @@ pub fn describe(catalog: &Catalog, options: &RenderOptions) -> String {
 
 /// One inlined declaration: the signature, its brief, and the roster name when
 /// the callable name had to change.
-fn declaration(spec: &ToolSpec, options: &RenderOptions) -> String {
+fn declaration(spec: &ToolSpec, options: &RenderOptions, script_only: bool) -> String {
     let mut line = format!(
         "{}\n    {}",
         signature(spec),
@@ -234,7 +262,23 @@ fn declaration(spec: &ToolSpec, options: &RenderOptions) -> String {
     if spec.renamed() {
         line.push_str(&format!(" (tool name \"{}\")", spec.name));
     }
+    if script_only {
+        line.push_str(SCRIPT_ONLY);
+    }
     line
+}
+
+/// The deferred tools by name — or, when even the names would not fit the
+/// budget, a count per namespace, which is enough to aim a `search_tools` at one
+/// of them, rather than spending the whole budget on names.
+fn name_listing(deferred: &[&ToolSpec], budget: usize) -> String {
+    let names: Vec<String> = deferred.iter().map(|spec| spec.qualified()).collect();
+    let listing = names.join(", ");
+    if estimated_tokens(&listing) <= budget {
+        format!("{listing}\n")
+    } else {
+        namespace_summary(deferred)
+    }
 }
 
 /// What is behind a roster too large to list: a count per namespace, which is
@@ -347,7 +391,7 @@ mod tests {
             "Resolve a package to an id.",
             json!({ "type": "object", "properties": { "name": { "type": "string" } } }),
         )]);
-        let rendered = describe(&catalog, &RenderOptions::default());
+        let rendered = describe(&catalog, &RenderOptions::default(), &BTreeSet::new());
         assert!(
             rendered.contains(
                 "mcp::dev_radius::resolve_library_id(name?: String) -> Dynamic\n    \
@@ -355,6 +399,74 @@ mod tests {
             ),
             "{rendered}"
         );
+    }
+
+    /// A tool the model's own roster does not offer says so in the catalog, so
+    /// the split is stated rather than inferred from function schemas.
+    #[test]
+    fn script_only_tools_say_so() {
+        let catalog = Catalog::new([
+            ToolEntry::roster("read_file", "Read a file.", json!({})),
+            ToolEntry::mcp(
+                "dev-radius",
+                "dev_radius__search",
+                "search",
+                "An MCP search.",
+                json!({}),
+            ),
+        ]);
+        let script_only = BTreeSet::from(["dev_radius__search".to_string()]);
+        let rendered = describe(&catalog, &RenderOptions::default(), &script_only);
+
+        assert!(
+            rendered
+                .contains("mcp::dev_radius::search() -> Dynamic\n    An MCP search. (script only)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("tools::read_file() -> Dynamic\n    Read a file.\n"),
+            "a directly callable tool is not marked: {rendered}"
+        );
+        assert!(rendered.contains("not on your own roster"), "{rendered}");
+
+        // Nothing hidden, nothing marked.
+        let plain = describe(&catalog, &RenderOptions::default(), &BTreeSet::new());
+        assert!(!plain.contains("script only"), "{plain}");
+    }
+
+    /// Over budget, the script-only names are still said to be script-only —
+    /// a name list has no room for a per-name mark, so they get their own.
+    #[test]
+    fn deferred_script_only_tools_are_listed_apart() {
+        let catalog = Catalog::new([
+            ToolEntry::roster(
+                "read_file",
+                "Read a file. A description long enough to blow a tiny budget.",
+                json!({}),
+            ),
+            ToolEntry::mcp(
+                "dev-radius",
+                "dev_radius__search",
+                "search",
+                "An MCP search, also past the budget.",
+                json!({}),
+            ),
+        ]);
+        let script_only = BTreeSet::from(["dev_radius__search".to_string()]);
+        let rendered = describe(
+            &catalog,
+            &RenderOptions {
+                inline_budget: 10,
+                brief_chars: 120,
+            },
+            &script_only,
+        );
+
+        assert!(
+            rendered.contains("Script only (1): mcp::dev_radius::search"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("tools::read_file\n"), "{rendered}");
     }
 
     /// The description is the tool's contract with the model, so its exact
@@ -374,7 +486,7 @@ mod tests {
             ToolEntry::roster("grep", "Search file contents.", json!({})),
         ]);
 
-        let rendered = describe(&catalog, &RenderOptions::default());
+        let rendered = describe(&catalog, &RenderOptions::default(), &BTreeSet::new());
         let expected = format!(
             "{}\n\n{}\n\n# Tools (2)\n\n\
              tools::grep() -> Dynamic\n    Search file contents.\n\
@@ -397,7 +509,7 @@ mod tests {
             ));
         }
         let catalog = Catalog::new(entries);
-        let rendered = describe(&catalog, &RenderOptions::default());
+        let rendered = describe(&catalog, &RenderOptions::default(), &BTreeSet::new());
 
         // The names of everything deferred are still there, and the total stays
         // near the budget rather than carrying 200 signatures.
@@ -448,6 +560,7 @@ mod tests {
                 inline_budget: 100,
                 brief_chars: 120,
             },
+            &BTreeSet::new(),
         );
         // The last server has nothing inlined, so all of its tools are behind
         // the count.
@@ -458,7 +571,11 @@ mod tests {
 
     #[test]
     fn an_empty_catalog_still_teaches_the_language() {
-        let rendered = describe(&Catalog::default(), &RenderOptions::default());
+        let rendered = describe(
+            &Catalog::default(),
+            &RenderOptions::default(),
+            &BTreeSet::new(),
+        );
         assert!(rendered.contains("# Tools (0)"));
         assert!(rendered.contains("describe_tool"));
         assert!(rendered.contains("Rhai"));

@@ -200,6 +200,13 @@ means no script can reach `x`, so hiding it as well would make it reachable by
 neither route — gone rather than hidden. Whatever a mode hides, it hides only
 what is left in the script's roster.
 
+The catalog states the split rather than leaving it to be inferred: a tool the
+model's own roster does not offer is printed with a `script only` mark (and,
+when it fell past the inline budget, listed under `Script only (N):`). Inference
+would be poor here — the two name spaces differ (`mcp__dev__x` in the roster,
+`mcp::dev::x` in the catalog), and `only` mode empties the roster entirely, so
+there is nothing to compare against.
+
 ## Telling the model about Rhai
 
 The model is fluent in JavaScript and not in Rhai, so the syntax has to be
@@ -207,8 +214,9 @@ taught, in three channels:
 
 - **System-preamble note** — appended only on the turns that offer the tool
   (`enabled "auto"` narrowing included): a script is for complex, multi-step
-  work and for tools only a script can reach; a straightforward tool call goes
-  direct. Without the split stated, the model writes scripts for everything.
+  work and for the tools the catalog marks `script only`; a straightforward
+  tool call goes direct. Without the split stated, the model writes scripts for
+  everything.
 - **Dialect card** — always in the `codemode` description: the essentials
   (`let`, `fn`, `if`/`else` as an expression, `for x in arr`, `switch`,
   `try {} catch (err) {}`, `#{ key: value }` maps, `[]` arrays, backtick
