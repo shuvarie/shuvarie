@@ -1,6 +1,7 @@
 use crate::core_task::steer::SteerSignal;
 
 use super::*;
+use crate::tools::codemode::Mode;
 use futures_util::StreamExt as _;
 use selune::ProviderType;
 use shuvarie_llm::ProviderKind;
@@ -3422,15 +3423,15 @@ async fn turn_retry_resume_keeps_the_turn_after_an_empty_retry_tip() {
 
 #[test]
 fn headless_preamble_note_is_appended() {
-    let base = preamble_notes("Base".to_string(), false, false, false);
+    let base = preamble_notes("Base".to_string(), false, false, None);
     assert_eq!(base, "Base");
 
-    let headless = preamble_notes("Base".to_string(), false, true, false);
+    let headless = preamble_notes("Base".to_string(), false, true, None);
     assert!(headless.starts_with("Base\n\n"), "{headless}");
     assert!(headless.contains(HEADLESS_NOTE), "{headless}");
 
     // Both notes can coexist (web search available and headless).
-    let both = preamble_notes("Base".to_string(), true, true, false);
+    let both = preamble_notes("Base".to_string(), true, true, None);
     assert!(both.contains("Web search is available"), "{both}");
     assert!(both.contains(HEADLESS_NOTE), "{both}");
 }
@@ -3440,10 +3441,10 @@ fn headless_preamble_note_is_appended() {
 /// script-only work, a direct call for the straightforward case.
 #[test]
 fn codemode_preamble_note_is_appended() {
-    let off = preamble_notes("Base".to_string(), false, false, false);
+    let off = preamble_notes("Base".to_string(), false, false, None);
     assert!(!off.contains(CODEMODE_NOTE), "{off}");
 
-    let on = preamble_notes("Base".to_string(), false, false, true);
+    let on = preamble_notes("Base".to_string(), false, false, Some(Mode::DeclareBuiltin));
     assert!(on.starts_with("Base\n\n"), "{on}");
     assert!(on.contains(CODEMODE_NOTE), "{on}");
     assert!(on.contains("complex, multi-step work"), "{on}");
@@ -3454,4 +3455,14 @@ fn codemode_preamble_note_is_appended() {
         ),
         "{on}"
     );
+
+    // `only` mode leaves a script as the only route, so the direct-call escape
+    // hatch is replaced rather than repeated.
+    let only = preamble_notes("Base".to_string(), false, false, Some(Mode::Only));
+    assert!(only.contains(CODEMODE_ONLY_NOTE), "{only}");
+    assert!(
+        only.contains("reachable only from inside a script"),
+        "{only}"
+    );
+    assert!(!only.contains(CODEMODE_NOTE), "{only}");
 }

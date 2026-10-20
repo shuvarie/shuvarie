@@ -215,8 +215,11 @@ taught, in three channels:
 - **System-preamble note** — appended only on the turns that offer the tool
   (`enabled "auto"` narrowing included): a script is for complex, multi-step
   work and for the tools the catalog marks `script only`; a straightforward
-  tool call goes direct. Without the split stated, the model writes scripts for
-  everything.
+  tool call goes direct. Under `mode "only"` the note is replaced by its
+  stronger form — a script is the only route to the roster, so the work is one
+  script per piece rather than a call per step. Without the split stated, the
+  model writes scripts for everything; with `only` stated as if it were a
+  split, the model hunts for tools it no longer has.
 - **Dialect card** — always in the `codemode` description: the essentials
   (`let`, `fn`, `if`/`else` as an expression, `for x in arr`, `switch`,
   `try {} catch (err) {}`, `#{ key: value }` maps, `[]` arrays, backtick

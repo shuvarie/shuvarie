@@ -1871,10 +1871,25 @@ together, one call fanned out over many items, or a large result filtered down b
 the context — and for every tool marked `script only`. For a straightforward call to a tool in \
 your roster, call it directly instead.";
 
+/// The same note when `mode "only"` has left the script tool as the way in:
+/// everything the model wants to do is now a call inside a script, so the
+/// direct-call escape hatch above would only mislead.
+const CODEMODE_ONLY_NOTE: &str = "\
+`codemode` is the way in this turn: the tools are reachable only from inside a script, so write one \
+script per piece of work instead of a call per step. A tool that still appears on your own roster — \
+one a script may not run — is called directly as usual. Your answer is the script's value, so \
+report through `text(...)` or its last expression.";
+
 /// Appends the per-turn capability notes to the base preamble: the web-search
 /// note when the tool is available, the codemode note when the script tool is
-/// offered, and the headless note in `run` mode.
-fn preamble_notes(base: String, web_search: bool, headless: bool, codemode: bool) -> String {
+/// offered (in its `only` form when a script is the only route to the roster),
+/// and the headless note in `run` mode.
+fn preamble_notes(
+    base: String,
+    web_search: bool,
+    headless: bool,
+    codemode: Option<crate::tools::codemode::Mode>,
+) -> String {
     let mut base = base;
     if web_search {
         base.push_str(
@@ -1883,9 +1898,16 @@ fn preamble_notes(base: String, web_search: bool, headless: bool, codemode: bool
              result page with `webfetch`.",
         );
     }
-    if codemode {
-        base.push_str("\n\n");
-        base.push_str(CODEMODE_NOTE);
+    match codemode {
+        Some(crate::tools::codemode::Mode::Only) => {
+            base.push_str("\n\n");
+            base.push_str(CODEMODE_ONLY_NOTE);
+        }
+        Some(_) => {
+            base.push_str("\n\n");
+            base.push_str(CODEMODE_NOTE);
+        }
+        None => {}
     }
     if headless {
         base.push_str("\n\n");
@@ -3061,7 +3083,8 @@ impl CoreCtx {
         let has_configured_tools = !self.config.tools.tools.is_empty()
             || mcp_roster.values().any(|roster| !roster.is_empty());
         // `auto` narrows codemode to the configured sources above, so the note
-        // rides only the turns that actually offer the tool.
+        // rides only the turns that actually offer the tool -- and in its `only`
+        // form when a script is the only route to the roster.
         let codemode = self.codemode_wiring(has_configured_tools);
         let web_search_config = self.config.tools.effective_web_search();
         let web_search = web_search_config.as_ref();
@@ -3069,7 +3092,7 @@ impl CoreCtx {
             base,
             web_search.is_some(),
             self.headless,
-            codemode.is_some(),
+            codemode.as_ref().map(|wiring| wiring.mode),
         );
         let preamble = crate::context::build_preamble(&base, &loaded_context);
         let tools = crate::tools::all_tools(
