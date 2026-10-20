@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.5.0] - 2026-10-20
+
+### 🚀 Features
+
+- Rhai-based codemode (#101)
+- *(session)* Seamless turn resume after failure
+- *(tui)* Add peak/off-peak display
+- *(tui)* Add peak table
+
+### 🐛 Bug Fixes
+
+- *(screensaver)* Entrance lengths
+- *(codemode)* Rhai code gotcha
+- *(codemode)* Hardened rhai
+- *(codemode)* Patch rhai skill
+
+### 🎨 Styling
+
+- *(tui)* Use model display name for label
 ## [0.4.3] - 2026-10-19
 
 ### 🐛 Bug Fixes
