@@ -3070,15 +3070,14 @@ impl CoreCtx {
             &mcp_roster,
             self.codemode_wiring(has_configured_tools),
         );
-        // The turn's attribution: the catalog's model code for the resolved
-        // model (absent for providers outside the catalog) plus the scene the
-        // request runs under. Persisted with the assistant row and recorded
-        // in the session's per-model usage list when the turn commits.
+        // The turn's attribution: the resolved model's assisted-by code — the
+        // catalog's `org/model` code when the model is known, else its
+        // configured id (a custom model outside the catalog) — plus the scene
+        // the request runs under. Persisted with the assistant row and
+        // recorded in the session's per-model usage list when the turn
+        // commits.
         let attribution = shuvarie_db::Attribution {
-            model_code: catalog_provider
-                .as_ref()
-                .and_then(|p| crate::catalog::find_model(p, &model))
-                .map(|m| m.model_code.to_string()),
+            model_code: crate::catalog::model_code_or_id(catalog_provider.as_ref(), &model),
             scene: stored_scene.clone(),
         };
         // Fit the request's attachments to the streaming target (capability

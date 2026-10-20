@@ -117,8 +117,9 @@ pub struct StoredMessage {
     /// Usage of the turn's last main-stream request, parsed from
     /// `request_json`; all-zero when the row has none.
     pub request: TokenUsage,
-    /// Model code (`org/model`) that produced this assistant message;
-    /// `None` for user rows, summaries, and pre-attribution data.
+    /// The model's assisted-by code — the catalog's `org/model`, or the
+    /// configured id for a custom model — that produced this assistant
+    /// message; `None` for user rows, summaries, and pre-attribution data.
     pub model_code: Option<String>,
     /// Scene name under which the model produced this assistant message;
     /// `None` for the built-in Default scene (and for user rows).
@@ -138,7 +139,8 @@ pub struct StoredMessage {
 /// Persisted alongside the row so the `/assisted-by` popup survives restarts.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Attribution {
-    /// Model code (`org/model`); `None` when the model is not in the catalog.
+    /// The model's assisted-by code: the catalog's `org/model`, or the
+    /// configured id for a custom model outside the catalog.
     pub model_code: Option<String>,
     /// Scene name; `None` = the built-in Default scene.
     pub scene: Option<String>,

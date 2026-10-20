@@ -461,6 +461,21 @@ pub fn model_display_name<'a>(provider: &'a Provider, model_id: &str) -> Option<
         .filter(|name| !name.is_empty())
 }
 
+/// The assisted-by code for a resolved model: the catalog's model code
+/// (`org/model[:variant]`) when the provider knows the model, else the model id
+/// exactly as configured. A custom model id — the model picker's free-text row,
+/// or a model a registry does not list — therefore still names the model in the
+/// `Assisted-By:` trailer. `None` only when the id is blank.
+pub fn model_code_or_id(provider: Option<&Provider>, model_id: &str) -> Option<String> {
+    provider
+        .and_then(|provider| find_model(provider, model_id))
+        .map(|model| model.model_code.to_string())
+        .or_else(|| {
+            let custom = model_id.trim();
+            (!custom.is_empty()).then(|| custom.to_string())
+        })
+}
+
 /// The reasoning-effort variants of a catalog model, in declared order.
 /// Empty for models without an effort-typed option carrying values.
 pub fn model_variants(model: &selune::Model) -> &[String] {
@@ -934,6 +949,37 @@ mod tests {
             model_display_name(&provider, "claude-sonnet-4-5"),
             None,
             "a model with no name has no display name"
+        );
+    }
+
+    #[test]
+    fn model_code_or_id_prefers_the_catalog_and_keeps_custom_ids() {
+        let provider = test_provider("ollama-cloud", [("glm-5.3-flash:cloud", 1_310_720)]);
+
+        assert_eq!(
+            model_code_or_id(Some(&provider), "glm-5.3-flash").as_deref(),
+            Some("test-org/glm-5.3-flash:cloud"),
+            "a catalog model resolves to its assisted-by code through its alias"
+        );
+        assert_eq!(
+            model_code_or_id(None, "acme/custom-model").as_deref(),
+            Some("acme/custom-model"),
+            "a provider outside the catalog keeps the configured model id"
+        );
+        assert_eq!(
+            model_code_or_id(Some(&provider), "acme/custom-model").as_deref(),
+            Some("acme/custom-model"),
+            "a model the catalog does not list keeps the configured id"
+        );
+        assert_eq!(
+            model_code_or_id(Some(&provider), " acme/custom-model ").as_deref(),
+            Some("acme/custom-model"),
+            "the custom id is trimmed"
+        );
+        assert_eq!(
+            model_code_or_id(None, "  "),
+            None,
+            "a blank id names nothing"
         );
     }
 

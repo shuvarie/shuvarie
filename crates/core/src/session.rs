@@ -6,10 +6,11 @@ use shuvarie_llm::{Role, TokenUsage};
 
 use crate::tool_record::ToolRecord;
 
-/// One entry of the session's per-model usage: the model code (`org/model`)
-/// plus the non-Default scene that first used it (`None` when the model has
-/// only served the Default scene). Deduped by code, ordered by first use;
-/// drives the `/assisted-by` popup.
+/// One entry of the session's per-model usage: the model's assisted-by code
+/// (the catalog's `org/model`, or the configured id for a custom model) plus
+/// the non-Default scene that first used it (`None` when the model has only
+/// served the Default scene). Deduped by code, ordered by first use; drives the
+/// `/assisted-by` popup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelUsage {
     pub code: String,
@@ -41,8 +42,9 @@ fn request_usage_of(m: &StoredMessage) -> Option<TokenUsage> {
 /// their footer.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MessageMeta {
-    /// Model code (`org/model`); `None` when the model is not in the catalog
-    /// (or the row predates attribution).
+    /// The model's assisted-by code: the catalog's `org/model`, or the
+    /// configured id for a custom model; `None` when the row predates
+    /// attribution.
     pub model_code: Option<String>,
     /// Scene name; `None` = the built-in Default scene. Only meaningful
     /// alongside a `model_code`.
@@ -416,9 +418,9 @@ impl Session {
         self.messages.push(ChatMsg::assistant(content));
     }
 
-    /// Record one model use against the session: deduped by model code,
+    /// Record one model use against the session: deduped by assisted-by code,
     /// ordered by first use, with the first non-Default scene kept as the
-    /// annotation. A `None` code (the model is not in the catalog) is a no-op.
+    /// annotation. A `None` code (no model id was attributed) is a no-op.
     pub fn record_model_use(&mut self, model_code: Option<&str>, scene: Option<&str>) {
         let Some(code) = model_code else {
             return;

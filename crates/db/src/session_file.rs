@@ -99,8 +99,9 @@ pub struct FileMessage {
     /// Usage of the turn's last main-stream request.
     #[serde(default)]
     pub request: TokenUsage,
-    /// Model code (`org/model`) that produced this assistant message; `None`
-    /// for user rows, summaries, and pre-attribution data.
+    /// The model's assisted-by code — the catalog's `org/model`, or the
+    /// configured id for a custom model — that produced this assistant
+    /// message; `None` for user rows, summaries, and pre-attribution data.
     #[serde(default)]
     pub model_code: Option<String>,
     /// Scene name under which the model produced this assistant message;
