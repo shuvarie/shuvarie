@@ -3422,15 +3422,36 @@ async fn turn_retry_resume_keeps_the_turn_after_an_empty_retry_tip() {
 
 #[test]
 fn headless_preamble_note_is_appended() {
-    let base = preamble_notes("Base".to_string(), false, false);
+    let base = preamble_notes("Base".to_string(), false, false, false);
     assert_eq!(base, "Base");
 
-    let headless = preamble_notes("Base".to_string(), false, true);
+    let headless = preamble_notes("Base".to_string(), false, true, false);
     assert!(headless.starts_with("Base\n\n"), "{headless}");
     assert!(headless.contains(HEADLESS_NOTE), "{headless}");
 
     // Both notes can coexist (web search available and headless).
-    let both = preamble_notes("Base".to_string(), true, true);
+    let both = preamble_notes("Base".to_string(), true, true, false);
     assert!(both.contains("Web search is available"), "{both}");
     assert!(both.contains(HEADLESS_NOTE), "{both}");
+}
+
+/// The codemode note rides only the turns that offer the script tool, and it
+/// draws the line the tool's whole point rests on: scripts for complex or
+/// script-only work, a direct call for the straightforward case.
+#[test]
+fn codemode_preamble_note_is_appended() {
+    let off = preamble_notes("Base".to_string(), false, false, false);
+    assert!(!off.contains(CODEMODE_NOTE), "{off}");
+
+    let on = preamble_notes("Base".to_string(), false, false, true);
+    assert!(on.starts_with("Base\n\n"), "{on}");
+    assert!(on.contains(CODEMODE_NOTE), "{on}");
+    assert!(on.contains("complex, multi-step work"), "{on}");
+    assert!(on.contains("only available from a script"), "{on}");
+    assert!(
+        on.contains(
+            "For a straightforward call to a tool in your roster, call it directly instead."
+        ),
+        "{on}"
+    );
 }

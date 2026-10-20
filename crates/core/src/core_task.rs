@@ -1861,9 +1861,19 @@ You are running headlessly, in non-interactive `run` mode: no user is watching a
 `question` tool. When you would otherwise ask which option to take, pick the one you judge best \
 and proceed.";
 
+/// Appended to the system preamble when the turn offers the `codemode` tool:
+/// which work belongs in a script, and which does not.
+const CODEMODE_NOTE: &str = "\
+The `codemode` tool runs a Rhai script in which the other tools are callable (`tools::read_file(…)`), \
+and its description carries the catalog of what a script can reach. Use it for complex, multi-step \
+work — dependent calls chained together, one call fanned out over many items, or a large result \
+filtered down before it reaches the context — and for any tool that is only available from a script. \
+For a straightforward call to a tool in your roster, call it directly instead.";
+
 /// Appends the per-turn capability notes to the base preamble: the web-search
-/// note when the tool is available, and the headless note in `run` mode.
-fn preamble_notes(base: String, web_search: bool, headless: bool) -> String {
+/// note when the tool is available, the codemode note when the script tool is
+/// offered, and the headless note in `run` mode.
+fn preamble_notes(base: String, web_search: bool, headless: bool, codemode: bool) -> String {
     let mut base = base;
     if web_search {
         base.push_str(
@@ -1871,6 +1881,10 @@ fn preamble_notes(base: String, web_search: bool, headless: bool) -> String {
              information and documentation beyond your training data, then read a specific \
              result page with `webfetch`.",
         );
+    }
+    if codemode {
+        base.push_str("\n\n");
+        base.push_str(CODEMODE_NOTE);
     }
     if headless {
         base.push_str("\n\n");
@@ -2996,10 +3010,6 @@ impl CoreCtx {
                 None => AGENT_PREAMBLE.to_string(),
             },
         };
-        let web_search_config = self.config.tools.effective_web_search();
-        let web_search = web_search_config.as_ref();
-        let base = preamble_notes(base, web_search.is_some(), self.headless);
-        let preamble = crate::context::build_preamble(&base, &loaded_context);
         let question_gate = (!self.headless).then(|| QuestionGate::new(self.question_tx.clone()));
         let (shell_tx, shell_rx) = tokio::sync::mpsc::channel::<crate::tools::ShellChunk>(64);
         let file_locks = crate::tools::FileLocks::new();
@@ -3049,6 +3059,18 @@ impl CoreCtx {
         // `tool` subprocess entries plus every connected MCP server's tools.
         let has_configured_tools = !self.config.tools.tools.is_empty()
             || mcp_roster.values().any(|roster| !roster.is_empty());
+        // `auto` narrows codemode to the configured sources above, so the note
+        // rides only the turns that actually offer the tool.
+        let codemode = self.codemode_wiring(has_configured_tools);
+        let web_search_config = self.config.tools.effective_web_search();
+        let web_search = web_search_config.as_ref();
+        let base = preamble_notes(
+            base,
+            web_search.is_some(),
+            self.headless,
+            codemode.is_some(),
+        );
+        let preamble = crate::context::build_preamble(&base, &loaded_context);
         let tools = crate::tools::all_tools(
             self.lsp.clone(),
             file_locks.clone(),
@@ -3068,7 +3090,7 @@ impl CoreCtx {
             &self.config.tools.tools,
             Some(&self.mcp),
             &mcp_roster,
-            self.codemode_wiring(has_configured_tools),
+            codemode,
         );
         // The turn's attribution: the resolved model's assisted-by code — the
         // catalog's `org/model` code when the model is known, else its

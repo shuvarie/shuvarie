@@ -203,8 +203,12 @@ what is left in the script's roster.
 ## Telling the model about Rhai
 
 The model is fluent in JavaScript and not in Rhai, so the syntax has to be
-taught, in two channels:
+taught, in three channels:
 
+- **System-preamble note** — appended only on the turns that offer the tool
+  (`enabled "auto"` narrowing included): a script is for complex, multi-step
+  work and for tools only a script can reach; a straightforward tool call goes
+  direct. Without the split stated, the model writes scripts for everything.
 - **Dialect card** — always in the `codemode` description: the essentials
   (`let`, `fn`, `if`/`else` as an expression, `for x in arr`, `switch`,
   `try {} catch (err) {}`, `#{ key: value }` maps, `[]` arrays, backtick
