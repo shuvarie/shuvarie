@@ -6,6 +6,8 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords.workspace = true
+categories = ["rendering", "text-processing"]
 
 [dependencies]
 pulldown-cmark = { version = "0.13", default-features = false }

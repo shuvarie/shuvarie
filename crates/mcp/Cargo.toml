@@ -6,6 +6,8 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords.workspace = true
+categories = ["api-bindings", "development-tools"]
 
 [dependencies]
 http.workspace = true

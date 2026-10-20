@@ -7,6 +7,8 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [profile.release]
 codegen-units = 1
@@ -103,6 +105,14 @@ edition = "2024"
 authors = ["Charles Dong <chardon_cs@proton.me>"]
 license = "MIT"
 repository = "https://github.com/shuvarie/shuvarie.git"
+# crates.io allows at most 5 keywords of <= 20 bytes each.
+keywords = ["ai", "llm", "tui", "terminal", "coding-assistant"]
+categories = [
+    "artificial-intelligence",
+    "command-line-utilities",
+    "development-tools",
+    "text-editors",
+]
 
 [workspace.dependencies]
 base64 = "0.23"

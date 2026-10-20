@@ -6,6 +6,8 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords.workspace = true
+categories = ["development-tools", "text-editors"]
 
 [dependencies]
 async-lsp = { version = "0.2", default-features = false, features = ["omni-trait", "client-monitor", "tracing"] }
