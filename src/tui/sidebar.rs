@@ -417,23 +417,7 @@ impl Sidebar {
         if self.skills.is_empty() {
             lines.push(Line::from("  none").fg(theme::text_muted()));
         } else {
-            for skill in &self.skills {
-                let mut spans = vec![Span::styled(
-                    format!("  {}", skill.name),
-                    if skill.disable_model_invocation {
-                        Style::new().fg(theme::text_muted())
-                    } else {
-                        Style::new().fg(theme::text()).bold()
-                    },
-                )];
-                if skill.global {
-                    spans.push(Span::styled(
-                        " (global)",
-                        Style::new().fg(theme::text_muted()),
-                    ));
-                }
-                lines.push(Line::from(spans));
-            }
+            lines.extend(self.skills.iter().map(skill_line));
         }
         for warning in &self.skill_warnings {
             let label = warning
@@ -457,6 +441,38 @@ impl Default for Sidebar {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// One row of the Skills section: the skill name plus its provenance labels.
+///
+/// A built-in skill has no directory to open — its body ships inside the
+/// binary — so both the name and its `(builtin)` label render dimmed, the way
+/// the sidebar marks things the user cannot reach or edit. A skill hidden from
+/// the model preamble is muted, an ordinary skill is bold, and a skill that
+/// lives outside the workspace carries a `(global)` label.
+fn skill_line(skill: &Skill) -> Line<'static> {
+    let builtin = skill.builtin.is_some();
+    let name_style = if builtin {
+        Style::new().fg(theme::text_dim())
+    } else if skill.disable_model_invocation {
+        Style::new().fg(theme::text_muted())
+    } else {
+        Style::new().fg(theme::text()).bold()
+    };
+    let mut spans = vec![Span::styled(format!("  {}", skill.name), name_style)];
+    if builtin {
+        spans.push(Span::styled(
+            " (builtin)",
+            Style::new().fg(theme::text_dim()),
+        ));
+    }
+    if skill.global {
+        spans.push(Span::styled(
+            " (global)",
+            Style::new().fg(theme::text_muted()),
+        ));
+    }
+    Line::from(spans)
 }
 
 /// Status marker for a settled server; `None` while animating (the spinner
@@ -547,6 +563,75 @@ mod tests {
         sidebar.update(SidebarMessage::SetWidth { cols: 100 });
         let rendered = text(sidebar.rendered_lines());
         assert!(!rendered.contains("MCP"), "body: {rendered}");
+    }
+
+    fn skill(name: &str, builtin: Option<&'static str>, global: bool) -> Skill {
+        Skill {
+            name: name.into(),
+            description: String::new(),
+            tags: Vec::new(),
+            category: None,
+            path: if builtin.is_some() {
+                std::path::PathBuf::new()
+            } else {
+                format!("/skills/{name}").into()
+            },
+            global,
+            disable_model_invocation: false,
+            builtin,
+        }
+    }
+
+    /// The row whose rendered text contains `needle`.
+    fn row<'a>(lines: &'a [Line<'static>], needle: &str) -> &'a Line<'static> {
+        lines
+            .iter()
+            .find(|l| {
+                let rendered: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                rendered.contains(needle)
+            })
+            .unwrap_or_else(|| panic!("no row containing {needle:?}"))
+    }
+
+    #[test]
+    fn skills_section_labels_and_dimms_builtin_skills() {
+        let _lock = theme::lock_for_tests();
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateSkills {
+            skills: vec![
+                skill("codemode", Some("(built-in body)"), false),
+                skill("ratatui", None, false),
+                skill("tokio", None, true),
+            ],
+            warnings: Vec::new(),
+        });
+        let lines = sidebar.rendered_lines();
+
+        // The built-in's name and its label both render dimmed.
+        let builtin = row(lines, "codemode");
+        assert_eq!(builtin.spans[0].content.as_ref(), "  codemode");
+        assert_eq!(builtin.spans[0].style.fg, Some(theme::text_dim()));
+        assert!(
+            !builtin.spans[0].style.add_modifier.contains(Modifier::BOLD),
+            "a dimmed built-in does not also read as bold"
+        );
+        assert_eq!(builtin.spans[1].content.as_ref(), " (builtin)");
+        assert_eq!(builtin.spans[1].style.fg, Some(theme::text_dim()));
+        assert!(
+            !builtin.spans[1].style.add_modifier.contains(Modifier::BOLD),
+            "the label is dimmed, not bold"
+        );
+
+        // An ordinary skill keeps the bright bold name and no built-in label.
+        let plain = row(lines, "ratatui");
+        assert_eq!(plain.spans.len(), 1, "no label for a plain skill");
+        assert_eq!(plain.spans[0].style.fg, Some(theme::text()));
+        assert!(plain.spans[0].style.add_modifier.contains(Modifier::BOLD));
+
+        // A global skill keeps its own label.
+        let global = row(lines, "tokio");
+        assert_eq!(global.spans[1].content.as_ref(), " (global)");
+        assert_eq!(global.spans[1].style.fg, Some(theme::text_muted()));
     }
 
     #[test]
