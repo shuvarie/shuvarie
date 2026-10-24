@@ -34,7 +34,7 @@ dirs.workspace = true
 flate2 = "1"
 frameplay = "0.3"
 futures-util.workspace = true
-gix = { version = "0.89", default-features = false, features = ["sha1"] }
+gix = { version = "0.90", default-features = false, features = ["sha1"] }
 nucleo = "0.5"
 notify = "8.2"
 image.workspace = true
