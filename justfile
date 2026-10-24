@@ -226,4 +226,4 @@ changelog:
 
 # Regenerate CHANGELOG.md scoped to the current branch only (--use-branch-tags)
 changelog-branch:
-    git cliff --use-branch-tags v0.1.1..HEAD -o ./CHANGELOG.md
+    git cliff --use-branch-tags v0.1.1..HEAD -o ./CHANGELOG.md -c ./cliff-offline.toml
