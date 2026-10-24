@@ -1,10 +1,25 @@
 # Changelog
 
-## [unreleased]
+## [0.5.3] - 2026-10-24
+
+### 🚀 Features
+
+- *(notification)* Add permission and question notification
+- *(tui)* Hide builtin skills in sidebar
+
+### 🐛 Bug Fixes
+
+- *(tui)* No update context percentage update for subagents
+## [0.5.2] - 2026-10-20
 
 ### 🚀 Features
 
 - *(codemode)* System prompt for only mode
+- *(codemode)* Update builtin skill
+
+### 🐛 Bug Fixes
+
+- *(peak)* Frozen countdown when session busy
 ## [0.5.1] - 2026-10-20
 
 ### 🚀 Features
