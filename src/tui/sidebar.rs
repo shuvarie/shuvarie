@@ -177,7 +177,13 @@ impl Sidebar {
                 self.mcp_servers = servers;
             }
             SidebarMessage::UpdateSkills { skills, warnings } => {
-                self.skills = skills;
+                // Built-in skills ship inside the binary: no directory to open
+                // and nothing the user can edit, so the section lists only the
+                // on-disk skills.
+                self.skills = skills
+                    .into_iter()
+                    .filter(|skill| skill.builtin.is_none())
+                    .collect();
                 self.skill_warnings = warnings;
             }
             SidebarMessage::SetTodos { done, total } => {
@@ -446,27 +452,16 @@ impl Default for Sidebar {
 
 /// One row of the Skills section: the skill name plus its provenance labels.
 ///
-/// A built-in skill has no directory to open — its body ships inside the
-/// binary — so both the name and its `(builtin)` label render dimmed, the way
-/// the sidebar marks things the user cannot reach or edit. A skill hidden from
-/// the model preamble is muted, an ordinary skill is bold, and a skill that
-/// lives outside the workspace carries a `(global)` label.
+/// A skill hidden from the model preamble is muted, an ordinary skill is bold,
+/// and a skill that lives outside the workspace carries a `(global)` label.
+/// Built-in skills never reach here: `UpdateSkills` drops them.
 fn skill_line(skill: &Skill) -> Line<'static> {
-    let builtin = skill.builtin.is_some();
-    let name_style = if builtin {
-        Style::new().fg(theme::text_dim())
-    } else if skill.disable_model_invocation {
+    let name_style = if skill.disable_model_invocation {
         Style::new().fg(theme::text_muted())
     } else {
         Style::new().fg(theme::text()).bold()
     };
     let mut spans = vec![Span::styled(format!("  {}", skill.name), name_style)];
-    if builtin {
-        spans.push(Span::styled(
-            " (builtin)",
-            Style::new().fg(theme::text_dim()),
-        ));
-    }
     if skill.global {
         spans.push(Span::styled(
             " (global)",
@@ -595,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn skills_section_labels_and_dimms_builtin_skills() {
+    fn skills_section_hides_builtin_skills() {
         let _lock = theme::lock_for_tests();
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateSkills {
@@ -608,22 +603,12 @@ mod tests {
         });
         let lines = sidebar.rendered_lines();
 
-        // The built-in's name and its label both render dimmed.
-        let builtin = row(lines, "codemode");
-        assert_eq!(builtin.spans[0].content.as_ref(), "  codemode");
-        assert_eq!(builtin.spans[0].style.fg, Some(theme::text_dim()));
-        assert!(
-            !builtin.spans[0].style.add_modifier.contains(Modifier::BOLD),
-            "a dimmed built-in does not also read as bold"
-        );
-        assert_eq!(builtin.spans[1].content.as_ref(), " (builtin)");
-        assert_eq!(builtin.spans[1].style.fg, Some(theme::text_dim()));
-        assert!(
-            !builtin.spans[1].style.add_modifier.contains(Modifier::BOLD),
-            "the label is dimmed, not bold"
-        );
+        // The built-in skill is not listed at all: no name, no label either.
+        let rendered = text(lines);
+        assert!(!rendered.contains("codemode"), "body: {rendered}");
+        assert!(!rendered.contains("builtin"), "body: {rendered}");
 
-        // An ordinary skill keeps the bright bold name and no built-in label.
+        // An ordinary skill keeps the bright bold name and no label.
         let plain = row(lines, "ratatui");
         assert_eq!(plain.spans.len(), 1, "no label for a plain skill");
         assert_eq!(plain.spans[0].style.fg, Some(theme::text()));
@@ -633,6 +618,18 @@ mod tests {
         let global = row(lines, "tokio");
         assert_eq!(global.spans[1].content.as_ref(), " (global)");
         assert_eq!(global.spans[1].style.fg, Some(theme::text_muted()));
+    }
+
+    #[test]
+    fn skills_section_reads_none_when_only_builtins_are_loaded() {
+        let _lock = theme::lock_for_tests();
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateSkills {
+            skills: vec![skill("codemode", Some("(built-in body)"), false)],
+            warnings: Vec::new(),
+        });
+        let rendered = text(sidebar.rendered_lines());
+        assert!(rendered.contains("Skills\n  none"), "body: {rendered}");
     }
 
     #[test]
