@@ -429,7 +429,7 @@ fn arm_peak_wake(
 /// Apply a mapped message, recording a quit request on `AppEffect::Quit`,
 /// writing `AppEffect::CopyToClipboard` as OSC 52 (the render loop owns the
 /// terminal), and launching the browser for `AppEffect::OpenBrowser`. The
-/// queued turn-finished notifications are drained afterwards.
+/// queued notifications are drained afterwards.
 fn apply_msg(app: &mut App, terminal: &mut PlatformTerminal, msg: Option<AppMessage>) -> bool {
     if let Some(msg) = msg {
         match app.update(msg) {
@@ -449,7 +449,7 @@ fn apply_msg(app: &mut App, terminal: &mut PlatformTerminal, msg: Option<AppMess
                     let _ = write!(terminal, "{}", escape::notify(&body));
                     let _ = terminal.flush();
                 }
-                // An empty list is a turn with no sound to play; the first
+                // An empty list is a notice with no sound to play; the first
                 // candidate that exists is the one heard.
                 notify::play_sound(&sounds);
             }

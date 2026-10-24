@@ -317,10 +317,12 @@ fn parse_ui(node: &KdlNode, input: &str) -> Result<UiPrefs> {
     Ok(prefs)
 }
 
-/// `notify { … }` — the turn-finished notification. The `disabled` toggle
-/// turns the desktop toast off (it is on by default), the `sound` switch opts
-/// into playing an audio file (off by default), and `sound-file` /
-/// `error-sound-file` pick the files played for a completed / failed turn.
+/// `notify { … }` — the desktop notifications: a turn that finished, failed,
+/// or blocked on the user (a permission ask or a question prompt). The
+/// `disabled` toggle turns the desktop toast off (it is on by default), the
+/// `sound` switch opts into playing an audio file (off by default), and
+/// `sound-file` / `error-sound-file` pick the files played for a completed
+/// turn, a prompt waiting on the user, and a failed turn.
 /// The file nodes only pick a file — `sound` alone plays the platform's own
 /// sounds — and a file named here replaces those defaults rather than adding
 /// to them.

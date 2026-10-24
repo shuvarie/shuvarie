@@ -1,4 +1,5 @@
-//! Turn-finished notification sound playback.
+//! Notification sound playback: the audio half of the desktop notice a
+//! finished, failed, or user-blocked turn raises.
 //!
 //! The sound is played by handing the file to whichever audio player the host
 //! has, so no audio decoding happens in-process and no audio crate is dragged

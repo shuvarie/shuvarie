@@ -2836,9 +2836,10 @@ pub const DEFAULT_NOTIFY_SOUNDS: &[&str] = &[];
 #[cfg(not(any(unix, windows)))]
 pub const DEFAULT_NOTIFY_ERROR_SOUNDS: &[&str] = &[];
 
-/// Turn-finished notifications (`ui.notify`). When an agent turn ends the TUI
-/// shows a desktop notification through the terminal (OSC 9) and may play an
-/// audio file.
+/// Desktop notifications (`ui.notify`). The TUI shows a notification through
+/// the terminal (OSC 9) and may play an audio file when an agent turn ends, and
+/// also when it blocks waiting on the user — a permission ask or a question
+/// prompt — so stepping away from the terminal does not stall the turn.
 ///
 /// The toast is on by default and turned off with `disabled #true`. The sound
 /// is off by default and opted into with the `sound` switch; `sound-file` and
@@ -2850,14 +2851,17 @@ pub const DEFAULT_NOTIFY_ERROR_SOUNDS: &[&str] = &[];
 /// the sound stays quiet rather than failing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotifyPrefs {
-    /// Show the desktop notification when a turn finishes (the `disabled`
-    /// toggle, stored inverted in the file: `disabled #true` turns it off).
+    /// Show the desktop notification when a turn finishes or waits on the user
+    /// (the `disabled` toggle, stored inverted in the file: `disabled #true`
+    /// turns it off).
     pub toast: bool,
-    /// Play a sound when a turn finishes (the `sound` switch).
+    /// Play a sound when a turn finishes or waits on the user (the `sound`
+    /// switch).
     pub sound: bool,
-    /// The audio file played when a turn completes (`sound-file`). `None`
-    /// keeps the platform's own list ([`DEFAULT_NOTIFY_SOUNDS`]); setting it
-    /// pins exactly one file to play instead.
+    /// The audio file played when a turn completes or waits on the user
+    /// (`sound-file`). `None` keeps the platform's own list
+    /// ([`DEFAULT_NOTIFY_SOUNDS`]); setting it pins exactly one file to play
+    /// instead.
     pub sound_file: Option<PathBuf>,
     /// The audio file played when a turn fails (`error-sound-file`). `None`
     /// keeps the platform's own list ([`DEFAULT_NOTIFY_ERROR_SOUNDS`]).

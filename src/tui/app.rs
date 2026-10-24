@@ -231,12 +231,12 @@ pub enum AppEffect {
     CopyToClipboard(String),
     /// Launch the OAuth verification URL in the platform browser.
     OpenBrowser(String),
-    /// A turn finished: tell the user through the terminal's desktop
-    /// notification (`body`) and/or by playing an audio file (`sounds`: the
-    /// candidates to try, in order, of which the first that exists is played;
-    /// empty plays nothing). Either half may be absent when its prefs are off.
-    /// The render loop, which owns the terminal, emits it — see
-    /// [`App::take_pending_effects`].
+    /// Tell the user something through the terminal's desktop notification
+    /// (`body`) and/or by playing an audio file (`sounds`: the candidates to
+    /// try, in order, of which the first that exists is played; empty plays
+    /// nothing). A turn finishing, failing, or blocking on the user all notify.
+    /// Either half may be absent when its prefs are off. The render loop, which
+    /// owns the terminal, emits it — see [`App::take_pending_effects`].
     Notify {
         body: Option<String>,
         sounds: Vec<PathBuf>,
@@ -294,12 +294,12 @@ pub struct App {
     /// The `/screensaver` scene (the slash command of the same name): the
     /// welcome art over a live session.
     pub screensaver: Screensaver,
-    /// The turn-finished notification prefs (`ui.notify`).
+    /// The notification prefs (`ui.notify`): the turn-finish and prompt notices.
     notify: NotifyPrefs,
     /// Notifications `update` queued for the render loop. Kept out of the
-    /// single `AppEffect` return slot so a completion note is never dropped by
-    /// a competing effect (the media load a stream end can carry); the render
-    /// loop drains them with [`App::take_pending_effects`].
+    /// single `AppEffect` return slot so a note is never dropped by a competing
+    /// effect (the media load a stream end can carry); the render loop drains
+    /// them with [`App::take_pending_effects`].
     pending_effects: Vec<AppEffect>,
     quit: bool,
 }
@@ -392,10 +392,10 @@ fn catalog_variants(connections: &Connections) -> Option<Vec<String>> {
     (!variants.is_empty()).then(|| variants.to_vec())
 }
 
-/// Cap on the characters taken from a failure message for a notification
-/// body: enough for the gist, short of a wall of text in the toast (and well
-/// inside the terminals' notification-length limits).
-const NOTIFY_ERROR_CHARS: usize = 160;
+/// Cap on the characters taken from a prompt or a failure message for a
+/// notification body: enough for the gist, short of a wall of text in the toast
+/// (and well inside the terminals' notification-length limits).
+const NOTIFY_BODY_CHARS: usize = 160;
 
 /// How often the render loop refreshes the peak/off-peak countdown. The line
 /// shows whole minutes, so a quarter-minute tick keeps the displayed value at
@@ -403,11 +403,34 @@ const NOTIFY_ERROR_CHARS: usize = 160;
 const PEAK_REFRESH: Duration = Duration::from_secs(15);
 
 /// The first line of `text`, trimmed and capped for a notification body. A
-/// failure message is often several lines of provider detail; the toast only
-/// carries its opening line.
+/// failure message and a permission ask are both often several lines of
+/// detail; the toast only carries the opening line.
 fn first_line(text: &str) -> String {
     let line = text.lines().next().unwrap_or_default().trim();
-    line.chars().take(NOTIFY_ERROR_CHARS).collect()
+    line.chars().take(NOTIFY_BODY_CHARS).collect()
+}
+
+/// The toast body for a turn that blocked on the user: what it is waiting on
+/// and, when the prompt carries one, the detail's gist.
+fn waiting_body(waiting_on: &str, detail: Option<&str>) -> String {
+    let detail = detail.map(first_line).unwrap_or_default();
+    if detail.is_empty() {
+        format!("Shuvarie — waiting for {waiting_on}")
+    } else {
+        format!("Shuvarie — waiting for {waiting_on}: {detail}")
+    }
+}
+
+/// The gist of a question prompt for a notification body: the header when the
+/// model gave one (short by design), else the question text. `None` when the
+/// prompt carries no question at all.
+fn question_gist(questions: &[shuvarie_core::QuestionPrompt]) -> Option<&str> {
+    let prompt = questions.first()?;
+    Some(if prompt.header.trim().is_empty() {
+        prompt.question.as_str()
+    } else {
+        prompt.header.as_str()
+    })
 }
 
 impl App {
@@ -539,38 +562,53 @@ impl App {
     }
 
     /// Notifications queued by `update` that have to reach the terminal: a
-    /// turn-finished note is emitted even when the same message also produces
-    /// an effect (a media load), so it travels on this channel of its own
-    /// rather than competing for `update`'s single effect slot. The render
-    /// loop drains it right after each update.
+    /// notice is emitted even when the same message also produces an effect (a
+    /// media load), so it travels on this channel of its own rather than
+    /// competing for `update`'s single effect slot. The render loop drains it
+    /// right after each update.
     pub fn take_pending_effects(&mut self) -> Vec<AppEffect> {
         std::mem::take(&mut self.pending_effects)
     }
 
     /// The notification a session message calls for: a desktop toast and/or an
-    /// audio file when a turn finished, `None` for every other message and
-    /// while both prefs are off.
+    /// audio file when a turn finished, failed, or blocked on the user, `None`
+    /// for every other message and while both prefs are off.
     ///
-    /// Only the two turn-end events notify. A retryable failure never does:
-    /// the core reports `RetryScheduled` for those and reserves `StreamError`
-    /// for retries it gave up on (or a wait the user cancelled).
-    fn finished_turn_notice(&self, msg: &SessionMessage) -> Option<AppEffect> {
+    /// The two turn-end events notify, and so do the two prompts that stop the
+    /// turn until the user answers — a permission ask and a question prompt.
+    /// Those are exactly the moments a user who stepped away has to come back,
+    /// and the status row alone cannot reach them. A retryable failure never
+    /// does: the core reports `RetryScheduled` for those and reserves
+    /// `StreamError` for retries it gave up on (or a wait the user cancelled).
+    /// A compaction and its resume stay silent for the same reason — the turn
+    /// carries on by itself.
+    fn session_notice(&self, msg: &SessionMessage) -> Option<AppEffect> {
         if !self.notify.toast && !self.notify.sound {
             return None;
         }
-        let SessionMessage::Chat(chat) = msg else {
-            return None;
-        };
-        let (body, file, defaults) = match chat {
-            ChatMessage::StreamDone => (
+        let (body, file, defaults) = match msg {
+            SessionMessage::Chat(ChatMessage::StreamDone) => (
                 self.finished_turn_body(),
                 self.notify.sound_file.as_deref(),
                 DEFAULT_NOTIFY_SOUNDS,
             ),
-            ChatMessage::StreamError { error } => (
+            SessionMessage::Chat(ChatMessage::StreamError { error }) => (
                 format!("Shuvarie — agent error: {}", first_line(error)),
                 self.notify.error_sound_file.as_deref(),
                 DEFAULT_NOTIFY_ERROR_SOUNDS,
+            ),
+            // A prompt plays the completion sound: its prefs carry one
+            // attention sound, and both events mean the turn is parked on the
+            // user.
+            SessionMessage::PermissionRequested { description, .. } => (
+                waiting_body("permission", Some(description)),
+                self.notify.sound_file.as_deref(),
+                DEFAULT_NOTIFY_SOUNDS,
+            ),
+            SessionMessage::QuestionAsked { questions, .. } => (
+                waiting_body("an answer", question_gist(questions)),
+                self.notify.sound_file.as_deref(),
+                DEFAULT_NOTIFY_SOUNDS,
             ),
             _ => return None,
         };
@@ -1402,8 +1440,9 @@ impl App {
             }
             AppMessage::Session(m) => {
                 // Detected before the session applies it: the notice only reads
-                // the session title, which no session message mutates.
-                if let Some(effect) = self.finished_turn_notice(&m) {
+                // the session title (which no session message mutates) and the
+                // message's own prompt text.
+                if let Some(effect) = self.session_notice(&m) {
                     self.pending_effects.push(effect);
                 }
                 let effect = self.session.update(m);
@@ -3596,6 +3635,109 @@ mod tests {
         app.update(AppMessage::Session(SessionMessage::Chat(
             ChatMessage::StreamCancelled,
         )));
+        assert!(app.take_pending_effects().is_empty());
+    }
+
+    /// A prompt to pick from, `header` short and `question` long.
+    fn question(header: &str, question: &str) -> shuvarie_core::QuestionPrompt {
+        shuvarie_core::QuestionPrompt {
+            question: question.into(),
+            header: header.into(),
+            options: vec![shuvarie_core::question::QuestionOption {
+                label: "a".into(),
+                description: String::new(),
+            }],
+            multiple: false,
+            custom: false,
+        }
+    }
+
+    /// The turn parks on the user at a permission ask: away from the terminal
+    /// that is invisible, so it notifies like a finished turn does (and plays
+    /// the sound the completion note plays).
+    #[test]
+    fn a_permission_prompt_notifies_with_the_request() {
+        let mut app = app_with(connected());
+        active_session(&mut app);
+        app.notify.sound = true;
+        app.update(AppMessage::Session(SessionMessage::PermissionRequested {
+            id: 3,
+            description: "Run `cargo test`\n(the suite takes a minute)".into(),
+            allow_session: true,
+            allow_dir: false,
+        }));
+        let (body, sounds) = sole_notice(&mut app);
+        assert_eq!(
+            body.as_deref(),
+            Some("Shuvarie — waiting for permission: Run `cargo test`"),
+            "the toast carries the first line of the ask"
+        );
+        assert_eq!(
+            sounds,
+            notify::candidates(None, DEFAULT_NOTIFY_SOUNDS),
+            "a prompt sounds like a completed turn"
+        );
+    }
+
+    /// A question prompt blocks the turn the same way, so it notifies too —
+    /// with the header, the short label the model wrote for the toast-sized
+    /// form of the question.
+    #[test]
+    fn a_question_prompt_notifies_with_its_header() {
+        let mut app = app_with(connected());
+        active_session(&mut app);
+        app.update(AppMessage::Session(SessionMessage::QuestionAsked {
+            id: 4,
+            questions: vec![question("Pick", "Which database?\nTwo are supported.")],
+        }));
+        assert_eq!(
+            sole_notice(&mut app).0.as_deref(),
+            Some("Shuvarie — waiting for an answer: Pick")
+        );
+    }
+
+    /// Without a header the question itself is the only text there is.
+    #[test]
+    fn a_question_without_a_header_notifies_with_the_question() {
+        let mut app = app_with(connected());
+        active_session(&mut app);
+        app.update(AppMessage::Session(SessionMessage::QuestionAsked {
+            id: 5,
+            questions: vec![question("  ", "Which database?\nTwo are supported.")],
+        }));
+        assert_eq!(
+            sole_notice(&mut app).0.as_deref(),
+            Some("Shuvarie — waiting for an answer: Which database?"),
+            "a blank header falls back to the question, first line only"
+        );
+    }
+
+    /// A prompt with no questions still names what the turn waits on.
+    #[test]
+    fn a_question_prompt_without_questions_still_notifies() {
+        let mut app = app_with(connected());
+        active_session(&mut app);
+        app.update(AppMessage::Session(SessionMessage::QuestionAsked {
+            id: 6,
+            questions: Vec::new(),
+        }));
+        assert_eq!(
+            sole_notice(&mut app).0.as_deref(),
+            Some("Shuvarie — waiting for an answer")
+        );
+    }
+
+    #[test]
+    fn notifications_off_silence_a_waiting_prompt() {
+        let mut app = app_with(connected());
+        active_session(&mut app);
+        app.notify.toast = false;
+        app.update(AppMessage::Session(SessionMessage::PermissionRequested {
+            id: 7,
+            description: "Run `cargo test`".into(),
+            allow_session: false,
+            allow_dir: false,
+        }));
         assert!(app.take_pending_effects().is_empty());
     }
 
