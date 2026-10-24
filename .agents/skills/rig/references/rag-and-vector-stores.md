@@ -112,8 +112,8 @@ Retrieval through the bus:
 
 | Item | Type / shape |
 |------|--------------|
-| `rig_agent::bus::IndexHandle` | `Handle<family::Retrieve>`: `top_n<T>(req) -> Retrieval<T>`, `top_n_ids(req) -> Typed<family::Retrieve, Vec<VectorSearchIdResult>>`, plus `key()`, `descriptor()`, `is_closed()` |
-| `rig_agent::bus::Retrieval<T>` | `Typed<family::Retrieve, Vec<VectorSearchResult<T>>>` — **changed in 0.44** from `Typed<family::Retrieve, Vec<(f64, String, T)>>` |
+| `rig_agent::handlers::IndexHandle` | `Handle<family::Retrieve>` (**0.45**: the module is `handlers`, not `bus`): `top_n<T>(req) -> Result<Vec<VectorSearchResult<T>>, ErrorReport>`, `top_n_ids(req) -> Result<Vec<VectorSearchIdResult>, ErrorReport>`, plus `key()`, `descriptor()`, `is_closed()` |
+| `VectorSearchResult<T>` / `VectorSearchIdResult` | `rig_core::vector_store::{VectorSearchResult, VectorSearchIdResult}` — `{ score, id, document }` / `{ score, id }` (the `Typed<family::Retrieve, …>` wrapper is no longer how a retrieval comes back from a handle) |
 | `Typed<F, T>` | `Future<Output = Result<T, ErrorReport>>`; dropping it cancels the dispatch |
 | `HookContext::bind(&Key<family::Retrieve>)`, `HookContext::index(&HandlerKey)` | a `RunHandle<'_, family::Retrieve>` borrowing the hook context, with `top_n::<T>(req) -> Retrieval<T>` — a hook retrieving for itself |
 

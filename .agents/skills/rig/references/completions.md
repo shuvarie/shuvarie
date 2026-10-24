@@ -2,7 +2,7 @@
 
 Completions are the layer beneath agents: the call to send a single request to a language model and handle what comes back. There are no completion *traits* — a model is a concrete `Model<Wire, Transport>` value (or a `DynModel<Op>` handle) and the response types are portable. One-line prompting lives on the **agent** (`agent.prompt(..)`); full request control is building a `CompletionRequest` and calling the model.
 
-Official docs: https://rig.rs/docs/concepts/completion · API: https://docs.rs/rig-core/latest/rig_core/completion/index.html (0.44: `rig-core-0.44.0/src/completion/`)
+Official docs: https://rig.rs/docs/concepts/completion · API: https://docs.rs/rig-core/latest/rig_core/completion/index.html (0.44: `rig-core-0.45.0/src/completion/`)
 
 > Not in 0.44: the `Prompt`/`Chat`/`TypedPrompt` traits, the `CompletionModel` trait and `CompletionRequestBuilder`; `Sealed<Reasoning>` (an assistant reasoning block is plain `Reasoning { text, redacted, native }`); `ProviderError::MalformedToolInput` and `ProviderError::DuplicateCallId` (malformed arguments are kept on `ToolFunction::invalid_arguments`, a duplicate call id gets one rig issues); `ToolChoice::Specific { names }` (the field is now `function_names: Vec<ToolName>`).
 

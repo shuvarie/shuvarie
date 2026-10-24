@@ -8,15 +8,15 @@ description: >-
   a model catalog, build agents with tools and RAG context, drive runs with
   AgentRunner streams, extract typed structured output, manage conversation
   memory, and hook the agent loop for guardrails and approvals.
-  This skill covers Rig 0.44.x (`rig-core` and `rig-agent` depended on directly;
-  the `rig` facade is published for 0.44 but shuvarie deliberately avoids it) as
+  This skill covers Rig 0.45.x (`rig-core` and `rig-agent` depended on directly;
+  the `rig` facade is published for 0.45 but shuvarie deliberately avoids it) as
   used by the `shuvarie-llm` crate, with `shuvarie-decision` on `rig-core` +
   `rig-typesafeai`. Docs: guide at https://rig.rs/docs and API docs at
-  https://docs.rs/rig-core/0.44.0/rig_core/.
+  https://docs.rs/rig-core/0.45.0/rig_core/.
 license: MIT
 metadata:
   author: shuvarie
-  version: 0.44.0
+  version: 0.45.0
   category: Backend Development
   tags:
     - rust
@@ -27,10 +27,10 @@ metadata:
 
 Rig is a Rust library for building LLM-powered applications and agents. It gives you unified abstractions over **model providers** (OpenAI, Anthropic, Gemini, Ollama, and 20+ others), **tools**, **memory**, and **vector stores / RAG**, so you can wire up an agent in a few lines and scale to a production system without changing frameworks.
 
-This project (`shuvarie`) pins **Rig 0.44.0** — `rig-core` and `rig-agent` directly in `crates/llm/Cargo.toml` (`rig-core` with `features = ["reqwest"]`; the `rig` facade crate *is* published for 0.44 but shuvarie deliberately avoids it: "Do NOT include `rig`. It has too many implicit dependencies."). `crates/decision` depends on `rig-core` plus `rig-typesafeai` (its own System One wire). The `shuvarie-llm` crate is a thin wrapper over rig that exposes a `ProviderKind`-keyed `ProviderClient` (`selune::ProviderType` + an optional `selune::Dialect`) dispatching onto seven client families, plus model listing, embeddings, worker agents, and a streaming completion API; the root binary never calls `rig` directly (see `AGENTS.md`).
+This project (`shuvarie`) pins **Rig 0.45.0** — `rig-core` and `rig-agent` directly in `crates/llm/Cargo.toml` (`rig-core` with `features = ["reqwest"]`, plus `rig-reqwest` with `default-features = false` for the OAuth paths that need a transport before a client exists; the `rig` facade crate *is* published for 0.45 but shuvarie deliberately avoids it: "Do NOT include `rig`. It has too many implicit dependencies."). `crates/decision` depends on `rig-core` plus `rig-typesafeai` (its own System One wire). The `shuvarie-llm` crate is a thin wrapper over rig that exposes a `ProviderKind`-keyed `ProviderClient` (`selune::ProviderType` + an optional `selune::Dialect`) dispatching onto seven client families, plus model listing, embeddings, worker agents, and a streaming completion API; the root binary never calls `rig` directly (see `AGENTS.md`).
 
 > **What 0.44 gives you**
-> 1. **Provider clients are named per provider** (`openai::OpenAI`, `anthropic::Anthropic`, `gemini::Gemini`, `ollama::Ollama`, `copilot::Copilot`, `cohere::Cohere`, `voyageai::VoyageAi`) and built from **configs**: `OpenAIConfig::new(key).client()` / `Config::from_env()?.client()` / `.connect(http)`. OpenAI-shaped **vendors** (Groq, Together, DeepSeek, …) are *dialects*: their modules expose constructors that return the shared `OpenAI` client on their dialect (e.g. `openai::wire::GROQ`), so an OpenAI- or Anthropic-shaped client covers all of them. 0.44 harmonized the per-provider constructor story (Anthropic dialect, Bedrock builder, Vertex errors).
+> 1. **Provider clients are named per provider** (`openai::OpenAI`, `anthropic::Anthropic`, `gemini::Gemini`, `ollama::Ollama`, `cohere::Cohere`, `voyageai::VoyageAi`) and built from **configs**: `OpenAIConfig::new(key).client()` / `Config::from_env()?.client()` / `.connect(http)`. OpenAI-shaped **vendors** (Groq, Together, DeepSeek, Copilot, …) are *dialects*: their modules expose constructors that return the shared `OpenAI` client on their dialect (e.g. `openai::wire::GROQ`, `copilot::DIALECT`), so an OpenAI- or Anthropic-shaped client covers all of them. 0.44 harmonized the per-provider constructor story (Anthropic dialect, Bedrock builder, Vertex errors); **0.45 finished the job — Copilot lost its own client and is now purely a dialect**.
 > 2. **Typed generation options** — `GenerationOptions` (`reasoning`, `cache`, `service_tier`, `verbosity`, `parallel_tool_calls`, `top_p`, `seed`, `stop`, `on_unsupported`) maps every wire's request-body knobs, and **typed per-provider options** (`ProviderOptions` + each provider's `extension` module) carry what no portable option covers. Precedence, lowest first: **mapped options → `provider_options` → `additional_params`**.
 > 3. **A model catalog** — `rig_core::catalog::{Catalog, ModelSpec, Pricing}` knows per-model context/output limits, modalities, the reasoning and caching a model takes, and its prices, so `ModelSpec::validate(&options)` refuses an option a model does not take *before anything is sent*, and `Pricing::cost(&usage)` prices a `Usage`.
 > 4. **A model is a `Model<Wire, Transport>`** (`rig_core::driver::Model`): a wire (what to send: `Chat`, `Responses`, `Messages`, `GenerateContent`, `Embeddings`, …) on a transport (how it travels; the erased shared client by default). Clients build models: `openai.chat("gpt-5")`, `openai.completion("gpt-5")` (the dialect's default completion route — Responses for OpenAI/ChatGPT, chat completions for compat vendors), `anthropic.completion("claude-…")`. A model erases to **`DynModel<Op>`** (`model.erase()`; the agent builder takes `impl Into<DynModel<Completion>>`).
@@ -42,20 +42,29 @@ This project (`shuvarie`) pins **Rig 0.44.0** — `rig-core` and `rig-agent` dir
 > 10. **Tools split into `Tool` (contextual) and `PortableTool` (context-free)**; failures are typed end-to-end (no string flattening), `ToolContext` values are serde-backed `ContextValue`s, and malformed tool arguments are offered to the invalid-call hook with bounded retries (`max_consecutive_malformed_tool_calls`).
 > 11. **`schemars` v1.0 is required** for `JsonSchema` derives (tool args, structured output); field descriptions are `///` doc comments and the macro is `schemars::schema_for!`.
 
-Official docs: **Guide** at https://rig.rs/docs and **API docs** at https://docs.rs/rig-core/0.44.0/rig_core/ / https://docs.rs/rig-agent/0.44.0/rig_agent/. docs.rs now serves the 0.44 line; the crate sources under `~/.cargo/registry/src/*/rig-core-0.44.0` / `rig-agent-0.44.0` are the most precise reference (the modules are heavily documented), and `rig-core-0.44.0/TYPED_OPTIONS.md` explains the intent behind the typed-option/catalog work.
+> **What 0.45 changed** (the deltas this workspace had to absorb — the rest of 0.44's surface above still holds)
+> 1. **Copilot is a dialect, not a client.** `copilot::Copilot` / `copilot::CopilotConfig` are gone: build `openai::OpenAIConfig::with_key(&copilot::DIALECT, session_token)` (the dialect derives the API root from the token's `proxy-ep=`, and stamps the editor-identity headers through its `completion_envelope`/`modality_envelope` hooks). Copilot's catalogue keeps its own wire — `Model::new(copilot::model_listing::Models::new(config), http).list()` — because its entries name a vendor and a `capabilities.type`.
+> 2. **Auth is a token store, and a client is no longer the thing that authenticates.** `Authenticator::new(source, impl TokenStore + 'static, device_code_handler, allow_device_flow)` — the `Option<PathBuf>` auth-file argument became a store: `MemoryTokenStore` (in-process, what shuvarie uses) or `FileTokenStore::new(dir)` (persisted, native only), or your own `TokenStore`. `Client::authenticate(&authenticator)` does not exist: resolve `authenticator.auth_context(&http).await -> AuthContext { api_key: Secret, account_id, api_base }` and configure it onto the client, or hand the authenticator to `rig_core::client::signed_in::SignedInModel`, which re-resolves the credential on every request.
+> 3. **Hooks see shared messages.** `CompletionCallEvent::history` is `&[Arc<Message>]`, and `RequestPatch::history` takes anything `Into<Arc<Message>>` (its field is `Option<Vec<Arc<Message>>>`) — the run and every hook share one canonical message value instead of cloning the history per event.
+> 4. **Dynamic tools run through `run_with`.** `DynamicTool::execute_with` is `DynamicTool::run_with(&mut ToolContext, Value)` (`execute` stays for a named dispatch on `ToolSet`). `ToolSet::from_dynamic_tools` is gone (loop `add_dynamic_tool`), and `ToolSet::tool_definitions()` now returns `Vec<Arc<ToolDefinition>>`.
+> 5. **Crates split.** Memory left `rig-core` for its own **`rig-memory`** crate (sessions, compaction, stores, over `rig_core::conversation`); `rig_core::transcript` is gone (`invalid_arguments_feedback` moved to `rig_core::tool::feedback`); `rig_agent::bus` became `rig_agent::handlers` (`Handlers` + `ModelHandle` served inline). `rig_core` gained `conversation` (one `Conversation` model: entries, `Change`s, `TurnRecord`s, tool-call/result `pairing`) and `redact`.
+> 6. **rig-typesafeai stopped inventing `total_tokens`.** Its Jev/System One usage reads only what the wire reports (`input_tokens`, `output_tokens`, and OpenRouter's `cost`), so `Usage::total_tokens` is `None` there; shuvarie's `context_footprint` derives a total from the counters.
+
+Official docs: **Guide** at https://rig.rs/docs and **API docs** at https://docs.rs/rig-core/0.45.0/rig_core/ / https://docs.rs/rig-agent/0.45.0/rig_agent/. docs.rs now serves the 0.45 line; the crate sources under `~/.cargo/registry/src/*/rig-core-0.45.0` / `rig-agent-0.45.0` are the most precise reference (the modules are heavily documented), and `rig-core-0.45.0/TYPED_OPTIONS.md` explains the intent behind the typed-option/catalog work.
 
 ## Workspace / crate layout
 
 Rig separates portable provider/backend contracts from the agent runtime:
 
-- `rig-core` (**`rig_core`**) — portable contracts: `catalog`, `wire` (configs, dialects, endpoint wires, `Operation`/`Fold`/`Decoder`), `driver` (`Model`/`DynModel` + transports), `completion` (requests/responses/messages/options/provider-options/history), `streaming` (part events), `tool` (Tool/PortableTool contracts, contexts, results), `embeddings`, `rerank`, `vector_store`, `memory`, `model` (listing), `error` (`ProviderError`, `ErrorReport`, `ErrorKind`), `effect` (typed effect bus contracts), `serve`, `transcript`, `structured_output`, `observe`, and the provider modules. Default features: `derive` + `rustls`; enable `reqwest` for the shared transport behind `Config::…client()`.
-- `rig-agent` (**`rig_agent`**) — the classic agent runtime: `agent` (`Agent`/`AgentBuilder`, `AgentRunner`, typed hooks, tools registry/server/catalog, `TypedRun`), `run` (the sans-IO run vocabulary: `AgentRun`, `RunSpec`, policy, patch, output mode, streamed-turn assembly), `extractor` (typed extraction), `bus`/`integrations`, and `rig_agent::core` (re-exports `rig_core::*`). Default feature: `derive`; `test-utils` enables the mock models and conformance helpers (`rig_agent::test_utils` re-exports `rig_core::test_utils`).
-- Companion crates are split per backend/transport (`rig-http`, `rig-reqwest`, `rig-tungstenite`, `rig-typesafeai`, …) and per integration (lancedb, qdrant, mongodb, neo4j, milvus, postgres, sqlite, s3vectors, scylladb, vectorize, helixdb, fastembed, …). Vector-store/memory integrations **are** republished for 0.44 (unlike 0.43). MCP lives in its own crate (`rig-rmcp`).
+- `rig-core` (**`rig_core`**) — portable contracts: `catalog`, `wire` (configs, dialects, endpoint wires, `Operation`/`Fold`/`Decoder`), `driver` (`Model`/`DynModel` + transports), `completion` (requests/responses/messages/options/provider-options/history), `conversation` (the one `Conversation` model — entries, `Change`s, `TurnRecord`s, tool-call/result `pairing`), `streaming` (part events), `tool` (Tool/PortableTool contracts, contexts, results, `feedback`), `embeddings`, `rerank`, `vector_store`, `model` (listing), `error` (`ProviderError`, `ErrorReport`, `ErrorKind`), `effect` (typed effect bus contracts), `serve`, `redact`, `structured_output`, `observe`, and the provider modules. Default features: `derive` + `rustls`; enable `reqwest` for the shared transport behind `Config::…client()`. (`memory` and `transcript` left this crate in 0.45 — see `rig-memory` and `tool::feedback`.)
+- `rig-agent` (**`rig_agent`**) — the classic agent runtime: `agent` (`Agent`/`AgentBuilder`, `AgentRunner`, typed hooks, tools registry/server/catalog, `TypedRun`), `run` (the sans-IO run vocabulary: `AgentRun`, `RunSpec`, policy, patch, output mode, streamed-turn assembly), `extractor` (typed extraction), `handlers` (the `Handlers`/`ErasedHandler` table an agent dispatches through — 0.45's replacement for `bus`), and `rig_agent::core` (re-exports `rig_core::*`). Default feature: `derive`; `test-utils` enables the mock models and conformance helpers (`rig_agent::test_utils` re-exports `rig_core::test_utils`).
+- Companion crates are split per backend/transport (`rig-http`, `rig-reqwest`, `rig-tungstenite`, `rig-typesafeai`, …), per capability (`rig-memory` for sessions/memory, since 0.45) and per integration (lancedb, qdrant, mongodb, neo4j, milvus, postgres, sqlite, s3vectors, scylladb, vectorize, helixdb, fastembed, …). MCP lives in its own crate (`rig-rmcp`).
 
 ```toml
 [dependencies]
-rig-core = { version = "0.44", features = ["reqwest"] }
-rig-agent = "0.44"
+rig-core = { version = "0.45", features = ["reqwest"] }
+rig-agent = "0.45"
+rig-reqwest = { version = "0.45", default-features = false }   # only for the OAuth paths
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 ```
 
@@ -90,7 +99,7 @@ Before writing Rig code in this repo, know these constraints:
 - **`schemars` v1.0 is required** for `JsonSchema` derives (tool args, structured output). Field descriptions are `///` doc comments; use `schemars::schema_for!(T)`.
 - **OpenAI Responses API requires every parameter listed under `required`.** Include a `"required"` array in hand-written tool schemas, or use the macro's `required(...)` helper, or derive from `schemars::JsonSchema` (which marks non-`Option` fields required).
 - **Query embeddings must match the stored model.** Vectors from different embedding models are not comparable; use the exact same model id at ingestion and query time. The embedding model is `client.embedding(id, Option<usize>)` → `Model<Embeddings>`.
-- **OAuth providers (`chatgpt`, `copilot`) resolve sign-in at first use.** Build the config (empty credential) and an `Authenticator::new(AuthSource::OAuth, …, DeviceCodeHandler, allow_device_flow)`; `client.authenticate(&authenticator).await` resolves/refreshes/runs the device flow (cached credentials open without network). Without a device-code handler pass `allow_device_flow: false` for a fast, actionable failure. A pasted static token goes straight into the config.
+- **OAuth providers (`chatgpt`, `copilot`) resolve sign-in through `AuthContext`, not a client method.** Build the config (empty credential) and an `Authenticator::new(AuthSource::OAuth, store, DeviceCodeHandler, allow_device_flow)`; then `authenticator.auth_context(&http).await` resolves/refreshes/runs the device flow (a cached credential opens without network) and hands back `{ api_key, account_id, api_base }` to configure the client with. `Client::authenticate` no longer exists; for a credential that must outlive one access token, use `client::signed_in::SignedInModel` instead. Without a device-code handler pass `allow_device_flow: false` for a fast, actionable failure. A pasted static token goes straight into the config.
 
 ## Quickstart
 
@@ -179,7 +188,7 @@ Use this to decide which reference file to load:
 **Need vector stores, `VectorStoreIndex`, `VectorSearchResult`, `InsertDocuments`, `InMemoryVectorStore`, `dynamic_context`, tool RAG, or `VectorSearchRequest`?**
 → Read `references/rag-and-vector-stores.md`
 
-**Need conversation memory, `InMemoryConversationMemory`, `ConversationMemory`/`MessageFilter`/`Compactor` traits, or memory via the agent builder?**
+**Need conversation memory, sessions/stores (`MemoryStore`/`DirStore`/`AsyncStore`), `recent` windowing, or compaction (`CompactionPolicy`/`apply_summary`)?**
 → Read `references/memory.md`
 
 ## API Surface (Cheat Sheet)
@@ -190,11 +199,12 @@ Use this to decide which reference file to load:
 | `Anthropic` / `AnthropicConfig` | `rig_core::providers::anthropic::{Anthropic, AnthropicConfig}` | Messages-format client (base for moonshot/minimax/xiaomi/zai anthropic dialects) |
 | `Gemini` / `GeminiConfig` | `rig_core::providers::gemini::{Gemini, GeminiConfig}` | generateContent/interactions client |
 | `Ollama` / `OllamaConfig` | `rig_core::providers::ollama::{Ollama, OllamaConfig}` | local daemon client (optional key); `/v1` chat and native `/api/chat` wires |
-| `Copilot` / `CopilotConfig` / `auth` | `rig_core::providers::copilot::{Copilot, CopilotConfig, auth}` | Copilot client + GitHub/OAuth authenticator |
+| `copilot::DIALECT` / `copilot::auth` / `copilot::model_listing` | `rig_core::providers::copilot::{DIALECT, auth, model_listing}` | Copilot is an OpenAI dialect (no client of its own): `OpenAIConfig::with_key(&DIALECT, token)`, its catalogue wire, GitHub/OAuth authenticator |
 | `Cohere` / `CohereConfig` | `rig_core::providers::cohere::{Cohere, CohereConfig}` | Cohere chat (compatibility and native routes), embeddings |
 | `VoyageAi` / `VoyageAiConfig` | `rig_core::providers::voyageai::{VoyageAi, VoyageAiConfig}` | embeddings + rerank only |
-| `Authenticator` / `AuthSource` / `DeviceCodeHandler` | `providers::chatgpt::auth::…`, `providers::copilot::auth::…` | OAuth: `authenticate(&client).await` |
-| `ChatGPT dialect` | `rig_core::providers::chatgpt` | `DIALECT` + model consts; OpenAI client + `authenticate` for OAuth |
+| `Authenticator` / `AuthSource` / `DeviceCodeHandler` / `TokenStore` | `providers::chatgpt::auth::…`, `providers::copilot::auth::…` | OAuth: `auth_context(&http).await` → `AuthContext`; stores are `MemoryTokenStore` / `FileTokenStore` |
+| `ChatGPT dialect` | `rig_core::providers::chatgpt` | `DIALECT` + model consts; OpenAI client + `auth_context` for OAuth |
+| `SignedInModel` | `rig_core::client::signed_in::SignedInModel` | a catalog model whose every request re-resolves the credential (the OAuth way to outlive an access token) |
 | Provider extensions | `rig_core::providers::<p>::extension::{<P>Ext, <P>Options, <P>Extras}` | typed per-provider request/response options (`OpenAiOptions`, `AnthropicOptions`, `OllamaOptions`, …) |
 | `Model` / `DynModel` | `rig_core::driver::{Model, DynModel}` | wire + transport; `call`, `stream`, `_observed` twins, `capabilities()`, `erase()` → `DynModel<Op>` |
 | `Operation` family | `rig_core::operation::{Completion, Embedding, ModelListing, Rerank, Verify, …}` | the `Op` marker parameter; `wire::{Operation, Fold, Decoder, Wire}` back each endpoint |
@@ -210,11 +220,11 @@ Use this to decide which reference file to load:
 | `Catalog` / `ModelSpec` / `Pricing` | `rig_core::catalog::{Catalog, ModelSpec, Pricing}` | per-model facts + prices; `builtin()`, `resolve("provider/model")`, `validate(&options)`, `Pricing::cost(&usage)` |
 | `Agent` / `AgentBuilder` | `rig_agent::agent::{Agent, AgentBuilder}` | `AgentBuilder::new(model)` (generic over tool state only); preamble/context/tools/hooks/memory/routes/options; always non-model-generic |
 | `AgentRunner` | `rig_agent::agent::AgentRunner<O = ()>` | per-run driver from `agent.prompt(..)`: `.history/.max_turns/.tool_concurrency/.tool_context/.add_hook/.using_model/.temperature/.max_tokens/.options/.reasoning/.cache/.provider_option/.additional_params/.run/.stream/.run_channel` |
-| `PromptResponse` | `rig_agent::agent::PromptResponse` | `usage`, `messages: Vec<Message>`, `completion_calls`, `memory_append`, `content`; **`output() -> String`**, `usage()` |
+| `PromptResponse` | `rig_agent::agent::PromptResponse` | `usage`, `messages: Vec<Message>`, `completion_calls`, `content`; **`output() -> String`**, `usage()` (`memory_append` is gone in 0.45 — the session `Writer` owns persistence) |
 | `TypedRun` / `TypedOutput` / `TypedPromptResponse` | `rig_agent::agent::{TypedRun, TypedOutput, TypedPromptResponse}` | `TypedRun<T> = AgentRunner<TypedOutput<T>>`; `TypedPromptResponse { output: T, … }` |
 | `AgentRun` / `RunSpec` / `RequestPatch` / `OutputMode` | `rig_agent::run::{AgentRun, RunSpec, RequestPatch, OutputMode, …}` | sans-IO/drivable run vocabulary (durable + resumable); `RUN_FORMAT = 2` |
 | `PromptError` | `rig_agent::completion::PromptError` (defined in `rig_agent::run::response`) | `Provider(ProviderError)` / `Report(ErrorReport)` / `Memory(MemoryError)` / `MaxTurns { .. }` / `Cancelled { .. }` / `UnknownToolCall { .. }` |
-| `AgentHook` / events | `rig_agent::agent::{AgentHook, HookContext, RunStart, RunSettled, ModelSelection, CompletionCallEvent, ModelTurnFinished, TextDelta, ReasoningDelta, ToolCallDelta, DispatchEvent, OutcomeEvent, StepEventKind, Scratchpad, RunEntry, RunHandle}` | typed methods per boundary returning per-event actions |
+| `AgentHook` / events | `rig_agent::agent::{AgentHook, HookContext, RunStart, RunSettled, ModelSelection, CompletionCallEvent, ModelTurnFinished, TextDelta, ReasoningDelta, ToolCallDelta, DispatchEvent, OutcomeEvent, StepEventKind, Scratchpad, RunEntry, RunHandle}` | typed methods per boundary returning per-event actions; **event history is `&[Arc<Message>]`** |
 | Actions | `…::{RunStartAction, ModelSelectionAction, CompletionCallAction, ModelTurnAction, DispatchAction, OutcomeAction, ObservationAction, InvalidToolCallAction}` | `Continue/Proceed` / `Patch/Rewrite/Select/Retry/Skip/Stop/Repair/Fail` per event |
 | Invalid tool calls | `rig_agent::run::{InvalidToolCallReason, InvalidToolCallContext, InvalidToolCallAction, RetryRequest, UnhandledInvalidToolCall}` | malformed-argument recovery and unknown/disallowed policy (`#[non_exhaustive]` types) |
 | `MultiTurnStreamItem` | `rig_agent::agent::MultiTurnStreamItem` | `StreamAssistantItem(Item<StreamEvent>)` / `ToolCall { tool_call }` / `ToolExecutionCommitted { tool_call }` / `ToolResult { tool_result }` / `CompletionCall(CompletionCall)` / `ModelTurnRetried { turn }` / `FinalResponse(PromptResponse)` |
@@ -222,7 +232,7 @@ Use this to decide which reference file to load:
 | `RunEvents` | `rig_agent::agent::{RunEvents, RUN_EVENTS_CAPACITY}` | bounded event feed from `run_channel()`; `try_next`, `is_done`, `Stream`/`FusedStream` |
 | `StreamEvent` / `Item` / `Part` | `rig_core::streaming::{StreamEvent, Item, Part, PartKind, Transcript, SequenceError, Streamed}` | `Start`/`Text`/`Reasoning`/`Arguments`/`End` parts; `Streamed<Op>`/`CompletionStream` with `finish()`/`partial()` |
 | `stream_to_stdout` | `rig_agent::agent::{stream_to_stdout, StreamToStdoutError}` | `(&mut StreamingResult) -> Result<PromptResponse, StreamToStdoutError>` |
-| `Tool` / `PortableTool` / `DynamicTool` | `rig_core::tool::{Tool, PortableTool, DynamicTool, ToolContext, …}`; `ToolSet` from `rig_agent::tool` | `const NAME`, `Args`, `Output`, `Error`, `description`, `parameters`, `call`; `DynamicTool::new(name, desc, params, args-only-callback)` / `new_with_context((ctx, args))` |
+| `Tool` / `PortableTool` / `DynamicTool` | `rig_core::tool::{Tool, PortableTool, DynamicTool, ToolContext, …}`; `ToolSet` from `rig_agent::tool` | `const NAME`, `Args`, `Output`, `Error`, `description`, `parameters`, `call`; `DynamicTool::new(name, desc, params, args-only-callback)` / `new_with_context((ctx, args))`, run one with `run_with(&mut ctx, value)` |
 | `ToolOutput` / `ToolResult` / `ToolExecutionError` / `ToolErrorKind` | `rig_core::tool::{ToolOutput, IntoToolOutput, ToolResult, ToolExecutionError, ToolErrorKind}` | typed tool results and failures with output rendering |
 | `ContextValue` | `rig_core::tool::ContextValue` (trait) + `#[derive(rig_core::ContextValue)]` | typed serde-backed keys for `ToolContext::insert/get/require/insert_result/result/require_result` |
 | `rig_tool` | `#[rig_core::rig_tool]` / `#[rig_agent::rig_tool]` | function → `Tool` (mutable context arg) or `PortableTool`; `#[rig(context)]` names an imported context type |
@@ -234,13 +244,16 @@ Use this to decide which reference file to load:
 | `VectorStoreIndex` / `VectorSearchResult` | `rig_core::vector_store::{VectorStoreIndex, VectorSearchResult, VectorSearchIdResult, InsertDocuments}` | `top_n(req)` → `Vec<VectorSearchResult<T>> { score, id, document }`; `top_n_ids` → ids only |
 | `InMemoryVectorStore` | `rig_core::vector_store::in_memory_store::InMemoryVectorStore` | `from_documents`/`from_documents_with_ids`/`…_with_id_f`, `.index(model)` |
 | `VectorSearchRequest` | `rig_core::vector_store::request::VectorSearchRequest` | typestate builder: `.builder().query(..).samples(n).build()` |
-| `ConversationMemory` / `InMemoryConversationMemory` | `rig_core::memory::{ConversationMemory, InMemoryConversationMemory, MessageFilter, DemotionHook, Compactor}` | in-process memory contracts; `.with_filter(..)`; wired via `AgentBuilder::memory(..)` |
+| `AsyncStore` / `MemoryStore` / `DirStore` / `Session` / `Writer` | `rig_memory::{AsyncStore, MemoryStore, DirStore, Session, Writer, load, save}` | where a session is kept (moved out of `rig-core` in 0.45); wired via `AgentBuilder::memory(store).conversation(log)` |
+| `Conversation` / `Change` / `pairing` | `rig_core::conversation::{Conversation, Entry, Change, TurnRecord, pairing}` | one conversation model for all of rig: stable entry ids, edits as changes, tool call/result pairing |
+| `recent` | `rig_memory::recent::{Recent, LastMessages, TokenBudget, view}` | which newest messages a request sends (`view` keeps every kept result after its call) |
+| `CompactionPolicy` / `apply_summary` | `rig_memory::{CompactionPolicy, apply_summary, undo_summary, Summarizer}` | managed forgetting: summarize, clear old tool outputs, roll summaries forward |
 | `test_utils` | `rig_core::test_utils` / `rig_agent::test_utils` (feature `test-utils`) | mock completion models/embeddings/memory/relay plus streaming and trace conformance helpers |
 | `schemars` / `serde` / `serde_json` | `rig_core::{schemars, serde, serde_json}` | re-exports so macro-generated code resolves through rig; **schemars v1.0** |
 
-## Provider List (rig-core 0.44)
+## Provider List (rig-core 0.45)
 
-Modules under `rig_core::providers::*`, each with its own client/section unless marked: `openai` (`OpenAI`), `anthropic` (`Anthropic`), `gemini` (`Gemini`), `ollama` (`Ollama`), `copilot` (`Copilot`), `cohere` (`Cohere`), `voyageai` (`VoyageAi`, embeddings/rerank only), `chatgpt` (dialect + auth — the client is `openai::OpenAI`), `azure` (OpenAI-shaped resource routing — client is `openai::OpenAI`), and OpenAI/Anthropic-shaped **vendors** whose constructors build the shared client: `deepseek`, `doubleword`, `groq`, `huggingface`, `hyperbolic`, `llamacpp`, `minimax`, `mira`, `mistral`, `moonshot`, `openrouter`, `perplexity`, `together`, `venice`, `xai` (`xai::DIALECT`), `xiaomimimo`, `zai`. `providers::registry::ProviderRef` builds clients from data when the provider is chosen programmatically.
+Modules under `rig_core::providers::*`, each with its own client/section unless marked: `openai` (`OpenAI`), `anthropic` (`Anthropic`), `gemini` (`Gemini`), `ollama` (`Ollama`), `cohere` (`Cohere`), `voyageai` (`VoyageAi`, embeddings/rerank only), `copilot` (dialect + auth + its own catalogue wire — the client is `openai::OpenAI`), `chatgpt` (dialect + auth — the client is `openai::OpenAI`), `azure` (OpenAI-shaped resource routing — client is `openai::OpenAI`), and OpenAI/Anthropic-shaped **vendors** whose constructors build the shared client: `deepseek`, `doubleword`, `groq`, `huggingface`, `hyperbolic`, `llamacpp`, `minimax`, `mira`, `mistral`, `moonshot`, `openrouter`, `perplexity`, `together`, `venice`, `xai` (`xai::DIALECT`), `xiaomimimo`, `zai`. `providers::registry::ProviderRef` builds clients from data when the provider is chosen programmatically.
 
 OpenAI-compatible vendors are reachable generically via `OpenAIConfig::with_key(&openai::wire::<DIALECT>, key).with_base_url(url).client()` when you need an endpoint override.
 
@@ -256,7 +269,7 @@ OpenAI-compatible vendors are reachable generically via `OpenAIConfig::with_key(
 
 1. **Calling `rig` from the root binary** — go through `shuvarie-llm` so the TUI stays provider-agnostic and the core task owns the async work.
 2. **Awaiting a stream on the TUI thread** — drive `agent.prompt(..).stream()` on the core task and forward mapped items over `mpsc` to the TUI.
-3. **Reading `response.output` as a field** — in 0.44 it is `output()`, a method returning `String`; `messages` is a `Vec<Message>`, not an `Option`.
+3. **Reading `response.output` as a field** — since 0.44 it is `output()`, a method returning `String`; `messages` is a `Vec<Message>`, not an `Option`.
 4. **Forgetting `max_turns` on multi-tool prompts** — it is the *total* model-call budget (1 = initial only); chained tool calls fail with `PromptError::MaxTurns`.
 5. **Double-appending history with `chat`** — `chat(prompt, &mut history)` already appends the committed turn (including tool calls/results). `.history(..)` on a runner does NOT (it only seeds the input — the committed messages come back on `PromptResponse.messages`).
 6. **Mixing embedding models** — query embeddings must come from the exact same model id used to embed the stored documents.
@@ -270,16 +283,19 @@ OpenAI-compatible vendors are reachable generically via `OpenAIConfig::with_key(
 14. **Assuming `from_env()` works without the API key env var** — each provider reads a specific var (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `COHERE_API_KEY`, …); Ollama needs none.
 15. **Using `schemars` 0.8 idioms** — v1.0 is required; descriptions are `///` doc comments and the macro is `schemars::schema_for!`.
 16. **Building `rig-reqwest`-backed clients without the `reqwest` feature** — `Config::…client()` is behind `rig-core/reqwest`; without it you must `.connect(http)` with an HTTP transport of your own.
-17. **Assuming `observes()` only gates outcomes** — in 0.44 a hook that returns `false` for `StepEventKind::ToolDispatch` stops seeing tool results, and the same gate covers the run lifecycle and delta events.
+17. **Assuming `observes()` only gates outcomes** — since 0.44 a hook that returns `false` for `StepEventKind::ToolDispatch` stops seeing tool results, and the same gate covers the run lifecycle and delta events.
 18. **Setting a typed option the model does not take** — `OnUnsupported::Error` is the default, so the call fails; validate with `ModelSpec::validate` (or the catalog) or opt into `OnUnsupported::Ignore`.
 19. **Expecting `additional_params` to be replaced wholesale** — it now deep-merges into the body and raw keys beat typed options (precedence: mapped options → `provider_options` → `additional_params`).
 20. **Reaching for `#[non_exhaustive]` types with an exhaustive `match`** — `CompletionRequest` and the invalid-tool-call policy types require a `_` arm.
-21. **Ignoring malformed tool arguments** — they reach `on_invalid_tool_call` (`InvalidToolCallReason::MalformedArguments`) and are subject to `max_consecutive_malformed_tool_calls`; the default path answers the call with corrective feedback rather than failing the run.
+21. **Ignoring malformed tool arguments** — they reach `on_invalid_tool_call` (`InvalidToolCallReason::MalformedArguments`) and are subject to `max_consecutive_malformed_tool_calls`; the default path answers the call with corrective feedback (`rig_core::tool::feedback::invalid_arguments_feedback`) rather than failing the run.
+22. **Reaching for `Client::authenticate` / `CopilotConfig` / `DynamicTool::execute_with` / `ToolSet::from_dynamic_tools`** — 0.45 removed them. Resolve an `AuthContext` instead, build Copilot as `OpenAIConfig::with_key(&copilot::DIALECT, ..)`, run a dynamic tool with `run_with`, and register dynamic tools one by one with `add_dynamic_tool`.
+23. **Cloning the history in a hook** — 0.45 hands hooks `&[Arc<Message>]`; clone the `Arc`, never the message.
+24. **Expecting `rig_core::memory`** — memory lives in the `rig-memory` crate in 0.45, and `rig_core::transcript` is `rig_core::tool::feedback`.
 
 ## External Resources
 
 - **Rig website / guide**: https://rig.rs/docs
-- **Rig API docs (0.44)**: https://docs.rs/rig-core/0.44.0/rig_core/ · https://docs.rs/rig-agent/0.44.0/rig_agent/
+- **Rig API docs (0.45)**: https://docs.rs/rig-core/0.45.0/rig_core/ · https://docs.rs/rig-agent/0.45.0/rig_agent/
 - **GitHub**: https://github.com/0xPlaygrounds/rig
 - **Examples**: https://github.com/0xPlaygrounds/rig/tree/main/examples
 - **awesome-rig**: https://github.com/0xPlaygrounds/awesome-rig
@@ -300,4 +316,4 @@ OpenAI-compatible vendors are reachable generically via `OpenAIConfig::with_key(
 | `references/structured-output.md` | shared `structured_output` policy, `OutputMode`, `Extractor`/`ExtractorBuilder`, `TypedRun`/`TypedPromptResponse`, schema/reprompt loop, `StructuredOutputError` |
 | `references/embeddings.md` | `Embed` derive + manual impl, `TextEmbedder`, `EmbeddingsBuilder`, normalized embedding replies and width checks, tool-RAG `ToolSchema` |
 | `references/rag-and-vector-stores.md` | RAG phases, `VectorStoreIndex`/`VectorSearchResult`, `InsertDocuments`, `InMemoryVectorStore`/LSH, `dynamic_context(n, index)`, `VectorSearchRequest`/filters, tool RAG, stores |
-| `references/memory.md` | `ConversationMemory`/`MessageFilter`/`DemotionHook`/`Compactor` contracts, `InMemoryConversationMemory`, memory via `AgentBuilder::memory`, `PromptResponse::memory_append`, long-term memory |
+| `references/memory.md` | session stores (`MemoryStore`/`DirStore`/`AsyncStore`), `Session`/`Writer`/`load`/`save`, `recent` windowing, `CompactionPolicy`/`apply_summary`, memory via `AgentBuilder::memory(store).conversation(log)`, long-term memory |

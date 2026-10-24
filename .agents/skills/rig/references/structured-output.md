@@ -2,7 +2,7 @@
 
 An `Extractor` turns unstructured text into a strongly-typed Rust value. Give it a target type and Rig drives an LLM to parse text into that type with type-safe deserialization and minimal boilerplate — useful for pulling entities, fields, or records out of free-form input.
 
-Official docs: https://rig.rs/docs/concepts/extractors · API: https://docs.rs/rig-agent/latest/rig_agent/extractor/index.html (authoritative reference: `rig-agent-0.44.0/src/extractor.rs`, `rig-agent-0.44.0/src/agent/typed.rs`, `rig-core-0.44.0/src/structured_output.rs`).
+Official docs: https://rig.rs/docs/concepts/extractors · API: https://docs.rs/rig-agent/latest/rig_agent/extractor/index.html (authoritative reference: `rig-agent-0.45.0/src/extractor.rs`, `rig-agent-0.45.0/src/agent/typed.rs`, `rig-core-0.45.0/src/structured_output.rs`).
 
 > **Changed in 0.44** — the structured-output *policy* is shared by the agent runtimes in `rig_core::structured_output` (output-tool name and description, instructions, reprompts, required-field check). A typed run is `AgentRunner<TypedOutput<T>>` and **shares every `AgentRunner` setter** (0.43 forwarded them one by one). `PromptResponse::output()` is a **method derived from `content`** (no `output: String` field), and 0.44 tightened the extractor to match: `StructuredOutputError` is `Prompt` / `Deserialization { output, error }` / `EmptyResponse`, and `ExtractorBuilder::retries` takes `usize`.
 
@@ -213,7 +213,7 @@ A `TypedRun<T>` **is** an `AgentRunner`, parameterised by the `TypedOutput<T>` m
 | `usage: Usage` | aggregate usage across every attempt |
 | `completion_calls: Vec<CompletionCall>` / `completion_calls()` / `requests()` | per-request usage/identity of the accepted attempt |
 | `messages: Vec<Message>` | the accepted attempt's transcript (append it to caller-owned history) |
-| `memory_append: Option<MemoryAppend>` | how the attempt's memory append settled |
+| `memory_append: Option<MemoryAppend>` | **removed in 0.45** — a run backed by a session store persists through its `Writer`; `TypedPromptResponse` carries `output`, `usage`, `completion_calls` and `messages` |
 | `new(output, usage)` / `with_completion_calls(calls)` | constructors |
 
 `Agent::prompt_typed::<T>(prompt) -> TypedRun<T>` is the native-mode entry point: the schema for `T` becomes the run's `output_schema`, the mode is `Native`, and the model's final text is parsed as `T` (tolerating prose or fences around the JSON — a direct parse is tried first, then one value starting at the first `{` or `[`).

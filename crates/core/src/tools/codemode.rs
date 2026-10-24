@@ -315,7 +315,7 @@ impl ToolInvoker for RosterInvoker {
             // not forward that metadata -- they have no block to draw it in --
             // so the context exists only to satisfy the tool contract.
             let mut context = ToolContext::new();
-            match tool.execute_with(&mut context, call.args).await {
+            match tool.run_with(&mut context, call.args).await {
                 Ok(output) => Ok(output_as_json(&output)),
                 Err(error) => Err(error.message().to_string()),
             }
@@ -429,7 +429,7 @@ mod tests {
 
         let mut context = ToolContext::new();
         let output = codemode
-            .execute_with(&mut context, json!({ "script": script }))
+            .run_with(&mut context, json!({ "script": script }))
             .await
             .expect("the script runs");
         let text = output.render();

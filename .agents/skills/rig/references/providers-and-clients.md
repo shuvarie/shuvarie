@@ -2,16 +2,16 @@
 
 A **provider client** is the entry point to any LLM vendor in Rig. It holds a provider's **configuration** (credentials, base URL, routing/dialect policy) on a **transport** (how payloads travel) and builds the **models** you call — completion, embedding, listing, rerank, transcription, image, audio models — depending on what the provider serves.
 
-Official docs: https://rig.rs/docs/concepts/provider_clients · API: https://docs.rs/rig-core/latest/rig_core/providers/index.html — for 0.44 read the crate sources under `~/.cargo/registry/src/*/rig-core-0.44.0/src/providers` as well; the modules are heavily documented.
+Official docs: https://rig.rs/docs/concepts/provider_clients · API: https://docs.rs/rig-core/latest/rig_core/providers/index.html — for 0.44 read the crate sources under `~/.cargo/registry/src/*/rig-core-0.45.0/src/providers` as well; the modules are heavily documented.
 
 ## Vocabulary
 
 - **Provider module** — the vendor's module in `rig_core::providers` (e.g. `providers::openai`). Holds the client, its config, wire types, dialect constants, model ids, its `extension` (typed options + reply extras) and the request/response normalization.
-- **Config** — plain data describing the provider: `openai::wire::OpenAIConfig` (re-exported as `openai::OpenAIConfig`), `anthropic::wire::AnthropicConfig`, `gemini::GeminiConfig`, `ollama::wire::OllamaConfig`, `copilot::wire::CopilotConfig`, `cohere::wire::CohereConfig`, `voyageai::wire::VoyageAiConfig`. Carries the credential (`rig_core::wire::Secret`, never serialized), the base URL, and dialect/policy fields. Serializable (`deny_unknown_fields`) and cheap to clone.
+- **Config** — plain data describing the provider: `openai::wire::OpenAIConfig` (re-exported as `openai::OpenAIConfig`), `anthropic::wire::AnthropicConfig`, `gemini::GeminiConfig`, `ollama::wire::OllamaConfig`, `cohere::wire::CohereConfig`, `voyageai::wire::VoyageAiConfig`. Carries the credential (`rig_core::wire::Secret`, never serialized), the base URL, and dialect/policy fields. Serializable (`deny_unknown_fields`) and cheap to clone. **Copilot has no config of its own in 0.45** — it is `OpenAIConfig` on `copilot::DIALECT`.
 - **Client** — the config on a transport, e.g. `openai::OpenAI` (`Config::client()` / `Config::connect(http)` / `client.with_http(http)` / `client.config()`). Builds models.
 - **Wire** — what to send and how to read the reply: `openai::wire::{OpenAiWire, Chat, Embeddings, Rerank, Transcriptions, Models, Verify, …}`, `anthropic::wire::Messages`, `gemini::completion::GenerateContent`, `copilot::wire::CopilotWire`, `ollama::Chat` (native `/api/chat`), `cohere::{CohereChat, NativeChat}`. Each wire declares its `Operation` (`Chat::Op = Completion`).
 - **Model** — a `rig_core::driver::Model<W, T = rig_core::http_client::DynHttpClient>` (e.g. `Model<OpenAiWire>` from `openai.completion(id)`): `call(request)` (one whole reply, folded), `stream(request)` → `Streamed<W::Op>` (part events; `finish()`/`partial()` fold or read it), `erase()` → `DynModel<Op>`.
-- **Dialect** — the request/response policy of one vendor that speaks another provider's format: one constant per vendor in `openai::wire` (`GROQ`, `TOGETHER`, `DEEPSEEK`, `OPENROUTER`, `AZURE`, `LLAMACPP`, … — plus `xai::DIALECT`, `chatgpt::DIALECT`, `copilot::wire::DIALECT`) and in `anthropic::wire` (`ANTHROPIC`, `ZAI`, `MINIMAX`, `MOONSHOT`, `XIAOMIMIMO`). Built with `Dialect::gateway(name, base_url, api_key_env)` + `Quirks`; `by_name`/`all` resolve the registered set, and a dialect serializes as its registered name only. The vendor modules' `new`/`from_env` build the shared client on their dialect.
+- **Dialect** — the request/response policy of one vendor that speaks another provider's format: one constant per vendor in `openai::wire` (`GROQ`, `TOGETHER`, `DEEPSEEK`, `OPENROUTER`, `AZURE`, `LLAMACPP`, … — plus `xai::DIALECT`, `chatgpt::DIALECT`, `copilot::DIALECT`) and in `anthropic::wire` (`ANTHROPIC`, `ZAI`, `MINIMAX`, `MOONSHOT`, `XIAOMIMIMO`). Built with `Dialect::gateway(name, base_url, api_key_env)` + `Quirks`; `by_name`/`all` resolve the registered set, and a dialect serializes as its registered name only. The vendor modules' `new`/`from_env` build the shared client on their dialect. `DialectHooks.default_endpoint` lets a dialect derive its API root from the credential (`copilot::DIALECT` reads `proxy-ep=`), and `model_route` picks the route per model id (Copilot sends `*codex*` to Responses, everything else to Chat).
 
 Flow is always: **config → client → model → agent/extractor/index**.
 
@@ -51,7 +51,7 @@ The transport defaults to the shared `rig_reqwest::shared()` client (built once 
 | `OPENAI` | `OPENAI_BASE_URL` | — |
 | `AZURE` | `AZURE_ENDPOINT` | — (also requires `AZURE_API_VERSION`; speech: `AZURE_AUDIO_API_VERSION`) |
 | `chatgpt::DIALECT` | `CHATGPT_API_BASE` | `OPENAI_CHATGPT_API_BASE` |
-| `copilot::wire::DIALECT` | `GITHUB_COPILOT_API_BASE` | `COPILOT_BASE_URL` |
+| `copilot::DIALECT` | `GITHUB_COPILOT_API_BASE` | `COPILOT_BASE_URL` |
 | `LLAMACPP` | `LLAMACPP_API_BASE_URL` | — |
 | `VENICE` | `VENICE_BASE_URL` | — |
 | `DOUBLEWORD` | `DOUBLEWORD_BASE_URL` | — |
@@ -63,9 +63,36 @@ The transport defaults to the shared `rig_reqwest::shared()` client (built once 
 | `anthropic::wire::{ZAI, MINIMAX, MOONSHOT, XIAOMIMIMO}` | `ZAI_ANTHROPIC_API_BASE`, `MINIMAX_ANTHROPIC_API_BASE`, `MOONSHOT_ANTHROPIC_API_BASE`, `XIAOMI_MIMO_ANTHROPIC_API_BASE` | — |
 | `DEEPSEEK`, `GROQ`, `TOGETHER`, `HYPERBOLIC`, `MIRA`, `PERPLEXITY`, `HUGGINGFACE`, `MISTRAL`, `OPENROUTER`, `COHERE`, `OLLAMA`, `xai::DIALECT` | none — the dialect's default stands | — |
 
-Configs that are not OpenAI-shaped read their own variables: `OllamaConfig::from_env` (`OLLAMA_API_BASE_URL`, `OLLAMA_API_KEY`; both optional — an unset key sends no credential), `CopilotConfig::from_env` (`GITHUB_COPILOT_API_KEY` else `COPILOT_API_KEY`, plus the two base URLs above), and `GeminiConfig`/`CohereConfig`/`VoyageAiConfig::from_env` read a key only (`GEMINI_API_KEY`, `COHERE_API_KEY`, `VOYAGE_API_KEY`).
+Configs that are not OpenAI-shaped read their own variables: `OllamaConfig::from_env` (`OLLAMA_API_BASE_URL`, `OLLAMA_API_KEY`; both optional — an unset key sends no credential), and `GeminiConfig`/`CohereConfig`/`VoyageAiConfig::from_env` read a key only (`GEMINI_API_KEY`, `COHERE_API_KEY`, `VOYAGE_API_KEY`). An OpenAI-shaped **dialect** reads its own pair through `OpenAIConfig::from_env_with(&DIALECT)` — for Copilot that is `GITHUB_COPILOT_API_KEY` plus `GITHUB_COPILOT_API_BASE` (alias `COPILOT_BASE_URL`); `from_env()` alone is official OpenAI.
 
 Beyond credentials: `with_base_url(..)`, `with_dialect(..)` (same credential, another dialect's defaults), `with_auth(Auth::{Bearer, OptionalBearer, ApiKeyHeader})`, `with_sub_route(SubRoute::…)` and `with_api_version(..)` on `OpenAIConfig`; `with_version`/`with_beta` on `AnthropicConfig`; `with_api_key` on `OllamaConfig`. The `providers::registry` umbrella adds the general `ProviderConfig::base_url()` / `with_base_url(..)` surface (**new in 0.44**, #2700).
+
+### OAuth: `chatgpt` and `copilot` (changed in 0.45)
+
+A sign-in resolves through a **`TokenStore`**, and a client is no longer what authenticates:
+
+```rust
+use rig_core::providers::chatgpt::auth::{AuthSource, Authenticator, DeviceCodeHandler, MemoryTokenStore};
+
+let auth = Authenticator::new(
+    AuthSource::OAuth,              // or ApiKey(token) / GitHubAccessToken(token) for Copilot
+    MemoryTokenStore::default(),    // or FileTokenStore::new(dir) (native only), or your own TokenStore
+    DeviceCodeHandler::default(),   // shuvarie's wraps its own callback: DeviceCodeHandler::new(|prompt| …)
+    false,                          // allow_device_flow: false fails fast instead of blocking unattended
+);
+let context = auth.auth_context(&http).await?;   // { api_key: Secret, account_id, api_base }
+let provider = openai::OpenAIConfig::with_key(&chatgpt::DIALECT, context.api_key);
+let provider = match context.account_id {
+    Some(id) => provider.with_account_id(id),    // the `ChatGPT-Account-Id` header
+    None => provider,
+};
+let client = provider.client();
+```
+
+- `Client::authenticate(&authenticator)` is **gone** (0.44 had it on `OpenAI` and `Copilot`). Resolve the context yourself, or reach for `rig_core::client::signed_in::SignedInModel::new(spec, auth, http)`, which re-resolves the credential on **every** request — the right tool when a run must outlive one access token, at the cost of reconnecting the model when the credential changes.
+- `Authenticator::new`'s second argument was an `Option<PathBuf>` auth file in 0.44; it is now an `impl TokenStore + 'static`. `MemoryTokenStore` keeps credentials for the life of the process (what `shuvarie-llm` uses — its client is cached, so nothing needs to survive a restart); `FileTokenStore` persists `<dir>/<key>.json` with a `<key>.lock` cross-process lock. Both are `Arc`-able (`impl TokenStore for Arc<T>`).
+- Store keys are the providers' `PROVIDER_NAME` (`"chatgpt"`, `"copilot"`); `Authenticator::forget()` drops the in-memory copy so the next request rereads the store (a sign-out).
+- Copilot's `AuthContext.api_base` is the session endpoint the exchange names; a caller's explicit `with_base_url` still wins.
 
 ## Building models
 
@@ -213,4 +240,4 @@ Guide: https://rig.rs/docs/guides/extension/write_your_own_provider
 
 `shuvarie-llm` collapses rig's client types into its own private `ListImpl` enum (7 client families — OpenAI/Anthropic/Gemini/Ollama/Copilot/Cohere/VoyageAi — plus a `Pending` arm gated by an OAuth sign-in) keyed by `shuvarie_llm::ProviderKind` (the `selune::ProviderType` plus an optional `selune::Dialect` — Selune 0.4 folds the OpenAI-compatible vendors under `openai-compat` + `dialect`), so the TUI never names a provider concretely and OpenAI-shaped vendors share one arm. Add new providers in `crates/llm/src/provider.rs`, not in the root binary; the root binary drives the core task which drives `shuvarie-llm`.
 
-`shuvarie-decision` (`crates/decision/Cargo.toml`) uses `rig-core` for errors/usage and `rig-typesafeai = { version = "0.44", features = ["reqwest"] }` for its own System One wire. Rig's `rig` facade **is** published for 0.44 (`rig::…` re-exports `rig_core`, `rig::agent` re-exports `rig_agent`), but this workspace still depends on `rig-core`/`rig-agent` directly by choice — the workspace manifest says `Do NOT include rig. It has too many implicit dependencies.`
+`shuvarie-decision` (`crates/decision/Cargo.toml`) uses `rig-core` for errors/usage and `rig-typesafeai = { version = "0.45", features = ["reqwest"] }` for its own System One wire. In 0.45 that crate reads only the usage counters the wire actually reports (`input_tokens`, `output_tokens`, and OpenRouter's `cost`), so `Usage::total_tokens` is `None` on a System One reply — derive a total from the counters (`shuvarie_llm::context_footprint` does). Rig's `rig` facade **is** published for 0.45 (`rig::…` re-exports `rig_core`, `rig::agent` re-exports `rig_agent`), but this workspace still depends on `rig-core`/`rig-agent` directly by choice — the workspace manifest says `Do NOT include rig. It has too many implicit dependencies.`

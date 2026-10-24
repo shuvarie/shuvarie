@@ -137,12 +137,24 @@ enum ListImpl {
     Anthropic(anthropic::Anthropic),
     Gemini(gemini::Gemini),
     Ollama(ollama::Ollama),
-    Copilot(copilot::Copilot),
+    /// Copilot is an OpenAI-shaped provider (a dialect on the same client
+    /// type), but its catalogue is its own wire: entries name their vendor
+    /// and modality where OpenAI names the owner and nothing else.
+    Copilot(Box<openai::OpenAI>),
     Cohere(cohere::Cohere),
     Voyageai(voyageai::VoyageAi),
     /// Awaiting first-use sign-in; the gate builds and authenticates the
     /// client, and every operation reads the resolved transport from there.
     Pending,
+}
+
+/// The shared reqwest transport rig's clients send through by default — the
+/// one `<Config>::client()` builds. The OAuth-backed transports need it
+/// before a client exists: `Authenticator::auth_context` sends the token
+/// exchange and the refresh through it, and Copilot's catalogue has its own
+/// listing wire.
+fn shared_http() -> rig_core::http_client::DynHttpClient {
+    rig_reqwest::shared()
 }
 
 /// Fused text of a multi-turn agent stream. A paragraph break is inserted
@@ -251,7 +263,9 @@ enum Pending {
         authenticator: chatgpt::auth::Authenticator,
     },
     Copilot {
-        config: copilot::CopilotConfig,
+        /// The caller's endpoint override, which wins over the API root the
+        /// sign-in names.
+        base_url: Option<String>,
         authenticator: copilot::auth::Authenticator,
     },
 }
@@ -263,25 +277,41 @@ impl Pending {
                 config,
                 authenticator,
             } => {
-                let client = (**config)
-                    .clone()
-                    .client()
-                    .authenticate(authenticator)
+                // rig 0.45 has no `Client::authenticate`: the credential is
+                // resolved through the transport and configured onto the
+                // client (the `SignedInModel` handler re-resolves per request
+                // instead, but a resolved client — what `OAuthGate` caches —
+                // is what every operation here dispatches onto).
+                let context = authenticator
+                    .auth_context(&shared_http())
                     .await
                     .map_err(|error| LlmError::Provider(error.to_string()))?;
-                Ok(ListImpl::OpenAi(Box::new(client)))
+                let mut config = (**config).clone();
+                config.api_key = context.api_key;
+                if let Some(account_id) = context.account_id {
+                    config = config.with_account_id(account_id);
+                }
+                Ok(ListImpl::OpenAi(Box::new(config.client())))
             }
             Pending::Copilot {
-                config,
+                base_url,
                 authenticator,
             } => {
-                let client = config
-                    .clone()
-                    .client()
-                    .authenticate(authenticator)
+                let context = authenticator
+                    .auth_context(&shared_http())
                     .await
                     .map_err(|error| LlmError::Provider(error.to_string()))?;
-                Ok(ListImpl::Copilot(client))
+                // The Copilot dialect derives its endpoint from the session
+                // token (`proxy-ep=`); the sign-in's own API root and then
+                // the caller's override take precedence over that default.
+                let mut config = openai::OpenAIConfig::with_key(&copilot::DIALECT, context.api_key);
+                if let Some(api_base) = context.api_base {
+                    config = config.with_base_url(api_base);
+                }
+                if let Some(url) = base_url.as_deref() {
+                    config = config.with_base_url(url);
+                }
+                Ok(ListImpl::Copilot(Box::new(config.client())))
             }
         }
     }
@@ -338,7 +368,15 @@ fn device_code(handler: Option<&DeviceCodeHandler>) -> (chatgpt::auth::DeviceCod
 
 fn chatgpt_authenticator(handler: Option<&DeviceCodeHandler>) -> chatgpt::auth::Authenticator {
     let (device, allow_flow) = device_code(handler);
-    chatgpt::auth::Authenticator::new(chatgpt::auth::AuthSource::OAuth, None, device, allow_flow)
+    // Credentials stay in this process's memory: the resolved client is
+    // cached by `OAuthGate`, so nothing needs to survive a restart (rig 0.45
+    // takes a `TokenStore` where it took an optional auth-file path).
+    chatgpt::auth::Authenticator::new(
+        chatgpt::auth::AuthSource::OAuth,
+        chatgpt::auth::MemoryTokenStore::default(),
+        device,
+        allow_flow,
+    )
 }
 
 fn copilot_authenticator(
@@ -346,7 +384,12 @@ fn copilot_authenticator(
     handler: Option<&DeviceCodeHandler>,
 ) -> copilot::auth::Authenticator {
     let (device, allow_flow) = device_code(handler);
-    copilot::auth::Authenticator::new(source, None, None, device, allow_flow)
+    copilot::auth::Authenticator::new(
+        source,
+        copilot::auth::MemoryTokenStore::default(),
+        device,
+        allow_flow,
+    )
 }
 
 impl ProviderClient {
@@ -475,15 +518,15 @@ impl ProviderClient {
             }
             ProviderType::Copilot => {
                 let token = api_key.map(str::trim).filter(|k| !k.is_empty());
-                let mut config = copilot::CopilotConfig::new(token.unwrap_or(""));
-                if let Some(url) = base_url.as_deref() {
-                    config = config.with_base_url(url);
-                }
                 match token {
                     // A pasted GitHub token exchanges for a Copilot session at
                     // first use; a plain Copilot key is the session itself.
                     Some(token) if !is_github_token(token) => {
-                        (ListImpl::Copilot(config.client()), None)
+                        let mut config = openai::OpenAIConfig::with_key(&copilot::DIALECT, token);
+                        if let Some(url) = base_url.as_deref() {
+                            config = config.with_base_url(url);
+                        }
+                        (ListImpl::Copilot(Box::new(config.client())), None)
                     }
                     Some(token) => {
                         let authenticator = copilot_authenticator(
@@ -493,7 +536,7 @@ impl ProviderClient {
                         (
                             ListImpl::Pending,
                             Some(OAuthGate::new(Pending::Copilot {
-                                config,
+                                base_url: base_url.clone(),
                                 authenticator,
                             })),
                         )
@@ -506,7 +549,7 @@ impl ProviderClient {
                         (
                             ListImpl::Pending,
                             Some(OAuthGate::new(Pending::Copilot {
-                                config,
+                                base_url: base_url.clone(),
                                 authenticator,
                             })),
                         )
@@ -807,10 +850,15 @@ impl ListImpl {
                 .list_models()
                 .await
                 .map_err(|e| LlmError::Model(e.to_string())),
-            ListImpl::Copilot(c) => c
-                .list_models()
-                .await
-                .map_err(|e| LlmError::Model(e.to_string())),
+            // Copilot's catalogue is its own wire (see [`ListImpl::Copilot`]);
+            // the OpenAI client it rides on lists nothing itself.
+            ListImpl::Copilot(c) => rig_core::driver::Model::new(
+                copilot::model_listing::Models::new(c.config().clone()),
+                shared_http(),
+            )
+            .list()
+            .await
+            .map_err(|e| LlmError::Model(e.to_string())),
             ListImpl::Cohere(_) | ListImpl::Voyageai(_) | ListImpl::Pending => Err(
                 LlmError::Model("provider does not support model listing".into()),
             ),

@@ -18,6 +18,8 @@ reqwest.workspace = true
 # Do NOT include `rig`. It has too many implicit dependencies.
 rig-agent.workspace = true
 rig-core.workspace = true
+# The shared reqwest transport, for the OAuth sign-in paths (see `provider`).
+rig-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 selune.workspace = true

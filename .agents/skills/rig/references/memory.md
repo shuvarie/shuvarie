@@ -1,8 +1,10 @@
 # Memory
 
-Memory is an agent's ability to retain and reuse information from earlier in a conversation (and across conversations). Without it, every prompt starts from scratch. Rig gives you both ends of the spectrum — attach a conversation-memory backend and history is loaded/appended for you, or own the `Vec<Message>` yourself and decide exactly what the model sees.
+Memory is an agent's ability to retain and reuse information from earlier in a conversation (and across conversations). Without it, every prompt starts from scratch. Rig gives you both ends of the spectrum — attach a store and history is loaded/appended for you, or own the `Vec<Message>` yourself and decide exactly what the model sees.
 
-Official docs: https://rig.rs/docs/concepts/memory · API: https://docs.rs/rig-core/latest/rig_core/memory/index.html — the contracts live in `rig_core::memory` (`rig-core-0.44.0/src/memory.rs`). Reusable truncation/summarization policies live in the separate **`rig-memory` companion crate**, not in rig-core.
+Official docs: https://rig.rs/docs/concepts/memory · API: https://docs.rs/rig-memory/latest/rig_memory/ — **changed in 0.45**: `rig_core::memory` is gone. Conversations over time live in the **`rig-memory` crate** (sessions, compaction, stores), over the `rig_core::conversation` model; `AgentBuilder::memory` takes a **store**, not a `ConversationMemory` trait object.
+
+> **Migrating from 0.44:** `ConversationMemory` / `InMemoryConversationMemory` / `MessageFilter` / `DemotionHook` / `Compactor` / `MemoryError` / `MemoryAppend` no longer exist. `AgentBuilder::memory(impl rig_memory::AsyncStore)` + `AgentBuilder::conversation(log)` replaces them: a *log name* (a `&str`) replaces `ConversationId`, `rig_memory::MemoryStore` replaces `InMemoryConversationMemory`, `rig_memory::DirStore` (feature `fs`) is the durable file store, `recent::{Recent, LastMessages, TokenBudget, view}` replaces `MessageFilter`, and `CompactionPolicy`/`apply_summary`/`undo_summary` replace `Compactor`. `PromptResponse::memory_append` is gone too — the writer owns persistence.
 
 Two layers:
 - **Conversation history** (short-term) — messages of the current conversation, passed back each turn and bounded so it doesn't outgrow the context window.
@@ -14,12 +16,12 @@ Give the agent a memory backend + conversation id and Rig loads stored history b
 
 ```rust
 use rig_agent::AgentBuilder;
-use rig_core::memory::InMemoryConversationMemory;
+use rig_memory::MemoryStore;
 
 let agent = AgentBuilder::new(model)
     .preamble("You are a helpful assistant.")
-    .memory(InMemoryConversationMemory::new())
-    .conversation("user-42")            // the conversation id (a ConversationId)
+    .memory(MemoryStore::default())     // any `rig_memory::AsyncStore`
+    .conversation("user-42")            // the log name the session is kept under
     .build();
 
 let _ = agent.prompt("My name is Ada.").await?;
@@ -28,11 +30,24 @@ println!("{}", reply.output());        // `output()` is a method
 ```
 
 Rules:
-- The conversation id can be a builder default (`AgentBuilder::conversation(id)`) or a runner override (`.conversation(id)`). No id → no memory.
-- `memory(backend)` takes any `B: ConversationMemory + 'static` and registers it as the agent's memory handler (`MemoryAdapter` under the key `<owner>/memory`); `memory_handler(handler)` registers any memory-family `Serve` instead — a host can serve several backends and dispatch to each by `memory:<label>`. A `.conversation(id)` without either warns at build and does nothing.
+- The log name can be a builder default (`AgentBuilder::conversation(log)`) or a runner override (`.conversation(log)`). No name → no memory.
+- `memory(store)` takes any `impl AsyncStore + Send + Sync + 'static` (every `Store` is one, so `MemoryStore`, `DirStore`, `Arc<dyn Store>`, and your own database/IndexedDB backend all fit). `.conversation(log)` without a store warns at build and does nothing.
 - Passing explicit history with `.history(iter)` **bypasses memory entirely** for that run — nothing loaded, nothing appended (the committed messages return on `PromptResponse::messages()` for caller-owned persistence).
-- `.without_memory()` clears both the memory key and the conversation id for a single run (no load, no save).
-- A failed load fails the run with `PromptError::Memory` before any model call; a failed append is **acknowledged** on `PromptResponse::memory_append` without invalidating the answer.
+- `.without_memory()` clears both the store and the log name for a single run (no load, no save).
+- A failed load fails the run with `PromptError::Memory` before any model call.
+
+### The store, the session and the conversation
+
+| Piece | Where | What it is |
+|-------|-------|-----------|
+| `Conversation` | `rig_core::conversation` | the one conversation model rig shares: entries with stable ids, edits as `Change`s, `TurnRecord`s kept as asides, and `pairing` of tool calls with their results |
+| `Files` / `Store` / `AsyncStore` | `rig_memory::{Files, Store, AsyncStore}` | where a session is kept: `Files` by name, `Store` also holds each log with a length-checked append (a stale write is `LogWriteError::Changed`), `AsyncStore` the same storage reached asynchronously (a database, an object store, IndexedDB) |
+| `MemoryStore` / `DirStore` / `PluginFiles` | `rig_memory` | in-process store; `DirStore` = one directory per session (`feature = "fs"`); `PluginFiles` for a host's own named files |
+| `Session` / `SavedAgent` | `rig_memory::{Session, SavedAgent}` | a session as its logs left it: agents in start order with their `Conversation`, the session's saved values, and what reading it repaired (`repairs`) |
+| `load` / `save` / `load_async` / `save_async` | `rig_memory` | one log's `Conversation` in and out of a `Store`, without a running `Writer` — `save` writes only the changes not yet in the log |
+| `Writer` / `SessionMeta` / `read_conversation` / `history` / `as_of` | `rig_memory` | a running conversation's writer; what a session *list* shows without folding every log; a log's records and the conversation as of record `n` |
+| `recent` | `rig_memory::recent` | which newest messages a request sends: `Recent` (`start(&[Arc<Message>]) -> usize`), `LastMessages(n)`, `TokenBudget::new(tokens)` (custom `TokenCounter` if you have a real tokenizer), and `view(&[Arc<Message>], &dyn Recent)` which moves the start past results whose calls it cut off, so every result kept still follows its call |
+| `FORMAT` | `rig_memory::FORMAT` | the one on-disk format; a session of another format, or that does not read whole, is refused and nothing is written |
 
 ### What the run hands back
 
@@ -40,47 +55,12 @@ Rules:
 |------|-------|
 | `PromptResponse::messages` | `Vec<Message>` — the run's transcript: the prompt, every accepted assistant turn, every committed tool result and any corrective feedback, *excluding* the input history. This, and only this, is what memory is asked to persist. |
 | `PromptResponse::messages()` | the same transcript by reference |
-| `PromptResponse::memory_append` | `Option<MemoryAppend>`, set by the driver once the append dispatch resolved |
 
-`MemoryAppend` is the append's outcome, independent of the (still valid) answer. It serializes tagged as `{"status":"acknowledged"}` / `{"status":"failed",…}`:
+In 0.45 there is no per-run append receipt (`memory_append` is gone): the `Writer` a session keeps is what persists, and a save that raced another writer is refused (`SessionError::Changed`) rather than merged.
 
-| Variant | Meaning |
-|---------|---------|
-| `Acknowledged` | the backend acknowledged the append of `messages` |
-| `Failed { report: ErrorReport }` | the append dispatch failed or was refused, as reported after outcome hooks — **persistence may still have occurred** |
+> **Resumed runs.** `Agent::resume(run)` continues a persisted run: its prompt and history are already inside the run, so **nothing is loaded**. Whether the run's added messages are appended at the end is the persisted run's business; in 0.45 there is no per-run receipt to inspect. Persist the finished run's `messages` yourself and never depend on the append there. `history`, `max_turns` and `unhandled_invalid_tool_call` on a resumed runner are inert for the same reason — the run carries its own.
 
-Helpers: `is_acknowledged()`, `failure() -> Option<&ErrorReport>`. The source's own caveats: acknowledgement gives only the *backend's* durability guarantee; failure does not prove no write occurred; dropping an in-flight append yields no response; none of this is exactly-once. `memory_append` is `None` when memory was not configured for the run, bypassed by explicit history, disabled — **or the run was resumed**.
-
-> **Resumed runs.** `Agent::resume(run)` continues a persisted run: its prompt and history are already inside the run, so **nothing is loaded**. The sources disagree about the append — `Agent::resume`'s docs and `PromptResponse::memory_append`'s docs both say a resumed run neither loads nor appends (the driver that persisted the run owns persistence, so `memory_append` is `None`), while `AgentRunner::resumed_memory` resolves a memory handle for a resumed run and says the messages it adds "are appended once, at its end" — which is what the engine's `append_run_messages` does with any handle it is handed. Treat a resumed run's append as unspecified: persist the finished run's `messages` yourself and never depend on the append or on `memory_append` there. `history`, `max_turns` and `unhandled_invalid_tool_call` on a resumed runner are inert for the same reason — the run carries its own.
-
-`InMemoryConversationMemory` lives in process, protected by a `std::sync::Mutex<HashMap<ConversationId, Vec<Message>>>`, and forgets on restart. It is `Clone` + `Default`; `new()` builds the empty store, `with_filter(f)` replaces the load-time view, and a poisoned lock surfaces as `MemoryError::Internal`. For durable sessions, implement `ConversationMemory` over your own store:
-
-```rust
-pub trait ConversationMemory: WasmCompatSend + WasmCompatSync {
-    fn load<'a>(&'a self, conversation_id: &'a ConversationId)
-        -> WasmBoxedFuture<'a, Result<Vec<Message>, MemoryError>>;
-    fn append<'a>(&'a self, conversation_id: &'a ConversationId, messages: Vec<Message>)
-        -> WasmBoxedFuture<'a, Result<(), MemoryError>>;
-    fn clear<'a>(&'a self, conversation_id: &'a ConversationId)
-        -> WasmBoxedFuture<'a, Result<(), MemoryError>>;
-}
-```
-
-| Method | Contract |
-|--------|----------|
-| `load` | the full history for the id, or an empty `Vec` when nothing is stored; called before the first model call |
-| `append` | called after a successful turn with the prompt, the assistant response and the tool-call/tool-result pairs; runs inline before the agent returns. Writes are **not** transactional or exactly-once — an error may arrive after the backend already persisted |
-| `clear` | remove every stored message for the id (`MemoryOp::Clear`); the agent itself never calls it — a host or tool does |
-
-`MemoryError`:
-
-| Variant | Meaning |
-|---------|---------|
-| `Backend(MemoryBackendError)` | the store failed to load, append or clear. `MemoryBackendError` is the cfg-split boxed error alias (`Box<dyn std::error::Error + Send + Sync + 'static>`, without `Send + Sync` on wasm); `MemoryError::backend(e)` wraps it |
-| `Policy(String)` | a history-shaping filter or policy rejected the loaded history |
-| `Internal(String)` | an invariant broke — a poisoned in-process lock, an unreachable handler, a report of another family |
-
-`Arc<M>` and `Box<M>` forward `ConversationMemory` in rig-core (`Arc<M>` likewise for `DemotionHook` and `Compactor`), so an adapter can hold either a concrete backend or a shared trait object.
+`MemoryStore` lives in process (a `Mutex` over an in-memory file map) and forgets on restart; `DirStore::new(dir)` persists a session per directory (native, `feature = "fs"`). For a database or IndexedDB, implement `AsyncStore` — the same read/write/length-checked-append surface reached with futures — or wrap a synchronous store in `BlockingStore`/`PluginFiles`-style shims. `Arc<dyn Store>` and `Box<dyn Store>` are themselves a `Store`, so a host can hold either a concrete store or a shared trait object.
 
 Messages are `Serialize`/`Deserialize` — persisting a conversation is ordinary serde work (a JSON column per conversation id is fine). Keep `append` cheap: it runs inline before the agent returns.
 
@@ -90,25 +70,22 @@ Messages are `Serialize`/`Deserialize` — persisting a conversation is ordinary
 
 Raw history grows without bound — long histories are worse than just expensive (models get distracted; context windows overflow). The fix is managed forgetting: shape what `load` returns.
 
-`InMemoryConversationMemory::with_filter(f)` takes any **closing-over closure** `Fn(Vec<Message>) -> Vec<Message>` (a `MessageFilter`): truncation, re-ordering, token-based windows — implement the policy you need:
+In 0.45 the window is chosen when a request is built, not by a filter on `load`. `rig_memory::recent` gives the rule:
 
 ```rust
-use rig_core::memory::InMemoryConversationMemory;
+use rig_memory::recent::{LastMessages, TokenBudget, view};
 
-let memory = InMemoryConversationMemory::new().with_filter(|messages| {
-    messages.last_chat_window(20)   // your windowing policy
-});
+let window = view(&conversation.messages(), &LastMessages(20));   // newest 20
+let window = view(&conversation.messages(), &TokenBudget::new(32_000)); // newest that fit
 ```
 
-The filter runs on every load, after the store lock is released, and never modifies stored messages: it is a *view*, not a write, so evicted messages stay in the store unless a `DemotionHook` or `Compactor` takes them somewhere.
+`view` runs `pairing::safe_start` past the start the rule picked, so a `ToolResult` is never kept without its call (a request whose result has no call is rejected by the wires). Because it is a *view*, the store keeps everything — nothing is evicted, so nothing needs archiving.
 
-For richer managed-forgetting flows, rig-core also ships the composing contracts:
+For managed forgetting of a whole conversation, `rig_memory` ships the compaction policy rather than adapter traits:
 
-- **`MessageFilter`** — `Fn(Vec<Message>) -> Vec<Message> + WasmCompatSend + WasmCompatSync`, auto-implemented for any closure with that shape, applied on every load (drop-oldest windows, token budgeting).
-- **`DemotionHook`** — `on_demote<'a>(&'a self, conversation_id: &'a ConversationId, messages: Vec<Message>) -> WasmBoxedFuture<'a, Result<(), MemoryError>>`: receives the messages evicted from the active window, in original conversation order (archive to a long-tail store). Awaited inline — keep it fast. Implementations must be idempotent on `(conversation_id, messages)`: delivery watermarks are not persisted, so a restart or a newly built adapter can redeliver, and a durable hook should deduplicate by a stable key such as conversation id + content hash. `NoopDemotionHook` is the do-nothing default for adapters that require a hook value.
-- **`Compactor`** — `compact<'a>(&'a self, conversation_id: &'a ConversationId, evicted: &'a [Message], carry_over: Option<&'a Self::Artifact>) -> WasmBoxedFuture<'a, Result<Self::Artifact, MemoryError>>` where `Artifact: Into<Message> + Clone + WasmCompatSend + WasmCompatSync + 'static`: replaces evicted messages with a summary artifact spliced back into history (rolling-summary pattern; `carry_over` folds the previous summary in, or ignore it to summarize only what was newly evicted). Runs inline on the load path — a slow compactor delays the agent's next turn. Errors are propagated unchanged by the composing adapter, so pick the variant that describes the failure (`Backend` for I/O or remote-LLM faults, `Policy`/`Internal` otherwise).
-
-> **Named policies are not in this crate.** Ready-made filters, and the demotion/compaction adapters that wire a filter, a hook and a compactor together, ship in the **`rig-memory` companion crate** — a separate published crate from rig-core, with its own policy and error types. `rig_core::memory` gives you the contracts (and the closure route above); reach for `rig-memory` for the batteries.
+- **`CompactionPolicy`** fields: `summarizer: Summarizer` (whose `reserve` is how much of the model's window is kept free), `tracked: Vec<TrackArgument>`, `keep_recent` (tokens of the newest messages an *automatic* compaction keeps verbatim — default 20k, a quarter of the window at most), `keep_asked` (the same for a compaction the user asked for; the newest reply or message always stays), `clearing: ClearToolOutputs` (how old tool outputs are cleared before a summary is asked for) and `near_window: NearWindow` (what happens to the outputs a near-window clearing drops). `CompactionPolicy::default()` is `Summarizer::DEFAULT`, nothing tracked, 20k kept, default clearing, and notes on what clearing dropped.
+- `apply_summary` splices a summary artifact back in as the conversation's prefix (`summary_in`/`summarized_prefix` read it back, `summary_author`), and `undo_summary` takes it out again — the rolling-summary pattern, on the `Conversation` rather than a filter closure.
+- `estimate_tokens`, `summary_state`, `TrackedSet`, `ClearPlan`/`Cleared`, `SummaryPlan`/`SummaryState`/`SummaryLimits`/`SummaryPrompts`, `CompactReason`, `Compacted`/`Uncompacted` are the rest of the policy surface; `SummaryError`/`UndoError`/`SessionError` are its failures.
 
 ## Managing history by hand
 
@@ -206,4 +183,4 @@ Bounded history keeps a single conversation healthy; many apps need memory survi
 - **User observations / profile** — persistent facts about the user (preferences, location, communication style). Keep separate from conversation history; update incrementally; re-verify before use.
 - **Grounded facts** — objectively verifiable data pulled from external sources during a session (retrieved docs, computed results, API responses), stored with source + timestamp.
 
-The mechanics are the same for all three: after a significant exchange, use an `Extractor` (see `structured-output.md`) or a plain prompt to distill the relevant info, then persist it. When a new conversation starts, retrieve the most relevant items and add them to the system prompt or opening messages. For semantic retrieval, use a vector store (see `rag-and-vector-stores.md`). A `DemotionHook` (above) is a natural place to feed evicted conversation turns into such a store.
+The mechanics are the same for all three: after a significant exchange, use an `Extractor` (see `structured-output.md`) or a plain prompt to distill the relevant info, then persist it. When a new conversation starts, retrieve the most relevant items and add them to the system prompt or opening messages. For semantic retrieval, use a vector store (see `rag-and-vector-stores.md`), and keep the distilled facts there rather than in the session log — `rig-memory` keeps the conversation, not a fact store.

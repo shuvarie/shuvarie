@@ -2,7 +2,7 @@
 
 Tools let an agent do more than generate text: they expose your Rust functions to the model so it can fetch data, run computations, or reach external systems. When the model decides a tool is needed, Rig parses the call, runs your code, feeds the result back, and continues the loop.
 
-Official docs: https://rig.rs/docs/concepts/tools · API: https://docs.rs/rig-core/latest/rig_core/tool/index.html (0.44: the contracts live in `rig-core-0.44.0/src/tool/`, the runtime registration in `rig-agent-0.44.0/src/tool/`)
+Official docs: https://rig.rs/docs/concepts/tools · API: https://docs.rs/rig-core/latest/rig_core/tool/index.html (0.44: the contracts live in `rig-core-0.45.0/src/tool/`, the runtime registration in `rig-agent-0.45.0/src/tool/`)
 
 ## Complete example (0.44)
 
@@ -346,7 +346,7 @@ let tool = DynamicTool::new_with_context(
 ```
 
 - Accessors: `name() -> &ToolName`, `definition() -> ToolDefinition`, `handler() -> &ErasedHandler`, `into_parts() -> (ToolDefinition, ErasedHandler, Option<LivenessFn>)`.
-- Execution: `execute(arguments) -> Result<ToolOutput, ToolExecutionError>` on an empty context, `execute_with(&mut ToolContext, arguments)` on isolated inbound values — a completed call replaces only the caller's result metadata (including when the tool failed); dropping the future leaves the caller's context unchanged and publishes nothing partial.
+- Execution (**renamed in 0.45**): `run(arguments) -> Result<ToolOutput, ToolExecutionError>` on an empty context, `run_with(&mut ToolContext, arguments)` on isolated inbound values (0.44's `execute_with`) — a completed call replaces only the caller's result metadata (including when the tool failed); dropping the future leaves the caller's context unchanged and publishes nothing partial.
 - `is_live()` — whether the tool's owner still serves it (`true` when no probe is attached); registries check it lazily on reads/reconciliation, and a call that races retirement may fail as a transport error rather than `HandlerUnavailable`.
 - The name is typed, so a dynamic tool cannot be built with an empty name.
 - Attach with `.dynamic_tool(t)` / `.dynamic_tools(vec)`.
@@ -391,7 +391,7 @@ Tools don't have to live in your crate. The [Model Context Protocol](https://mod
 
 ## Tool organization
 
-Tools are collected in a `ToolSet` (`rig_agent::tool::ToolSet`), an insertion-ordered registry: `add_tool` / `add_dynamic_tool` / `add_retrieved_tool` / `add_registered_tool` (`from_tools` / `from_dynamic_tools`, `add_tools`, `add_retrievable_tools`, `remove_tool`), reads by name (`get`, `contains`, `iter`, `names`, `len`, `is_empty`, `always_exposed_names`), `tool_definitions()`, `documents()`, `schemas()`, and inline `execute(name, args, &mut ToolContext)`. Each entry is a `RegisteredTool` — definition, optional embedding descriptor, bus `key`, erased handler, optional liveness probe — with `name()`, `key()`, `descriptor()`, `embedding()`, `is_live()`, `with_key(..)` and `execute(args, &mut ToolContext)`. `execute_tool(name, args, Option<RegisteredTool>, &ToolContext) -> ToolDispatch { result, context }` is the free dispatch function, and `ToolDispatch::publish_to(&mut ToolContext)` folds a dispatch's published metadata back into the caller's context.
+Tools are collected in a `ToolSet` (`rig_agent::tool::ToolSet`), an insertion-ordered registry: `add_tool` / `add_dynamic_tool` / `add_retrieved_tool` / `add_registered_tool` (`from_tools`, `add_tools`, `add_retrievable_tools`, `remove_tool` — **`from_dynamic_tools` is gone in 0.45**: loop `add_dynamic_tool` over a `ToolSet::default()`), reads by name (`get`, `contains`, `iter`, `names`, `len`, `is_empty`, `always_exposed_names`), `tool_definitions()` (**returns `Vec<Arc<ToolDefinition>>` in 0.45**), `catalog()`, `documents()`, `schemas()`, and inline `execute(name, args, &mut ToolContext)`. Each entry is a `RegisteredTool` — definition, optional embedding descriptor, handler `key`, erased handler, optional liveness probe — with `name()`, `key()`, `descriptor()`, `embedding()`, `is_live()`, `with_key(..)` and `execute(args, &mut ToolContext)`. `execute_tool(name, args, Option<RegisteredTool>, &ToolContext) -> ToolDispatch { result, context }` is the free dispatch function, and `ToolDispatch::publish_to(&mut ToolContext)` folds a dispatch's published metadata back into the caller's context. Malformed-argument feedback lives in `rig_core::tool::feedback` in 0.45 (`invalid_arguments_feedback(name, raw)`, 0.44's `rig_core::transcript`).
 
 On the runtime side, `ToolCatalog` (`rig_agent::tool::ToolCatalog`) pins the registrations one request advertises — `definitions()`, `names()`, `iter()`, `get()`, `contains()`, `key()`, `take_definitions()`, inline `execute` / `execute_scoped` — and holds a `ToolLease` (an opaque `Arc`) per generation so a registry cannot retire a handler a pinned request may still need. When you attach tools to an agent, Rig converts each `ToolDefinition` into the provider's format, parses model output into tool calls, executes them from that turn's catalog, and returns the typed results to the model.
 

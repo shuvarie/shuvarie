@@ -2,7 +2,7 @@
 
 `AgentRunner` is the driver behind Rig's high-level agent prompt APIs. `agent.prompt("...")` **is** the runner: it returns an explicit run value for one prompt — one set of per-run options, one call to `run()`, `stream()`, or `run_channel()`. Nothing happens until it is driven (a stream that is dropped unpolled has done nothing).
 
-Official docs: https://rig.rs/docs/concepts/agentrunner · API: https://docs.rs/rig-agent/latest/rig_agent/agent/struct.AgentRunner.html (pinned to **0.44**: `rig-agent-0.44.0/src/agent/{runner.rs,streaming.rs,typed.rs}` is authoritative).
+Official docs: https://rig.rs/docs/concepts/agentrunner · API: https://docs.rs/rig-agent/latest/rig_agent/agent/struct.AgentRunner.html (pinned to **0.45**: `rig-agent-0.45.0/src/agent/{runner.rs,streaming.rs,typed.rs}` is authoritative).
 
 > **Changed in 0.44** — `AgentRunner<O = ()>` is now generic over what `.await` recovers (`O = ()` for the raw `PromptResponse`; `TypedRun<T> = AgentRunner<TypedOutput<T>>`), and it grew the typed-options, telemetry-content, unknown-finish-reason and malformed-argument setters below. `StreamingError` is **gone**: a stream yields `Result<MultiTurnStreamItem, PromptError>`, and `StreamedUserContent`/`StreamUserItem` is now `MultiTurnStreamItem::ToolResult { tool_result }`. Error renames: `CompletionError` → `Provider`, `MaxTurnsError` → `MaxTurns`, `PromptCancelled` → `Cancelled`, plus the new `UnknownToolCall`.
 
@@ -44,7 +44,7 @@ println!("model calls: {}", response.completion_calls().len());
 println!("tokens: {:?}", response.usage().total_tokens);
 ```
 
-`.await` on a runner is `run()`; both return `PromptResponse`: fields `usage`, `completion_calls`, `messages` (a plain `Vec<Message>` in 0.44), `memory_append`, `content`, plus the accessors `output() -> String`, `usage()`, `messages()`, `memory_append()`, `content()`, `completion_calls()`, `requests()` (number of completion calls), `output_tool_calls()`. A typed run's `.await` yields `TypedPromptResponse<T>` instead (see `agents.md`).
+`.await` on a runner is `run()`; both return `PromptResponse`: fields `usage`, `completion_calls`, `messages` (a plain `Vec<Message>` since 0.44), `content`, plus the accessors `output() -> String`, `usage()`, `messages()`, `content()`, `completion_calls()`, `requests()` (number of completion calls), `output_tool_calls()`. (`memory_append` left in 0.45 — a run backed by a session store persists through its `Writer`.) A typed run's `.await` yields `TypedPromptResponse<T>` instead (see `agents.md`).
 
 ## Per-run controls
 
@@ -83,7 +83,7 @@ Order matters for the options shortcuts: `options(opts)` overlays only the field
 
 ### Conversation memory
 
-With a memory backend + conversation id, the runner loads history before the first model call (a load failure fails the run with `PromptError::Memory` before any completion) and appends the completed run's messages after it (the append is acknowledged on `PromptResponse.memory_append` — `Acknowledged` or `Failed { report }`; a failed append does not invalidate the answer and does not prove no write occurred):
+With a session store (`rig_memory::AsyncStore`) + log name (`.memory(store).conversation(log)`), the runner loads history before the first model call (a load failure fails the run with `PromptError::Memory` before any completion) and appends the completed run's messages after it, through the session's `Writer` (**0.45**: there is no per-run append receipt on `PromptResponse`):
 
 ```rust
 let response = agent
@@ -160,7 +160,7 @@ let stream = agent
 
 The run is authoritative for what it persisted: its prompt, history, turn budget, invalid-tool-call retry budget and unhandled-invalid-call policy — so `history(..)`, `max_turns(..)` and `unhandled_invalid_tool_call(..)` on the returned runner have no effect. Everything else comes from the agent and the runner: request shape (preamble, documents, sampling, additional params, tool choice, output mode), `add_hook`, `tool_context`, `tool_concurrency`, model selection and telemetry settings (inbound tool context is driver state and is never persisted). Two run-side values still show through: the run's persisted tool choice is what invalid-call hooks see and what gates a `Skip`, while the request's tool choice is the runner's; and an output tool the run committed stays committed.
 
-Pending tool calls re-execute on resume: a tool that ran before the suspension and answered nothing runs again. History is never *loaded* — the run carries it; when a memory backend and conversation id are configured, the runner appends the messages the run adds once, at its end (`memory_append` reports how that settled, and is `None` when memory was not configured). `Agent::resume`'s own docs present a resumed run as neither loading nor appending, so treat the append as the persisting driver's job rather than something to depend on. A run suspended by another rig version is refused (see `RUN_FORMAT` below).
+Pending tool calls re-execute on resume: a tool that ran before the suspension and answered nothing runs again. History is never *loaded* — the run carries it; when a session store and log name are configured, the run's messages are persisted once, at its end, by the session's `Writer`. Treat that append as the persisting driver's job rather than something to depend on (and in 0.45 there is no `memory_append` receipt to check). A run suspended by another rig version is refused (see `RUN_FORMAT` below).
 
 ## Durable runs without the driver: `rig_agent::run`
 

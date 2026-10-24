@@ -134,8 +134,13 @@ reqwest = "0.13"
 # `sync`, no `no_module` -- static modules are the call surface).
 rhai = { version = "1.26", features = ["serde"] }
 # Do NOT include `rig`. It has too many implicit dependencies.
-rig-agent = "0.44"
-rig-core = { version = "0.44", features = ["reqwest"] }
+rig-agent = "0.45"
+rig-core = { version = "0.45", features = ["reqwest"] }
+# The bundled reqwest transport rig's clients send through by default (already
+# in the tree through rig-core's `reqwest` feature). Named directly only for
+# the OAuth paths, which resolve a credential through a transport before any
+# client exists. TLS stays rig-core's `rustls` feature.
+rig-reqwest = { version = "0.45", default-features = false }
 rmcp = { version = "3.4", default-features = false }
 selune = "0.5"
 serde = { version = "1", features = ["derive"] }

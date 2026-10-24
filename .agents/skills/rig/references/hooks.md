@@ -2,7 +2,7 @@
 
 Hooks let your code observe and steer the agent loop while `AgentRunner` drives the model and tool IO. Use them for logging, metrics, audit trails, approval flows, guardrails, request shaping, invalid-tool-call recovery, and streaming UI integration.
 
-Official docs: https://rig.rs/docs/concepts/hooks (the surface below is read from the crate sources: `rig-agent-0.44.0/src/agent/hook.rs`, `src/run/policy.rs`, `src/run/patch.rs` — the docs site may lag).
+Official docs: https://rig.rs/docs/concepts/hooks (the surface below is read from the crate sources: `rig-agent-0.45.0/src/agent/hook.rs`, `src/run/policy.rs`, `src/run/patch.rs` — the docs site may lag).
 
 A hook implements the `AgentHook` trait — a set of **typed methods, one per boundary**, each returning an event-specific action. Model calls and tool dispatches are *effects* on the run's bus, so the tool-call/tool-result boundaries are `on_dispatch` (before) / `on_outcome` (after); there is no `on_tool_call`/`on_tool_result`, and no `ToolResultAction`. Hooks live on the `AgentRunner` (driver) layer — the lower-level `AgentRun` state machine stays sans-IO. `AgentHook` is not generic over a model.
 
@@ -108,11 +108,13 @@ A returned action an event cannot honor terminates the run with a diagnostic —
 
 | Type | Public shape |
 |------|--------------|
-| `RunStart<'a>` | `prompt: &Message`, `history: &[Message]` |
+| `RunStart<'a>` | `prompt: &Message`, `history: &[Arc<Message>]` |
 | `RunSettled<'a>` | `outcome: SettledOutcome<'a>`, `messages: Option<&[Message]>` (messages this run committed; `None` when it failed before its state existed) |
 | `SettledOutcome<'a>` | `Response(&PromptResponse)` \| `Error(&str)` (the error's `Display` form) |
-| `ModelSelection<'a>` | `prompt: &Message`, `history: &[Message]`, `request_patch: Option<&RequestPatch>`, `previous_model: Option<&ModelRef>`, `default_model: &ModelRef`, `selected_model: &ModelRef`; `ModelSelection::new(..)` |
-| `CompletionCallEvent<'a>` | `prompt: &Message`, `history: &[Message]`, `turn: usize` |
+| `ModelSelection<'a>` | `prompt: &Message`, `history: &[Arc<Message>]`, `request_patch: Option<&RequestPatch>`, `previous_model: Option<&ModelRef>`, `default_model: &ModelRef`, `selected_model: &ModelRef`; `ModelSelection::new(..)` |
+| `CompletionCallEvent<'a>` | `prompt: &Message`, `history: &[Arc<Message>]`, `turn: usize` |
+
+> **Changed in 0.45:** every event's `history` is `&[Arc<Message>]`, not `&[Message]` — the run and every hook share one canonical message value, so a hook clones the `Arc` (never the message) when it needs to keep one.
 | `ModelTurnFinished<'a>` | `turn: usize`, `content: &Vec<AssistantContent>`, `usage: Usage`, `identity: &ResponseIdentity`, `finish_reason: Option<&FinishReason>`, `max_tokens: Option<u64>`, `raw: &serde_json::Value` |
 | `TextDelta<'a>` | `delta: &str`, `aggregated: &str` (accumulated for the turn) |
 | `ReasoningDelta<'a>` | `part: Part`, `delta: &str`, `aggregated: &str` (scoped to that reasoning part) |
@@ -157,7 +159,7 @@ impl AgentHook for ForceSearchFirst {
 }
 ```
 
-`RequestPatch` (defined in `run/patch.rs`, re-exported from `agent::hook`) fields: `preamble: Option<String>`, `temperature: Option<f64>`, `max_tokens: Option<u64>`, `tool_choice: Option<ToolChoice>` (`Specific { function_names: Vec<ToolName> }`), `active_tools: Option<Vec<String>>`, `additional_params: Option<serde_json::Value>`, `extra_context: Vec<Document>`, `history: Option<Vec<Message>>`. Builders: `new()`, `preamble(impl Into<String>)`, `temperature(f64)`, `max_tokens(u64)`, `tool_choice(ToolChoice)`, `active_tools<I: IntoIterator<Item = S>, S: Into<String>>(values)`, `additional_params(serde_json::Value)`, `extra_context<I: IntoIterator<Item = Document>>(values)`, `context(Document)`, `history<I: IntoIterator<Item = Message>>(values)`, plus `is_empty()` and `merge(later)` (which takes `self` by value).
+`RequestPatch` (defined in `run/patch.rs`, re-exported from `agent::hook`) fields: `preamble: Option<String>`, `temperature: Option<f64>`, `max_tokens: Option<u64>`, `tool_choice: Option<ToolChoice>` (`Specific { function_names: Vec<ToolName> }`), `active_tools: Option<Vec<String>>`, `additional_params: Option<serde_json::Value>`, `extra_context: Vec<Document>`, `history: Option<Vec<Arc<Message>>>`. Builders: `new()`, `preamble(impl Into<String>)`, `temperature(f64)`, `max_tokens(u64)`, `tool_choice(ToolChoice)`, `active_tools<I: IntoIterator<Item = S>, S: Into<String>>(values)`, `additional_params(serde_json::Value)`, `extra_context<I: IntoIterator<Item = Document>>(values)`, `context(Document)`, `history<I: IntoIterator<Item: Into<Arc<Message>>>>(values)` (**changed in 0.45**: plain `Message`s still go in, and `&[Arc<Message>]` slices do too), plus `is_empty()` and `merge(later)` (which takes `self` by value).
 
 Patches are per-turn and non-sticky, and never mutate the agent's baseline. `HookStack::on_completion_call` merges them with `earlier.merge(later)` in registration order:
 
@@ -214,7 +216,7 @@ This is a guardrail, not a security boundary. Enforce real authorization inside 
 
 **Unknown / disallowed name.** `Fail` fails the run with `PromptError::UnknownToolCall { tool_name, available_tools, allowed_tools, chat_history }`; `Retry { feedback }` appends the rejected turn plus corrective feedback and re-asks while `max_invalid_tool_call_retries` remains (default `0`; each retry also consumes the total model-call budget, and an exhausted budget fails as `UnknownToolCall`); `Repair { tool_name }` renames the call and revalidates the name against the turn's allowed tools (a disallowed name fails as `UnknownToolCall`); `Skip { reason }` answers with a synthetic skipped result without executing and is **rejected under `ToolChoice::None`**; `Stop { reason }` cancels the run. In a `HookStack` the **first `Some(..)` wins** and later hooks are not called. If every hook returns `None`, the run's `UnhandledInvalidToolCall` policy applies — `Fail` (default) or `Ignore`, which drops the call and continues the turn without suppressing sibling calls or response hooks. Set it with `AgentRunner::unhandled_invalid_tool_call(rig_agent::run::UnhandledInvalidToolCall::{Fail, Ignore})` (`run` only; `agent` does not re-export it) or `RunSpec.unhandled_invalid_tool_call`; a resumed run keeps the policy it persisted.
 
-**Malformed arguments** (**new in 0.44:** the call is offered to this hook and always answered with a tool result). The call is offered **in the tool step, after its turn committed**: `None` answers with `rig_core::transcript::invalid_arguments_feedback(name, raw)`, `Retry { feedback }` with its feedback, `Skip { reason }` with `ToolResult::skipped(reason)`, `Stop { reason }` cancels the run, and `Fail` **or** `Repair { .. }` fails the run naming the tool and the parse error (renaming cannot fix arguments). Consecutive malformed calls are bounded by `AgentRunner::max_consecutive_malformed_tool_calls(impl Into<Option<usize>>)` (`RunSpec.max_consecutive_malformed_tool_calls`; `None`, the default, sets no limit): the counter increments per tool step that answers a malformed call and resets when a step's calls all parse — past the limit the run fails. `UnhandledInvalidToolCall` never applies to malformed arguments.
+**Malformed arguments** (**new in 0.44:** the call is offered to this hook and always answered with a tool result). The call is offered **in the tool step, after its turn committed**: `None` answers with `rig_core::tool::feedback::invalid_arguments_feedback(name, raw)` (**moved in 0.45**; `rig_core::transcript` is gone), `Retry { feedback }` with its feedback, `Skip { reason }` with `ToolResult::skipped(reason)`, `Stop { reason }` cancels the run, and `Fail` **or** `Repair { .. }` fails the run naming the tool and the parse error (renaming cannot fix arguments). Consecutive malformed calls are bounded by `AgentRunner::max_consecutive_malformed_tool_calls(impl Into<Option<usize>>)` (`RunSpec.max_consecutive_malformed_tool_calls`; `None`, the default, sets no limit): the counter increments per tool step that answers a malformed call and resets when a step's calls all parse — past the limit the run fails. `UnhandledInvalidToolCall` never applies to malformed arguments.
 
 ```rust
 use rig_agent::agent::{

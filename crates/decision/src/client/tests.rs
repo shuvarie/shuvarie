@@ -114,7 +114,14 @@ async fn evaluate_sends_one_system_one_request_and_reads_the_answer() {
         outcome.answer("shell-safety"),
         Some(&DecisionAnswer::Noul { probability: 0.97 })
     );
-    assert_eq!(outcome.usage.and_then(|usage| usage.total_tokens), Some(15));
+    // rig-typesafeai 0.45 reads only the counters Jev actually reports — the
+    // input/output pair and, through OpenRouter, a `cost` — so the wire's own
+    // `total_tokens` is no longer carried; shuvarie's `context_footprint`
+    // derives a total from the counters.
+    let usage = outcome.usage.expect("usage is reported");
+    assert_eq!(usage.input_tokens, Some(12));
+    assert_eq!(usage.output_tokens, Some(3));
+    assert_eq!(usage.total_tokens, None);
 }
 
 #[tokio::test]

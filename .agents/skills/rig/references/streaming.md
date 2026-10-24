@@ -2,7 +2,7 @@
 
 Streaming processes an LLM response incrementally as it's generated, essential for responsive UIs and long-form output. The streaming surface is a **runner mode**: `agent.prompt(...)` builds an `AgentRunner`; driving it with `.stream()` yields one lazy, `Send` stream of `MultiTurnStreamItem`s (identical loop, hooks and history as `.run()`; only the deltas differ). The 0.42 `Prompt`/`Chat`/`StreamingPrompt`/`StreamingChat` traits are gone.
 
-Official docs: https://rig.rs/docs/concepts/streaming · API: https://docs.rs/rig-agent/latest/rig_agent/agent/struct.AgentRunner.html (authoritative reference: `rig-agent-0.44.0/src/agent/streaming.rs` + `rig-core-0.44.0/src/streaming/`).
+Official docs: https://rig.rs/docs/concepts/streaming · API: https://docs.rs/rig-agent/latest/rig_agent/agent/struct.AgentRunner.html (authoritative reference: `rig-agent-0.45.0/src/agent/streaming.rs` + `rig-core-0.45.0/src/streaming/`).
 
 > **Changed in 0.44** — one error type for a run: the stream yields `Result<MultiTurnStreamItem, PromptError>`; **`StreamingError` is gone**. **`StreamUserItem`/`StreamedUserContent` are gone**: results arrive as `MultiTurnStreamItem::ToolResult { tool_result }`, a plain `ToolResult`. Tool-call arguments now stream as they arrive (`StreamEvent::Arguments`, `PartKind::Opaque`), and reasoning is a plain `Reasoning` — `Sealed`/`Issuer` no longer exist. `MultiTurnStreamItem` and `StreamEvent` serialize/deserialize again.
 

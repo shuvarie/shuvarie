@@ -2,9 +2,9 @@
 
 An `Agent` is Rig's primary building block. It bundles an erased completion model (`DynModel<Completion>`, registered as a handler on the agent's own effect bus) with a system prompt (`preamble`), optional context documents, tools, and (optionally) conversation memory, then runs the **agent loop** for you: send the prompt, execute any tools the model calls, feed results back, repeat until the model answers.
 
-Official docs: https://rig.rs/docs/concepts/agent · API: https://docs.rs/rig-agent/latest/rig_agent/agent/index.html (pinned to **0.44**: the crate sources under `rig-agent-0.44.0/src/agent/` are authoritative).
+Official docs: https://rig.rs/docs/concepts/agent · API: https://docs.rs/rig-agent/latest/rig_agent/agent/index.html (pinned to **0.45**: the crate sources under `rig-agent-0.45.0/src/agent/` are authoritative).
 
-> **Changed in 0.44** — this file documents 0.44 only. Headlines: the builder is *tool-state* generic (`AgentBuilder<ToolState = NoToolConfig>`, no model parameter); generation options are typed (`GenerationOptions`, `ProviderOptions`, `ModelSpec`); `PromptResponse::output()` is a **method returning `String`** (0.43 exposed an `output: String` field) and `PromptResponse::messages` is a plain `Vec<Message>` (0.43: `Option<Vec<Message>>`); the max-turns error is `PromptError::MaxTurns` (0.43: `MaxTurnsError`), and `StreamingError` is gone (see `agent-runner.md`).
+> **Changed in 0.44** — this file documents 0.45 (with the 0.44-era detail it inherited). Headlines: the builder is *tool-state* generic (`AgentBuilder<ToolState = NoToolConfig>`, no model parameter); generation options are typed (`GenerationOptions`, `ProviderOptions`, `ModelSpec`); `PromptResponse::output()` is a **method returning `String`** (0.43 exposed an `output: String` field) and `PromptResponse::messages` is a plain `Vec<Message>` (0.43: `Option<Vec<Message>>`); the max-turns error is `PromptError::MaxTurns` (0.43: `MaxTurnsError`), and `StreamingError` is gone (see `agent-runner.md`).
 
 ## Minimal agent
 
@@ -86,7 +86,7 @@ The builder's type parameter is the **tool state**, not the model. Every generic
 |------|--------------|
 | `context(impl Into<String>)` | append a static context document (id `static_doc_<n>`) to every request |
 | `dynamic_context(samples, index)` / `dynamic_context_handler(samples, handler)` | retrieve up to `samples` documents per request through a generated `retrieve:context#<n>` index handler and a built-in completion-call hook |
-| `memory(B: ConversationMemory)` / `memory_handler(impl Serve)` / `conversation(id)` | register memory under `<owner>/memory` and the conversation id it loads/saves under; `conversation(..)` without a backend only warns at build |
+| `memory(impl rig_memory::AsyncStore)` / `conversation(log)` | the session store and the log name it loads/saves under (**0.45**: a store, not a `ConversationMemory`; `memory_append` is gone) |
 | `model_route(label, model)` / `model_route_handler(label, handler)` | register an extra completion model a run may select by label |
 | `add_hook(H: AgentHook)` | append to the agent's default hook stack |
 | `configure_bus(ServingPolicy)` | size the agent's own bus (warns over a host's bus) |
@@ -284,14 +284,14 @@ history.extend(response.messages.iter().cloned()); // prompt + accepted assistan
 let response = chat_agent.chat("Hello!", &mut previous_messages).await?;
 ```
 
-**Attach conversation memory** — a memory backend + conversation id loads stored history before each prompt and appends the committed turn after (the append is acknowledged on `PromptResponse.memory_append`):
+**Attach conversation memory** — a session store + log name loads stored history before each prompt and appends the committed turn after (**0.45**: `rig_memory::AsyncStore` + a log name; there is no per-run append receipt any more):
 
 ```rust
-use rig_core::memory::InMemoryConversationMemory;
+use rig_memory::MemoryStore;
 
 let agent = rig_agent::AgentBuilder::new(model)
     .preamble("You are a helpful assistant.")
-    .memory(InMemoryConversationMemory::new())
+    .memory(MemoryStore::default())
     .conversation("user-42")
     .build();
 
@@ -324,13 +324,13 @@ println!(
 - `completion_calls` — one `CompletionCall` per completed request (index, usage, response/request ids, `finish_reason`, raw provider payload); `requests()` is its length.
 - `messages` — the run's transcript (the prompt, accepted assistant turns, committed tool results, retry feedback), what memory is asked to persist.
 - `content` — the final turn as `Vec<AssistantContent>` (text, reasoning, images); `output()` is the concatenated text of it. In output-tool mode `content` holds the serialized structured output as one text block.
-- `memory_append` — `Option<MemoryAppend>` (`Acknowledged` / `Failed { report }`), only for runs that had memory to append to.
+- `memory_append` was removed in 0.45: a run backed by a session store persists through its `Writer`, and a save that raced another writer is refused (`SessionError::Changed`) instead of reported per run.
 - `output_tool_calls()` — how many synthetic output-tool calls finalized the response.
 
 ## Structured output and typed runs
 
 - `AgentBuilder::output_schema::<T>()` (schema from `T`, which needs `schemars::JsonSchema`) or `output_schema_raw(schemars::Schema)` sets the schema; `output_mode(OutputMode)` picks how it is conveyed: `Auto` (default: tool output when a schema and function tools are present and native output can't compose with tools, else native), `Tool` (a synthetic final-answer tool the model must call), `Native` (a provider-native constraint), `Prompted` (the schema goes in the system prompt and the final text must be parsed).
-- `agent.prompt_typed::<T>("...")` returns a `TypedRun<T>` = `AgentRunner<TypedOutput<T>>`: the same runner with the schema for `T` set and native output mode, whose `.await` yields `TypedPromptResponse<T> { output: T, usage, completion_calls, messages, memory_append }`. It shares `AgentRunner`'s setters (`max_turns`, `history`, `using_model`, …) plus `retries(n)`: a failed attempt (run error, empty output, unparseable output) is retried from scratch and usage accumulates across attempts.
+- `agent.prompt_typed::<T>("...")` returns a `TypedRun<T>` = `AgentRunner<TypedOutput<T>>`: the same runner with the schema for `T` set and native output mode, whose `.await` yields `TypedPromptResponse<T> { output: T, usage, completion_calls, messages }` (`memory_append` is gone in 0.45). It shares `AgentRunner`'s setters (`max_turns`, `history`, `using_model`, …) plus `retries(n)`: a failed attempt (run error, empty output, unparseable output) is retried from scratch and usage accumulates across attempts.
 
 ```rust
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]

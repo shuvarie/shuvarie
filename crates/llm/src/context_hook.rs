@@ -221,7 +221,7 @@ enum ContextDecision {
     /// Inside the budget; send the request as-is.
     Continue,
     /// The forecast exceeded the budget; send a trimmed history instead.
-    Trim(Vec<Message>),
+    Trim(Vec<Arc<Message>>),
     /// The measured request-side cost of the last completed call crossed the
     /// usable budget; stop before the model call so the caller can compact
     /// the session and retry.
@@ -249,8 +249,12 @@ impl ContextHook {
         }
     }
 
-    fn request_chars(&self, prompt: &Message, history: &[Message]) -> usize {
-        message_text_len(prompt) + history.iter().map(message_text_len).sum::<usize>()
+    fn request_chars(&self, prompt: &Message, history: &[Arc<Message>]) -> usize {
+        message_text_len(prompt)
+            + history
+                .iter()
+                .map(|message| message_text_len(message))
+                .sum::<usize>()
     }
 
     /// Forecast input tokens for this request: the last call's real token
@@ -272,7 +276,7 @@ impl ContextHook {
     /// Decide what to do with this call's request. Also records the request
     /// char count consumed by the decision, which `forecast` diffs against on
     /// the following call.
-    fn decide(&self, prompt: &Message, history: &[Message]) -> ContextDecision {
+    fn decide(&self, prompt: &Message, history: &[Arc<Message>]) -> ContextDecision {
         if self.budget.disabled {
             return ContextDecision::Continue;
         }
@@ -297,8 +301,11 @@ impl ContextHook {
         // this diff re-measures exactly that regrowth. The trimmed request is
         // sent even when it still forecasts over budget — only measured
         // usage stops the run.
-        let trimmed_chars =
-            message_text_len(prompt) + trimmed.iter().map(message_text_len).sum::<usize>();
+        let trimmed_chars = message_text_len(prompt)
+            + trimmed
+                .iter()
+                .map(|message| message_text_len(message))
+                .sum::<usize>();
         *self.last_request_chars.lock().unwrap() = Some(trimmed_chars);
         ContextDecision::Trim(trimmed)
     }
@@ -308,7 +315,7 @@ impl ContextHook {
     /// tool-result content with recovery-hint stubs. Text messages are never
     /// dropped or truncated — when the result still forecasts over budget it
     /// is sent anyway; a genuine overflow surfaces reactively.
-    fn trim_history(&self, history: &[Message]) -> Vec<Message> {
+    fn trim_history(&self, history: &[Arc<Message>]) -> Vec<Arc<Message>> {
         let preserve = self.budget.keep_recent_chars();
         let _ = preserve;
 
@@ -334,9 +341,9 @@ impl ContextHook {
 
         // Head: replace tool-result content with recovery-hint stubs; keep
         // user/assistant text. Tail: keep verbatim.
-        let mut out: Vec<Message> = Vec::with_capacity(history.len());
+        let mut out: Vec<Arc<Message>> = Vec::with_capacity(history.len());
         for msg in &history[..split] {
-            out.push(condense_message(msg));
+            out.push(Arc::new(condense_message(msg)));
         }
         out.extend_from_slice(&history[split..]);
         out
@@ -449,6 +456,13 @@ mod tests {
         }
     }
 
+    /// The hook sees history as `Arc<Message>` (rig 0.45 shares one canonical
+    /// message between the run and every hook); tests build it from plain
+    /// messages.
+    fn arced(messages: Vec<Message>) -> Vec<Arc<Message>> {
+        messages.into_iter().map(Arc::new).collect()
+    }
+
     fn mint_call_id() -> CallId {
         // A fresh rig-issued (uuid) id per result, like the provider-free
         // results rig itself answers in a live run.
@@ -518,7 +532,7 @@ mod tests {
         assert_eq!(tracker.input(), 0);
         let budget = ContextBudget::new(128_000, 20_000);
         let hook = ContextHook::new(budget, Arc::clone(&tracker));
-        let decision = hook.decide(&user_msg("x"), &[user_msg("recent")]);
+        let decision = hook.decide(&user_msg("x"), &arced(vec![user_msg("recent")]));
         assert!(!matches!(decision, ContextDecision::Stop), "{decision:?}");
     }
 
@@ -534,7 +548,7 @@ mod tests {
         let budget = ContextBudget::new(128_000, 20_000).with_preamble_tokens(3_000);
         let hook = ContextHook::new(budget, UsageTracker::new());
         // 40 000 chars / 4 = 10 000 tokens, + 3 000 preamble = 13 000.
-        let decision = hook.decide(&user_msg("x"), &[user_msg(&"y".repeat(40_000))]);
+        let decision = hook.decide(&user_msg("x"), &arced(vec![user_msg(&"y".repeat(40_000))]));
         assert!(matches!(decision, ContextDecision::Continue));
     }
 
@@ -546,7 +560,7 @@ mod tests {
         // Establish the previous request's char baseline (one small result).
         hook.decide(
             &user_msg("x"),
-            &[tool_result_msg("read_file", &"y".repeat(4_000))],
+            &arced(vec![tool_result_msg("read_file", &"y".repeat(4_000))]),
         );
         // Anchor arrives from the stream side: previous call costed 9 000
         // request tokens (total 9 500, output 500) — just under the 10 000
@@ -555,7 +569,7 @@ mod tests {
         // Nothing appended: forecast stays at the anchor (9 000 < 10 000 usable).
         let decision = hook.decide(
             &user_msg("x"),
-            &[tool_result_msg("read_file", &"y".repeat(4_000))],
+            &arced(vec![tool_result_msg("read_file", &"y".repeat(4_000))]),
         );
         assert!(
             matches!(decision, ContextDecision::Continue),
@@ -563,10 +577,10 @@ mod tests {
         );
         // Grow the history by ~100 000 chars ≈ 25 000 tokens → forecast ≈
         // 35 000, but the growth is a tool result the trim can stub away.
-        let history = vec![
+        let history = arced(vec![
             tool_result_msg("read_file", &"y".repeat(4_000)),
             tool_result_msg("run_shell", &"z".repeat(100_000)),
-        ];
+        ]);
         let decision = hook.decide(&user_msg("x"), &history);
         assert!(matches!(decision, ContextDecision::Trim(_)), "{decision:?}");
     }
@@ -576,10 +590,13 @@ mod tests {
         let budget = ContextBudget::new(128_000, 20_000);
         let hook = ContextHook::new(budget, UsageTracker::new());
         let big = "z".repeat(100_000);
-        let history = vec![tool_result_msg("read_file", &big), user_msg("recent user")];
+        let history = arced(vec![
+            tool_result_msg("read_file", &big),
+            user_msg("recent user"),
+        ]);
         let trimmed = hook.trim_history(&history);
         assert_eq!(trimmed.len(), 2);
-        let Message::User { content } = trimmed.first().unwrap() else {
+        let Message::User { content } = &**trimmed.first().unwrap() else {
             panic!("expected user message");
         };
         let text = content.iter().find_map(|c| match c {
@@ -601,13 +618,13 @@ mod tests {
         let hook = ContextHook::new(budget, UsageTracker::new());
         let big = "z".repeat(100_000);
         let tail = "recent".to_string();
-        let history = vec![
+        let history = arced(vec![
             tool_result_msg("read_file", &big),
             user_msg("old user"),
             user_msg(&tail),
-        ];
+        ]);
         let trimmed = hook.trim_history(&history);
-        match &trimmed[2] {
+        match &*trimmed[2] {
             Message::User { content } => match &content[0] {
                 UserContent::Text(t) => assert_eq!(t.text, tail),
                 other => panic!("expected text message, got {other:?}"),
@@ -623,10 +640,10 @@ mod tests {
         // stop the run.
         let budget = ContextBudget::new(20_000, 1_000).with_keep_recent_tokens(2_000);
         let hook = ContextHook::new(budget, UsageTracker::new());
-        let history = vec![
+        let history = arced(vec![
             tool_result_msg("read_file", &"y".repeat(100_000)),
             user_msg("recent user"),
-        ];
+        ]);
         let decision = hook.decide(&user_msg("x"), &history);
         let ContextDecision::Trim(trimmed) = decision else {
             panic!("expected trim, got {decision:?}");
@@ -647,7 +664,7 @@ mod tests {
         let tracker = UsageTracker::new();
         tracker.record(usage_of(50_000, 500));
         let hook = ContextHook::new(budget, Arc::clone(&tracker));
-        let decision = hook.decide(&user_msg("x"), &[user_msg("recent")]);
+        let decision = hook.decide(&user_msg("x"), &arced(vec![user_msg("recent")]));
         assert!(matches!(decision, ContextDecision::Stop), "{decision:?}");
     }
 
@@ -660,7 +677,7 @@ mod tests {
         let tracker = UsageTracker::new();
         tracker.record(usage_of(10_500, 500));
         let hook = ContextHook::new(budget, Arc::clone(&tracker));
-        let decision = hook.decide(&user_msg("x"), &[user_msg("recent")]);
+        let decision = hook.decide(&user_msg("x"), &arced(vec![user_msg("recent")]));
         assert!(!matches!(decision, ContextDecision::Stop), "{decision:?}");
     }
 
@@ -671,14 +688,14 @@ mod tests {
         let hook = ContextHook::new(budget, Arc::clone(&tracker));
         // Establish the char baseline and the anchor (9 000 request tokens,
         // under the 10 000 usable budget).
-        let base = vec![tool_result_msg("read_file", &"y".repeat(4_000))];
+        let base = arced(vec![tool_result_msg("read_file", &"y".repeat(4_000))]);
         hook.decide(&user_msg("x"), &base);
         tracker.record(usage_of(9_500, 500));
         // Append a huge tool result: forecast ≈ 9 000 + 25 000 → trim.
-        let grown = vec![
+        let grown = arced(vec![
             tool_result_msg("read_file", &"y".repeat(4_000)),
             tool_result_msg("run_shell", &"z".repeat(100_000)),
-        ];
+        ]);
         let decision = hook.decide(&user_msg("x"), &grown);
         assert!(matches!(decision, ContextDecision::Trim(_)), "{decision:?}");
         // Patches are non-sticky (rig): the next call re-expands to the full
@@ -696,7 +713,7 @@ mod tests {
         let mut budget = ContextBudget::new(20_000, 1_000).with_preamble_tokens(100_000);
         budget.disabled = true;
         let hook = ContextHook::new(budget, UsageTracker::new());
-        let decision = hook.decide(&user_msg(&"y".repeat(1_000_000)), &[]);
+        let decision = hook.decide(&user_msg(&"y".repeat(1_000_000)), &arced(vec![]));
         assert!(matches!(decision, ContextDecision::Continue));
     }
 

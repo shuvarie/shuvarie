@@ -73,10 +73,16 @@ fn roster(
         // wiring is a turn's, so a test that wants the tool builds it.
         None,
     );
-    ToolSet::from_dynamic_tools(tools)
+    // rig 0.45 has no `from_dynamic_tools`: a dynamic registration goes in
+    // through `add_dynamic_tool`, in the roster's order.
+    let mut set = ToolSet::default();
+    for tool in tools {
+        set.add_dynamic_tool(tool);
+    }
+    set
 }
 
-fn definition(set: &ToolSet, name: &str) -> shuvarie_llm::ToolDefinition {
+fn definition(set: &ToolSet, name: &str) -> std::sync::Arc<shuvarie_llm::ToolDefinition> {
     set.tool_definitions()
         .into_iter()
         .find(|d| d.name == name)
