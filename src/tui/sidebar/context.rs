@@ -11,16 +11,16 @@ use crate::tui::utils::time::fmt_relative;
 /// The sidebar Context panel: session token usage, estimated cost, and the
 /// active model's context window (from the Selune catalog, mapped through the
 /// connection's `catalog` field and model id). The window line (below the
-/// token totals) shows the context occupancy — the latest main-request
-/// footprint (from `Event::UsageUpdate`, workers excluded; also restored from
-/// a loaded session's persisted request usage) against the window — and falls
-/// back to the bare window size while no footprint is known (fresh session, or
-/// a provider that has not reported usage yet). Directly below it,
-/// the latest main-request read tokens (`R…`, `shuvarie_llm::read_tokens`)
+/// token totals) shows the context occupancy — the latest request's footprint
+/// (from `Event::UsageUpdate`, subagents included; also restored from a
+/// loaded session's persisted request usage) against the window — and falls
+/// back to the bare window size while no footprint is known (fresh session,
+/// or a provider that has not reported usage yet). Directly below it,
+/// the latest request's read tokens (`R…`, `shuvarie_llm::read_tokens`)
 /// and cache-hit percentage (`CH…%`, `cached_input_tokens` over the read
-/// tokens) show how the last exchange was served; each half is hidden while
-/// unavailable. Display strings come from `utils::num` so token and cost
-/// formatting lives in one place.
+/// tokens) show how the last exchange was served, whichever agent ran it;
+/// each half is hidden while unavailable. Display strings come from
+/// `utils::num` so token and cost formatting lives in one place.
 ///
 /// Below the cost, a catalog peak/off-peak schedule (provider-wide, or the
 /// model's own override) adds a live countdown to the end of the current
@@ -37,9 +37,9 @@ pub struct ContextDisplay {
     cost: f64,
     context_length: Option<CachedScaledNumber>,
     context_tokens: Option<CachedScaledNumber>,
-    /// Prompt tokens the latest main request read (`read_tokens` of its
-    /// usage); `None` until a main request reports usage (live or restored
-    /// from the session's persisted request usage).
+    /// Prompt tokens the latest request read (`read_tokens` of its usage);
+    /// `None` until a request reports usage (live or restored from the
+    /// session's persisted request usage).
     read_tokens: Option<CachedScaledNumber>,
     /// Cache-hit percentage of that request (rounded, capped at 100); only
     /// when the provider reported cached tokens.
@@ -104,8 +104,9 @@ impl ContextDisplay {
     }
 
     /// Add one request's usage to the running totals. `context_tokens` is
-    /// the request's context footprint; `None` (worker requests, or a zero
-    /// footprint) leaves the anchor — and the latest-request read/cache-hit
+    /// the request's context footprint — subagent requests included, since
+    /// they read a context too; `None` (a zero footprint, or a provider that
+    /// reported none) leaves the anchor — and the latest-request read/cache-hit
     /// metrics — untouched.
     pub fn add_usage(&mut self, usage: &TokenUsage, cost: f64, context_tokens: Option<u64>) {
         self.input_tokens = self
@@ -135,7 +136,7 @@ impl ContextDisplay {
         self.cost = cost;
     }
 
-    /// Seed (or clear, when `None`) the latest main-request context block:
+    /// Seed (or clear, when `None`) the latest request's context block:
     /// the occupancy anchor plus the read/cache-hit metrics, all derived from
     /// one request's usage. Used to restore the metrics from a loaded
     /// session's persisted request usage; a zero footprint (or `None`) clears

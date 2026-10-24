@@ -4091,21 +4091,24 @@ async fn stream_stream_to_events(
                     .as_ref()
                     .map(|p| crate::catalog::estimate_cost(p, &model, &usage))
                     .unwrap_or(0.0);
-                let context_tokens = if worker.is_none() {
-                    let footprint = shuvarie_llm::context_footprint(&usage);
+                // Every request reports its context footprint, workers
+                // included: the sidebar's occupancy display anchors on the
+                // latest one, whoever ran it. Only a main-stream request
+                // describes the conversation itself, though, so the measured
+                // compaction trigger and the reply row's persisted request
+                // payload stay main-only — a worker's conversation is its
+                // own and must not re-anchor them.
+                let footprint = shuvarie_llm::context_footprint(&usage);
+                if worker.is_none() && footprint > 0 {
                     // Keep the session's live anchor in step with the last
                     // completed main request: the next turn seeds its
                     // measured compaction trigger and the sidebar's restored
                     // context anchor from it, and the reply row persists it
                     // as the turn's request usage.
-                    if footprint > 0 {
-                        main_request_usage = Some(usage);
-                        session.lock().await.last_usage = Some(usage);
-                    }
-                    (footprint > 0).then_some(footprint)
-                } else {
-                    None
-                };
+                    main_request_usage = Some(usage);
+                    session.lock().await.last_usage = Some(usage);
+                }
+                let context_tokens = (footprint > 0).then_some(footprint);
                 let _ = event_tx
                     .send(Event::UsageUpdate {
                         usage,

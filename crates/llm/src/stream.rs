@@ -70,8 +70,10 @@ pub enum StreamItem {
     /// per agent iteration (main stream and workers), so consumers can track
     /// token consumption before the run finishes. `worker` is `None` for the
     /// main stream's requests — the only ones whose context is the
-    /// conversation itself, so consumers can anchor context-occupancy
-    /// displays on them alone.
+    /// conversation itself — so consumers can keep the session's compaction
+    /// anchor and persisted request payload on them alone; the context
+    /// occupancy display anchors on every request's footprint, whichever
+    /// agent ran it.
     Usage {
         usage: TokenUsage,
         worker: Option<String>,

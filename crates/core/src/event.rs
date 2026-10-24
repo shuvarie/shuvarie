@@ -251,9 +251,10 @@ pub enum Event {
     /// Per-request usage for one completed LLM request (main stream or
     /// worker), added to the session's running totals. `context_tokens` is
     /// the request's context footprint (see
-    /// `shuvarie_llm::context_footprint`) — present only for main-stream
-    /// requests, since workers run separate conversations — so the UI can
-    /// anchor its context-occupancy display on the latest one.
+    /// `shuvarie_llm::context_footprint`), reported for every request so the
+    /// UI can anchor its context-occupancy display on the latest one from any
+    /// agent; a worker's conversation is its own, so the session's compaction
+    /// anchor and persisted request payload stay main-only.
     UsageUpdate {
         usage: TokenUsage,
         cost: f64,

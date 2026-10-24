@@ -641,11 +641,20 @@ async fn stream_done_waits_for_queued_worker_items_to_drain() {
                 saw_tool_result_before_done = true;
             }
             Some(Event::StreamDone { .. }) => done_seen = true,
-            Some(Event::UsageUpdate { usage, .. }) => {
+            Some(Event::UsageUpdate {
+                usage,
+                context_tokens,
+                ..
+            }) => {
                 assert_eq!(
                     usage.total_tokens,
                     Some(12),
                     "worker request usage passes through"
+                );
+                assert_eq!(
+                    context_tokens,
+                    Some(12),
+                    "worker usage carries its own context footprint"
                 );
                 saw_live_usage = true;
             }

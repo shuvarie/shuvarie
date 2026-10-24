@@ -60,8 +60,9 @@ pub enum SidebarMessage {
     UpdateUsage {
         usage: TokenUsage,
         cost: f64,
-        /// The request's context footprint; `None` (worker requests, or a
-        /// zero footprint) leaves the sidebar's anchor untouched.
+        /// The request's context footprint (main stream or subagent); `None`
+        /// (a zero footprint, or one the provider did not report) leaves the
+        /// sidebar's anchor untouched.
         context_tokens: Option<u64>,
     },
     SetUsage {
@@ -932,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn context_section_worker_usage_keeps_anchor() {
+    fn context_section_worker_usage_updates_anchor() {
         let mut sidebar = Sidebar::new();
         sidebar.update(SidebarMessage::UpdateConfig {
             context_length: Some(200_000),
@@ -943,6 +944,42 @@ mod tests {
             cost: 0.0,
             context_tokens: Some(84_000),
         });
+        // A subagent reports its own conversation's footprint and read/cache
+        // split: the panel follows the latest request from any agent.
+        sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage::new()
+                .total_tokens(Some(20_000))
+                .input_tokens(Some(19_000))
+                .output_tokens(Some(1_000))
+                .cached_input_tokens(Some(9_500)),
+            cost: 0.0,
+            context_tokens: Some(20_000),
+        });
+        let rendered = text(sidebar.rendered_lines());
+        assert!(
+            rendered.contains("20k/200k (10%)"),
+            "worker usage anchors the occupancy: {rendered}"
+        );
+        assert!(
+            rendered.contains("R19k CH50%"),
+            "worker usage updates the request metrics: {rendered}"
+        );
+    }
+
+    #[test]
+    fn context_section_unknown_footprint_keeps_anchor() {
+        let mut sidebar = Sidebar::new();
+        sidebar.update(SidebarMessage::UpdateConfig {
+            context_length: Some(200_000),
+            peaks: None,
+        });
+        sidebar.update(SidebarMessage::UpdateUsage {
+            usage: TokenUsage::new().total_tokens(Some(84_000)),
+            cost: 0.0,
+            context_tokens: Some(84_000),
+        });
+        // A request whose provider reported no usable footprint keeps the
+        // last known anchor instead of clearing it.
         sidebar.update(SidebarMessage::UpdateUsage {
             usage: TokenUsage::new().total_tokens(Some(8_000)),
             cost: 0.0,
@@ -951,11 +988,11 @@ mod tests {
         let rendered = text(sidebar.rendered_lines());
         assert!(
             rendered.contains("84k/200k (42%)"),
-            "worker usage must not replace the anchor: {rendered}"
+            "an unknown footprint must not replace the anchor: {rendered}"
         );
         assert!(
             rendered.contains("R84k"),
-            "worker usage must not replace the read tokens: {rendered}"
+            "an unknown footprint must not replace the read tokens: {rendered}"
         );
     }
 
