@@ -12,6 +12,11 @@
 //! silently so the rest of the manager keeps working on systems without a given server.
 
 #![allow(dead_code)]
+// This crate runs inside the TUI, which owns the terminal: anything printed by
+// a background LSP task would land on top of the rendered frame and stay there
+// until ratatui happens to repaint those cells. Failures belong on the
+// manager's event channel (see `Server::exit_error`), never on stdout/stderr.
+#![deny(clippy::print_stdout, clippy::print_stderr)]
 
 pub mod config;
 mod manager;

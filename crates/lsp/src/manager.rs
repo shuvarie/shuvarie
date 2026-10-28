@@ -127,16 +127,45 @@ impl LspManager {
             .iter()
             .map(|(name, srv)| {
                 let pid = srv.child.try_lock().ok().and_then(|c| c.id());
+                let error = srv.exit_error();
                 LspStatus {
                     name: name.clone(),
                     language: srv.language.clone(),
-                    status: ServerStatus::Running,
+                    status: if error.is_some() {
+                        ServerStatus::Failed
+                    } else {
+                        ServerStatus::Running
+                    },
                     pid,
                     diagnostics: self.diagnostics.values().map(|v| v.len()).sum(),
-                    error: None,
+                    error,
                 }
             })
             .collect()
+    }
+
+    /// Servers whose main loop stopped with an error since the last call,
+    /// removed from the manager: a dead connection can no longer publish
+    /// diagnostics, and dropping it (the child is `kill_on_drop`) lets a later
+    /// file change start a fresh one.
+    ///
+    /// The messages are for the session's notice channel. They are not printed
+    /// here — the TUI owns the terminal, and a background write would land on
+    /// top of the rendered frame.
+    pub fn take_exited(&mut self) -> Vec<String> {
+        let mut errors = Vec::new();
+        self.servers
+            .retain(|_name, server| match server.exit_error() {
+                Some(error) => {
+                    errors.push(error);
+                    false
+                }
+                None => true,
+            });
+        if !errors.is_empty() {
+            let _ = self.on_status.send(());
+        }
+        errors
     }
 
     pub async fn start(&mut self, name: &str) -> Result<(), String> {

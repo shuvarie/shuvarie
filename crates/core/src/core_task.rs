@@ -1643,7 +1643,18 @@ pub async fn run(
                         })
                         .await;
                 }
-                if had_updates {
+                // A server whose main loop stopped cannot publish anything
+                // else: say why through the session notice and drop it.
+                let exited = mgr.take_exited();
+                for error in &exited {
+                    let _ = ctx
+                        .event_tx
+                        .send(Event::LspError {
+                            error: error.clone(),
+                        })
+                        .await;
+                }
+                if had_updates || !exited.is_empty() {
                     emit_lsp_status(&mgr, &ctx.event_tx).await;
                 }
             }
