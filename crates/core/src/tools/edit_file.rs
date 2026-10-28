@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use shuvarie_llm::{FileChange, Tool, ToolContext, ToolExecutionError, ToolOutput};
 
 use crate::lsp_manager::SharedManager;
-use crate::permissions::{Access, PathKind, resolve_read};
+use crate::permissions::{Access, PathKind};
 
 use super::{FileLocks, arg_value, compute_diff};
 
@@ -78,7 +78,7 @@ impl Tool for EditFile {
         let result: Result<ToolOutput, String> = async move {
             let path = arg_value(&args, "path")?;
             let edits = parse_edits(&args)?;
-            let abs = resolve_read(&path)?;
+            let abs = access.resolve_read(&path)?;
             access.authorize_path(PathKind::Write, &abs, &path).await?;
             let _file_lock = locks.lock(&abs).await;
             let raw = tokio::fs::read_to_string(&abs)

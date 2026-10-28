@@ -185,10 +185,6 @@ pub(crate) fn arg_value(args: &Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("missing string argument '{key}'"))
 }
 
-fn workspace_root() -> Result<PathBuf, String> {
-    std::env::current_dir().map_err(|e| format!("cwd: {e}"))
-}
-
 pub(crate) fn compute_diff(old: &str, new: &str) -> Vec<DiffLine> {
     let diff = similar::TextDiff::from_lines(old, new);
     let mut options = similar::InlineChangeOptions::new();
@@ -314,8 +310,8 @@ pub fn all_tools(
             |_access| SkillTool::new(skills.clone(), max_output_chars),
         ));
     }
-    tools.extend(scene_tool("lsp", scene, &access, false, |_access| {
-        Lsp::new(lsp.clone())
+    tools.extend(scene_tool("lsp", scene, &access, false, |access| {
+        Lsp::new(lsp.clone(), access)
     }));
     tools.extend(scene_tool("webfetch", scene, &access, false, |_access| {
         WebFetch::new(max_output_chars)
@@ -437,8 +433,8 @@ pub fn read_tools(
             |_access| SkillTool::new(skills.clone(), max_output_chars),
         ));
     }
-    tools.extend(scene_tool("lsp", scene, &access, false, |_access| {
-        Lsp::new(lsp.clone())
+    tools.extend(scene_tool("lsp", scene, &access, false, |access| {
+        Lsp::new(lsp.clone(), access)
     }));
     tools.extend(scene_tool("webfetch", scene, &access, false, |_access| {
         WebFetch::new(max_output_chars)
@@ -503,8 +499,8 @@ pub fn edit_tools(
     tools.extend(scene_tool("delete_file", scene, &access, true, |access| {
         DeleteFile::new(locks.clone(), access)
     }));
-    tools.extend(scene_tool("lsp", scene, &access, false, |_access| {
-        Lsp::new(lsp)
+    tools.extend(scene_tool("lsp", scene, &access, false, |access| {
+        Lsp::new(lsp, access)
     }));
     tools
 }
@@ -512,8 +508,7 @@ pub fn edit_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::permissions::{resolve_read, resolve_write, resolve_write_in};
-    use crate::test_util::tempdir;
+    use crate::permissions::{resolve_read_at, resolve_write_at, resolve_write_in_at};
     use shuvarie_config::{SceneToolVerb, SceneToolsConfig, ToolOverride};
     use tempfile::TempDir;
 
@@ -779,29 +774,40 @@ mod tests {
     fn tilde_paths_expand() {
         let home = TempDir::new().unwrap();
         std::fs::write(home.path().join("homefile.txt"), "x").unwrap();
-        let abs = resolve_write_in("~/homefile.txt", Some(home.path())).unwrap();
+        let abs = resolve_write_in_at(
+            std::path::Path::new("/ws"),
+            "~/homefile.txt",
+            Some(home.path()),
+        )
+        .unwrap();
         assert_eq!(abs, home.path().join("homefile.txt"));
     }
 
     #[test]
-    fn resolve_read_classification() {
-        let (dir, _guard) = tempdir();
-        std::fs::create_dir_all(".git").unwrap();
-        std::fs::write(".git/config", "x").unwrap();
-        assert!(resolve_read(".git/config").is_ok());
-        assert!(resolve_read(".").is_ok());
-        assert!(resolve_write("src/f.txt").is_ok());
+    fn paths_resolve_against_the_given_root_not_the_process_cwd() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir_all(root.path().join(".git")).unwrap();
+        std::fs::write(root.path().join(".git/config"), "x").unwrap();
+        assert!(resolve_read_at(root.path(), ".git/config").is_ok());
+        assert!(resolve_read_at(root.path(), ".").is_ok());
+        assert!(resolve_write_at(root.path(), "src/f.txt").is_ok());
 
-        let outside = dir
+        // A `..` escape still resolves: the permission engine, not path
+        // resolution, decides what may be touched.
+        let outside = root
             .path()
-            .parent()
-            .unwrap()
-            .join(format!("shuvarie-outside-{}", std::process::id()));
+            .join(format!("../shuvarie-outside-{}", std::process::id()));
         std::fs::write(&outside, "x").unwrap();
         let rel = format!("../{}", outside.file_name().unwrap().to_string_lossy());
-        assert!(resolve_read(&rel).is_ok());
-        assert!(resolve_write(&rel).is_ok());
+        assert!(resolve_read_at(root.path(), &rel).is_ok());
+        assert!(resolve_write_at(root.path(), &rel).is_ok());
         let _ = std::fs::remove_file(&outside);
-        drop(dir);
+
+        // The process cwd plays no part in it: a relative name that exists
+        // in another directory is only found under the root given.
+        let other = TempDir::new().unwrap();
+        std::fs::write(other.path().join("only-here.txt"), "x").unwrap();
+        assert!(resolve_read_at(root.path(), "only-here.txt").is_err());
+        assert!(resolve_read_at(other.path(), "only-here.txt").is_ok());
     }
 }

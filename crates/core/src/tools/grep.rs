@@ -7,7 +7,7 @@ use grep::searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkMatch
 use serde_json::{Value, json};
 use shuvarie_llm::{Tool, ToolContext, ToolExecutionError, ToolOutput};
 
-use crate::permissions::{Access, PathKind, resolve_read};
+use crate::permissions::{Access, PathKind};
 
 use super::arg_value;
 
@@ -70,7 +70,7 @@ impl Tool for Grep {
                 .and_then(Value::as_u64)
                 .unwrap_or(DEFAULT_MAX_RESULTS as u64)
                 .max(1) as usize;
-            let abs = resolve_read(&path)?;
+            let abs = access.resolve_read(&path)?;
             access.authorize_path(PathKind::Read, &abs, &path).await?;
 
             tokio::task::spawn_blocking(move || {

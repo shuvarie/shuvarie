@@ -213,11 +213,12 @@ fn push_file(
     files.push(rel.to_string());
 }
 
-pub fn load_from_cwd(trust: &TrustGrants) -> LoadedContext {
-    match std::env::current_dir() {
-        Ok(cwd) => load(&cwd, trust),
-        Err(_) => LoadedContext::new(Vec::new(), String::new()),
-    }
+/// Loads the context files under an explicit workspace root (see [`load`]).
+///
+/// The core resolves its workspace once, from the permission rules, and passes
+/// it down: no core path reads the process cwd.
+pub fn load_workspace(root: &Path, trust: &TrustGrants) -> LoadedContext {
+    load(root, trust)
 }
 
 pub fn build_preamble(base: &str, context: &LoadedContext) -> String {
@@ -237,13 +238,6 @@ pub fn build_preamble(base: &str, context: &LoadedContext) -> String {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-
-    fn tempdir() -> (TempDir, crate::test_util::CwdGuard) {
-        let guard = crate::test_util::lock_cwd();
-        let dir = TempDir::new().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
-        (dir, guard)
-    }
 
     fn write(path: &Path, text: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -449,15 +443,16 @@ mod tests {
 
     #[test]
     fn loads_agents_md_and_context_dir_sorted() {
-        let (dir, _guard) = tempdir();
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
         let app_dir = shuvarie_config::WORKSPACE_DIR_NAME;
-        std::fs::write("AGENTS.md", "project rules").unwrap();
-        std::fs::create_dir_all(format!("{app_dir}/context")).unwrap();
-        std::fs::write(format!("{app_dir}/context/b.md"), "bee").unwrap();
-        std::fs::write(format!("{app_dir}/context/a.md"), "aye").unwrap();
-        std::fs::write(format!("{app_dir}/context/skip.bin"), "\0binary").unwrap();
+        std::fs::write(root.join("AGENTS.md"), "project rules").unwrap();
+        std::fs::create_dir_all(root.join(app_dir).join("context")).unwrap();
+        std::fs::write(root.join(app_dir).join("context/b.md"), "bee").unwrap();
+        std::fs::write(root.join(app_dir).join("context/a.md"), "aye").unwrap();
+        std::fs::write(root.join(app_dir).join("context/skip.bin"), "\0binary").unwrap();
 
-        let ctx = load_from_cwd(&TrustGrants::all());
+        let ctx = load(root, &TrustGrants::all());
         assert!(ctx.files.ends_with(&[
             "AGENTS.md".to_string(),
             format!("{app_dir}/context/a.md"),
@@ -478,11 +473,12 @@ mod tests {
 
     #[test]
     fn missing_agents_only_context_dir() {
-        let (dir, _guard) = tempdir();
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
         let app_dir = shuvarie_config::WORKSPACE_DIR_NAME;
-        std::fs::create_dir_all(format!("{app_dir}/context")).unwrap();
-        std::fs::write(format!("{app_dir}/context/notes.md"), "notes").unwrap();
-        let ctx = load_from_cwd(&TrustGrants::all());
+        std::fs::create_dir_all(root.join(app_dir).join("context")).unwrap();
+        std::fs::write(root.join(app_dir).join("context/notes.md"), "notes").unwrap();
+        let ctx = load(root, &TrustGrants::all());
         assert!(
             ctx.files
                 .ends_with(&[format!("{app_dir}/context/notes.md")])

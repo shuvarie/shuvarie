@@ -311,6 +311,12 @@ pub async fn run(
             })
             .await;
     }
+    // The workspace every tool resolves against: the one the permission rules
+    // were compiled for, not the process cwd. That is what lets one process
+    // host several core tasks in different directories (one per TUI tab); the
+    // spawner builds `permissions` for the tab's root. Captured before the
+    // rules move into the access handle.
+    let workspace_root = permissions.workspace_root().to_path_buf();
     let access = Access::new(
         permissions,
         PermissionGate::new(permission_tx),
@@ -353,7 +359,6 @@ pub async fn run(
         });
     }
 
-    let workspace_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let lsp_config = crate::lsp_manager::lsp_config_from_repr(&config.lsp);
     let lsp = std::sync::Arc::new(tokio::sync::Mutex::new(shuvarie_lsp::LspManager::new(
         workspace_root.clone(),

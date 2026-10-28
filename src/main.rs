@@ -9,7 +9,7 @@ mod trust;
 mod tui;
 mod update;
 
-use crate::cli::{init_default_store, show_resume_hint};
+use crate::cli::show_resume_hint;
 
 #[cfg(target_env = "musl")]
 #[global_allocator]
@@ -79,22 +79,22 @@ async fn main() -> color_eyre::Result<()> {
     // first means a store is never created for a run that quits at the trust
     // prompt. `--transient` overrides both with an in-memory DB.
     let transient = run_args.as_ref().is_some_and(|run| run.transient);
+    // The workspace everything below is pinned to: the directory the process
+    // runs in (`--dir` has already applied). It is passed explicitly rather
+    // than re-read from the cwd at each layer, so a per-tab core task can use
+    // the same code path with its own root.
+    let workspace_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let store = if transient {
         shuvarie_db::Store::open_in_memory().await?
-    } else if config.db.global_store {
-        shuvarie_db::Store::open_global().await?
     } else {
-        init_default_store().await?
+        shuvarie_db::Store::for_workspace(&workspace_root, config.db.global_store).await?
     };
 
     let (cmd_tx, cmd_rx) = channel::<shuvarie_core::Command>(64);
     let (event_tx, event_rx) = channel::<shuvarie_core::Event>(64);
     let permissions = std::sync::Arc::new(
-        shuvarie_core::permissions::Permissions::build(
-            &config.permissions,
-            &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-        )
-        .map_err(|e| color_eyre::eyre::eyre!(e))?,
+        shuvarie_core::permissions::Permissions::build(&config.permissions, &workspace_root)
+            .map_err(|e| color_eyre::eyre::eyre!(e))?,
     );
     let startup = if let Some(id) = args.session {
         shuvarie_core::StartupSession::Session(id)

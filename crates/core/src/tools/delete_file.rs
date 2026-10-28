@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use shuvarie_llm::{FileChange, Tool, ToolContext, ToolExecutionError, ToolOutput};
 
-use crate::permissions::{Access, PathKind, resolve_write};
+use crate::permissions::{Access, PathKind};
 
 use super::FileLocks;
 
@@ -49,7 +49,7 @@ impl Tool for DeleteFile {
         let access = self.access.clone();
         let result: Result<ToolOutput, String> = async move {
             let path = super::arg_value(&args, "path")?;
-            let abs = resolve_write(&path)?;
+            let abs = access.resolve_write(&path)?;
             access.authorize_path(PathKind::Write, &abs, &path).await?;
             let _file_lock = locks.lock(&abs).await;
             if abs.is_dir() {

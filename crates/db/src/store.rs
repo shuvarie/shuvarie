@@ -265,6 +265,31 @@ impl Store {
         PathBuf::from(WORKSPACE_DIR_NAME).join("data.db")
     }
 
+    /// [`Self::default_path`] under an explicit workspace root, so one process
+    /// can reach the local database of a directory other than its own cwd (a
+    /// TUI tab pointed somewhere else).
+    pub fn default_path_at(root: &Path) -> PathBuf {
+        root.join(WORKSPACE_DIR_NAME).join(GLOBAL_DB_FILE)
+    }
+
+    /// The store a core task for `root` runs on: with `global_store` off, that
+    /// workspace's own `<root>/.shuvarie/data.db`; with it on, the shared store
+    /// in the platform data dir, with directory tracking pinned to `root` so
+    /// tabs in different workspaces do not claim each other's sessions.
+    ///
+    /// Opening is not free of side effects: the global store purges sessions
+    /// no workspace claims, so open one per workspace and clone it for further
+    /// consumers (`Store: Clone` shares the connection) rather than reopening.
+    pub async fn for_workspace(root: &Path, global_store: bool) -> Result<Self> {
+        if global_store {
+            let data_dir = shuvarie_config::data_dir()
+                .map_err(|e| DbError::Open(format!("resolve data dir: {e}")))?;
+            Self::open_global_in(&data_dir, root).await
+        } else {
+            Self::open(&Self::default_path_at(root)).await
+        }
+    }
+
     pub async fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             let created = !parent.exists();
@@ -1921,5 +1946,31 @@ mod tests {
         assert_eq!(blob_count(&mut store).await, 0);
         let messages = store.messages_for_session(id).await.unwrap();
         assert!(messages.is_empty());
+    }
+
+    /// A workspace's local store lands under *that* root, not the process cwd:
+    /// this is what lets a TUI tab point a core task at another directory.
+    #[tokio::test]
+    async fn for_workspace_opens_the_local_store_under_the_given_root() {
+        let root = tempfile::TempDir::new().unwrap();
+        let expected = root.path().join(WORKSPACE_DIR_NAME).join(GLOBAL_DB_FILE);
+        assert_eq!(Store::default_path_at(root.path()), expected);
+
+        let mut store = Store::for_workspace(root.path(), false).await.unwrap();
+        assert!(
+            expected.exists(),
+            "the local database is created at {expected:?}"
+        );
+        // The store is usable and belongs to this root, not to the cwd.
+        let id = store.create_session("tab", None, None, None).await.unwrap();
+        assert!(store.messages_for_session(id).await.unwrap().is_empty());
+
+        // A second root gets its own database file, so two tabs never share
+        // history by accident.
+        let other = tempfile::TempDir::new().unwrap();
+        let other_path = Store::default_path_at(other.path());
+        assert_ne!(other_path, expected);
+        let _ = Store::for_workspace(other.path(), false).await.unwrap();
+        assert!(other_path.exists());
     }
 }

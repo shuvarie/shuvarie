@@ -3,7 +3,7 @@ use shuvarie_llm::{ShellStreams, Tool, ToolContext, ToolExecutionError, ToolOutp
 
 use std::path::Path;
 
-use super::{DEFAULT_TIMEOUT_SECS, arg_value, workspace_root};
+use super::{DEFAULT_TIMEOUT_SECS, arg_value};
 use crate::permissions::{Access, OutputInterrupt};
 use crate::shell::Shell;
 
@@ -372,8 +372,8 @@ impl Tool for RunShell {
                 .unwrap_or(DEFAULT_TIMEOUT_SECS);
             let cwd_abs = match cwd {
                 Some(c) => {
-                    let root = workspace_root()?;
-                    let resolved = root
+                    let resolved = access
+                        .workspace_root()
                         .join(c)
                         .canonicalize()
                         .map_err(|e| format!("cwd '{c}': {e}"))?;
@@ -382,7 +382,7 @@ impl Tool for RunShell {
                     }
                     resolved
                 }
-                None => workspace_root()?,
+                None => access.workspace_root().to_path_buf(),
             };
             access.authorize_shell(&command).await?;
             let interrupt = access.output_interrupt();

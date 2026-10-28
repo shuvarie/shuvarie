@@ -4,7 +4,6 @@ use shuvarie_llm::{
 };
 
 use crate::lsp_manager::SharedManager;
-use crate::permissions::resolve_write;
 use crate::tools::{FileLocks, arg_value, compute_diff};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -439,7 +438,7 @@ impl Tool for ApplyPatch {
             for hunk in &hunks {
                 match hunk {
                     Hunk::Add { path, .. } => {
-                        let abs = resolve_write(path)?;
+                        let abs = access.resolve_write(path)?;
                         if authorized.insert(abs.to_string_lossy().into_owned()) {
                             access
                                 .authorize_path(crate::permissions::PathKind::Write, &abs, path)
@@ -448,7 +447,7 @@ impl Tool for ApplyPatch {
                         lock_keys.push(abs);
                     }
                     Hunk::Delete { path, .. } => {
-                        let abs = resolve_write(path)?;
+                        let abs = access.resolve_write(path)?;
                         if authorized.insert(abs.to_string_lossy().into_owned()) {
                             access
                                 .authorize_path(crate::permissions::PathKind::Write, &abs, path)
@@ -459,7 +458,7 @@ impl Tool for ApplyPatch {
                     Hunk::Update {
                         path, move_path, ..
                     } => {
-                        let abs = resolve_write(path)?;
+                        let abs = access.resolve_write(path)?;
                         if authorized.insert(abs.to_string_lossy().into_owned()) {
                             access
                                 .authorize_path(crate::permissions::PathKind::Write, &abs, path)
@@ -467,7 +466,7 @@ impl Tool for ApplyPatch {
                         }
                         lock_keys.push(abs);
                         if let Some(target) = move_path {
-                            let target_abs = resolve_write(target)?;
+                            let target_abs = access.resolve_write(target)?;
                             if authorized.insert(target_abs.to_string_lossy().into_owned()) {
                                 access
                                     .authorize_path(
@@ -519,7 +518,7 @@ impl Tool for ApplyPatch {
                         } else {
                             format!("{contents}\n")
                         };
-                        let abs = resolve_write(path)?;
+                        let abs = access.resolve_write(path)?;
                         if abs.exists() {
                             return Err(format!("cannot add {path}: file already exists"));
                         }
@@ -538,7 +537,7 @@ impl Tool for ApplyPatch {
                         });
                     }
                     Hunk::Delete { path } => {
-                        let abs = resolve_write(path)?;
+                        let abs = access.resolve_write(path)?;
                         let original = tokio::fs::read_to_string(&abs)
                             .await
                             .map_err(|e| format!("read {path}: {e}"))?;
@@ -560,9 +559,9 @@ impl Tool for ApplyPatch {
                         move_path,
                         chunks,
                     } => {
-                        let abs = resolve_write(path)?;
+                        let abs = access.resolve_write(path)?;
                         if let Some(target) = move_path {
-                            let target_abs = resolve_write(target)?;
+                            let target_abs = access.resolve_write(target)?;
                             if target_abs == abs {
                                 return Err(format!("move target {target} matches source {path}"));
                             }

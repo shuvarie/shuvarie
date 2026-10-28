@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use shuvarie_llm::{Tool, ToolContext, ToolExecutionError, ToolOutput};
 
-use crate::permissions::{Access, PathKind, resolve_read};
+use crate::permissions::{Access, PathKind};
 
 pub(crate) struct ListDir {
     access: Access,
@@ -42,7 +42,7 @@ impl Tool for ListDir {
     ) -> Result<ToolOutput, ToolExecutionError> {
         let result: Result<ToolOutput, String> = async move {
             let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
-            let abs = resolve_read(path)?;
+            let abs = self.access.resolve_read(path)?;
             self.access
                 .authorize_path(PathKind::Read, &abs, path)
                 .await?;
