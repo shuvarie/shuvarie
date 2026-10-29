@@ -207,6 +207,39 @@ fn next_connection_retry_caps_at_max() {
     assert_eq!(next_turn_retry(1, 1), None);
 }
 
+/// Only content counts as an attempt getting going: the bridge maps the rig
+/// items it does not handle to empty deltas, so an attempt whose sole item is one
+/// of those never got anywhere and its failure continues the chain.
+#[test]
+fn progress_is_content_not_bookkeeping() {
+    assert!(!shows_progress(&StreamItem::Delta {
+        text: String::new()
+    }));
+    assert!(!shows_progress(&StreamItem::Reasoning {
+        text: String::new()
+    }));
+    assert!(!shows_progress(&StreamItem::Overflow));
+    assert!(!shows_progress(&StreamItem::Error {
+        message: "boom".into(),
+        reason: "Turn error".into(),
+    }));
+    assert!(shows_progress(&StreamItem::Delta {
+        text: "half ".into()
+    }));
+    assert!(shows_progress(&StreamItem::Reasoning {
+        text: "thinking".into()
+    }));
+    assert!(shows_progress(&main_tool_start("grep", "c1")));
+    assert!(shows_progress(&main_tool_result("grep", "c1")));
+    assert!(
+        shows_progress(&StreamItem::Usage {
+            usage: TokenUsage::default(),
+            worker: None,
+        }),
+        "a request that completed is progress, streamed text or not"
+    );
+}
+
 #[tokio::test]
 async fn stream_events_forward_and_accumulate_usage() {
     let client =
@@ -533,6 +566,7 @@ async fn stream_error_schedules_turn_retry_and_leaves_session_clean() {
         StreamOutcome::RetryableFailure {
             reason: "Turn error".into(),
             message: "boom".into(),
+            progressed: true,
         },
     );
     // No `StreamError` either: only the run loop emits one, after
@@ -2404,6 +2438,7 @@ async fn resumed_attempt_finishes_the_interrupted_reply_row() {
         StreamOutcome::RetryableFailure {
             reason: "Connection reset".into(),
             message: "dropped again".into(),
+            progressed: true,
         }
     );
     let stored = store.load_session(id).await.unwrap();

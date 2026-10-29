@@ -44,8 +44,15 @@ enum StreamOutcome {
     /// connection failure, provider API error, malformed tool call, worker
     /// failure, ...). The run loop resumes the turn after a backoff, up to
     /// `[retry].max-retries`; on exhaustion the error surfaces as
-    /// `StreamError`.
-    RetryableFailure { reason: String, message: String },
+    /// `StreamError`. `progressed` is whether the attempt got anywhere before
+    /// it died (see [`shows_progress`]): the retry budget is a chain of
+    /// back-to-back failures, so an attempt that got going ends the chain its
+    /// predecessors were on.
+    RetryableFailure {
+        reason: String,
+        message: String,
+        progressed: bool,
+    },
 }
 
 /// How a resumed turn picks up after an interrupted attempt.
@@ -183,6 +190,27 @@ fn next_turn_retry(attempts_so_far: usize, max_retries: usize) -> Option<(usize,
     Some((attempt, RetrySchedule::delay_secs(attempt)))
 }
 
+/// Whether a stream item is the attempt getting somewhere: text or reasoning it
+/// streamed, a tool call or its result, a live shell chunk, a request that
+/// completed. `Overflow`/`Error` are the attempt ending instead, and the
+/// provider bridge maps the rig items it does not handle to empty deltas, so an
+/// empty one reports nothing that happened.
+fn shows_progress(item: &shuvarie_llm::StreamItem) -> bool {
+    match item {
+        shuvarie_llm::StreamItem::Delta { text } | shuvarie_llm::StreamItem::Reasoning { text } => {
+            !text.is_empty()
+        }
+        shuvarie_llm::StreamItem::ToolStart { .. }
+        | shuvarie_llm::StreamItem::ToolResult { .. }
+        | shuvarie_llm::StreamItem::WorkerStart { .. }
+        | shuvarie_llm::StreamItem::WorkerResult { .. }
+        | shuvarie_llm::StreamItem::ShellOutput { .. }
+        | shuvarie_llm::StreamItem::Usage { .. }
+        | shuvarie_llm::StreamItem::Done { .. } => true,
+        shuvarie_llm::StreamItem::Overflow | shuvarie_llm::StreamItem::Error { .. } => false,
+    }
+}
+
 /// Which session (if any) to load when the core task starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StartupSession {
@@ -272,8 +300,11 @@ pub async fn run(
     let mut overflow_retries: usize = 0;
     const MAX_OVERFLOW_RETRIES: usize = 3;
 
-    // Turn-failure auto-retry state: consecutive turn errors within one
-    // retry chain, plus the currently scheduled wait (if any).
+    // Turn-failure auto-retry state: consecutive turn errors within one retry
+    // chain, plus the currently scheduled wait (if any). The chain only ever
+    // covers failures with no progress between them — an attempt that got going
+    // ends it (see `StreamOutcome::RetryableFailure`), so a long turn that keeps
+    // making progress never spends its whole budget on one flaky window.
     let mut turn_retries: usize = 0;
     let mut pending_retry: Option<PendingRetry> = None;
 
@@ -1750,7 +1781,18 @@ pub async fn run(
                                 .await;
                         }
                     }
-                    StreamOutcome::RetryableFailure { reason, message } => {
+                    StreamOutcome::RetryableFailure {
+                        reason,
+                        message,
+                        progressed,
+                    } => {
+                        // The attempt got going before the wire dropped it: what
+                        // the retry was for already happened, so the chain is over
+                        // and this failure starts a fresh budget rather than
+                        // spending the one the attempts before it used.
+                        if progressed {
+                            turn_retries = 0;
+                        }
                         match next_turn_retry(turn_retries, ctx.config.retry.max_retries) {
                             Some((attempt, delay_secs)) => {
                                 turn_retries = attempt;
@@ -3757,6 +3799,11 @@ async fn stream_stream_to_events(
     // Whether this attempt streamed any text delta of its own; a provider that
     // reports the reply only in its final item needs that text kept.
     let mut streamed_text = false;
+    // Whether this attempt got anywhere at all, reported with a retryable
+    // failure so the run loop can tell a chain of back-to-back failures from a
+    // turn that is merely being interrupted between steps (see
+    // [`shows_progress`]).
+    let mut progressed = false;
     let mut pending_tool_args: std::collections::HashMap<String, PendingTool> =
         std::collections::HashMap::new();
     // Worker-internal tool calls tracked apart from the main agent's batch:
@@ -3796,6 +3843,8 @@ async fn stream_stream_to_events(
             outcome = cut_turn_cancelled(&turn_state, &mut store, &session, &event_tx).await;
             break;
         }
+        // Decided before the item's own arm consumes it.
+        progressed |= shows_progress(&item);
         match item {
             shuvarie_llm::StreamItem::Delta { text } if !text.is_empty() => {
                 let text = if std::mem::take(&mut text_seam) {
@@ -4228,7 +4277,11 @@ async fn stream_stream_to_events(
                 )
                 .await;
                 done = None;
-                outcome = StreamOutcome::RetryableFailure { reason, message };
+                outcome = StreamOutcome::RetryableFailure {
+                    reason,
+                    message,
+                    progressed,
+                };
                 break;
             }
             shuvarie_llm::StreamItem::Overflow => {

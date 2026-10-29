@@ -3589,6 +3589,90 @@ async fn a_retried_turn_carries_the_interrupted_reply() {
     let _ = handle.await;
 }
 
+/// The retry budget bounds back-to-back failures, not everything one turn runs
+/// into: an attempt that got going — here it streams a delta before the wire
+/// drops — ends the chain its predecessors were on, so the failure that cuts it
+/// starts a fresh budget. The turn therefore completes even though the config
+/// allows a single retry and its first two attempts both died; counting the
+/// chain as a whole instead would have spent the only retry on the second
+/// attempt and surfaced a `StreamError`.
+#[tokio::test]
+async fn an_attempt_that_got_going_restarts_the_retry_chain() {
+    let (addr, chats) = spawn_scripted_openai(vec![
+        // Attempt one: cut before it produced anything at all.
+        "data: {\"error\":\"the connection dropped\"}\n\n",
+        // Attempt two: it gets going (a delta lands), then drops too.
+        "data: {\"object\":\"chat.completion.chunk\",\"id\":\"c\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"half \"}}]}\n\n\
+         data: {\"error\":\"the connection dropped again\"}\n\n",
+        // Attempt three: the turn finishes.
+        "data: {\"object\":\"chat.completion.chunk\",\"id\":\"c\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"the end\"}}]}\n\n\
+         data: {\"object\":\"chat.completion.chunk\",\"id\":\"c\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+         data: [DONE]\n\n",
+    ]);
+
+    // One retry allowed: only a chain that restarts after an attempt made
+    // progress gets to the third request.
+    let mut config = empty_config();
+    config.retry.max_retries = 1;
+    let (cmd_tx, mut event_rx, handle) = core_with_mock_config(
+        addr,
+        Store::open_in_memory().await.unwrap(),
+        StartupSession::None,
+        config,
+    )
+    .await;
+    recv_skills_loaded(&mut event_rx).await;
+
+    cmd_tx
+        .send(Command::SendMessage {
+            content: "carry out the task".into(),
+            attachments: Vec::new(),
+            model: None,
+        })
+        .await
+        .unwrap();
+
+    let mut attempts: Vec<(usize, usize)> = Vec::new();
+    let mut done_text = None;
+    for _ in 0..32 {
+        match tokio::time::timeout(std::time::Duration::from_secs(30), event_rx.recv()).await {
+            Ok(Some(Event::RetryScheduled {
+                attempt,
+                max_attempts,
+                ..
+            })) => attempts.push((attempt, max_attempts)),
+            Ok(Some(Event::StreamDone { text, .. })) => {
+                done_text = Some(text);
+                break;
+            }
+            Ok(Some(Event::StreamError { error })) => {
+                panic!("the budget must not run out while the turn keeps making progress: {error}")
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    assert_eq!(
+        attempts,
+        vec![(1, 1), (1, 1)],
+        "the attempt that got going restarts the chain at 1"
+    );
+    let text = done_text.expect("the third attempt finishes the turn");
+    assert!(
+        text.contains("the end"),
+        "the retried attempt finishes the interrupted reply: {text}"
+    );
+    assert_eq!(
+        chats.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "two attempts cut by the wire and the one that finished"
+    );
+
+    drop(cmd_tx);
+    let _ = handle.await;
+}
+
 /// Read one HTTP request off `stream`: the head, then the body its
 /// `Content-Length` announces. `None` when the peer went away before the head
 /// arrived.
@@ -3641,6 +3725,60 @@ fn write_sse_reply(stream: &mut std::net::TcpStream, content: &str) {
         sse.len()
     );
     let _ = stream.write_all(response.as_bytes());
+}
+
+/// An OpenAI-compatible mock that scripts its chat replies: the *n*-th chat
+/// request is answered with the *n*-th body of `script`, written verbatim as a
+/// `text/event-stream` (the last body repeats for every later request, so a
+/// test can script a failure and then the recovery). Non-chat requests — the
+/// session's background embedding call — get an empty JSON reply. The returned
+/// counter says how many chat requests were answered.
+fn spawn_scripted_openai(
+    script: Vec<&'static str>,
+) -> (
+    std::net::SocketAddr,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    assert!(
+        !script.is_empty(),
+        "a scripted mock needs a reply to start on"
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let chats = std::sync::Arc::new(AtomicUsize::new(0));
+    let counter = chats.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let counter = counter.clone();
+            // Cheap to clone (a handful of `&'static str`) and cheaper than
+            // sharing the script behind a lock the reply threads would contend
+            // on.
+            let script = script.clone();
+            std::thread::spawn(move || {
+                let Some(body) = read_http_request(&mut stream) else {
+                    return;
+                };
+                if !body.contains("\"messages\"") {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                    );
+                    return;
+                }
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                let sse = script[n.min(script.len() - 1)];
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{sse}",
+                    sse.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            });
+        }
+    });
+    (addr, chats)
 }
 
 /// A recording OpenAI-compatible mock, one thread per connection. Chat
@@ -3745,6 +3883,21 @@ async fn core_with_mock_store(
     tokio::sync::mpsc::Receiver<Event>,
     tokio::task::JoinHandle<()>,
 ) {
+    core_with_mock_config(addr, store, startup, empty_config()).await
+}
+
+/// [`core_with_mock_store`] with a config the test tunes — the retry budget,
+/// so a backoff chain is short enough to wait out.
+async fn core_with_mock_config(
+    addr: std::net::SocketAddr,
+    store: Store,
+    startup: StartupSession,
+    config: Config,
+) -> (
+    tokio::sync::mpsc::Sender<Command>,
+    tokio::sync::mpsc::Receiver<Event>,
+    tokio::task::JoinHandle<()>,
+) {
     let mut connections = empty_connections();
     connections.providers.insert(
         "mock".into(),
@@ -3763,7 +3916,7 @@ async fn core_with_mock_store(
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
     let (event_tx, event_rx) = tokio::sync::mpsc::channel::<Event>(64);
     let handle = tokio::spawn(run(
-        empty_config(),
+        config,
         connections,
         store,
         startup,
