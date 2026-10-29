@@ -150,9 +150,11 @@ impl ToolBlock {
 
     /// Open the block queued rather than running: the call was announced with
     /// the batch but rig has not given it a concurrency slot yet. The header
-    /// holds a still `◇` until [`ToolMessage::Run`] opens its turn.
+    /// holds a still `◇` until [`ToolMessage::Run`] opens its turn, and the
+    /// block carries no clock — waiting is not time the call spent running.
     pub fn queued(mut self) -> Self {
         self.status = ToolStatus::Waiting;
+        self.started_at = None;
         self
     }
 
@@ -225,6 +227,14 @@ impl ToolBlock {
     /// waiting glyph, static — nothing of the call has begun).
     pub fn is_waiting(&self) -> bool {
         self.status == ToolStatus::Waiting
+    }
+
+    /// Whether the block carries its bottom meta row: only the long-running
+    /// tools, and not while the call is still queued — a queued call has not
+    /// begun, so the row appears (at `0.0s`) when its turn comes rather than
+    /// counting a wait that is not its own time.
+    fn shows_elapsed_row(&self) -> bool {
+        shows_elapsed(&self.name) && !self.is_waiting()
     }
 
     /// Flip the collapse state of the output rows.
@@ -318,7 +328,7 @@ impl ToolBlock {
             padding_rows: 2 * u32::from(BLOCK_PADDING.1),
             tool_header_width: (self.name.chars().count() + 1) as u32
                 + UnicodeWidthStr::width(self.args.as_str()).min(120) as u32,
-            tool_rows: u32::from(shows_elapsed(&self.name)),
+            tool_rows: u32::from(self.shows_elapsed_row()),
             ..TurnEst::default()
         };
         let output_rows = self.output.lines().count() as u32;
@@ -436,10 +446,14 @@ impl ToolBlock {
                     return false;
                 }
                 self.status = ToolStatus::Running;
-                // The header swaps its waiting glyph for the spinner and a
-                // `question` block's body its queued note: the bump keys the body
-                // and estimate caches so neither survives the handover. (Registering
-                // the header as a spinner slot is the turn's job, on its rev.)
+                // The clock starts with the run, not the batch's announcement:
+                // the wait in the queue is not time this call spent running.
+                self.started_at = Some(Instant::now());
+                // The header swaps its waiting glyph for the spinner, the body
+                // gains the elapsed meta row, and a `question` block's body its
+                // asking note: the bump keys the body and estimate caches so
+                // none of them survives the handover. (Registering the header as
+                // a spinner slot is the turn's job, on its rev.)
                 self.body_rev += 1;
                 true
             }
@@ -465,7 +479,7 @@ impl ToolBlock {
         let mut chunks = Vec::with_capacity(body.len() + 2);
         chunks.push(BodyChunk::fixed(self.header_lines(inner_w)));
         chunks.extend(body.iter().cloned());
-        if shows_elapsed(&self.name) {
+        if self.shows_elapsed_row() {
             chunks.push(BodyChunk::fixed(vec![elapsed_line(self)]));
         }
         Segment {
@@ -993,12 +1007,11 @@ fn push_todo_rows(
 }
 
 /// The bottom meta row of a tool block: `Elapsed 4.5s` while the call runs,
-/// `Queued 4.5s` while it is still waiting for a concurrency slot, `Took 10.3s`
-/// once it finishes — the finished value comes from the core-measured duration.
-/// Only shown for `shows_elapsed` blocks, with the value dimmed like the label
-/// so timing never competes with the block's content. The clock runs from the
-/// batch's announcement either way, so the label changes at the handover and
-/// the number does not jump.
+/// `Took 10.3s` once it finishes — the finished value comes from the
+/// core-measured duration. Only shown for `shows_elapsed` blocks that are not
+/// still queued, with the value dimmed like the label so timing never competes
+/// with the block's content. A queued call has no clock, so the row appears at
+/// `0.0s` when its turn comes.
 fn elapsed_line(tool: &ToolBlock) -> Line<'static> {
     if tool.is_active() {
         let ms = tool
@@ -1006,13 +1019,7 @@ fn elapsed_line(tool: &ToolBlock) -> Line<'static> {
             .map(|started| started.elapsed().as_millis() as u64)
             .unwrap_or_default();
         Line::from(vec![
-            Span::raw(if tool.is_waiting() {
-                "  Queued "
-            } else {
-                "  Elapsed "
-            })
-            .fg(theme::text_muted())
-            .italic(),
+            Span::raw("  Elapsed ").fg(theme::text_muted()).italic(),
             Span::raw(format_duration_ms(ms))
                 .fg(theme::text_muted())
                 .italic(),
@@ -1476,11 +1483,11 @@ mod tests {
         assert!(!killed.update(ToolMessage::Kill), "and only once");
     }
 
-    /// The meta row of a queued `shows_elapsed` block counts the wait rather than
-    /// claiming time spent running; the handover relabels it without resetting the
-    /// clock the batch's announcement started.
+    /// A queued `shows_elapsed` block carries no meta row at all — the wait is not
+    /// time the call spent running — and the row appears at `0.0s` when its turn
+    /// comes: the clock starts with the run, not with the batch's announcement.
     #[test]
-    fn a_queued_block_meta_row_counts_its_wait() {
+    fn a_queued_block_has_no_meta_row_until_it_runs() {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
@@ -1488,14 +1495,24 @@ mod tests {
         };
         let mut block = queued_block("explore_workspace", r#"{"task":"map it"}"#);
         let text = block_text(&block, &env);
-        assert!(text.contains("Queued"), "{text}");
-        assert!(!text.contains("Elapsed"), "{text}");
+        assert!(!text.contains("Queued"), "no wait row: {text}");
+        assert!(!text.contains("Elapsed"), "no clock yet: {text}");
+        assert_eq!(
+            block.est().tool_rows,
+            0,
+            "the estimate reserves no meta row while queued"
+        );
 
         block.update(ToolMessage::Run);
         let text = block_text(&block, &env);
         assert!(
-            text.contains("Elapsed") && !text.contains("Queued"),
-            "{text}"
+            text.contains("Elapsed 0.0s"),
+            "the clock starts at zero: {text}"
+        );
+        assert_eq!(
+            block.est().tool_rows,
+            1,
+            "the promoted block's meta row is accounted again"
         );
     }
 

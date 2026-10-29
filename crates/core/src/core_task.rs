@@ -2117,6 +2117,42 @@ async fn announce_tool_running(event_tx: &Sender<Event>, call: QueuedCall) {
         .await;
 }
 
+/// The clock of a call that waited for a concurrency slot starts when its turn
+/// comes, not when the batch announced it: the wait in the queue is not time the
+/// call spent running, so the block's live timer (which the UI restarts on
+/// [`Event::ToolRunning`]) and the duration this turn records count only the
+/// run. Resets whichever record the call left at its announcement — a manager or
+/// worker tool call, a worker-tool start, and the turn's kill backup.
+async fn restart_promoted_clock(
+    call: &QueuedCall,
+    pending_tool_args: &mut HashMap<String, PendingTool>,
+    pending_worker_tools: &mut HashMap<String, PendingTool>,
+    pending_worker_starts: &mut HashMap<String, std::time::Instant>,
+    turn_state: &Arc<Mutex<TurnState>>,
+) {
+    let now = std::time::Instant::now();
+    for pending in [
+        pending_tool_args.get_mut(&call.call_id),
+        pending_worker_tools.get_mut(&call.call_id),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        pending.started = now;
+    }
+    if let Some(started) = pending_worker_starts.get_mut(&call.call_id) {
+        *started = now;
+    }
+    let mut ts = turn_state.lock().await;
+    if let Some(pending) = ts
+        .pending_tools
+        .iter_mut()
+        .find(|pending| pending.call_id == call.call_id)
+    {
+        pending.started = now;
+    }
+}
+
 /// The provisional title for a new session: a trimmed prefix of the first
 /// user prompt, capped at `max_chars` (the `ui.title` `max-chars` property),
 /// or "Untitled session" for an empty prompt.
@@ -3997,6 +4033,14 @@ async fn stream_stream_to_events(
                 // naming the tool that is running now rather than the one that
                 // just returned.
                 if let Some(call) = promoted {
+                    restart_promoted_clock(
+                        &call,
+                        &mut pending_tool_args,
+                        &mut pending_worker_tools,
+                        &mut pending_worker_starts,
+                        &turn_state,
+                    )
+                    .await;
                     announce_tool_running(&event_tx, call).await;
                 }
                 if is_main {
@@ -4061,6 +4105,14 @@ async fn stream_stream_to_events(
                     })
                     .await;
                 if let Some(call) = promoted {
+                    restart_promoted_clock(
+                        &call,
+                        &mut pending_tool_args,
+                        &mut pending_worker_tools,
+                        &mut pending_worker_starts,
+                        &turn_state,
+                    )
+                    .await;
                     announce_tool_running(&event_tx, call).await;
                 }
                 action = if pending_tool_args.is_empty() && pending_worker_starts.is_empty() {
