@@ -222,7 +222,7 @@ changelog:
         echo "dedup: skipping cherry-picked duplicate $s $(git log -1 --format='%s' "$s")"
     done < "$tmp/skip"
 
-    git cliff "${base}..${union}" $skipargs -o ./CHANGELOG.md
+    git cliff "${base}..${union}" $skipargs -o ./CHANGELOG.md -c ./cliff-offline.toml
 
 # Regenerate CHANGELOG.md scoped to the current branch only (--use-branch-tags)
 changelog-branch:
