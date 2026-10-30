@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.5] - 2026-10-30
+
+### 🐛 Bug Fixes
+
+- *(session)* Queued time counted
+- *(session)* Make try count from start
+## [0.5.4] - 2026-10-28
+
+### 🐛 Bug Fixes
+
+- *(tui)* Stderr output leak to TUI
 ## [0.5.3] - 2026-10-24
 
 ### 🚀 Features
