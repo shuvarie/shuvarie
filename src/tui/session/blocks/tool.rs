@@ -6,7 +6,7 @@ use std::time::Instant;
 use ratatui::prelude::*;
 use serde_json::Value;
 use shuvarie_core::tools::todos::{TodoStatus, done_total, parse_items};
-use shuvarie_llm::{FileChange, PatchFileKind};
+use shuvarie_llm::{DiffLine, FileChange, PatchFileKind};
 use unicode_width::UnicodeWidthStr;
 
 use super::{
@@ -874,6 +874,53 @@ fn push_codemode_script(body: &mut BodyBuilder, tool: &ToolBlock) {
     body.fixed(Line::from(""));
 }
 
+/// Row text as the block paints it: tabs become spaces on the same four-column
+/// stops markdown code blocks use, so a tab-indented file keeps its
+/// indentation instead of losing it (a terminal paints a tab as nothing) and
+/// the wrap count, measured on the row text, counts the columns the tab stands
+/// for.
+fn display_text(text: &str) -> String {
+    shuvarie_highlight::code::expand_tabs(text)
+}
+
+/// Diff rows as the block paints them: [`display_text`] over each row's text,
+/// with the partially-edited runs (byte ranges into that text) moved onto the
+/// expansion.
+fn display_diff(diff: &[DiffLine]) -> BodySource {
+    if !diff.iter().any(|line| line.text.contains('\t')) {
+        return BodySource::Diff {
+            lines: Rc::from(diff),
+        };
+    }
+    let lines: Vec<DiffLine> = diff
+        .iter()
+        .map(|line| {
+            let (text, map) = shuvarie_highlight::code::expand_tabs_mapped(&line.text);
+            let edits = line
+                .edits
+                .iter()
+                .map(|&(start, end)| (mapped_offset(&map, start), mapped_offset(&map, end)))
+                .collect();
+            DiffLine {
+                text,
+                edits,
+                ..line.clone()
+            }
+        })
+        .collect();
+    BodySource::Diff {
+        lines: lines.into(),
+    }
+}
+
+/// Where the byte at `offset` of the original text lands in its tab-expanded
+/// form; past the end it takes the end itself.
+fn mapped_offset(map: &[u32], offset: u32) -> u32 {
+    map.get(offset as usize)
+        .copied()
+        .unwrap_or_else(|| map[map.len() - 1])
+}
+
 fn push_output_rows(tool: &ToolBlock, body: &mut BodyBuilder, is_shell: bool) -> bool {
     let (stdout_body, stderr_body): (&str, &str) = if is_shell {
         let (_, body) = split_status_line(&tool.output);
@@ -888,7 +935,7 @@ fn push_output_rows(tool: &ToolBlock, body: &mut BodyBuilder, is_shell: bool) ->
         let mut has_output = false;
         if stdout_count > 0 {
             body.rows(BodySource::Text {
-                rows: TextRows::new(stdout_body),
+                rows: TextRows::new(display_text(stdout_body)),
                 prefix: "",
                 style: Style::new().fg(theme::text_dim()),
             });
@@ -899,7 +946,7 @@ fn push_output_rows(tool: &ToolBlock, body: &mut BodyBuilder, is_shell: bool) ->
                 body.fixed(Line::from(""));
             }
             body.rows(BodySource::Text {
-                rows: TextRows::new(stderr_body),
+                rows: TextRows::new(display_text(stderr_body)),
                 prefix: "",
                 style: Style::new().fg(theme::error()),
             });
@@ -926,7 +973,7 @@ fn push_tail_rows(body: &mut BodyBuilder, text: &str, fg: Color) -> bool {
     let hidden = count.saturating_sub(COLLAPSED_OUTPUT_LINES as u32);
     let mut pushed = false;
     for row in text.lines().skip(hidden as usize) {
-        body.fixed(Line::from(Span::raw(row.to_string()).fg(fg)));
+        body.fixed(Line::from(Span::raw(display_text(row)).fg(fg)));
         pushed = true;
     }
     if hidden > 0 {
@@ -1134,9 +1181,7 @@ fn push_file_change_rows(body: &mut BodyBuilder, change: &FileChange) {
                 Span::raw("  ── diff: ").fg(theme::text_muted()),
                 Span::raw(path.clone()).fg(theme::accent()),
             ]));
-            body.rows(BodySource::Diff {
-                lines: Rc::from(diff.as_slice()),
-            });
+            body.rows(display_diff(diff));
         }
         FileChange::Write { path, content, .. } => {
             body.fixed(Line::from(vec![
@@ -1144,7 +1189,7 @@ fn push_file_change_rows(body: &mut BodyBuilder, change: &FileChange) {
                 Span::raw(path.clone()).fg(theme::accent()),
             ]));
             body.rows(BodySource::Numbered {
-                rows: TextRows::new(content.as_str()),
+                rows: TextRows::new(display_text(content)),
             });
         }
         FileChange::Delete { path, .. } => {
@@ -1168,7 +1213,9 @@ fn push_file_change_rows(body: &mut BodyBuilder, change: &FileChange) {
                             Span::raw(file.path.clone()).fg(theme::accent()),
                         ]));
                         body.rows(BodySource::Numbered {
-                            rows: TextRows::new(file.new.as_deref().unwrap_or_default()),
+                            rows: TextRows::new(display_text(
+                                file.new.as_deref().unwrap_or_default(),
+                            )),
                         });
                     }
                     (PatchFileKind::Update, Some(target)) => {
@@ -1178,18 +1225,14 @@ fn push_file_change_rows(body: &mut BodyBuilder, change: &FileChange) {
                             Span::raw(" → ").fg(theme::text_muted()),
                             Span::raw(target.clone()).fg(theme::accent()),
                         ]));
-                        body.rows(BodySource::Diff {
-                            lines: Rc::from(file.diff.as_slice()),
-                        });
+                        body.rows(display_diff(&file.diff));
                     }
                     (PatchFileKind::Update, None) => {
                         body.fixed(Line::from(vec![
                             Span::raw("  ── diff: ").fg(theme::text_muted()),
                             Span::raw(file.path.clone()).fg(theme::accent()),
                         ]));
-                        body.rows(BodySource::Diff {
-                            lines: Rc::from(file.diff.as_slice()),
-                        });
+                        body.rows(display_diff(&file.diff));
                     }
                 }
             }
@@ -1606,6 +1649,118 @@ mod tests {
             .find(|r| r.contains("+        let value = new();"))
             .unwrap_or_else(|| panic!("plus row missing: {rows:?}"));
         assert_eq!(minus.find('-').unwrap(), plus.find('+').unwrap());
+    }
+
+    /// A tab in a block's content stands for four columns: a terminal paints a
+    /// tab as nothing, so a row that kept one would lose its indentation — and
+    /// the wrap count, measured on the row text, would miss its columns.
+    #[test]
+    fn output_tabs_render_four_wide() {
+        let env = ChatEnv {
+            rev: 0,
+            lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
+        };
+        let mut block = ToolBlock::new(
+            "run_shell",
+            r#"{"command":"ls"}"#.to_string(),
+            None,
+            None,
+            None,
+        );
+        block.update(ToolMessage::Output {
+            stdout: "\tindented\nlet x\t= 1;".into(),
+            stderr: String::new(),
+        });
+        let collapsed = block_text(&block, &env);
+        assert!(collapsed.contains("    indented"), "preview: {collapsed}");
+
+        block.toggle();
+        let text = block_text(&block, &env);
+        assert!(text.contains("    indented"), "expanded: {text}");
+        assert!(text.contains("let x   = 1;"), "interior tab: {text}");
+        assert!(!text.contains('\t'), "no raw tab survives: {text}");
+    }
+
+    /// New-file content renders as a numbered listing: a tab-indented first
+    /// line keeps its four columns behind the gutter.
+    #[test]
+    fn new_file_content_tabs_render_four_wide() {
+        let env = ChatEnv {
+            rev: 0,
+            lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
+        };
+        let mut block = ToolBlock::new(
+            "write_file",
+            r#"{"path":"a.rs"}"#.to_string(),
+            None,
+            None,
+            None,
+        );
+        block.update(ToolMessage::Finish {
+            ok: true,
+            output: String::new(),
+            stderr: String::new(),
+            file_change: Some(FileChange::Write {
+                path: "a.rs".to_string(),
+                content: "\tfn main() {}".to_string(),
+                original: None,
+            }),
+            duration_ms: 5,
+        });
+        let text = block_text(&block, &env);
+        assert!(text.contains("1     fn main() {}"), "{text}");
+        assert!(!text.contains('\t'), "no raw tab survives: {text}");
+    }
+
+    /// Diff rows expand their tabs too, and the partially-edited runs (byte
+    /// ranges into the row's text) move onto the expansion so the emphasis
+    /// still covers the run it was computed for.
+    #[test]
+    fn diff_row_tabs_render_four_wide() {
+        let env = ChatEnv {
+            rev: 0,
+            lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
+        };
+        let diff = vec![DiffLine {
+            kind: DiffLineKind::Add,
+            old_line: None,
+            new_line: Some(1),
+            text: "\tlet value = new();\n".to_string(),
+            // `value` in the original row.
+            edits: vec![(5, 10)],
+        }];
+
+        let BodySource::Diff { lines } = display_diff(&diff) else {
+            panic!("a diff projection");
+        };
+        assert_eq!(lines[0].text, "    let value = new();\n");
+        assert_eq!(lines[0].edits, vec![(8, 13)], "emphasis follows the tab");
+
+        let mut block = ToolBlock::new(
+            "edit_file",
+            r#"{"path":"a.rs"}"#.to_string(),
+            None,
+            None,
+            None,
+        );
+        block.update(ToolMessage::Finish {
+            ok: true,
+            output: String::new(),
+            stderr: String::new(),
+            file_change: Some(FileChange::Edit {
+                path: "a.rs".to_string(),
+                diff,
+                original: String::new(),
+                new: String::new(),
+            }),
+            duration_ms: 5,
+        });
+        let text = block_text(&block, &env);
+        assert!(text.contains("+    let value = new();"), "{text}");
+        assert!(!text.contains('\t'), "no raw tab survives: {text}");
     }
 
     #[test]

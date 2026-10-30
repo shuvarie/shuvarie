@@ -16,9 +16,22 @@ pub fn expand_tabs(text: &str) -> String {
     if !text.contains('\t') {
         return text.to_string();
     }
+    expand_tabs_mapped(text).0
+}
+
+/// [`expand_tabs`], also returning where each original byte lands: one entry
+/// per original byte, plus a final one for the end of the text.
+///
+/// A byte that starts a multi-byte character maps to where that character
+/// starts. Byte ranges into `text` — the emphasized runs of a diff row — map
+/// through it onto the expansion.
+pub fn expand_tabs_mapped(text: &str) -> (String, Vec<u32>) {
     let mut out = String::with_capacity(text.len());
+    let mut map = Vec::with_capacity(text.len() + 1);
     let mut col = 0usize;
     for ch in text.chars() {
+        let start = out.len() as u32;
+        map.extend(core::iter::repeat_n(start, ch.len_utf8()));
         if ch == '\t' {
             let stop = col / TAB_STOP * TAB_STOP + TAB_STOP;
             out.extend(core::iter::repeat_n(' ', stop - col));
@@ -28,7 +41,8 @@ pub fn expand_tabs(text: &str) -> String {
             col += UnicodeWidthChar::width(ch).unwrap_or(0);
         }
     }
-    out
+    map.push(out.len() as u32);
+    (out, map)
 }
 
 /// Rewrite a rendered code line's leading whitespace into NBSPs so the
