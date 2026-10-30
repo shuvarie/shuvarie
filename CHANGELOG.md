@@ -1,5 +1,15 @@
 # Changelog
 
+## [unreleased]
+
+### 📚 Documentation
+
+- Add ai usage generation notice
+## [0.5.6] - 2026-10-30
+
+### 🐛 Bug Fixes
+
+- *(tui)* Display tab was 4 blanks
 ## [0.5.5] - 2026-10-30
 
 ### 🐛 Bug Fixes
