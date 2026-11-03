@@ -4870,9 +4870,11 @@ fn build_client(pc: &ProviderConfig, event_tx: &Sender<Event>) -> Result<Provide
     let kind = crate::catalog::provider_kind(&pc.kind);
     let base_url = crate::catalog::base_url_for(&pc.kind, pc.base_url.as_deref());
     let on_device_code = device_code_handler(kind.r#type, pc.name.clone(), event_tx);
+    // A pact may keep its key in an environment variable instead of the file.
+    let api_key = pc.resolved_api_key();
     ProviderClient::build_with_device_code(
         kind,
-        pc.api_key.as_deref(),
+        api_key.as_deref(),
         base_url.as_deref(),
         on_device_code,
     )

@@ -79,6 +79,8 @@ providers {
 }
 ```
 
+A pact can keep its secret out of the scroll instead: write `api-key-env "ANTHROPIC_API_KEY"` where `api-key` would go, and the key is read from the environment when the knight rides out. The provider dialog offers the same bargain — press `Alt+E` over the API key row and it fills in the variable Selune names for that provider. That option appears only while the variable actually holds a value; an unset one is never offered.
+
 > Then launch `shuvarie` and choose your steed — provider and model — from the selectors. A hall without pacts greets you with the Welcome overlay: the knight waits at the gate.
 
 ### Commands

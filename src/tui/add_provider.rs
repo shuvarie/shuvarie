@@ -32,6 +32,79 @@ pub enum FormField {
     ApiKey,
 }
 
+/// Where the API key comes from: typed (and written to `connections.kdl`) or
+/// read from an environment variable at connect time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeySource {
+    Inline,
+    Env,
+}
+
+impl KeySource {
+    fn flipped(self) -> Self {
+        match self {
+            KeySource::Inline => KeySource::Env,
+            KeySource::Env => KeySource::Inline,
+        }
+    }
+}
+
+/// Whether `name` could be an environment variable name: a leading letter or
+/// underscore, then letters, digits and underscores. Catches the common
+/// mistake of pasting the key itself into the env field.
+fn is_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Whether `name` holds a non-empty value in this process's environment.
+fn env_is_set(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| !value.trim().is_empty())
+}
+
+/// One row of the details form: a label, optional dimmed text before and after
+/// the value, and the ghost text an empty value shows in its place.
+struct FieldRow<'a> {
+    label: &'a str,
+    /// Dimmed marker before the value, e.g. `[env] `.
+    prefix: &'a str,
+    /// Dimmed text shown while the value is empty.
+    placeholder: &'a str,
+    buffer: &'a InputBuffer,
+    field: FormField,
+    /// Dimmed note after the value, e.g. `(Enter to pick)`.
+    suffix: &'a str,
+}
+
+impl<'a> FieldRow<'a> {
+    fn new(label: &'a str, buffer: &'a InputBuffer, field: FormField) -> Self {
+        Self {
+            label,
+            prefix: "",
+            placeholder: "",
+            buffer,
+            field,
+            suffix: "",
+        }
+    }
+
+    fn prefix(mut self, prefix: &'a str) -> Self {
+        self.prefix = prefix;
+        self
+    }
+
+    fn placeholder(mut self, placeholder: &'a str) -> Self {
+        self.placeholder = placeholder;
+        self
+    }
+
+    fn suffix(mut self, suffix: &'a str) -> Self {
+        self.suffix = suffix;
+        self
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum AddProviderMessage {
     Next,
@@ -55,6 +128,7 @@ pub enum AddProviderMessage {
     KillToEnd,
     NextField,
     PrevField,
+    ToggleKeySource,
     Left,
     Right,
     LeftWord,
@@ -78,6 +152,7 @@ pub enum AddProviderOutcome {
         catalog: Option<String>,
         name: String,
         api_key: Option<String>,
+        api_key_env: Option<String>,
         base_url: Option<String>,
     },
 }
@@ -178,7 +253,13 @@ pub struct AddProviderForm {
     pub kind: InputBuffer,
     pub catalog: InputBuffer,
     pub base_url: InputBuffer,
+    /// The literal key, used when [`Self::key_source`] is
+    /// [`KeySource::Inline`].
     pub api_key: InputBuffer,
+    /// The environment variable name, used when [`Self::key_source`] is
+    /// [`KeySource::Env`].
+    pub api_key_env: InputBuffer,
+    pub key_source: KeySource,
     pub field: FormField,
     pub error: Option<String>,
     pub existing_names: Vec<String>,
@@ -220,6 +301,8 @@ impl AddProviderForm {
             catalog: InputBuffer::new(),
             base_url: InputBuffer::new(),
             api_key: InputBuffer::new(),
+            api_key_env: InputBuffer::new(),
+            key_source: KeySource::Inline,
             field: FormField::Name,
             error: None,
             existing_names: existing_names.to_vec(),
@@ -351,6 +434,22 @@ impl AddProviderForm {
                     self.base_url.set(&url);
                 }
                 self.api_key.clear();
+                // Selune spells the key it wants as `$OPENAI_API_KEY`, which is
+                // exactly the variable this pact can read instead of storing a
+                // secret. It only becomes the source when it is set: a source
+                // that cannot resolve helps nobody.
+                self.api_key_env.clear();
+                self.key_source = match provider
+                    .api_key
+                    .as_deref()
+                    .and_then(shuvarie_core::normalize_env_name)
+                {
+                    Some(env) if env_is_set(&env) => {
+                        self.api_key_env.set(&env);
+                        KeySource::Env
+                    }
+                    _ => KeySource::Inline,
+                };
                 self.field = if provider.oauth_device_login() {
                     FormField::Name
                 } else {
@@ -363,6 +462,8 @@ impl AddProviderForm {
                 self.catalog.clear();
                 self.base_url.clear();
                 self.api_key.clear();
+                self.api_key_env.clear();
+                self.key_source = KeySource::Inline;
                 self.field = FormField::Name;
             }
         }
@@ -402,7 +503,16 @@ impl AddProviderForm {
             FormField::Kind => &mut self.kind,
             FormField::Catalog => &mut self.catalog,
             FormField::BaseUrl => &mut self.base_url,
-            FormField::ApiKey => &mut self.api_key,
+            FormField::ApiKey => self.key_buf(),
+        }
+    }
+
+    /// The buffer the API key field edits: the literal key, or the name of the
+    /// environment variable holding it.
+    fn key_buf(&mut self) -> &mut InputBuffer {
+        match self.key_source {
+            KeySource::Inline => &mut self.api_key,
+            KeySource::Env => &mut self.api_key_env,
         }
     }
 
@@ -465,6 +575,9 @@ impl AddProviderForm {
                     return match key.code {
                         KeyCode::Char('b') => Some(AddProviderMessage::LeftWord),
                         KeyCode::Char('f') => Some(AddProviderMessage::RightWord),
+                        KeyCode::Char('e') if self.env_option_available() => {
+                            Some(AddProviderMessage::ToggleKeySource)
+                        }
                         _ => None,
                     };
                 }
@@ -580,6 +693,23 @@ impl AddProviderForm {
                 self.prev_field();
                 AddProviderOutcome::None
             }
+            AddProviderMessage::ToggleKeySource => {
+                // Only an environment variable that is actually set can become
+                // the key source; otherwise the option is not offered at all.
+                if !self.env_option_available() {
+                    return AddProviderOutcome::None;
+                }
+                self.key_source = self.key_source.flipped();
+                // A freshly opened env field is seeded from Selune, whose
+                // `api_key` is the `$NAME` reference the provider expects.
+                if self.key_source == KeySource::Env
+                    && self.api_key_env.value.trim().is_empty()
+                    && let Some(env) = self.catalog_env_name()
+                {
+                    self.api_key_env.set(&env);
+                }
+                AddProviderOutcome::None
+            }
             AddProviderMessage::Input(c) => {
                 self.field_buf(self.field).push(c);
                 AddProviderOutcome::None
@@ -681,20 +811,12 @@ impl AddProviderForm {
             ));
             return AddProviderOutcome::None;
         }
-        let api_key = if self.key_required() {
-            let k = self.api_key.value.trim().to_string();
-            if k.is_empty() {
-                self.error = Some("This provider requires an API key".into());
+        let (api_key, api_key_env) = match self.key_payload() {
+            Ok(payload) => payload,
+            Err(error) => {
+                self.error = Some(error);
                 return AddProviderOutcome::None;
             }
-            Some(k)
-        } else {
-            // Optional-key transports (ollama, llamafile; OAuth2 device-flow
-            // kinds render a sign-in line instead of this field): still honor
-            // a pasted key — it selects key-based auth over OAuth or
-            // anonymous local access.
-            let k = self.api_key.value.trim().to_string();
-            (!k.is_empty()).then_some(k)
         };
         let base_url = if self.base_url.value.trim().is_empty() {
             None
@@ -708,7 +830,54 @@ impl AddProviderForm {
             catalog,
             name,
             api_key,
+            api_key_env,
             base_url,
+        }
+    }
+
+    /// The key fields to save, or the error to show: the literal key for
+    /// [`KeySource::Inline`], the environment variable name for
+    /// [`KeySource::Env`]. A provider that demands a key demands one from
+    /// whichever source is selected.
+    fn key_payload(&self) -> Result<(Option<String>, Option<String>), String> {
+        let required = self.key_required();
+        match self.key_source {
+            KeySource::Inline => {
+                let key = self.api_key.value.trim().to_string();
+                if required && key.is_empty() {
+                    return Err("This provider requires an API key".into());
+                }
+                Ok(((!key.is_empty()).then_some(key), None))
+            }
+            KeySource::Env => {
+                // An empty field falls back to the catalog's own reference, so
+                // switching to the env source is enough for a known provider.
+                let typed = self.api_key_env.value.trim();
+                let raw = if typed.is_empty() {
+                    self.catalog_env_name().unwrap_or_default()
+                } else {
+                    typed.to_string()
+                };
+                match shuvarie_core::normalize_env_name(&raw) {
+                    Some(name) if !is_env_name(&name) => Err(format!(
+                        "'{raw}' is not an environment variable name — use letters, digits and \
+                         underscores"
+                    )),
+                    // The option is only offered for a variable that is set, so
+                    // this catches a name edited to one that is not.
+                    Some(name) if !env_is_set(&name) => Err(format!(
+                        "{name} is not set in this environment — export it, or store the key \
+                         instead"
+                    )),
+                    Some(name) => Ok((None, Some(name))),
+                    None if required => Err(
+                        "This provider requires an API key — name the environment variable that \
+                         holds it"
+                            .into(),
+                    ),
+                    None => Ok((None, None)),
+                }
+            }
         }
     }
 
@@ -758,13 +927,63 @@ impl AddProviderForm {
         }
     }
 
-    fn field_line(
-        &self,
-        label: &str,
-        buffer: &InputBuffer,
-        field: FormField,
-        suffix: &str,
-    ) -> Line<'static> {
+    /// The environment variable Selune names for the provider being
+    /// configured: the picked entry's `api_key` reference, else the typed
+    /// catalog id's. That field holds a `$NAME` reference, never a secret, so
+    /// it is exactly what the env source needs.
+    fn catalog_env_name(&self) -> Option<String> {
+        if let Some(provider) = &self.origin {
+            return provider
+                .api_key
+                .as_deref()
+                .and_then(shuvarie_core::normalize_env_name);
+        }
+        let catalog = self.catalog.value.trim();
+        if catalog.is_empty() {
+            return None;
+        }
+        shuvarie_core::catalog::catalog_api_key_env(catalog)
+    }
+
+    /// Whether the env variable named by the field is set in this process, so
+    /// the form can say a key will be found at connect time.
+    fn key_env_is_set(&self) -> bool {
+        shuvarie_core::normalize_env_name(&self.api_key_env.value)
+            .is_some_and(|name| env_is_set(&name))
+    }
+
+    /// Whether the env source is on offer at all: the variable Selune names for
+    /// the provider this form is configuring holds a value here. An unset
+    /// variable is never offered — a key source that cannot resolve would only
+    /// mislead.
+    fn env_option_available(&self) -> bool {
+        if self.oauth_login() {
+            return false;
+        }
+        self.catalog_env_name().is_some_and(|env| env_is_set(&env))
+    }
+
+    /// The ghost text for the inline key row when the variable Selune names for
+    /// this provider is missing: the env source is hidden, so the empty field
+    /// names the variable it looked for instead of leaving its absence
+    /// unexplained.
+    fn missing_env_placeholder(&self) -> Option<String> {
+        if self.oauth_login() {
+            return None;
+        }
+        let env = self.catalog_env_name()?;
+        (!env_is_set(&env)).then(|| format!("env var {env} not found"))
+    }
+
+    fn field_line(&self, row: FieldRow<'_>) -> Line<'static> {
+        let FieldRow {
+            label,
+            prefix,
+            placeholder,
+            buffer,
+            field,
+            suffix,
+        } = row;
         let label_style = Style::new().fg(theme::text_dim());
         let hint_style = Style::new().fg(theme::text_muted());
         let active_style = Style::new().fg(theme::accent());
@@ -776,8 +995,18 @@ impl AddProviderForm {
         let is_active = self.field == field;
 
         let mut spans = vec![Span::styled(format!("{label:<10}"), label_style)];
+        if !prefix.is_empty() {
+            spans.push(Span::styled(prefix.to_string(), hint_style));
+        }
 
-        if is_active {
+        if buffer.value.is_empty() && !placeholder.is_empty() {
+            // An empty value shows its ghost text, with the cursor parked in
+            // front of it when the field has focus.
+            if is_active {
+                spans.push(Span::styled(" ".to_string(), cursor_style));
+            }
+            spans.push(Span::styled(placeholder.to_string(), hint_style));
+        } else if is_active {
             let chars: Vec<char> = buffer.value.chars().collect();
             let cursor_idx = buffer.cursor_char_index();
             for (i, c) in chars.iter().enumerate() {
@@ -928,17 +1157,23 @@ impl AddProviderForm {
             None => "Add Custom Provider".to_string(),
         };
         popup::dialog(frame, popup, &title, dimmed, |inner, buf| {
-            let name_line = self.field_line("Name", &self.name, FormField::Name, "");
-            let kind_line =
-                self.field_line("Kind", &self.kind, FormField::Kind, "  (Enter to pick)");
+            let name_line = self.field_line(FieldRow::new("Name", &self.name, FormField::Name));
+            let kind_line = self.field_line(
+                FieldRow::new("Kind", &self.kind, FormField::Kind).suffix("  (Enter to pick)"),
+            );
             let catalog_suffix = if self.origin.is_none() {
                 "  (optional Selune id)"
             } else {
                 ""
             };
-            let catalog_line =
-                self.field_line("Catalog", &self.catalog, FormField::Catalog, catalog_suffix);
-            let url_line = self.field_line("Base URL", &self.base_url, FormField::BaseUrl, "");
+            let catalog_line = self.field_line(
+                FieldRow::new("Catalog", &self.catalog, FormField::Catalog).suffix(catalog_suffix),
+            );
+            let url_line = self.field_line(FieldRow::new(
+                "Base URL",
+                &self.base_url,
+                FormField::BaseUrl,
+            ));
             let key_line = if self.oauth_login() {
                 Line::from(vec![
                     Span::styled("Sign in   ".to_string(), Style::new().fg(theme::text_dim())),
@@ -948,12 +1183,39 @@ impl AddProviderForm {
                     ),
                 ])
             } else {
-                let key_suffix = if self.key_required() {
-                    ""
-                } else {
-                    "  (not required)"
-                };
-                self.field_line("API key", &self.api_key, FormField::ApiKey, key_suffix)
+                match self.key_source {
+                    KeySource::Inline => {
+                        // Where Selune names a variable this environment does not
+                        // have, the empty field shows which one as ghost text —
+                        // the env source is hidden, so the reason has to be
+                        // visible here.
+                        let placeholder = self.missing_env_placeholder().unwrap_or_default();
+                        let suffix = if self.key_required() {
+                            ""
+                        } else {
+                            "  (not required)"
+                        };
+                        self.field_line(
+                            FieldRow::new("API key", &self.api_key, FormField::ApiKey)
+                                .placeholder(&placeholder)
+                                .suffix(suffix),
+                        )
+                    }
+                    KeySource::Env => {
+                        // The variable name is what this field edits; the note
+                        // says whether a key will actually be found there.
+                        let suffix = if self.key_env_is_set() {
+                            ""
+                        } else {
+                            "  (not set in this environment)"
+                        };
+                        self.field_line(
+                            FieldRow::new("API key", &self.api_key_env, FormField::ApiKey)
+                                .prefix("[env] ")
+                                .suffix(suffix),
+                        )
+                    }
+                }
             };
 
             let lines = vec![name_line, kind_line, catalog_line, url_line, key_line];
@@ -966,13 +1228,14 @@ impl AddProviderForm {
                     .fg(theme::error())
                     .render(error_area, buf);
             }
-            Paragraph::new(theme::help_line(&[
-                ("Tab", "next"),
-                ("Enter", "submit"),
-                ("Esc", "back"),
-            ]))
-            .fg(theme::text_muted())
-            .render(hint_area, buf);
+            let mut hints = vec![("Tab", "next"), ("Enter", "submit")];
+            if self.env_option_available() {
+                hints.push(("Alt+E", "read key from env"));
+            }
+            hints.push(("Esc", "back"));
+            Paragraph::new(theme::help_line(&hints))
+                .fg(theme::text_muted())
+                .render(hint_area, buf);
         });
     }
 }
@@ -1017,7 +1280,7 @@ mod tests {
         Provider {
             name: name.to_string(),
             id: InferenceProvider(id.to_string()),
-            api_key: Some("$KEY".into()),
+            api_key: Some("$SHUVARIE_TEST_CATALOG_KEY".into()),
             auth: None,
             api_endpoint: Some("https://api.example.com/v1".into()),
             doc: None,
@@ -1047,6 +1310,26 @@ mod tests {
             catalog_provider("openai", "OpenAI", selune::ProviderType::Openai),
             catalog_provider("ollama", "Ollama", selune::ProviderType::Ollama),
         ]
+    }
+
+    /// A fixture whose Selune entry names `env` as the variable the key lives
+    /// in — the shape every real catalog entry has.
+    fn keyed_provider(id: &str, env: &str) -> Provider {
+        let mut provider = catalog_provider(id, "Acme", selune::ProviderType::Openai);
+        provider.api_key = Some(format!("${env}"));
+        provider
+    }
+
+    /// Set a variable for the body of one test. Each test uses its own name, so
+    /// parallel tests never read each other's environment.
+    fn set_env(name: &str, value: &str) {
+        // SAFETY: the variable is unique to the calling test.
+        unsafe { std::env::set_var(name, value) };
+    }
+
+    fn unset_env(name: &str) {
+        // SAFETY: the variable is unique to the calling test.
+        unsafe { std::env::remove_var(name) };
     }
 
     fn form() -> AddProviderForm {
@@ -1486,26 +1769,293 @@ mod tests {
     }
 
     #[test]
-    fn submit_registry_origin_requires_catalog_key() {
+    fn registry_origin_defaults_to_the_catalog_env_var() {
+        set_env("SHUVARIE_TEST_ENV_KEY_DEFAULT", "sk-env");
         let mut form = form();
-        form.open_details(Some(&catalog_provider(
-            "openai",
-            "OpenAI",
-            selune::ProviderType::Openai,
+        form.open_details(Some(&keyed_provider(
+            "acme-env-default",
+            "SHUVARIE_TEST_ENV_KEY_DEFAULT",
         )));
-        form.update(AddProviderMessage::Submit);
-        assert!(form.error.as_deref().unwrap().contains("API key"));
+        assert_eq!(
+            form.key_source,
+            KeySource::Env,
+            "a set variable becomes the default key source"
+        );
+        assert_eq!(
+            form.api_key_env.value, "SHUVARIE_TEST_ENV_KEY_DEFAULT",
+            "seeded from the `$NAME` the catalog names"
+        );
+        assert!(form.api_key.value.is_empty(), "no secret is prefilled");
+        assert!(form.env_option_available());
 
-        form.api_key.set("sk-test");
         let outcome = form.update(AddProviderMessage::Submit);
         assert!(matches!(
             outcome,
             AddProviderOutcome::Submit {
-                kind,
-                catalog: Some(catalog),
+                api_key: None,
+                api_key_env: Some(env),
                 ..
-            } if kind == "openai" && catalog == "openai"
+            } if env == "SHUVARIE_TEST_ENV_KEY_DEFAULT"
         ));
+        unset_env("SHUVARIE_TEST_ENV_KEY_DEFAULT");
+    }
+
+    #[test]
+    fn an_unset_variable_is_not_offered_at_all() {
+        let mut form = form();
+        form.open_details(Some(&keyed_provider(
+            "acme-env-unset",
+            "SHUVARIE_TEST_ENV_KEY_NEVER_SET",
+        )));
+        assert_eq!(
+            form.key_source,
+            KeySource::Inline,
+            "the env source is hidden, so the form starts on the key"
+        );
+        assert!(form.api_key_env.value.is_empty(), "nothing to prefill");
+        assert!(!form.env_option_available());
+        assert_eq!(
+            form.missing_env_placeholder().as_deref(),
+            Some("env var SHUVARIE_TEST_ENV_KEY_NEVER_SET not found"),
+            "the hidden source is named where the key is asked for"
+        );
+        assert_eq!(
+            form.map_event(&key(KeyCode::Char('e'), Modifiers::ALT)),
+            None,
+            "Alt+E is not offered when there is no variable to read"
+        );
+        form.update(AddProviderMessage::ToggleKeySource);
+        assert_eq!(
+            form.key_source,
+            KeySource::Inline,
+            "the toggle is a no-op without a set variable"
+        );
+        form.update(AddProviderMessage::Submit);
+        assert!(
+            form.error.as_deref().unwrap().contains("API key"),
+            "a key is still required from the source that is offered"
+        );
+    }
+
+    #[test]
+    fn the_missing_variable_placeholder_only_shows_for_a_named_unset_variable() {
+        // No catalog entry at all: nothing to name, nothing to say.
+        let mut custom = custom_form();
+        assert_eq!(custom.missing_env_placeholder(), None);
+        custom.catalog.set("not-a-provider");
+        assert_eq!(custom.missing_env_placeholder(), None);
+
+        // A catalog entry names the variable it wants; whether the placeholder
+        // shows depends on whether this environment happens to have it.
+        custom.catalog.set("openai");
+        if env_is_set("OPENAI_API_KEY") {
+            assert_eq!(
+                custom.missing_env_placeholder(),
+                None,
+                "the variable is present"
+            );
+        } else {
+            assert_eq!(
+                custom.missing_env_placeholder().as_deref(),
+                Some("env var OPENAI_API_KEY not found"),
+                "the typed catalog id names the variable it looked for"
+            );
+        }
+
+        // OAuth kinds have no key row to put a placeholder in.
+        let mut oauth = form();
+        oauth.open_details(Some(&oauth_provider(
+            "chatgpt",
+            "ChatGPT",
+            selune::ProviderType::Chatgpt,
+        )));
+        assert_eq!(oauth.missing_env_placeholder(), None);
+    }
+
+    #[test]
+    fn the_details_dialog_names_the_missing_variable() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        fn rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
+            (0..buffer.area().height)
+                .map(|y| {
+                    (0..buffer.area().width)
+                        .map(|x| buffer[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect()
+        }
+
+        fn key_row(form: &AddProviderForm, terminal: &mut Terminal<TestBackend>) -> String {
+            terminal
+                .draw(|frame| form.view(frame, frame.area(), false, false))
+                .unwrap();
+            rows(terminal.backend().buffer())
+                .into_iter()
+                // The dialog's left border precedes the label.
+                .find(|row| row.contains("API key"))
+                .unwrap_or_default()
+        }
+
+        let mut form = form();
+        form.open_details(Some(&keyed_provider(
+            "acme-env-rendered",
+            "SHUVARIE_TEST_ENV_KEY_RENDERED_NEVER_SET",
+        )));
+        // Wide enough that the key row stays on one line, so the assertion
+        // reads the placeholder whole.
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+
+        let row = key_row(&form, &mut terminal);
+        assert!(
+            row.contains("env var SHUVARIE_TEST_ENV_KEY_RENDERED_NEVER_SET not found"),
+            "the empty field is a placeholder naming the variable it looked for: {row:?}"
+        );
+
+        // A typed key takes the placeholder's place.
+        form.api_key.set("sk-typed");
+        let row = key_row(&form, &mut terminal);
+        assert!(row.contains("sk-typed"), "{row:?}");
+        assert!(
+            !row.contains("not found"),
+            "the placeholder steps aside: {row:?}"
+        );
+
+        // The env source is hidden, so its hint bar entry is too.
+        let text = rows(terminal.backend().buffer()).join("\n");
+        assert!(
+            !text.contains("Alt+E"),
+            "no env toggle without a variable:\n{text}"
+        );
+    }
+
+    #[test]
+    fn toggling_to_an_inline_key_requires_and_stores_it() {
+        set_env("SHUVARIE_TEST_ENV_KEY_TOGGLE", "sk-env");
+        let mut form = form();
+        form.open_details(Some(&keyed_provider(
+            "acme-env-toggle",
+            "SHUVARIE_TEST_ENV_KEY_TOGGLE",
+        )));
+        assert_eq!(form.key_source, KeySource::Env);
+        form.update(AddProviderMessage::ToggleKeySource);
+        assert_eq!(form.key_source, KeySource::Inline);
+        form.update(AddProviderMessage::Submit);
+        assert!(
+            form.error.as_deref().unwrap().contains("API key"),
+            "the env source no longer satisfies the requirement"
+        );
+
+        form.api_key.set("sk-test");
+        assert!(matches!(
+            form.update(AddProviderMessage::Submit),
+            AddProviderOutcome::Submit {
+                api_key: Some(key),
+                api_key_env: None,
+                ..
+            } if key == "sk-test"
+        ));
+        unset_env("SHUVARIE_TEST_ENV_KEY_TOGGLE");
+    }
+
+    #[test]
+    fn typing_edits_whichever_key_field_is_shown() {
+        set_env("SHUVARIE_TEST_ENV_KEY_TYPING", "sk-env");
+        let mut form = form();
+        form.open_details(Some(&keyed_provider(
+            "acme-env-typing",
+            "SHUVARIE_TEST_ENV_KEY_TYPING",
+        )));
+        form.field = FormField::ApiKey;
+        assert_eq!(form.key_source, KeySource::Env);
+        form.update(AddProviderMessage::Input('2'));
+        assert_eq!(form.api_key_env.value, "SHUVARIE_TEST_ENV_KEY_TYPING2");
+        assert!(form.api_key.value.is_empty());
+
+        form.update(AddProviderMessage::ToggleKeySource);
+        form.update(AddProviderMessage::Input('k'));
+        assert_eq!(form.api_key.value, "k");
+        assert_eq!(
+            form.api_key_env.value, "SHUVARIE_TEST_ENV_KEY_TYPING2",
+            "each source keeps its own text"
+        );
+        unset_env("SHUVARIE_TEST_ENV_KEY_TYPING");
+    }
+
+    #[test]
+    fn alt_e_toggles_the_key_source() {
+        set_env("SHUVARIE_TEST_ENV_KEY_ALT_E", "sk-env");
+        let mut form = form();
+        form.open_details(Some(&keyed_provider(
+            "acme-env-alt-e",
+            "SHUVARIE_TEST_ENV_KEY_ALT_E",
+        )));
+        assert!(matches!(
+            form.map_event(&key(KeyCode::Char('e'), Modifiers::ALT)),
+            Some(AddProviderMessage::ToggleKeySource)
+        ));
+        unset_env("SHUVARIE_TEST_ENV_KEY_ALT_E");
+    }
+
+    #[test]
+    fn catalog_env_name_resolves_the_typed_catalog_id() {
+        let mut form = custom_form();
+        form.kind.set("openai");
+        assert_eq!(form.catalog_env_name(), None, "no catalog id yet");
+        form.catalog.set("openai");
+        assert_eq!(
+            form.catalog_env_name().as_deref(),
+            Some("OPENAI_API_KEY"),
+            "the typed catalog id names the variable"
+        );
+        form.catalog.set("not-a-provider");
+        assert_eq!(form.catalog_env_name(), None);
+    }
+
+    #[test]
+    fn env_source_rejects_something_that_is_not_a_variable_name() {
+        set_env("SHUVARIE_TEST_ENV_KEY_INVALID", "sk-env");
+        let mut form = form();
+        form.open_details(Some(&keyed_provider(
+            "acme-env-invalid",
+            "SHUVARIE_TEST_ENV_KEY_INVALID",
+        )));
+        assert_eq!(form.key_source, KeySource::Env);
+
+        form.api_key_env.set("sk-abc/def");
+        form.update(AddProviderMessage::Submit);
+        assert!(
+            form.error
+                .as_deref()
+                .unwrap()
+                .contains("not an environment variable name"),
+            "{:?}",
+            form.error
+        );
+
+        form.api_key_env.set("SHUVARIE_TEST_ENV_KEY_NOT_EXPORTED");
+        form.update(AddProviderMessage::Submit);
+        assert!(
+            form.error
+                .as_deref()
+                .unwrap()
+                .contains("is not set in this environment"),
+            "{:?}",
+            form.error
+        );
+
+        // Clearing the field falls back to the variable the catalog names,
+        // which is set.
+        form.api_key_env.clear();
+        assert!(matches!(
+            form.update(AddProviderMessage::Submit),
+            AddProviderOutcome::Submit {
+                api_key_env: Some(env),
+                ..
+            } if env == "SHUVARIE_TEST_ENV_KEY_INVALID"
+        ));
+        unset_env("SHUVARIE_TEST_ENV_KEY_INVALID");
     }
 
     #[test]

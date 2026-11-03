@@ -1685,6 +1685,7 @@ impl App {
                             catalog,
                             name,
                             api_key,
+                            api_key_env,
                             base_url,
                         } => {
                             let id = uuid::Uuid::now_v7().to_string();
@@ -1694,7 +1695,8 @@ impl App {
                                 api_key,
                                 base_url,
                             )
-                            .with_catalog(catalog);
+                            .with_catalog(catalog)
+                            .with_api_key_env(api_key_env);
                             // OAuth2 device-flow providers sign in right
                             // away, so the verification URL + user code
                             // surface immediately.
@@ -3298,6 +3300,39 @@ mod tests {
                 "key-based kinds must not trigger the device flow: {cmd:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn submitting_an_env_keyed_provider_saves_the_variable() {
+        // SAFETY: the test owns this variable for its whole body.
+        unsafe { std::env::set_var("SHUVARIE_TEST_APP_PROVIDER_KEY", "sk-env") };
+        let (mut app, mut rx) = app_with_rx(Connections::default());
+        app.open_add_provider();
+        app.update(AppMessage::AddProvider(AddProviderMessage::OpenCustom));
+        let form = app.add_provider_form.as_mut().unwrap();
+        form.name.set("Acme");
+        form.kind.set("openai");
+        // A custom provider has no catalog entry naming the variable, so pick
+        // the env source directly: the popup only offers it for a set variable,
+        // and `Alt+E` therefore has nothing to toggle here.
+        form.key_source = crate::tui::add_provider::KeySource::Env;
+        form.api_key_env.set("SHUVARIE_TEST_APP_PROVIDER_KEY");
+        app.update(AppMessage::AddProvider(AddProviderMessage::Submit));
+
+        let mut saved = None;
+        while let Ok(cmd) = rx.try_recv() {
+            if let shuvarie_core::Command::AddProvider { config, .. } = cmd {
+                saved = Some(config);
+            }
+        }
+        // SAFETY: the test owns this variable for its whole body.
+        unsafe { std::env::remove_var("SHUVARIE_TEST_APP_PROVIDER_KEY") };
+        let config = saved.expect("the env-keyed provider must be saved");
+        assert_eq!(config.api_key, None, "no secret reaches the file");
+        assert_eq!(
+            config.api_key_env.as_deref(),
+            Some("SHUVARIE_TEST_APP_PROVIDER_KEY")
+        );
     }
 
     #[test]

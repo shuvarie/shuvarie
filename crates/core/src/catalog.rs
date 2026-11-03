@@ -617,17 +617,24 @@ fn oauth_device_login_kind_in(providers: &[Provider], kind: &str, catalog: Optio
     }
 }
 
+/// The environment variable a catalog entry reads its API key from. Selune's
+/// `api_key` field is a reference (`$OPENAI_API_KEY`), not a secret, so the
+/// add-provider dialog can offer it as the default source. `None` when the
+/// entry takes no key or names no variable.
+pub fn catalog_api_key_env(id: &str) -> Option<String> {
+    let providers = providers();
+    let entry = find_provider(&providers, id)?;
+    shuvarie_config::normalize_env_name(entry.api_key.as_deref()?)
+}
+
 /// Whether the provider is configured enough to open a connection. An
 /// explicit `catalog` entry governs (its `api_key` requirement); otherwise
 /// the transport decides: a key is required unless it's a local one
 /// (`ollama`). A `kind` that parses as neither is treated as a legacy
-/// catalog id.
+/// catalog id. A key counts as present when either a literal `api-key` is
+/// stored or the `api-key-env` variable holds a value.
 pub fn is_connectable(provider: &ProviderConfig) -> bool {
-    let has_key = provider
-        .api_key
-        .as_ref()
-        .map(|k| !k.trim().is_empty())
-        .unwrap_or(false);
+    let has_key = provider.resolved_api_key().is_some();
     if let Some(catalog) = &provider.catalog {
         return catalog_requires_key(catalog, has_key);
     }
@@ -1320,6 +1327,40 @@ mod tests {
         assert!(!is_connectable(&groq), "catalog entry requires a key");
         let groq = ProviderConfig::new("groq", "groq", Some("gsk-x".into()), None);
         assert!(is_connectable(&groq));
+    }
+
+    #[test]
+    fn is_connectable_reads_the_key_from_an_env_var() {
+        // SAFETY: the test owns this variable for its whole body.
+        unsafe { std::env::set_var("SHUVARIE_TEST_PROVIDER_KEY", "sk-env") };
+        let pc = ProviderConfig::new("acme", "openai", None, None)
+            .with_api_key_env(Some("SHUVARIE_TEST_PROVIDER_KEY"));
+        assert!(is_connectable(&pc), "the variable holds a key");
+
+        let literal_wins = ProviderConfig::new("acme", "openai", Some("sk-x".into()), None)
+            .with_api_key_env(Some("SHUVARIE_TEST_PROVIDER_KEY_UNSET"));
+        assert!(is_connectable(&literal_wins), "a stored key still counts");
+
+        // SAFETY: the test owns this variable for its whole body.
+        unsafe { std::env::remove_var("SHUVARIE_TEST_PROVIDER_KEY") };
+        assert!(
+            !is_connectable(&pc),
+            "an unset variable leaves the provider unconfigured"
+        );
+    }
+
+    #[test]
+    fn catalog_api_key_env_reads_the_selune_reference() {
+        assert_eq!(
+            catalog_api_key_env("openai").as_deref(),
+            Some("OPENAI_API_KEY"),
+            "Selune spells the key `$OPENAI_API_KEY`"
+        );
+        assert_eq!(
+            catalog_api_key_env("anthropic").as_deref(),
+            Some("ANTHROPIC_API_KEY")
+        );
+        assert_eq!(catalog_api_key_env("not-a-provider"), None);
     }
 
     #[test]

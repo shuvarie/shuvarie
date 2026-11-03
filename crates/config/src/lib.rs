@@ -12,7 +12,7 @@ mod trusts;
 mod trusts_kdl;
 
 pub use self::connections::{
-    Active, Connections, DecisionActive, DecisionProviderConfig, ProviderConfig,
+    Active, Connections, DecisionActive, DecisionProviderConfig, ProviderConfig, normalize_env_name,
 };
 pub use self::decisions::{
     DecisionConfig, DecisionLevel, DecisionOption, DecisionType, DecisionsConfig,
