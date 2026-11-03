@@ -120,6 +120,22 @@ pub enum AppMessage {
     CommandMenu(CommandMenuMessage),
     Welcome(WelcomeMessage),
     SessionPicker(SessionPickerMessage),
+    /// A tab's core was spawned (reply to [`AppEffect::SpawnTab`]): open the tab
+    /// and show it. The sender is the new core's, cloned from its handle.
+    TabOpened {
+        root: PathBuf,
+        cmd_tx: Sender<shuvarie_core::Command>,
+    },
+    /// A tab could not be opened (reply to [`AppEffect::SpawnTab`]): report why
+    /// on the tab the user is looking at, and leave the strip alone.
+    TabOpenFailed {
+        root: PathBuf,
+        error: String,
+    },
+    /// Drop a closed tab from the strip (the loop has already stopped its core).
+    TabClosed {
+        id: TabId,
+    },
     Tree(TreeMessage),
     Scene(scene::SceneMessage),
     Variant(variant::VariantMessage),
@@ -256,6 +272,17 @@ impl AppMessage {
 pub enum AppEffect {
     Quit,
     CopyToClipboard(String),
+    /// Open a tab: spawn a core for `path` (the active tab's workspace when
+    /// `None`) and show it. Only the render loop can carry this out — it owns
+    /// the spawner — and it reports back with [`AppMessage::TabOpened`].
+    SpawnTab {
+        path: Option<PathBuf>,
+    },
+    /// Stop a tab's agent and drop the tab. The render loop removes the App's
+    /// sender first, then drops its own and waits for the core to finish.
+    CloseTab {
+        id: TabId,
+    },
     /// Launch the OAuth verification URL in the platform browser.
     OpenBrowser(String),
     /// Tell the user something through the terminal's desktop notification
@@ -354,6 +381,11 @@ pub struct App {
     /// effect (the media load a stream end can carry); the render loop drains
     /// them with [`App::take_pending_effects`].
     pending_effects: Vec<AppEffect>,
+    /// The tab [`AppMessage::TabOpened`] just created, taken by the render loop
+    /// so it can register that tab's core. An outbox rather than a return value
+    /// because `update` hands back one effect slot, which the switch may already
+    /// be using.
+    opened_tab: Option<TabId>,
     quit: bool,
 }
 
@@ -698,6 +730,7 @@ impl App {
             current_scene: None,
             notify,
             pending_effects: Vec::new(),
+            opened_tab: None,
             quit: false,
         }
     }
@@ -868,10 +901,8 @@ impl App {
     /// Adds a tab for `root`, driven by `cmd_tx`.
     ///
     /// The async half — spawning the core — belongs to the render loop, which
-    /// owns the spawner; it calls this once the handle is in hand and then
-    /// switches over. Until that effect lands (`/newtab`), only the tests build
-    /// a second tab.
-    #[allow(dead_code)]
+    /// owns the spawner. [`AppMessage::TabOpened`] is the reply that calls this
+    /// and switches over, so the tab only exists once its agent does.
     pub(crate) fn open_tab(
         &mut self,
         root: PathBuf,
@@ -899,6 +930,31 @@ impl App {
             screen: Some(screen),
         });
         id
+    }
+
+    /// Drops `id` from the strip, switching away first when it is the tab on
+    /// screen. Its core is stopped by the render loop, which removes the App's
+    /// sender here and then drops its own.
+    fn close_tab(&mut self, id: TabId) {
+        let Some(position) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return;
+        };
+        if id == self.active {
+            // The loop refuses to close the last tab, so there is always a
+            // neighbour to hand the screen to. Leaving first matters: the App
+            // must not still be holding this tab's command sender when the loop
+            // stops its core.
+            let neighbour = if position + 1 < self.tabs.len() {
+                position + 1
+            } else {
+                position.saturating_sub(1)
+            };
+            self.save_scroll();
+            if let Some(next) = self.tabs.get(neighbour).map(|tab| tab.id) {
+                self.set_active(next);
+            }
+        }
+        self.tabs.retain(|tab| tab.id != id);
     }
 
     /// The status-row state a newly built screen starts with (see
@@ -936,6 +992,44 @@ impl App {
     /// right after each update.
     pub fn take_pending_effects(&mut self) -> Vec<AppEffect> {
         std::mem::take(&mut self.pending_effects)
+    }
+
+    /// The tab the last [`AppMessage::TabOpened`] created, so the render loop can
+    /// register the core that was spawned for it. `None` once taken, and after a
+    /// tab that failed to open.
+    pub fn take_opened_tab(&mut self) -> Option<TabId> {
+        self.opened_tab.take()
+    }
+
+    /// The workspace of the tab on screen: what `/newtab` inherits when it is
+    /// given no directory.
+    pub fn active_root(&self) -> PathBuf {
+        self.tabs
+            .iter()
+            .find(|tab| tab.id == self.active)
+            .map(|tab| tab.root.clone())
+            .unwrap_or_default()
+    }
+
+    /// Resolves a `/newtab` argument into the directory the tab should run in:
+    /// `~` expands to the home directory, and a relative path resolves against
+    /// the directory shuvarie was started in (tabs never change the process
+    /// directory, so that base is stable).
+    ///
+    /// Existence and "is a directory" are deliberately not checked here: the
+    /// spawner does both and reports them, which is the message that reaches the
+    /// user.
+    pub(crate) fn tab_path(&self, arg: &str) -> PathBuf {
+        let arg = arg.trim();
+        if arg == "~" {
+            return dirs::home_dir().unwrap_or_else(|| PathBuf::from(arg));
+        }
+        if let Some(rest) = arg.strip_prefix("~/").or_else(|| arg.strip_prefix("~\\"))
+            && let Some(home) = dirs::home_dir()
+        {
+            return home.join(rest);
+        }
+        PathBuf::from(arg)
     }
 
     /// The notification a session message calls for: a desktop toast and/or an
@@ -1835,6 +1929,20 @@ impl App {
                 }
             }
             AppMessage::GotoTab { position } => self.switch_to_position(position),
+            AppMessage::TabOpened { root, cmd_tx } => {
+                let id = self.open_tab(root, cmd_tx);
+                self.opened_tab = Some(id);
+                // Leaving the current tab: its scroll has to be persisted before
+                // its screen is parked.
+                self.save_scroll();
+                self.set_active(id);
+            }
+            AppMessage::TabOpenFailed { root, error } => {
+                self.session.update(SessionMessage::ShowError {
+                    error: format!("cannot open a tab in {}: {error}", root.display()),
+                });
+            }
+            AppMessage::TabClosed { id } => self.close_tab(id),
             AppMessage::RequestQuit => {
                 self.open_confirm_quit();
             }
@@ -2642,9 +2750,24 @@ impl App {
     /// (switch, reset, or quit) before the transition is dispatched; a no-op
     /// when no session row is loaded.
     fn save_scroll(&self) {
-        if let Some((id, scroll)) = self.session.scroll_save() {
-            self.ctx
-                .send(shuvarie_core::Command::SaveScroll { id, scroll });
+        // Every tab, not just the visible one: a background tab's chat is
+        // scrolled at its own position, and only a switch or a quit gets the
+        // chance to persist it.
+        for tab in &self.tabs {
+            let screen = if tab.id == self.active {
+                Some(&self.session)
+            } else {
+                tab.screen.as_ref()
+            };
+            let Some((id, scroll)) = screen.and_then(SessionScreen::scroll_save) else {
+                continue;
+            };
+            let command = shuvarie_core::Command::SaveScroll { id, scroll };
+            if tab.id == self.active {
+                self.ctx.send(command);
+            } else {
+                let _ = tab.cmd_tx.try_send(command);
+            }
         }
     }
 
@@ -3014,6 +3137,27 @@ impl App {
                 self.save_scroll();
                 self.session.update(SessionMessage::Reset);
                 self.ctx.send(shuvarie_core::Command::NewSession);
+            }
+            CommandAction::NewTab => {
+                // Spawning is async and owns the spawner, so it leaves the App
+                // as an effect and comes back as `TabOpened` (or
+                // `TabOpenFailed`, when the directory is not usable).
+                return Some(AppEffect::SpawnTab {
+                    path: args.map(|arg| self.tab_path(&arg)),
+                });
+            }
+            CommandAction::CloseTab => {
+                if self.tabs.len() < 2 {
+                    // The last tab is the app: closing it would leave nothing to
+                    // draw, and `/quit` already means what the user meant.
+                    self.session.update(SessionMessage::ShowError {
+                        error: "the last tab stays open — /quit exits shuvarie".into(),
+                    });
+                } else {
+                    // `close_tab` hands the screen to a neighbour first, so this
+                    // reports the tab being closed rather than the one left.
+                    return Some(AppEffect::CloseTab { id: self.active });
+                }
             }
             CommandAction::EditTitle => {
                 if self.session.session_id.is_none() {
@@ -5783,6 +5927,201 @@ mod tests {
         ));
         assert!(app.session_picker.sessions.is_empty());
         assert!(!app.tree_popup.open);
+    }
+
+    /// The effect `/newtab` leaves for the render loop: the loop owns the
+    /// spawner, so the App can only ask.
+    fn new_tab_effect(args: Option<&str>) -> Option<AppEffect> {
+        let (mut app, _receivers) = app_with_tabs(1);
+        app.run_command(CommandAction::NewTab, args.map(str::to_string))
+    }
+
+    #[test]
+    fn newtab_without_a_path_inherits_the_active_tabs_workspace() {
+        let mut app = app_with(connected());
+        app.welcome.close();
+        app.overlay = Overlay::None;
+        let effect = app.run_command(CommandAction::NewTab, None);
+        assert!(
+            matches!(effect, Some(AppEffect::SpawnTab { path: None })),
+            "no path means the tab I am looking at, not the process"
+        );
+        // The loop resolves it with `active_root`, which is the strip's tab.
+        assert_eq!(app.active_root(), app.tabs[0].root);
+    }
+
+    #[test]
+    fn newtab_with_a_path_carries_it() {
+        let effect = new_tab_effect(Some("/somewhere/else"));
+        assert!(
+            matches!(&effect, Some(AppEffect::SpawnTab { path: Some(path) })
+                if path == &PathBuf::from("/somewhere/else")),
+            "got {effect:?}"
+        );
+    }
+
+    #[test]
+    fn newtab_expands_a_leading_tilde() {
+        let Some(home) = dirs::home_dir() else {
+            return; // no home to expand against
+        };
+        let app = app_with(connected());
+        assert_eq!(app.tab_path("~"), home);
+        assert_eq!(app.tab_path("~/projects/x"), home.join("projects/x"));
+        // Only a *leading* tilde expands; the rest is an ordinary path.
+        assert_eq!(app.tab_path("/a/~/b"), PathBuf::from("/a/~/b"));
+    }
+
+    #[test]
+    fn closing_the_last_tab_is_refused() {
+        let (mut app, _receivers) = app_with_tabs(1);
+        let effect = app.run_command(CommandAction::CloseTab, None);
+        assert!(
+            effect.is_none(),
+            "there is no core to stop and nothing to draw afterwards"
+        );
+        assert_eq!(app.tabs.len(), 1, "the strip is untouched");
+        assert!(
+            app.session
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("/quit")),
+            "the error says what to do instead: {:?}",
+            app.session.error
+        );
+    }
+
+    #[test]
+    fn closing_a_tab_asks_the_loop_to_stop_the_tab_on_screen() {
+        let (mut app, _receivers) = app_with_tabs(2);
+        app.update(AppMessage::GotoTab { position: 1 });
+        let closing = app.tabs[1].id;
+
+        let effect = app.run_command(CommandAction::CloseTab, None);
+        assert!(
+            matches!(effect, Some(AppEffect::CloseTab { id }) if id == closing),
+            "the loop is told which core to stop"
+        );
+        // The strip is untouched until the loop answers with `TabClosed`: the
+        // App cannot hand the screen over while its own sender for the closing
+        // tab is still live, and that is the loop's report to make.
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(
+            app.active_index(),
+            1,
+            "the tab stays on screen until its core is stopped"
+        );
+    }
+
+    #[test]
+    fn a_tab_opened_by_the_loop_is_shown_and_offered_to_it() {
+        let (mut app, _receivers) = app_with_tabs(1);
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        app.update(AppMessage::TabOpened {
+            root: PathBuf::from("/elsewhere/project"),
+            cmd_tx: tx,
+        });
+
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_index(), 1, "a new tab is the one you see");
+        let id = app.take_opened_tab().expect("the loop registers the core");
+        assert_eq!(id, app.tabs[1].id);
+        assert!(app.take_opened_tab().is_none(), "the outbox drains once");
+        // The invariants that make the staging work.
+        assert!(app.tabs[1].screen.is_none(), "the new tab is staged");
+        assert!(app.tabs[0].screen.is_some(), "the old one is parked");
+        assert_eq!(
+            app.tabs[1].root,
+            PathBuf::from("/elsewhere/project"),
+            "the tab carries the workspace its core was spawned for"
+        );
+    }
+
+    #[test]
+    fn a_tab_that_will_not_open_explains_itself_and_adds_nothing() {
+        let (mut app, _receivers) = app_with_tabs(1);
+        app.update(AppMessage::TabOpenFailed {
+            root: PathBuf::from("/nope"),
+            error: "/nope: No such file or directory".into(),
+        });
+        assert_eq!(app.tabs.len(), 1);
+        let error = app.session.error.as_deref().expect("the user is told why");
+        assert!(error.contains("/nope"), "{error}");
+        assert!(app.take_opened_tab().is_none());
+    }
+
+    #[test]
+    fn closing_the_active_tab_hands_the_screen_to_a_neighbour() {
+        let (mut app, _receivers) = app_with_tabs(3);
+        app.update(AppMessage::GotoTab { position: 0 });
+        let closing = app.tabs[0].id;
+        app.session
+            .input
+            .buffer
+            .set("draft that goes away with the tab");
+
+        app.update(AppMessage::TabClosed { id: closing });
+
+        assert_eq!(app.tabs.len(), 2);
+        assert!(!app.tabs.iter().any(|tab| tab.id == closing));
+        assert_eq!(app.active_index(), 0, "the next tab took the position");
+        assert!(app.tabs[0].screen.is_none(), "and is the one staged");
+        assert!(app.tabs[1].screen.is_some());
+        assert!(
+            app.session.input.is_empty(),
+            "the closed tab's draft did not follow it"
+        );
+        // The closed tab's sender went with it: the remaining tab's core is the
+        // one the app now addresses.
+        assert!(app.ctx.cmd_tx.same_channel(&app.tabs[0].cmd_tx));
+    }
+
+    #[test]
+    fn closing_a_background_tab_leaves_the_screen_alone() {
+        let (mut app, _receivers) = app_with_tabs(3);
+        app.update(AppMessage::GotoTab { position: 1 });
+        app.session.input.buffer.set("still typing here");
+        let staged = app.tabs[1].id;
+        let closing = app.tabs[2].id;
+
+        app.update(AppMessage::TabClosed { id: closing });
+
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.tabs[1].id, staged, "the visible tab did not move");
+        assert!(app.tabs[1].screen.is_none(), "the same tab is still staged");
+        assert_eq!(app.session.input.buffer.value, "still typing here");
+    }
+
+    #[test]
+    fn the_tab_commands_parse_and_closetab_takes_no_arguments() {
+        use super::super::commands::{CommandRef, parse_command};
+
+        let parsed = parse_command("/newtab /tmp/x").expect("newtab takes a path");
+        assert_eq!(parsed.action, CommandAction::NewTab);
+        assert_eq!(parsed.args.as_deref(), Some("/tmp/x"));
+        assert_eq!(
+            parse_command("/newtab").map(|p| p.action),
+            Some(CommandAction::NewTab)
+        );
+
+        assert_eq!(
+            parse_command("/closetab").map(|p| p.action),
+            Some(CommandAction::CloseTab)
+        );
+        assert!(
+            parse_command("/closetab extra").is_none(),
+            "closing the tab you name is not a thing; the active one closes"
+        );
+
+        // The aliases the menus show.
+        assert_eq!(
+            CommandRef::Builtin(CommandAction::NewTab).slash_alias(),
+            "newtab"
+        );
+        assert_eq!(
+            CommandRef::Builtin(CommandAction::CloseTab).slash_alias(),
+            "closetab"
+        );
     }
 
     #[test]

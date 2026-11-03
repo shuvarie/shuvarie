@@ -52,16 +52,44 @@ impl CoreHandle {
         &self.root
     }
 
+    /// Splits the handle into what the render loop drives separately: the
+    /// command sender (shared with the App), the event receiver (turned into the
+    /// loop's stream), and the task that stops it. [`Self::shutdown`] is the
+    /// fused form of the same thing, for the single-core callers.
+    pub fn into_parts(self) -> CoreParts {
+        let CoreHandle {
+            cmd_tx,
+            event_rx,
+            root,
+            join,
+        } = self;
+        CoreParts {
+            cmd_tx,
+            event_rx,
+            root,
+            join,
+        }
+    }
+
     /// Stops this core: drops its command sender and waits for the task, which
     /// releases its session lock and shuts its LSP and MCP managers down.
     ///
     /// Every other clone of `cmd_tx` must be gone first — the App holds one —
     /// or the core's select loop never sees its channel close.
     pub async fn shutdown(self) -> Result<(), String> {
-        let CoreHandle { cmd_tx, join, .. } = self;
+        let CoreParts { cmd_tx, join, .. } = self.into_parts();
         drop(cmd_tx);
         join.await.map_err(|e| format!("core task failed: {e}"))
     }
+}
+
+/// A core's pieces, separated (see [`CoreHandle::into_parts`]).
+pub struct CoreParts {
+    pub cmd_tx: Sender<Command>,
+    pub event_rx: Receiver<CoreEvent>,
+    /// The workspace the core was spawned for.
+    pub root: PathBuf,
+    pub join: JoinHandle<()>,
 }
 
 /// Builds core tasks for workspaces other than the one the process started in.

@@ -15,6 +15,11 @@ pub enum CommandAction {
     PeakTable,
     OpenCodemode,
     NewSession,
+    /// Open another tab: a second agent, in its own workspace, driven by its own
+    /// core task. `/newtab [path]` takes the directory to run it in.
+    NewTab,
+    /// Close the active tab and stop its agent (`/closetab`).
+    CloseTab,
     EditTitle,
     GenTitle,
     Export,
@@ -32,7 +37,7 @@ pub enum CommandAction {
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 27] = [
+    pub const ALL: [CommandAction; 29] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::AddDecisionProvider,
@@ -46,6 +51,8 @@ impl CommandAction {
         CommandAction::PeakTable,
         CommandAction::OpenCodemode,
         CommandAction::NewSession,
+        CommandAction::NewTab,
+        CommandAction::CloseTab,
         CommandAction::EditTitle,
         CommandAction::GenTitle,
         CommandAction::Export,
@@ -77,6 +84,8 @@ impl CommandAction {
             CommandAction::PeakTable => "peak-table",
             CommandAction::OpenCodemode => "codemode",
             CommandAction::NewSession => "new",
+            CommandAction::NewTab => "newtab",
+            CommandAction::CloseTab => "closetab",
             CommandAction::EditTitle => "title",
             CommandAction::GenTitle => "gen-title",
             CommandAction::Export => "export",
@@ -102,6 +111,7 @@ impl CommandAction {
             CommandAction::Compact
                 | CommandAction::EditTitle
                 | CommandAction::Export
+                | CommandAction::NewTab
                 | CommandAction::McpReconnect
                 | CommandAction::OpenScenePicker
                 | CommandAction::OpenVariantPicker
@@ -201,6 +211,16 @@ pub fn default_commands() -> Vec<CommandEntry> {
             "New session",
             "Start a fresh conversation",
             CommandAction::NewSession,
+        ),
+        CommandEntry::builtin(
+            "New tab",
+            "Run another agent in its own workspace; optional directory",
+            CommandAction::NewTab,
+        ),
+        CommandEntry::builtin(
+            "Close tab",
+            "Stop this tab's agent and close it",
+            CommandAction::CloseTab,
         ),
         CommandEntry::builtin(
             "Session tree",

@@ -98,7 +98,7 @@ async fn main() -> color_eyre::Result<()> {
         return run::run_cli(run, core).await;
     }
 
-    let res = tui::run_tui(config, theme_set, core).await;
+    let res = tui::run_tui(config, theme_set, spawner, core).await;
     let res = res?;
 
     if let Some(res_enum) = res {
