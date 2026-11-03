@@ -44,7 +44,7 @@ use super::session::{
 use super::session_picker::{SessionPicker, SessionPickerEffect, SessionPickerMessage};
 use super::sidebar::SidebarMessage;
 use super::spinner::SpinnerKind;
-use super::tabs::{self, Tab, TabBarEntry, TabId};
+use super::tabs::{self, Staged, Tab, TabBarEntry, TabId};
 use super::theme;
 use super::theme_picker::{ThemePicker, ThemePickerEffect, ThemePickerMessage};
 use super::title::{TitleEffect, TitleMessage, TitlePopup};
@@ -98,6 +98,13 @@ pub enum AppMessage {
         cols: u16,
     },
     Session(SessionMessage),
+    /// A message about one tab: its stream, its session row, its roster. Applied
+    /// to that tab even while another is on screen (see [`App::apply_to_tab`]).
+    /// Boxed: the session messages are far larger than any other variant.
+    Tab {
+        tab: TabId,
+        msg: Box<AppMessage>,
+    },
     /// Move to the next (`Alt+Right`) or previous (`Alt+Left`) tab, wrapping at
     /// either end of the strip.
     CycleTab {
@@ -235,6 +242,16 @@ pub enum AppMessage {
     PickerRefresh,
 }
 
+impl AppMessage {
+    /// [`AppMessage::Tab`], boxed.
+    fn for_tab(tab: TabId, msg: AppMessage) -> Self {
+        Self::Tab {
+            tab,
+            msg: Box::new(msg),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum AppEffect {
     Quit,
@@ -268,6 +285,11 @@ pub struct App {
     /// The next id to hand out. Ids are never reused, so a message still in
     /// flight for a closed tab can never land in its successor.
     next_tab_id: usize,
+    /// Set while a background tab's message is being applied: its state has been
+    /// staged into the working slots, so `active` no longer describes what is
+    /// there. Handlers that would act on app-wide UI — a picker, a popup — check
+    /// this before doing so.
+    staged_tab: Option<TabId>,
     /// The `[ui]` prefs a newly opened tab's screen is built from, so a second
     /// tab looks exactly like the first.
     ui: UiPrefs,
@@ -306,8 +328,10 @@ pub struct App {
     registries: RegistriesConfig,
     pending_model_pick: Option<String>,
     /// The configured scene set (built-in Default first) for the switcher.
+    /// The active tab's scene set (`Tab::scenes` for the others).
     scene_entries: Vec<shuvarie_core::scenes::SceneListEntry>,
     /// The scene new sessions start under (`None` = built-in Default).
+    /// The active tab's (`Tab::scene_default` for the others).
     scene_default: Option<String>,
     /// The session's current scene (`None` = built-in Default).
     current_scene: Option<String>,
@@ -462,6 +486,35 @@ fn question_gist(questions: &[shuvarie_core::QuestionPrompt]) -> Option<&str> {
     })
 }
 
+/// Whether a core event is about the user's setup rather than a tab's agent: the
+/// catalog and its fetches, the saved config, an OAuth login, and the answers to
+/// interactive commands — which only the tab on screen can have issued, since the
+/// user had to be looking at it to ask.
+///
+/// Listed by exception on purpose: a new core event defaults to belonging to its
+/// tab, and the damage of that being wrong is a notice reaching one tab instead
+/// of every tab's chat being overwritten by another's stream.
+fn core_event_is_global(event: &CoreEvent) -> bool {
+    matches!(
+        event,
+        CoreEvent::Pong
+            | CoreEvent::ModelsLoaded { .. }
+            | CoreEvent::ModelsError { .. }
+            | CoreEvent::ConfigSaved
+            | CoreEvent::ConfigError { .. }
+            | CoreEvent::RegistryLoaded { .. }
+            | CoreEvent::RegistryError { .. }
+            | CoreEvent::ShellWarning { .. }
+            | CoreEvent::AuthPrompt { .. }
+            | CoreEvent::AuthSuccess { .. }
+            | CoreEvent::AuthFailed { .. }
+            | CoreEvent::SessionsLoaded { .. }
+            | CoreEvent::SessionTree { .. }
+            | CoreEvent::SearchResults { .. }
+            | CoreEvent::SearchError { .. }
+    )
+}
+
 /// The status-row state a session screen is built with: the active provider and
 /// model. Every tab is built with the same one, because a connection is the
 /// user's, not a tab's — a tab picks *what it works on*, not which model runs.
@@ -601,11 +654,14 @@ impl App {
                 id: first_tab,
                 root,
                 scene: None,
+                scenes: Vec::new(),
+                scene_default: None,
                 cmd_tx,
                 screen: None,
             }],
             active: first_tab,
             next_tab_id: 1,
+            staged_tab: None,
             ui,
             image_protocol,
             viewport_cols,
@@ -691,21 +747,122 @@ impl App {
         let Some(target) = self.tabs.iter().position(|tab| tab.id == id) else {
             return;
         };
-        // The invariant: a parked tab holds its screen, the active one does not.
-        let Some(incoming) = self.tabs[target].screen.take() else {
+        // Park the tab being left first: `stage` needs the incoming tab's own
+        // screen to be parked, which is exactly the invariant the active tab
+        // breaks on purpose.
+        let previous = self.active_index();
+        let Some(outgoing) = self.stage(target) else {
             return;
         };
-        let current = self.active_index();
-        let outgoing = std::mem::replace(&mut self.session, incoming);
-        self.tabs[current].screen = Some(outgoing);
-        std::mem::swap(&mut self.current_scene, &mut self.tabs[target].scene);
-        self.ctx.cmd_tx = self.tabs[target].cmd_tx.clone();
+        self.park(previous, outgoing);
         self.active = id;
         // A parked screen kept the width it was last painted at, and no resize
         // arrives just because a tab came back.
         self.session.sidebar.update(SidebarMessage::SetWidth {
             cols: self.viewport_cols,
         });
+    }
+
+    /// Stages the tab at `position` into the App's working slots (`session`,
+    /// `current_scene`, `scene_entries`, `scene_default`, `ctx.cmd_tx`),
+    /// returning the state that was there before so the caller can put it back.
+    ///
+    /// This is how tabs stay cheap: there is one set of working slots, so every
+    /// handler keeps reading `self.session` and sending through `self.ctx`
+    /// without knowing which tab — or whether more than one — exists. It is also
+    /// how a background tab's message is applied ([`App::apply_to_tab`]).
+    fn stage(&mut self, position: usize) -> Option<Staged> {
+        let incoming = self.tabs.get_mut(position)?.screen.take()?;
+        let staged = Staged {
+            screen: std::mem::replace(&mut self.session, incoming),
+            scene: std::mem::replace(&mut self.current_scene, self.tabs[position].scene.take()),
+            scenes: std::mem::replace(
+                &mut self.scene_entries,
+                std::mem::take(&mut self.tabs[position].scenes),
+            ),
+            scene_default: std::mem::replace(
+                &mut self.scene_default,
+                self.tabs[position].scene_default.take(),
+            ),
+            cmd_tx: std::mem::replace(&mut self.ctx.cmd_tx, self.tabs[position].cmd_tx.clone()),
+        };
+        Some(staged)
+    }
+
+    /// Parks the state `stage` handed out — the tab being left — into the tab at
+    /// `position`, leaving the working slots holding the tab that was just
+    /// staged there. The switch half of [`App::stage`]; see [`App::restore`] for
+    /// the other reading.
+    fn park(&mut self, position: usize, staged: Staged) {
+        let Some(tab) = self.tabs.get_mut(position) else {
+            return;
+        };
+        tab.screen = Some(staged.screen);
+        tab.scene = staged.scene;
+        tab.scenes = staged.scenes;
+        tab.scene_default = staged.scene_default;
+        // `staged.cmd_tx` is the left tab's core; that tab already holds it.
+    }
+
+    /// Swaps the working slots back with `staged`: the tab at `position` takes
+    /// back the state it had while it was staged, and the working slots take the
+    /// state `stage` handed out. The message half of [`App::stage`], used by
+    /// [`App::apply_to_tab`]; [`App::park`] is the switch half.
+    fn restore(&mut self, position: usize, staged: Staged) {
+        let Some(tab) = self.tabs.get_mut(position) else {
+            return;
+        };
+        tab.screen = Some(std::mem::replace(&mut self.session, staged.screen));
+        tab.scene = std::mem::replace(&mut self.current_scene, staged.scene);
+        tab.scenes = std::mem::replace(&mut self.scene_entries, staged.scenes);
+        tab.scene_default = std::mem::replace(&mut self.scene_default, staged.scene_default);
+        self.ctx.cmd_tx = staged.cmd_tx;
+    }
+
+    /// Whether the state in the working slots is the active tab's. False while a
+    /// background tab's message is being applied.
+    fn foreground(&self) -> bool {
+        self.staged_tab.is_none()
+    }
+
+    /// Applies a message that belongs to `tab`, staging that tab first when it
+    /// is not the one on screen.
+    ///
+    /// Staging is transparent to the handlers: a background tab's stream fills
+    /// *its* chat pane, its session row lands in *its* screen, and the commands
+    /// its handlers send go to *its* core. A message for a tab that has since
+    /// been closed is dropped — a turn in flight is not an error.
+    fn apply_to_tab(&mut self, tab: TabId, msg: AppMessage) -> Option<AppEffect> {
+        if tab == self.active {
+            return self.update(msg);
+        }
+        let position = self.tabs.iter().position(|candidate| candidate.id == tab)?;
+        let staged = self.stage(position)?;
+        self.staged_tab = Some(tab);
+        let effect = self.update(msg);
+        self.staged_tab = None;
+        self.restore(position, staged);
+        effect
+    }
+
+    /// The tab whose core the process spawned at startup. A tab opened later
+    /// reports through its own receiver; this one's events are the only ones the
+    /// render loop reads, so they are tagged with this id.
+    pub fn first_tab(&self) -> TabId {
+        self.tabs.first().map_or(self.active, |tab| tab.id)
+    }
+
+    /// The scene a tab starts its sessions under, read from whichever copy is
+    /// authoritative: the working slot for the active tab, the parked tab
+    /// otherwise.
+    fn tab_scene_default(&self, tab: TabId) -> Option<String> {
+        if tab == self.active {
+            return self.scene_default.clone();
+        }
+        self.tabs
+            .iter()
+            .find(|candidate| candidate.id == tab)
+            .and_then(|candidate| candidate.scene_default.clone())
     }
 
     /// Adds a tab for `root`, driven by `cmd_tx`.
@@ -733,6 +890,11 @@ impl App {
             id,
             root,
             scene: self.scene_default.clone(),
+            // The new core re-reports its own set (`ScenesLoaded`) once its
+            // config chain is loaded; until then the tab shows the roster the
+            // user already knows.
+            scenes: self.scene_entries.clone(),
+            scene_default: self.scene_default.clone(),
             cmd_tx,
             screen: Some(screen),
         });
@@ -1206,83 +1368,119 @@ impl App {
                 }
                 _ => None,
             },
-            Event::Core(core_ev) => match core_ev {
-                CoreEvent::Pong => Some(AppMessage::CommandMenu(CommandMenuMessage::Close)),
-                CoreEvent::ModelsLoaded {
-                    provider_name,
-                    models,
-                } => Some(AppMessage::ModelsLoaded {
-                    provider_name,
-                    models,
-                }),
-                CoreEvent::ModelsError {
-                    provider_name,
-                    error,
-                } => Some(AppMessage::ModelsError {
-                    provider_name,
-                    error,
-                }),
-                CoreEvent::ConfigSaved => Some(AppMessage::ConfigSaved),
-                CoreEvent::ConfigError { error } => Some(AppMessage::ConfigError { error }),
-                CoreEvent::RegistryLoaded {
-                    registry,
-                    providers,
-                } => Some(AppMessage::RegistryLoaded {
-                    registry,
-                    providers,
-                }),
-                CoreEvent::RegistryError { registry, error } => {
-                    Some(AppMessage::RegistryError { registry, error })
-                }
-                CoreEvent::SessionStarted => Some(AppMessage::SceneChanged {
-                    name: self.scene_default.clone(),
-                }),
-                CoreEvent::SessionCreated { id, title, scene } => {
-                    Some(AppMessage::SessionCreated { id, title, scene })
-                }
-                CoreEvent::SessionTitleChanged { id, title } => {
-                    Some(AppMessage::SessionTitleChanged { id, title })
-                }
-                CoreEvent::TokenReceived { content } => Some(AppMessage::Session(
-                    SessionMessage::Chat(ChatMessage::TokenReceived { content }),
-                )),
-                CoreEvent::ReasoningReceived { content } => Some(AppMessage::Session(
-                    SessionMessage::Chat(ChatMessage::ReasoningReceived { content }),
-                )),
-                CoreEvent::ContextLoaded { paths } => Some(AppMessage::Session(
-                    SessionMessage::Chat(ChatMessage::ContextLoaded { paths }),
-                )),
-                CoreEvent::ToolStarted {
+            Event::Core { tab, event } => self.map_core_event(tab, event),
+        }
+    }
+
+    /// A core event, tagged with the tab whose core sent it.
+    ///
+    /// Everything one core reports about its agent — its stream, its tools, its
+    /// session row, its roster, its scene set — belongs to that tab, so it is
+    /// wrapped and routed there even while another tab is on screen. The few
+    /// events about the *user's* setup rather than a tab's agent stay app-wide
+    /// (see [`core_event_is_global`]).
+    fn map_core_event(&self, tab: TabId, event: CoreEvent) -> Option<AppMessage> {
+        let scoped = !core_event_is_global(&event);
+        let msg = self.map_core_message(tab, event)?;
+        Some(if scoped {
+            AppMessage::for_tab(tab, msg)
+        } else {
+            msg
+        })
+    }
+
+    /// The one-to-one mapping from a core event to the message it means. Tab
+    /// identity is added around it by [`App::map_core_event`]; only the arms that
+    /// read per-tab state need it here.
+    fn map_core_message(&self, tab: TabId, core_ev: CoreEvent) -> Option<AppMessage> {
+        match core_ev {
+            CoreEvent::Pong => Some(AppMessage::CommandMenu(CommandMenuMessage::Close)),
+            CoreEvent::ModelsLoaded {
+                provider_name,
+                models,
+            } => Some(AppMessage::ModelsLoaded {
+                provider_name,
+                models,
+            }),
+            CoreEvent::ModelsError {
+                provider_name,
+                error,
+            } => Some(AppMessage::ModelsError {
+                provider_name,
+                error,
+            }),
+            CoreEvent::ConfigSaved => Some(AppMessage::ConfigSaved),
+            CoreEvent::ConfigError { error } => Some(AppMessage::ConfigError { error }),
+            CoreEvent::RegistryLoaded {
+                registry,
+                providers,
+            } => Some(AppMessage::RegistryLoaded {
+                registry,
+                providers,
+            }),
+            CoreEvent::RegistryError { registry, error } => {
+                Some(AppMessage::RegistryError { registry, error })
+            }
+            CoreEvent::SessionStarted => Some(AppMessage::SceneChanged {
+                name: self.tab_scene_default(tab),
+            }),
+            CoreEvent::SessionCreated { id, title, scene } => {
+                Some(AppMessage::SessionCreated { id, title, scene })
+            }
+            CoreEvent::SessionTitleChanged { id, title } => {
+                Some(AppMessage::SessionTitleChanged { id, title })
+            }
+            CoreEvent::TokenReceived { content } => Some(AppMessage::Session(
+                SessionMessage::Chat(ChatMessage::TokenReceived { content }),
+            )),
+            CoreEvent::ReasoningReceived { content } => Some(AppMessage::Session(
+                SessionMessage::Chat(ChatMessage::ReasoningReceived { content }),
+            )),
+            CoreEvent::ContextLoaded { paths } => Some(AppMessage::Session(SessionMessage::Chat(
+                ChatMessage::ContextLoaded { paths },
+            ))),
+            CoreEvent::ToolStarted {
+                name,
+                args,
+                worker,
+                spawn,
+                call_id,
+                waiting,
+            } => Some(AppMessage::Session(SessionMessage::Chat(
+                ChatMessage::ToolStarted {
                     name,
                     args,
                     worker,
                     spawn,
-                    call_id,
+                    call_id: Some(call_id),
                     waiting,
-                } => Some(AppMessage::Session(SessionMessage::Chat(
-                    ChatMessage::ToolStarted {
-                        name,
-                        args,
-                        worker,
-                        spawn,
-                        call_id: Some(call_id),
-                        waiting,
-                    },
-                ))),
-                CoreEvent::ToolRunning {
+                },
+            ))),
+            CoreEvent::ToolRunning {
+                name,
+                worker,
+                spawn,
+                call_id,
+            } => Some(AppMessage::Session(SessionMessage::Chat(
+                ChatMessage::ToolRunning {
                     name,
                     worker,
                     spawn,
-                    call_id,
-                } => Some(AppMessage::Session(SessionMessage::Chat(
-                    ChatMessage::ToolRunning {
-                        name,
-                        worker,
-                        spawn,
-                        call_id: Some(call_id),
-                    },
-                ))),
-                CoreEvent::ToolFinished {
+                    call_id: Some(call_id),
+                },
+            ))),
+            CoreEvent::ToolFinished {
+                name,
+                ok,
+                output,
+                worker,
+                spawn,
+                file_change,
+                streams,
+                duration_ms,
+                call_id,
+            } => Some(AppMessage::Session(SessionMessage::Chat(
+                ChatMessage::ToolFinished {
                     name,
                     ok,
                     output,
@@ -1291,286 +1489,272 @@ impl App {
                     file_change,
                     streams,
                     duration_ms,
-                    call_id,
-                } => Some(AppMessage::Session(SessionMessage::Chat(
-                    ChatMessage::ToolFinished {
-                        name,
-                        ok,
-                        output,
-                        worker,
-                        spawn,
-                        file_change,
-                        streams,
-                        duration_ms,
-                        call_id: Some(call_id),
-                    },
-                ))),
-                CoreEvent::ToolOutput {
+                    call_id: Some(call_id),
+                },
+            ))),
+            CoreEvent::ToolOutput {
+                tool,
+                worker,
+                call_id,
+                stdout,
+                stderr,
+            } => Some(AppMessage::Session(SessionMessage::Chat(
+                ChatMessage::ToolOutput {
                     tool,
                     worker,
                     call_id,
                     stdout,
                     stderr,
-                } => Some(AppMessage::Session(SessionMessage::Chat(
-                    ChatMessage::ToolOutput {
-                        tool,
-                        worker,
-                        call_id,
-                        stdout,
-                        stderr,
-                    },
-                ))),
-                CoreEvent::BashStarted { id, command } => Some(AppMessage::Session(
-                    SessionMessage::Bash(BashMessage::Started { id, command }),
-                )),
-                CoreEvent::BashOutput { id, stdout, stderr } => Some(AppMessage::Session(
-                    SessionMessage::Bash(BashMessage::Output { id, stdout, stderr }),
-                )),
-                CoreEvent::BashFinished {
+                },
+            ))),
+            CoreEvent::BashStarted { id, command } => Some(AppMessage::Session(
+                SessionMessage::Bash(BashMessage::Started { id, command }),
+            )),
+            CoreEvent::BashOutput { id, stdout, stderr } => Some(AppMessage::Session(
+                SessionMessage::Bash(BashMessage::Output { id, stdout, stderr }),
+            )),
+            CoreEvent::BashFinished {
+                id,
+                ok,
+                exit,
+                stdout,
+                stderr,
+                duration_ms,
+            } => Some(AppMessage::Session(SessionMessage::Bash(
+                BashMessage::Finished {
                     id,
                     ok,
                     exit,
                     stdout,
                     stderr,
                     duration_ms,
-                } => Some(AppMessage::Session(SessionMessage::Bash(
-                    BashMessage::Finished {
-                        id,
-                        ok,
-                        exit,
-                        stdout,
-                        stderr,
-                        duration_ms,
-                    },
-                ))),
-                CoreEvent::WorkerStarted {
+                },
+            ))),
+            CoreEvent::WorkerStarted {
+                name,
+                args,
+                call_id,
+                waiting,
+            } => Some(AppMessage::Session(SessionMessage::Chat(
+                ChatMessage::WorkerStarted {
                     name,
                     args,
-                    call_id,
+                    call_id: Some(call_id),
                     waiting,
-                } => Some(AppMessage::Session(SessionMessage::Chat(
-                    ChatMessage::WorkerStarted {
-                        name,
-                        args,
-                        call_id: Some(call_id),
-                        waiting,
-                    },
-                ))),
-                CoreEvent::WorkerFinished {
+                },
+            ))),
+            CoreEvent::WorkerFinished {
+                name,
+                ok,
+                output,
+                duration_ms,
+                call_id,
+            } => Some(AppMessage::Session(SessionMessage::Chat(
+                ChatMessage::WorkerFinished {
                     name,
                     ok,
                     output,
                     duration_ms,
-                    call_id,
-                } => Some(AppMessage::Session(SessionMessage::Chat(
-                    ChatMessage::WorkerFinished {
-                        name,
-                        ok,
-                        output,
-                        duration_ms,
-                        call_id: Some(call_id),
-                    },
-                ))),
-                CoreEvent::StreamDone { .. } => Some(AppMessage::Session(SessionMessage::Chat(
-                    ChatMessage::StreamDone,
-                ))),
-                CoreEvent::TurnMeta { meta } => Some(AppMessage::Session(SessionMessage::Chat(
-                    ChatMessage::TurnMeta { meta },
-                ))),
-                CoreEvent::PromptSteered { content } => Some(AppMessage::Session(
-                    SessionMessage::Chat(ChatMessage::SteeredQueued { content }),
-                )),
-                CoreEvent::TurnStarted {
+                    call_id: Some(call_id),
+                },
+            ))),
+            CoreEvent::StreamDone { .. } => Some(AppMessage::Session(SessionMessage::Chat(
+                ChatMessage::StreamDone,
+            ))),
+            CoreEvent::TurnMeta { meta } => Some(AppMessage::Session(SessionMessage::Chat(
+                ChatMessage::TurnMeta { meta },
+            ))),
+            CoreEvent::PromptSteered { content } => Some(AppMessage::Session(
+                SessionMessage::Chat(ChatMessage::SteeredQueued { content }),
+            )),
+            CoreEvent::TurnStarted {
+                content,
+                attachments,
+                steered,
+            } => Some(AppMessage::Session(SessionMessage::TurnStarted {
+                content,
+                attachments,
+                steered,
+            })),
+            CoreEvent::AttachmentMedia { items } => Some(AppMessage::MediaArrived(
+                items
+                    .into_iter()
+                    .map(|item| {
+                        (
+                            item.sha256,
+                            item.bytes.map(|bytes| MediaBytes(bytes.into())),
+                        )
+                    })
+                    .collect(),
+            )),
+            CoreEvent::DirectivesProbed { token, items } => {
+                Some(AppMessage::Session(SessionMessage::DirectivesValidated {
+                    token,
+                    items,
+                }))
+            }
+            CoreEvent::PathCompletions { token, candidates } => {
+                let menu = SessionMessage::PathCompletions { token, candidates };
+                Some(AppMessage::Session(menu))
+            }
+            CoreEvent::ClipboardImage { attachment } => {
+                Some(AppMessage::Session(SessionMessage::ClipboardAttached {
+                    path: attachment.path,
+                    probe: attachment.probe,
+                }))
+            }
+            CoreEvent::AttachmentNotice { text } => {
+                Some(AppMessage::Session(SessionMessage::ShowStatus {
+                    status: text,
+                }))
+            }
+            CoreEvent::SteeredRecalled { stacked, content } => {
+                Some(AppMessage::Session(SessionMessage::SteeredRecalled {
+                    stacked,
                     content,
-                    attachments,
-                    steered,
-                } => Some(AppMessage::Session(SessionMessage::TurnStarted {
-                    content,
-                    attachments,
-                    steered,
-                })),
-                CoreEvent::AttachmentMedia { items } => Some(AppMessage::MediaArrived(
-                    items
-                        .into_iter()
-                        .map(|item| {
-                            (
-                                item.sha256,
-                                item.bytes.map(|bytes| MediaBytes(bytes.into())),
-                            )
-                        })
-                        .collect(),
-                )),
-                CoreEvent::DirectivesProbed { token, items } => {
-                    Some(AppMessage::Session(SessionMessage::DirectivesValidated {
-                        token,
-                        items,
-                    }))
-                }
-                CoreEvent::PathCompletions { token, candidates } => {
-                    let menu = SessionMessage::PathCompletions { token, candidates };
-                    Some(AppMessage::Session(menu))
-                }
-                CoreEvent::ClipboardImage { attachment } => {
-                    Some(AppMessage::Session(SessionMessage::ClipboardAttached {
-                        path: attachment.path,
-                        probe: attachment.probe,
-                    }))
-                }
-                CoreEvent::AttachmentNotice { text } => {
-                    Some(AppMessage::Session(SessionMessage::ShowStatus {
-                        status: text,
-                    }))
-                }
-                CoreEvent::SteeredRecalled { stacked, content } => {
-                    Some(AppMessage::Session(SessionMessage::SteeredRecalled {
-                        stacked,
-                        content,
-                    }))
-                }
-                CoreEvent::SteeredCleared => Some(AppMessage::Session(SessionMessage::Chat(
-                    ChatMessage::SteeredCleared,
-                ))),
-                CoreEvent::StreamError { error } => Some(AppMessage::Session(
-                    SessionMessage::Chat(ChatMessage::StreamError { error }),
-                )),
-                CoreEvent::StreamCancelled => Some(AppMessage::Session(SessionMessage::Chat(
-                    ChatMessage::StreamCancelled,
-                ))),
-                CoreEvent::CompactionStarted => {
-                    Some(AppMessage::Session(SessionMessage::CompactionStarted))
-                }
-                CoreEvent::CompactionFinished => {
-                    Some(AppMessage::Session(SessionMessage::CompactionFinished))
-                }
-                CoreEvent::RetryScheduled {
-                    reason,
-                    attempt,
-                    max_attempts,
-                    delay_ms,
-                    ..
-                } => Some(AppMessage::Session(SessionMessage::RetryScheduled {
-                    reason,
-                    attempt,
-                    max_attempts,
-                    delay_ms,
-                })),
-                CoreEvent::UsageUpdate {
+                }))
+            }
+            CoreEvent::SteeredCleared => Some(AppMessage::Session(SessionMessage::Chat(
+                ChatMessage::SteeredCleared,
+            ))),
+            CoreEvent::StreamError { error } => Some(AppMessage::Session(SessionMessage::Chat(
+                ChatMessage::StreamError { error },
+            ))),
+            CoreEvent::StreamCancelled => Some(AppMessage::Session(SessionMessage::Chat(
+                ChatMessage::StreamCancelled,
+            ))),
+            CoreEvent::CompactionStarted => {
+                Some(AppMessage::Session(SessionMessage::CompactionStarted))
+            }
+            CoreEvent::CompactionFinished => {
+                Some(AppMessage::Session(SessionMessage::CompactionFinished))
+            }
+            CoreEvent::RetryScheduled {
+                reason,
+                attempt,
+                max_attempts,
+                delay_ms,
+                ..
+            } => Some(AppMessage::Session(SessionMessage::RetryScheduled {
+                reason,
+                attempt,
+                max_attempts,
+                delay_ms,
+            })),
+            CoreEvent::UsageUpdate {
+                usage,
+                cost,
+                context_tokens,
+            } => Some(AppMessage::Session(SessionMessage::UsageUpdate {
+                usage,
+                cost,
+                context_tokens,
+            })),
+            CoreEvent::UsageSnapshot { usage, cost } => {
+                Some(AppMessage::Session(SessionMessage::UsageSnapshot {
                     usage,
                     cost,
-                    context_tokens,
-                } => Some(AppMessage::Session(SessionMessage::UsageUpdate {
-                    usage,
-                    cost,
-                    context_tokens,
-                })),
-                CoreEvent::UsageSnapshot { usage, cost } => {
-                    Some(AppMessage::Session(SessionMessage::UsageSnapshot {
-                        usage,
-                        cost,
-                    }))
-                }
-                CoreEvent::SessionsLoaded { sessions } => {
-                    Some(AppMessage::SessionsLoaded { sessions })
-                }
-                CoreEvent::SessionLoaded { id, title, session } => {
-                    Some(AppMessage::SessionLoaded { id, title, session })
-                }
-                CoreEvent::SessionDeleted { id } => Some(AppMessage::SessionDeleted { id }),
-                CoreEvent::SessionLocked { .. } => Some(AppMessage::SessionLocked),
-                CoreEvent::SessionError { error } => Some(AppMessage::SessionError { error }),
-                CoreEvent::Forked { session, prompt } => {
-                    Some(AppMessage::Session(SessionMessage::Forked {
-                        session,
-                        prompt,
-                    }))
-                }
-                CoreEvent::SessionCompacted { session } => {
-                    Some(AppMessage::Session(SessionMessage::SessionCompacted {
-                        session,
-                    }))
-                }
-                CoreEvent::ModelUsed { session_id, models } => {
-                    Some(AppMessage::Session(SessionMessage::ModelsUsed {
-                        session_id,
-                        models,
-                    }))
-                }
-                CoreEvent::SessionTree { session } => Some(AppMessage::SessionTree { session }),
-                CoreEvent::SessionExported { path } => {
-                    Some(AppMessage::Session(SessionMessage::ShowStatus {
-                        status: format!("Exported to {}", path.display()),
-                    }))
-                }
-                CoreEvent::SearchResults { hits } => {
-                    Some(AppMessage::HistorySearch(HistorySearchMessage::Results {
-                        hits,
-                    }))
-                }
-                CoreEvent::SearchError { error } => {
-                    Some(AppMessage::HistorySearch(HistorySearchMessage::Error {
-                        error,
-                    }))
-                }
-                CoreEvent::QuestionAsked { id, questions } => {
-                    Some(AppMessage::Session(SessionMessage::QuestionAsked {
-                        id,
-                        questions,
-                    }))
-                }
-                CoreEvent::PermissionRequested {
+                }))
+            }
+            CoreEvent::SessionsLoaded { sessions } => Some(AppMessage::SessionsLoaded { sessions }),
+            CoreEvent::SessionLoaded { id, title, session } => {
+                Some(AppMessage::SessionLoaded { id, title, session })
+            }
+            CoreEvent::SessionDeleted { id } => Some(AppMessage::SessionDeleted { id }),
+            CoreEvent::SessionLocked { .. } => Some(AppMessage::SessionLocked),
+            CoreEvent::SessionError { error } => Some(AppMessage::SessionError { error }),
+            CoreEvent::Forked { session, prompt } => {
+                Some(AppMessage::Session(SessionMessage::Forked {
+                    session,
+                    prompt,
+                }))
+            }
+            CoreEvent::SessionCompacted { session } => {
+                Some(AppMessage::Session(SessionMessage::SessionCompacted {
+                    session,
+                }))
+            }
+            CoreEvent::ModelUsed { session_id, models } => {
+                Some(AppMessage::Session(SessionMessage::ModelsUsed {
+                    session_id,
+                    models,
+                }))
+            }
+            CoreEvent::SessionTree { session } => Some(AppMessage::SessionTree { session }),
+            CoreEvent::SessionExported { path } => {
+                Some(AppMessage::Session(SessionMessage::ShowStatus {
+                    status: format!("Exported to {}", path.display()),
+                }))
+            }
+            CoreEvent::SearchResults { hits } => {
+                Some(AppMessage::HistorySearch(HistorySearchMessage::Results {
+                    hits,
+                }))
+            }
+            CoreEvent::SearchError { error } => {
+                Some(AppMessage::HistorySearch(HistorySearchMessage::Error {
+                    error,
+                }))
+            }
+            CoreEvent::QuestionAsked { id, questions } => {
+                Some(AppMessage::Session(SessionMessage::QuestionAsked {
                     id,
-                    description,
-                    allow_session,
-                    allow_dir,
-                } => Some(AppMessage::Session(SessionMessage::PermissionRequested {
-                    id,
-                    description,
-                    allow_session,
-                    allow_dir,
-                })),
-                CoreEvent::LspStatus { servers } => Some(AppMessage::LspStatus { servers }),
-                CoreEvent::LspDiagnostics { path, diagnostics } => {
-                    Some(AppMessage::LspDiagnostics { path, diagnostics })
-                }
-                CoreEvent::LspError { error } => Some(AppMessage::LspError { error }),
-                CoreEvent::McpStatus { servers } => Some(AppMessage::McpStatus { servers }),
-                CoreEvent::McpError { error } => Some(AppMessage::McpError { error }),
-                CoreEvent::SkillsLoaded { skills, warnings } => {
-                    Some(AppMessage::SkillsLoaded { skills, warnings })
-                }
-                CoreEvent::CustomCommandsLoaded { commands, warnings } => {
-                    Some(AppMessage::CustomCommandsLoaded { commands, warnings })
-                }
-                CoreEvent::ScenesLoaded {
-                    scenes,
-                    default,
-                    warnings,
-                } => Some(AppMessage::ScenesLoaded {
-                    scenes,
-                    default,
-                    warnings,
-                }),
-                CoreEvent::SceneChanged { name } => Some(AppMessage::SceneChanged { name }),
-                CoreEvent::SceneError { error } => {
-                    Some(AppMessage::Session(SessionMessage::ShowError { error }))
-                }
-                CoreEvent::ShellWarning { message } => Some(AppMessage::ShellWarning { message }),
-                CoreEvent::AuthPrompt {
-                    provider,
-                    verification_uri,
-                    user_code,
-                } => Some(AppMessage::Auth(AuthMessage::Prompt {
-                    provider,
-                    verification_uri,
-                    user_code,
-                })),
-                CoreEvent::AuthSuccess { provider } => {
-                    Some(AppMessage::Auth(AuthMessage::Succeeded { provider }))
-                }
-                CoreEvent::AuthFailed { provider, error } => {
-                    Some(AppMessage::Auth(AuthMessage::Failed { provider, error }))
-                }
-            },
+                    questions,
+                }))
+            }
+            CoreEvent::PermissionRequested {
+                id,
+                description,
+                allow_session,
+                allow_dir,
+            } => Some(AppMessage::Session(SessionMessage::PermissionRequested {
+                id,
+                description,
+                allow_session,
+                allow_dir,
+            })),
+            CoreEvent::LspStatus { servers } => Some(AppMessage::LspStatus { servers }),
+            CoreEvent::LspDiagnostics { path, diagnostics } => {
+                Some(AppMessage::LspDiagnostics { path, diagnostics })
+            }
+            CoreEvent::LspError { error } => Some(AppMessage::LspError { error }),
+            CoreEvent::McpStatus { servers } => Some(AppMessage::McpStatus { servers }),
+            CoreEvent::McpError { error } => Some(AppMessage::McpError { error }),
+            CoreEvent::SkillsLoaded { skills, warnings } => {
+                Some(AppMessage::SkillsLoaded { skills, warnings })
+            }
+            CoreEvent::CustomCommandsLoaded { commands, warnings } => {
+                Some(AppMessage::CustomCommandsLoaded { commands, warnings })
+            }
+            CoreEvent::ScenesLoaded {
+                scenes,
+                default,
+                warnings,
+            } => Some(AppMessage::ScenesLoaded {
+                scenes,
+                default,
+                warnings,
+            }),
+            CoreEvent::SceneChanged { name } => Some(AppMessage::SceneChanged { name }),
+            CoreEvent::SceneError { error } => {
+                Some(AppMessage::Session(SessionMessage::ShowError { error }))
+            }
+            CoreEvent::ShellWarning { message } => Some(AppMessage::ShellWarning { message }),
+            CoreEvent::AuthPrompt {
+                provider,
+                verification_uri,
+                user_code,
+            } => Some(AppMessage::Auth(AuthMessage::Prompt {
+                provider,
+                verification_uri,
+                user_code,
+            })),
+            CoreEvent::AuthSuccess { provider } => {
+                Some(AppMessage::Auth(AuthMessage::Succeeded { provider }))
+            }
+            CoreEvent::AuthFailed { provider, error } => {
+                Some(AppMessage::Auth(AuthMessage::Failed { provider, error }))
+            }
         }
     }
 
@@ -1624,6 +1808,9 @@ impl App {
 
     pub fn update(&mut self, msg: AppMessage) -> Option<AppEffect> {
         match msg {
+            // A message about a specific tab: routed there before anything else
+            // looks at it (see `apply_to_tab`).
+            AppMessage::Tab { tab, msg } => return self.apply_to_tab(tab, *msg),
             AppMessage::OpenCommandMenu => {
                 self.session.update(SessionMessage::ClearError);
                 self.update_command_availability();
@@ -1740,13 +1927,18 @@ impl App {
                 }
             }
             AppMessage::SessionTree { session } => {
-                if self.tree_popup.open {
-                    self.tree_popup.set_rows(&session);
-                } else {
-                    self.tree_popup.open(&session);
-                    self.overlay = Overlay::Tree;
+                // An answer to an interactive command (`/tree`), which only the
+                // tab on screen can have issued: a background tab's would open
+                // the popup over a session it does not describe.
+                if self.foreground() {
+                    if self.tree_popup.open {
+                        self.tree_popup.set_rows(&session);
+                    } else {
+                        self.tree_popup.open(&session);
+                        self.overlay = Overlay::Tree;
+                    }
+                    self.tree_popup.set_busy(self.session.is_busy());
                 }
-                self.tree_popup.set_busy(self.session.is_busy());
             }
             AppMessage::Scene(m) => {
                 if let Some(effect) = self.scene_picker.update(m) {
@@ -2054,6 +2246,16 @@ impl App {
                 }
             }
             AppMessage::HistorySearch(m) => {
+                // Search runs against one store, so its answers belong to the tab
+                // that asked; a background tab's are dropped like the picker's.
+                if !self.foreground()
+                    && matches!(
+                        m,
+                        HistorySearchMessage::Results { .. } | HistorySearchMessage::Error { .. }
+                    )
+                {
+                    return None;
+                }
                 if let Some(effect) = self.history_search.update(m) {
                     match effect {
                         HistorySearchEffect::Open => {
@@ -2247,7 +2449,9 @@ impl App {
             AppMessage::SessionCreated { id, title, scene } => {
                 self.session.session_id = Some(id);
                 self.session.session_title = Some(title);
-                self.session_picker.active_id = Some(id);
+                if self.foreground() {
+                    self.session_picker.active_id = Some(id);
+                }
                 self.set_scene(scene);
             }
             AppMessage::SessionTitleChanged { id, title } => {
@@ -2258,36 +2462,55 @@ impl App {
                 }
             }
             AppMessage::SessionsLoaded { sessions } => {
-                self.session_picker.set_sessions(sessions);
+                // The picker lists the sessions of *one* store, so it is filled by
+                // the tab that asked for it and by no other (see `foreground`).
+                if self.foreground() {
+                    self.session_picker.set_sessions(sessions);
+                }
             }
             AppMessage::SessionLoaded { id, title, session } => {
                 let scene = session.scene.clone();
                 self.session
                     .update(SessionMessage::Loaded { id, title, session });
-                self.session_picker.active_id = Some(id);
+                if self.foreground() {
+                    self.session_picker.active_id = Some(id);
+                }
                 self.set_scene(scene);
             }
             AppMessage::SessionDeleted { id } => {
                 let was_active = self.session.session_id == Some(id);
                 if was_active {
-                    if let Some(rid) = self.session_picker.session_after(id) {
+                    // The picker's list is the tab-on-screen's, so only that tab
+                    // can pick a successor from it; a background tab simply ends
+                    // up with an empty screen.
+                    let next = self
+                        .foreground()
+                        .then(|| self.session_picker.session_after(id))
+                        .flatten();
+                    if let Some(rid) = next {
                         self.session.update(SessionMessage::Reset);
                         self.ctx
                             .send(shuvarie_core::Command::LoadSession { id: rid });
                         self.close_overlay();
                     } else {
                         self.session.update(SessionMessage::Reset);
-                        self.close_overlay();
+                        if self.foreground() {
+                            self.close_overlay();
+                        }
                     }
                 } else {
-                    self.refresh_sessions();
+                    if self.foreground() {
+                        self.refresh_sessions();
+                    }
                 }
             }
             AppMessage::SessionError { error } => {
                 self.session.update(SessionMessage::ShowError { error });
             }
             AppMessage::SessionLocked => {
-                if self.session_picker.open {
+                // A lock is worth saying out loud whichever tab hit it, but only
+                // the tab on screen owns the open picker that gets refreshed.
+                if self.session_picker.open && self.foreground() {
                     self.ctx.send(shuvarie_core::Command::ListSessions);
                 } else {
                     self.warning
@@ -5363,6 +5586,203 @@ mod tests {
                 "{code:?} stays with the composer"
             );
         }
+    }
+
+    /// A stored session row, for the picker's list.
+    fn summary(title: &str) -> shuvarie_core::SessionSummary {
+        shuvarie_core::SessionSummary {
+            id: uuid::Uuid::now_v7(),
+            title: title.to_string(),
+            message_count: 1,
+            updated_at_epoch_ms: 0,
+            in_use: false,
+        }
+    }
+
+    /// A core event for a tab other than the one on screen: the stream belongs
+    /// to the core that produced it, so it fills that tab's screen.
+    #[test]
+    fn a_background_tabs_event_lands_in_its_own_screen() {
+        let (mut app, mut receivers) = app_with_tabs(2);
+        assert_eq!(app.active_index(), 0);
+        let id = uuid::Uuid::now_v7();
+        let second = app.tabs[1].id;
+
+        app.update(AppMessage::for_tab(
+            second,
+            AppMessage::SessionCreated {
+                id,
+                title: "second agent".into(),
+                scene: None,
+            },
+        ));
+
+        // The tab that reported it moved, the one on screen did not.
+        let parked = app.tabs[1].screen.as_ref().expect("still parked");
+        assert_eq!(parked.session_id, Some(id));
+        assert_eq!(parked.session_title.as_deref(), Some("second agent"));
+        assert_eq!(app.session.session_id, None);
+        assert_eq!(app.active_index(), 0, "the user stays where they were");
+        // A background tab's session row is not the picker's active one.
+        assert_eq!(app.session_picker.active_id, None);
+
+        // ...and the working slots are handed back exactly as they were: the
+        // next session command still goes to the tab on screen.
+        app.ctx.send(shuvarie_core::Command::Ping);
+        assert!(matches!(
+            receivers[0].try_recv(),
+            Ok(shuvarie_core::Command::Ping)
+        ));
+        assert!(receivers[1].try_recv().is_err());
+    }
+
+    /// The same event for the tab on screen takes the direct path and never
+    /// stages anything.
+    #[test]
+    fn the_active_tabs_event_applies_in_place() {
+        let (mut app, _receivers) = app_with_tabs(2);
+        let id = uuid::Uuid::now_v7();
+        let first = app.tabs[0].id;
+
+        app.update(AppMessage::for_tab(
+            first,
+            AppMessage::SessionCreated {
+                id,
+                title: "first agent".into(),
+                scene: None,
+            },
+        ));
+
+        assert_eq!(app.session.session_id, Some(id));
+        assert!(app.tabs[0].screen.is_none(), "nothing was parked");
+        assert!(app.staged_tab.is_none(), "no tab was staged");
+    }
+
+    /// A turn in flight for a tab the user has since closed is dropped, not an
+    /// error and not a panic.
+    #[test]
+    fn an_event_for_a_closed_tab_is_dropped() {
+        let (mut app, _receivers) = app_with_tabs(1);
+        let before = app.session.session_id;
+        app.update(AppMessage::for_tab(
+            TabId::new(99),
+            AppMessage::SessionCreated {
+                id: uuid::Uuid::now_v7(),
+                title: "gone".into(),
+                scene: None,
+            },
+        ));
+        assert_eq!(app.session.session_id, before);
+        assert!(app.staged_tab.is_none());
+    }
+
+    /// Which events carry a tab and which are the user's own setup. Session
+    /// traffic is tagged; the catalog, the saved config, and an OAuth login are
+    /// the same in every tab and stay app-wide.
+    #[test]
+    fn core_events_are_tagged_by_tab_unless_they_are_the_users_setup() {
+        let (app, _receivers) = app_with_tabs(2);
+        let second = app.tabs[1].id;
+
+        let scoped = app.map_event(Event::Core {
+            tab: second,
+            event: CoreEvent::TokenReceived {
+                content: "hi".into(),
+            },
+        });
+        match scoped {
+            Some(AppMessage::Tab { tab, msg }) => {
+                assert_eq!(tab, second);
+                assert!(matches!(*msg, AppMessage::Session(_)));
+            }
+            _ => panic!("a stream event belongs to its tab"),
+        }
+
+        let global = app.map_event(Event::Core {
+            tab: second,
+            event: CoreEvent::ConfigSaved,
+        });
+        assert!(
+            matches!(global, Some(AppMessage::ConfigSaved)),
+            "the saved config is not one tab's"
+        );
+    }
+
+    /// A new session in a background tab starts under *that* tab's default scene,
+    /// which is the one its own config chain declares.
+    #[test]
+    fn a_background_tabs_scene_default_is_its_own() {
+        let (mut app, _receivers) = app_with_tabs(2);
+        let second = app.tabs[1].id;
+        let scene = |name: &str| shuvarie_core::scenes::SceneListEntry {
+            id: Some(name.into()),
+            name: name.into(),
+            description: None,
+            switchable: true,
+        };
+        app.update(AppMessage::for_tab(
+            second,
+            AppMessage::ScenesLoaded {
+                scenes: vec![scene("Beta")],
+                default: Some("Beta".into()),
+                warnings: Vec::new(),
+            },
+        ));
+        assert_eq!(app.scene_entries.len(), 0, "the active tab kept its own");
+        assert_eq!(app.tabs[1].scenes.len(), 1);
+
+        let msg = app.map_event(Event::Core {
+            tab: second,
+            event: CoreEvent::SessionStarted,
+        });
+        assert!(
+            matches!(msg, Some(AppMessage::Tab { msg, .. })
+                if matches!(*msg, AppMessage::SceneChanged { ref name } if name.as_deref() == Some("Beta"))),
+            "the reporting tab's default, not the one on screen"
+        );
+    }
+
+    /// `ScenesLoaded` for the tab on screen does reach the switcher, so a
+    /// single-tab run and a switch back behave as they always did.
+    #[test]
+    fn the_active_tabs_scene_set_fills_the_switcher() {
+        let (mut app, _receivers) = app_with_tabs(2);
+        let first = app.tabs[0].id;
+        app.update(AppMessage::for_tab(
+            first,
+            AppMessage::ScenesLoaded {
+                scenes: vec![shuvarie_core::scenes::SceneListEntry {
+                    id: Some("Plan".into()),
+                    name: "Plan".into(),
+                    description: None,
+                    switchable: true,
+                }],
+                default: None,
+                warnings: Vec::new(),
+            },
+        ));
+        assert_eq!(app.scene_entries.len(), 1);
+        app.switch_to_position(1);
+        assert!(app.scene_entries.is_empty(), "the other tab has its own");
+        app.switch_to_position(0);
+        assert_eq!(app.scene_entries.len(), 1, "and gets it back on return");
+    }
+
+    /// The picker and the tree list one store, so a background tab's answer is
+    /// dropped rather than drawn over another tab's session.
+    #[test]
+    fn interactive_answers_from_a_background_tab_are_ignored() {
+        let (mut app, _receivers) = app_with_tabs(2);
+        let second = app.tabs[1].id;
+
+        app.update(AppMessage::for_tab(
+            second,
+            AppMessage::SessionsLoaded {
+                sessions: vec![summary("theirs")],
+            },
+        ));
+        assert!(app.session_picker.sessions.is_empty());
+        assert!(!app.tree_popup.open);
     }
 
     #[test]

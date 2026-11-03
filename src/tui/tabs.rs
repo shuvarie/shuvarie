@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Padding, Paragraph};
 use shuvarie_core::Command;
+use shuvarie_core::scenes::SceneListEntry;
 use tokio::sync::mpsc::Sender;
 use unicode_width::UnicodeWidthStr;
 
@@ -40,11 +41,29 @@ pub struct Tab {
     pub root: PathBuf,
     /// The scene this tab's sessions start under (`None` = built-in Default).
     pub scene: Option<String>,
+    /// The scene set this tab's core reported. Scenes come from the config chain
+    /// of the workspace, so two tabs in different projects do not share one.
+    pub scenes: Vec<SceneListEntry>,
+    /// The default scene this tab's core reported (`None` = built-in Default).
+    pub scene_default: Option<String>,
     /// This tab's core.
     pub cmd_tx: Sender<Command>,
     /// The tab's screen, parked while another tab is active. The active tab is
     /// staged into `App::session` instead, so its entry is `None`.
     pub screen: Option<SessionScreen>,
+}
+
+/// The per-tab state the App keeps in its working slots while that tab is
+/// staged (see `App::stage`): the screen, its scene, the scene set its core
+/// reported, and the sender of its core. Everything else on the App is the
+/// user's — a connection, the theme, a prefs dialog — and stays put across a
+/// switch.
+pub struct Staged {
+    pub screen: SessionScreen,
+    pub scene: Option<String>,
+    pub scenes: Vec<SceneListEntry>,
+    pub scene_default: Option<String>,
+    pub cmd_tx: Sender<Command>,
 }
 
 /// What the bar calls a tab: the session title when the tab has one, else the

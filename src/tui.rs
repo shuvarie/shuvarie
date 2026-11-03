@@ -359,7 +359,9 @@ where
                 // Core event — drain all already-queued core events as one batch.
                 ev = core.event_rx.recv() => {
                     let Some(ev) = ev else { break 'render_loop app.session.session_id; };
-                    let msg = app.map_event(Event::Core(ev));
+                    // Tagged with the tab whose core this is, so a stream keeps
+                    // filling its own chat if the user moves to another tab.
+                    let msg = app.map_event(Event::Core { tab: app.first_tab(), event: ev });
                     apply_msg(&mut app, rat.backend_mut().terminal_mut(), msg)
                 }
                 // Git branch watcher — the workspace's `.git/HEAD` file was
