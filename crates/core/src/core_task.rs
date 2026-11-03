@@ -18,7 +18,7 @@ use crate::permissions::{
     Access, AskScope, DenyCut, PermissionAnswer, PermissionGate, PermissionRequest,
 };
 use crate::question::{AnswerResponse, QuestionGate, QuestionRequest};
-use crate::session::{Continuation, Session, TurnResume};
+use crate::session::{Continuation, ResumePlan, Session};
 use crate::shell::Shell;
 use shuvarie_config::Config;
 use shuvarie_config::{Connections, ProviderConfig, TitleConfig, TrustGrants};
@@ -60,6 +60,13 @@ enum StreamOutcome {
 }
 
 /// How a resumed turn picks up after an interrupted attempt.
+///
+/// The mode decides what the *pane* shows, never what the model is asked or
+/// which reply row the answer lands in: [`ResumePlan::of`] derives the request
+/// for both. A retry keeps the pane's in-flight turn (the attempt was never
+/// committed as interrupted), so the resumed output appends to it; an overflow
+/// changed the history under the turn, so the pane reloads the compacted
+/// session first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResumeMode {
     /// A turn retry after a connection/provider failure: the resumed attempt
@@ -69,8 +76,7 @@ enum ResumeMode {
     TurnRetry,
     /// An auto-continue after a context overflow: compaction changed the
     /// history under the turn, so the pane reloads the compacted session and
-    /// the resumed attempt appends its own reply row under the interrupted
-    /// one.
+    /// the resumed attempt still fills the interrupted reply row.
     Overflow,
 }
 
@@ -2713,88 +2719,6 @@ async fn reload_and_emit(
     Ok(())
 }
 
-/// What a resume hands the retried attempt: the request's own prompt message,
-/// the history above it, the prompt's attachment metadata (the blobs resolve
-/// separately), and the interrupted reply row a turn retry continues.
-struct ResumeRequest {
-    prompt: ChatMsg,
-    prior: Vec<ChatMsg>,
-    prompt_metas: Vec<shuvarie_llm::Attachment>,
-    continuation: Option<Continuation>,
-}
-
-/// Build the request that resumes `loaded`'s last turn so that it appends
-/// nothing to the conversation: the turn's own path is re-sent as-is, with its
-/// last message promoted to the request's prompt. The model therefore reads a
-/// conversation that stops exactly where it stopped — no error notice, no
-/// resume cue, no repeated task — and carries on from there, which is what
-/// keeps a retried turn indistinguishable from one that never dropped.
-///
-/// What that last message is decides how the model is asked to go on, and every
-/// case is the shape the provider would have received had nothing failed:
-///
-/// - A turn that produced nothing ends on its user prompt, re-sent as the
-///   request's prompt: the original request, unchanged.
-/// - A turn that stopped after a tool batch ends on the tool results answering
-///   its calls, re-sent as the prompt — the very user message the agent loop
-///   continues from.
-/// - A turn that stopped mid-reply ends on its own trailing text run, re-sent
-///   as an **assistant** prompt: a prefill, so the model continues that
-///   sentence instead of starting a new one.
-///
-/// The prefill is the one shape not every provider accepts (a server that
-/// insists the last message be a user turn refuses it, exactly as it would
-/// refuse any other trailing-assistant request). Such a refusal is reported and
-/// retried like every other turn error rather than silently trading the
-/// seamlessness away for a cue the model could read.
-///
-/// A [`ResumeMode::TurnRetry`] also continues the interrupted reply row, while
-/// an [`ResumeMode::Overflow`] starts a fresh reply row under it. `None` when
-/// the path has no user turn to resume.
-fn resume_request(loaded: &Session, mode: ResumeMode) -> Option<ResumeRequest> {
-    match loaded.last_turn_resume()? {
-        TurnResume::Replay { prompt, prior } => Some(ResumeRequest {
-            prompt: ChatMsg::user(prompt),
-            prior,
-            // A replay re-sends the turn's stored prompt, which the leaf no
-            // longer reaches: its attachment metadata must ride the retried
-            // request explicitly — pruned blobs arrive metadata-only.
-            prompt_metas: loaded
-                .last_user_node()
-                .map(|node| node.attachments.clone())
-                .unwrap_or_default(),
-            continuation: None,
-        }),
-        TurnResume::Continue { mut prior } => {
-            // The path's last message becomes the request's prompt; the rest is
-            // history. Nothing is appended to the conversation.
-            let prompt = prior.pop()?;
-            // Only a re-sent prompt carries attachments of its own (tool
-            // results and a prefill never do).
-            let prompt_metas = if prompt.is_user_prompt() {
-                prompt.attachments.clone()
-            } else {
-                Vec::new()
-            };
-            let continuation = (mode == ResumeMode::TurnRetry)
-                .then(|| loaded.resume_continuation())
-                .flatten()
-                .map(|mut continuation| {
-                    // An assistant prompt re-sends the reply's trailing run, so
-                    // the resumed text continues that run mid-way.
-                    continuation.prefilled = prompt.role == shuvarie_llm::Role::Assistant;
-                    continuation
-                });
-            Some(ResumeRequest {
-                prompt,
-                prior,
-                prompt_metas,
-                continuation,
-            })
-        }
-    }
-}
-
 impl CoreCtx {
     /// The turn's codemode wiring, or `None` when the feature is off (the
     /// default). The roster itself is not decided here -- `all_tools` has just
@@ -3033,7 +2957,7 @@ impl CoreCtx {
     /// Build a stream for `prompt` and spawn the event-forwarding task. The
     /// prompt is the request's own last message, and its role decides how the
     /// model reads the request: a fresh turn sends a user message, while a
-    /// resume sends whichever message its path ended on ([`resume_request`]) —
+    /// resume sends whichever message its path ended on ([`ResumePlan::of`]) —
     /// a user message carrying tool results, the turn's prompt again, or an
     /// assistant prefill. When `push_user` is set, the content is first
     /// appended as a user message carrying `attachments`' metadata (used by
@@ -3514,7 +3438,7 @@ impl CoreCtx {
     /// A retry *continues* the interrupted turn rather than replaying it, and
     /// it does so without telling the model anything: the resumed request is
     /// the turn's own path re-sent, its last message promoted to the request's
-    /// prompt ([`resume_request`]) — the tool results a tool batch would have
+    /// prompt ([`ResumePlan::of`]) — the tool results a tool batch would have
     /// continued from, or the reply's trailing text run as an assistant prefill
     /// so the model resumes that very sentence. A failure therefore costs the
     /// model nothing it had already done, and leaves no trace in its view of
@@ -3524,13 +3448,11 @@ impl CoreCtx {
     /// no prompt node is re-appended. Used by the auto-continue path after a
     /// context overflow and the turn-retry resume.
     ///
-    /// A [`ResumeMode::TurnRetry`] also hands the resumed attempt the
-    /// interrupted reply row to append to ([`Session::resume_continuation`])
-    /// and keeps the pane's in-flight turn: the retry then finishes the turn's
-    /// one reply row instead of writing a second one under the interrupted
-    /// partial. An [`ResumeMode::Overflow`] reloads the pane instead (the
-    /// compacted history changed what it shows) and starts a fresh reply row
-    /// under the partial.
+    /// The resumed attempt always fills the interrupted reply row when there is
+    /// one ([`Session::resume_continuation`]), so the turn commits the single
+    /// reply a turn that never failed would have written. The mode only decides
+    /// what the pane shows: a [`ResumeMode::TurnRetry`] keeps its in-flight
+    /// turn, an [`ResumeMode::Overflow`] reloads the compacted session first.
     async fn resume_last_turn(&mut self, mode: ResumeMode) {
         let Some(s) = &self.session else {
             return;
@@ -3542,12 +3464,12 @@ impl CoreCtx {
             Ok(stored) => Session::from_stored(stored),
             Err(_) => return,
         };
-        let Some(ResumeRequest {
+        let Some(ResumePlan {
             prompt,
             prior,
             prompt_metas,
             continuation,
-        }) = resume_request(&loaded, mode)
+        }) = ResumePlan::of(&loaded)
         else {
             return;
         };
@@ -4256,6 +4178,34 @@ async fn stream_stream_to_events(
                 // own batch, so it queues against the same concurrency budget.
                 // The TUI marks worker-tool blocks with an empty worker name,
                 // which the promotion carries back to find the block again.
+                let started = std::time::Instant::now();
+                // The call is the turn's first assistant activity as much as a
+                // tool call is: a cut mid-worker must leave a killed record for
+                // it, exactly as `ToolStart` does, or the reloaded turn loses
+                // the block the live pane showed.
+                ensure_assistant_row(
+                    &mut assistant_message_id,
+                    &mut assistant_seq,
+                    &session,
+                    &mut store,
+                    &pending_reasoning,
+                    &attribution,
+                    &event_tx,
+                )
+                .await;
+                {
+                    let mut ts = turn_state.lock().await;
+                    ts.assistant_message_id = assistant_message_id;
+                    ts.assistant_seq = assistant_seq;
+                    ts.pending_tools.push(PendingToolCall {
+                        call_id: call_id.clone(),
+                        name: name.clone(),
+                        args_json: args.to_string(),
+                        // The empty worker name is the TUI's worker-call marker.
+                        worker: Some(String::new()),
+                        started,
+                    });
+                }
                 let waiting = !tool_gate.start(
                     ToolBatch::Manager,
                     QueuedCall {
@@ -4265,7 +4215,7 @@ async fn stream_stream_to_events(
                         spawn: None,
                     },
                 );
-                pending_worker_starts.insert(call_id.clone(), std::time::Instant::now());
+                pending_worker_starts.insert(call_id.clone(), started);
                 let _ = event_tx
                     .send(Event::WorkerStarted {
                         name,
@@ -4290,6 +4240,14 @@ async fn stream_stream_to_events(
                     .remove(&call_id)
                     .map(|started| started.elapsed().as_millis() as u64)
                     .unwrap_or_default();
+                // The run answered: the call is a completed record elsewhere,
+                // not a started-but-unanswered one a cut would persist.
+                {
+                    let mut ts = turn_state.lock().await;
+                    ts.pending_tools.retain(|pending| {
+                        !(pending.call_id == call_id && pending.worker.as_deref() == Some(""))
+                    });
+                }
                 let promoted = tool_gate.settle(ToolBatch::Manager, &call_id);
                 let _ = event_tx
                     .send(Event::WorkerFinished {

@@ -70,9 +70,9 @@ inconsistent but recoverable; **S3** = cosmetic or deliberate trade-off.
 | 2 | **Cancel can abort the commit.** `Done` sets `done`, the loop keeps draining stragglers, then the commit (`store.update_message` / `append_assistant_message`) runs inside the abortable task. `CancelStream` in that window calls `abort()` and the finished reply is discarded. | `core_task.rs:4409-4540`, `cut_running_stream` `3588-3619` | S1 |
 | 3 | **Cancel can abort compaction mid-splice.** The overflow branch appends the summary, reparents the first tail message, then points the leaf back — three awaits inside the abortable task. An abort between them leaves the tail detached from the active path (recent messages vanish from every later request). | `core_task.rs:4351-4374`, `compact_active_path` `2573-2587` | S1 |
 | 4 | **Retryable failure used to drop in-flight tool calls.** The persisted half is fixed (`persist_stream_error` now writes a killed record, like `persist_interrupted_turn`), so the reloaded transcript and the retried model keep the call. The live TUI still drops the block on `AttemptCut` while a reload shows it — a view divergence, not a context one. | `persist_stream_error` vs `persist_interrupted_turn` `4712-4867`; TUI intent in `chat.rs:5438-5482` | S3 |
-| 5 | **Overflow prefill is persisted as a second row.** `resume_request` sets `continuation` only for `TurnRetry`; `Overflow` still re-sends the partial reply as an assistant prefill (`Continue` → `prior.pop()`), but `resume_last_turn` passes no continuation, so the attempt appends a fresh assistant row. The session ends with two consecutive assistant messages and a sentence split across them. | `resume_request` `2662-2704`, `resume_last_turn` `3436-3474`, commit `4432-4441` | S2 |
-| 6 | **Abort-based cancel races persistence.** `cut_running_stream` calls `abort()` and immediately reads `TurnState`; the aborted task may still be between awaits mutating the store and the state. The steer self-cut has a `FINALIZING` guard; the user-cancel path has none. | `steer.rs:19-56`, `cut_running_stream` `3607-3616` | S2 |
-| 7 | **Interrupted worker calls are not recorded.** `WorkerStart` never enters `TurnState.pending_tools`, so a cancel mid-worker writes no killed record; the live TUI shows it killed, a reload does not. | `core_task.rs:4140-4168`, `killed_records` `4666` | S2 |
+| 5 | **Overflow prefill used to be persisted as a second row.** `resume_request` set `continuation` only for `TurnRetry`, so an `Overflow` auto-continue re-sent the partial as an assistant prefill but wrote a fresh assistant row — two consecutive assistant messages and a sentence split across them. Fixed: `ResumePlan::of` derives the continuation for every resume, and the mode only decides whether the pane reloads. | `ResumePlan::of` in `session.rs`, `resume_last_turn` | closed |
+| 6 | **Abort-based cancel raced persistence.** `cut_running_stream` called `abort()` and immediately read `TurnState`, while the aborted task could still be between awaits mutating the store. Fixed twice over: a user cancel now asks the run to stop at a hook boundary (`FlowControl::cancel`) and only falls back to `abort()` after a grace, and `TurnState::finishing` keeps even that fallback away from a terminal sequence. | `flow.rs`, `cut_running_stream`, `TurnState::finishing` | closed |
+| 7 | **Interrupted worker calls used to be unrecorded.** `WorkerStart` never entered `TurnState.pending_tools` and never created the reply row, so a cut mid-worker wrote no killed record; the live TUI showed it killed, a reload did not. Fixed: `WorkerStart` mirrors `ToolStart` (row + pending call), and `WorkerResult` clears it. | `core_task.rs` `WorkerStart`/`WorkerResult` | closed |
 | 8 | **Hard crash loses the un-checkpointed tail.** Text and reasoning are written only at `Done`/`Error`/cut; a tool-start creates an empty row. SIGKILL or power loss loses every delta since the last of those. | `ensure_assistant_row` `4599-4640`, delta arms `3886-3948` | S2 |
 | 9 | **Resume replaces the in-memory session wholesale.** `resume_last_turn` does `*s.lock() = loaded`, discarding live `last_usage`, `announced_scene` changes, and any state written after the load. Mostly benign because the DB should be ahead, but it is nondeterministic when it is not. | `resume_last_turn` `3458` | S3 |
 | 10 | **A "progressed" failure resets the retry chain.** An attempt that streams one token then dies starts a fresh budget every time; a provider that dies just after first byte retries forever. | `RetryableFailure` `1784-1824`, `shows_progress` `198-212` | S3 |
@@ -84,12 +84,18 @@ are where the *adapter* earns its keep.
 `TurnState::finishing` makes the commit and the compaction splice
 non-abortable), and the persisted half of 4 is fixed (`persist_stream_error` now
 writes a started-but-unanswered call as a killed record, matching
-`persist_interrupted_turn` and the retry fixture). The live TUI still drops the
-cut block on `AttemptCut` while a reload shows it; that divergence and items 5–8
-remain. Phase 1's control surface has landed (`crates/llm/src/flow.rs`:
-`FlowControl`, `LedgerHook`, `ControlledStream`, `StreamItem::Cancelled`, and a
-cooperative cancel with a hard-cut grace); the core still persists from
-`TurnState`, and `ResumePlan` is Phase 2.
+`persist_interrupted_turn` and the retry fixture). Phase 1's control surface has
+landed (`crates/llm/src/flow.rs`: `FlowControl`, `LedgerHook`,
+`ControlledStream`, `StreamItem::Cancelled`, and a cooperative cancel with a
+hard-cut grace). Item 6 is closed by the same pair (cooperative cancel +
+`finishing`). Phase 2 has landed too: `ResumePlan::of` is the single resume
+derivation (no mode-dependent continuation), overflow continues the interrupted
+row, and `WorkerStart` joins `pending_tools`. What remains is 4's live-view
+divergence (the pane still drops the cut block on `AttemptCut` — the
+"the retry re-issues whatever it still needs" premise no longer holds now that
+the killed call and its cut-off result reach the retried model), 8 (durable turn
+checkpoints), and 9–10. The core still persists from `TurnState`; the ledger's
+settled messages are recorded but not yet the projection source.
 
 ## The adapter: an explicit conversation ledger
 
@@ -205,28 +211,37 @@ milliseconds and the turn commits", which is the correct outcome.
 
 ### The ledger makes resume an algebra, not a heuristic
 
-Replace `last_turn_resume` + `resume_continuation` + `resume_request` with one
-derivation over the canonical entries:
+`last_turn_resume` + `resume_continuation` + `resume_request` are now one
+derivation, `ResumePlan::of`:
 
 ```rust
-pub enum ResumePlan {
-    /// The attempt produced no entry: replay the turn's user entry.
-    Replay { prompt: ChatMsg, history: Vec<ChatMsg> },
-    /// Continue the last assistant entry in place.
-    Continue { prompt: ChatMsg, history: Vec<ChatMsg>, row: RowRef },
-    /// Answer the last tool round (the attempt died after the batch settled).
-    ToolRound { results: Vec<ChatToolResult>, history: Vec<ChatMsg>, row: RowRef },
-    /// A cancelled run: every call is already answered by `repair`, so the
-    /// next request is the repaired history plus the user's next prompt.
-    Repair { history: Vec<ChatMsg> },
+pub(crate) struct ResumePlan {
+    /// The request's own last message: the turn's prompt re-sent, the tool
+    /// results answering its last batch, or its trailing run as a prefill.
+    pub prompt: ChatMsg,
+    /// The history preceding it, truncated at the newest summary.
+    pub prior: Vec<ChatMsg>,
+    /// Attachment metadata for a re-sent prompt (tool results and a prefill
+    /// carry none).
+    pub prompt_metas: Vec<Attachment>,
+    /// The interrupted reply row this attempt fills. `None` only when the
+    /// attempt produced no reply row: the plan replays and a fresh one is
+    /// written.
+    pub continuation: Option<Continuation>,
 }
 ```
 
-Every case is explicit and every case names the row to append to. `TurnRetry`
-and `Overflow` differ only in whether the pane reloads, **not** in whether the
-row is continued — which fixes failure mode 5. The old heuristic ("the path's
-last message is the prompt") disappears; a trailing assistant prefill is a
-property of `Continue`, not an accident of message ordering.
+The continuation is a property of the plan, not a mode flag: `TurnRetry` and
+`Overflow` differ only in whether the pane reloads, **not** in whether the row is
+continued — which fixed failure mode 5. Which message becomes the prompt is
+still derived from where the path ends (prompt / tool results / trailing run);
+what changed is that the *row* is no longer decided by the caller.
+
+Still open: the plan reads the store, not rig's ledger, so a cancelled run's
+`PromptError::Cancelled { chat_history }` (already repaired by rig) is not yet
+the projection source. Until it is, a cancel that lands between a call's
+dispatch and its outcome relies on the `TurnState` killed record rather than a
+rig-made-up result — the same information, two mechanisms.
 
 ### Durability: turn checkpoints
 
@@ -257,7 +272,7 @@ side effects, and it depends on the ledger existing first.
 | --- | --- | --- |
 | 0 | **Done.** Shutdown: cut + persist when `cmd_rx` closes. `TurnState::finishing` guard around the reply commit, the error/overflow persist and compaction. | 1, 2, 3 |
 | 1 | **Control surface done.** `shuvarie-llm::flow`: `FlowControl`/`LedgerHook`/`ControlledStream` and `StreamItem::Cancelled`; the run loop cancels cooperatively and falls back to a hard cut after a grace. Still to do: `FlowSpec` (the request object) and persisting from the ledger's settled messages instead of `TurnState`. | 6, 4 |
-| 2 | `ResumePlan` replaces the `TurnState` reconstruction path; overflow continues the row; worker calls join `pending_tools`. | 5, 7 |
+| 2 | **Done.** `ResumePlan::of` is the one resume derivation (replacing `resume_request`'s mode gate); overflow continues the interrupted row instead of appending a second assistant row; `WorkerStart` joins `pending_tools` (and ensures its reply row) so a cut mid-worker is persisted as killed. | 5, 7 |
 | 3 | `turn_checkpoints` + startup recovery. | 8 |
 | 4 | `tool_effects` journal and journaled retries. | 4 (side effects) |
 

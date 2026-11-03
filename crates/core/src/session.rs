@@ -208,6 +208,85 @@ pub(crate) struct Continuation {
     pub prefilled: bool,
 }
 
+/// The request that resumes the active path's last turn, and the reply row the
+/// resumed attempt fills.
+///
+/// There is one derivation for every resume. A turn retry after a failed
+/// attempt and the auto-continue after a context overflow differ in what the
+/// *pane* shows — an overflow reloads the compacted history — never in what the
+/// model is asked or which row the answer lands in.
+///
+/// The plan appends nothing to the conversation: the turn's own path is re-sent
+/// with its last message promoted to the request's prompt, so the model reads a
+/// conversation that stops exactly where it stopped — no error notice, no
+/// resume cue, no repeated task — and carries on from there.
+pub(crate) struct ResumePlan {
+    /// The request's own last message: the turn's prompt re-sent, the tool
+    /// results answering its last batch, or its trailing text run as an
+    /// assistant prefill.
+    pub prompt: ChatMsg,
+    /// The history preceding `prompt`, truncated at the newest summary.
+    pub prior: Vec<ChatMsg>,
+    /// Attachment metadata for a re-sent prompt. Tool results and a prefill
+    /// never carry any; a replayed turn's prompt carries its own.
+    pub prompt_metas: Vec<shuvarie_llm::Attachment>,
+    /// The interrupted reply row this attempt fills instead of appending a new
+    /// one. `None` when the attempt produced no reply row: the plan replays the
+    /// turn's prompt and the attempt writes a fresh reply.
+    pub continuation: Option<Continuation>,
+}
+
+impl ResumePlan {
+    /// Plan the resume of `session`'s last turn. `None` when the active path has
+    /// no user turn to resume.
+    pub(crate) fn of(session: &Session) -> Option<Self> {
+        // Every resume continues the interrupted reply row when the attempt
+        // left one. A second row under the partial would split one sentence
+        // across two assistant messages and leave the reloaded session with an
+        // orphaned half-reply — and an overflow auto-continue ends on a partial
+        // prefill just as a retry does.
+        let continuation = session.resume_continuation();
+        match session.last_turn_resume()? {
+            TurnResume::Replay { prompt, prior } => Some(Self {
+                prompt: ChatMsg::user(prompt),
+                prior,
+                // A replay re-sends the turn's stored prompt, which the leaf no
+                // longer reaches: its attachment metadata must ride the retried
+                // request explicitly — pruned blobs arrive metadata-only.
+                prompt_metas: session
+                    .last_user_node()
+                    .map(|node| node.attachments.clone())
+                    .unwrap_or_default(),
+                continuation,
+            }),
+            TurnResume::Continue { mut prior } => {
+                // The path's last message becomes the request's prompt; the rest
+                // is history.
+                let prompt = prior.pop()?;
+                // Only a re-sent prompt carries attachments of its own (tool
+                // results and a prefill never do).
+                let prompt_metas = if prompt.is_user_prompt() {
+                    prompt.attachments.clone()
+                } else {
+                    Vec::new()
+                };
+                let continuation = continuation.map(|mut continuation| {
+                    // An assistant prompt re-sends the reply's trailing run, so
+                    // the resumed text continues that run mid-way.
+                    continuation.prefilled = prompt.role == Role::Assistant;
+                    continuation
+                });
+                Some(Self {
+                    prompt,
+                    prior,
+                    prompt_metas,
+                    continuation,
+                })
+            }
+        }
+    }
+}
+
 impl Session {
     pub fn new() -> Self {
         Self::default()
@@ -492,14 +571,15 @@ impl Session {
         })
     }
 
-    /// The interrupted reply row a retry continues, when the active path's tip
+    /// The interrupted reply row a resume continues, when the active path's tip
     /// is an assistant row: its DB id, dense index and the runs/calls the cut
-    /// attempt left. The resumed attempt appends to that row instead of
-    /// writing a second reply under it, so a successful retry commits exactly
-    /// the reply a turn that never failed would have. `None` when the turn
-    /// failed before producing a reply row — its prompt is then the tip and
-    /// there is nothing to continue — or when the tip is a compaction summary
-    /// rather than a reply.
+    /// attempt left. The resumed attempt appends to that row instead of writing
+    /// a second reply under it, so a turn that finally succeeds commits exactly
+    /// the reply a turn that never failed would have — retry and overflow
+    /// auto-continue alike ([`ResumePlan::of`]). `None` when the turn failed
+    /// before producing a reply row — its prompt is then the tip and there is
+    /// nothing to continue — or when the tip is a compaction summary rather than
+    /// a reply.
     pub(crate) fn resume_continuation(&self) -> Option<Continuation> {
         let seq = self.messages.len().checked_sub(1)?;
         if self.messages[seq].role != Role::Assistant {
