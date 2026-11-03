@@ -13,7 +13,7 @@ use termina::{Event as TermEvent, PlatformTerminal};
 use tokio::sync::mpsc::Sender;
 
 use crate::tui::event::Event;
-use crate::tui::utils::ctrl;
+use crate::tui::utils::{alt, ctrl};
 
 use super::add_decision_provider::{
     AddDecisionProviderForm, AddDecisionProviderMessage, AddDecisionProviderOutcome,
@@ -44,6 +44,7 @@ use super::session::{
 use super::session_picker::{SessionPicker, SessionPickerEffect, SessionPickerMessage};
 use super::sidebar::SidebarMessage;
 use super::spinner::SpinnerKind;
+use super::tabs::{self, Tab, TabBarEntry, TabId};
 use super::theme;
 use super::theme_picker::{ThemePicker, ThemePickerEffect, ThemePickerMessage};
 use super::title::{TitleEffect, TitleMessage, TitlePopup};
@@ -97,6 +98,15 @@ pub enum AppMessage {
         cols: u16,
     },
     Session(SessionMessage),
+    /// Move to the next (`Alt+Right`) or previous (`Alt+Left`) tab, wrapping at
+    /// either end of the strip.
+    CycleTab {
+        forward: bool,
+    },
+    /// Show the tab at this position in the strip (`Alt+1` … `Alt+9`).
+    GotoTab {
+        position: usize,
+    },
     AddProvider(AddProviderMessage),
     AddDecisionProvider(AddDecisionProviderMessage),
     ModelPicker(ModelPickerMessage),
@@ -246,7 +256,26 @@ pub enum AppEffect {
 pub struct App {
     pub ctx: UpdateCtx,
     pub overlay: Overlay,
+    /// The active tab's screen. Every other tab's is parked in `tabs` (see
+    /// [`App::set_active`]), so this stays the single place a message handler
+    /// has to look for "the session the user is watching".
     pub session: SessionScreen,
+    /// Every tab, in bar order. The active tab's `screen` is `None`: it is
+    /// staged into `session`.
+    pub tabs: Vec<Tab>,
+    /// The tab whose screen is staged into `session`.
+    active: TabId,
+    /// The next id to hand out. Ids are never reused, so a message still in
+    /// flight for a closed tab can never land in its successor.
+    next_tab_id: usize,
+    /// The `[ui]` prefs a newly opened tab's screen is built from, so a second
+    /// tab looks exactly like the first.
+    ui: UiPrefs,
+    /// The image protocol resolved at startup, for the same rebuild.
+    image_protocol: shuvarie_core::ImageProtocol,
+    /// The last known viewport width, so an incoming tab's sidebar starts sized
+    /// instead of at whatever width it was parked with.
+    viewport_cols: u16,
     pub command_menu: CommandMenu,
     pub welcome: Welcome,
     pub confirm_quit: ConfirmQuit,
@@ -433,6 +462,61 @@ fn question_gist(questions: &[shuvarie_core::QuestionPrompt]) -> Option<&str> {
     })
 }
 
+/// The status-row state a session screen is built with: the active provider and
+/// model. Every tab is built with the same one, because a connection is the
+/// user's, not a tab's — a tab picks *what it works on*, not which model runs.
+#[derive(Default)]
+struct ScreenConfig {
+    provider: Option<String>,
+    model: Option<String>,
+    model_display: Option<String>,
+    variant: Option<String>,
+    context_length: Option<u64>,
+    peaks: Option<shuvarie_core::peaks::PeakSchedule>,
+}
+
+/// Builds a session screen in the state a tab starts in: the workspace it shows
+/// in its sidebar, the model it reports in its status row, and the prefs every
+/// screen of this run shares.
+///
+/// Shared by the first tab ([`App::new`]) and every later one
+/// ([`App::open_tab`]), so a tab opened later is indistinguishable from the one
+/// the app started with.
+fn build_screen(
+    ui: &UiPrefs,
+    image_protocol: shuvarie_core::ImageProtocol,
+    viewport_cols: u16,
+    workspace: WorkspaceInfo,
+    config: ScreenConfig,
+) -> SessionScreen {
+    let mut screen = SessionScreen::new();
+    screen.update(SessionMessage::UpdateConfig {
+        provider: config.provider,
+        model: config.model,
+        model_display: config.model_display,
+        variant: config.variant,
+        context_length: config.context_length,
+        peaks: config.peaks,
+    });
+    screen
+        .sidebar
+        .update(SidebarMessage::SetPref { pref: ui.sidebar });
+    screen.update(SessionMessage::SetCopyOnSelect {
+        enabled: ui.copy_on_select,
+    });
+    screen.sidebar.update(SidebarMessage::SetWidth {
+        cols: viewport_cols,
+    });
+    screen
+        .sidebar
+        .update(SidebarMessage::SetWorkspace { workspace });
+    screen.update(SessionMessage::Chat(ChatMessage::ImageConfig {
+        cell_size: ui.image.cell_size,
+        protocol: Some(image_protocol),
+    }));
+    screen
+}
+
 impl App {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -487,38 +571,44 @@ impl App {
             .map(|(width, height)| ratatui_image::FontSize::new(width, height))
             .unwrap_or_else(|| ratatui_image::FontSize::new(8, 16));
         let notify = ui.notify.clone();
+        // The first tab: the workspace the process was started in, driven by the
+        // core `main` already spawned.
+        let first_tab = TabId::new(0);
+        let root = workspace.path.clone();
+        let screen = build_screen(
+            &ui,
+            image_protocol,
+            viewport_cols,
+            workspace,
+            ScreenConfig {
+                provider: initial_display,
+                model: initial_model,
+                model_display: initial_model_display,
+                variant: initial_variant,
+                context_length: initial_context_length,
+                peaks: initial_peaks,
+            },
+        );
         Self {
-            ctx: UpdateCtx::new(connections, cmd_tx),
+            ctx: UpdateCtx::new(connections, cmd_tx.clone()),
             overlay: if welcome.open {
                 Overlay::Welcome
             } else {
                 Overlay::None
             },
-            session: {
-                let mut s = SessionScreen::new();
-                s.update(SessionMessage::UpdateConfig {
-                    provider: initial_display,
-                    model: initial_model,
-                    model_display: initial_model_display,
-                    variant: initial_variant,
-                    context_length: initial_context_length,
-                    peaks: initial_peaks,
-                });
-                s.sidebar
-                    .update(SidebarMessage::SetPref { pref: ui.sidebar });
-                s.update(SessionMessage::SetCopyOnSelect {
-                    enabled: ui.copy_on_select,
-                });
-                s.sidebar.update(SidebarMessage::SetWidth {
-                    cols: viewport_cols,
-                });
-                s.sidebar.update(SidebarMessage::SetWorkspace { workspace });
-                s.update(SessionMessage::Chat(ChatMessage::ImageConfig {
-                    cell_size: ui.image.cell_size,
-                    protocol: Some(image_protocol),
-                }));
-                s
-            },
+            session: screen,
+            tabs: vec![Tab {
+                id: first_tab,
+                root,
+                scene: None,
+                cmd_tx,
+                screen: None,
+            }],
+            active: first_tab,
+            next_tab_id: 1,
+            ui,
+            image_protocol,
+            viewport_cols,
             command_menu: CommandMenu::new(),
             welcome,
             confirm_quit: ConfirmQuit::new(),
@@ -559,6 +649,122 @@ impl App {
     /// Record that the app should quit (set when `update` returns `Quit`).
     pub fn mark_quit(&mut self) {
         self.quit = true;
+    }
+
+    /// Whether the tab bar has anything to say: with a single tab there is
+    /// nothing to choose between, and the session keeps the row.
+    fn shows_tab_bar(&self) -> bool {
+        self.tabs.len() > 1
+    }
+
+    fn active_index(&self) -> usize {
+        self.tabs
+            .iter()
+            .position(|tab| tab.id == self.active)
+            .unwrap_or(0)
+    }
+
+    /// Switches to the tab at `position` in the strip; out of range is a no-op.
+    /// The session being left has its scroll persisted first, exactly as a
+    /// session switch does.
+    fn switch_to_position(&mut self, position: usize) {
+        let Some(id) = self.tabs.get(position).map(|tab| tab.id) else {
+            return;
+        };
+        if id == self.active {
+            return;
+        }
+        self.save_scroll();
+        self.set_active(id);
+    }
+
+    /// Makes `id` the active tab, or does nothing when there is no such tab.
+    ///
+    /// The swap is what makes tabs cheap: the App keeps one screen slot, and
+    /// switching parks the outgoing tab's screen (with its scene, and with its
+    /// core's sender going to `ctx`) back into the strip while staging the
+    /// incoming one. Pure — the caller persists any scroll position first.
+    fn set_active(&mut self, id: TabId) {
+        if id == self.active {
+            return;
+        }
+        let Some(target) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return;
+        };
+        // The invariant: a parked tab holds its screen, the active one does not.
+        let Some(incoming) = self.tabs[target].screen.take() else {
+            return;
+        };
+        let current = self.active_index();
+        let outgoing = std::mem::replace(&mut self.session, incoming);
+        self.tabs[current].screen = Some(outgoing);
+        std::mem::swap(&mut self.current_scene, &mut self.tabs[target].scene);
+        self.ctx.cmd_tx = self.tabs[target].cmd_tx.clone();
+        self.active = id;
+        // A parked screen kept the width it was last painted at, and no resize
+        // arrives just because a tab came back.
+        self.session.sidebar.update(SidebarMessage::SetWidth {
+            cols: self.viewport_cols,
+        });
+    }
+
+    /// Adds a tab for `root`, driven by `cmd_tx`.
+    ///
+    /// The async half — spawning the core — belongs to the render loop, which
+    /// owns the spawner; it calls this once the handle is in hand and then
+    /// switches over. Until that effect lands (`/newtab`), only the tests build
+    /// a second tab.
+    #[allow(dead_code)]
+    pub(crate) fn open_tab(
+        &mut self,
+        root: PathBuf,
+        cmd_tx: Sender<shuvarie_core::Command>,
+    ) -> TabId {
+        let id = TabId::new(self.next_tab_id);
+        self.next_tab_id += 1;
+        let screen = build_screen(
+            &self.ui,
+            self.image_protocol,
+            self.viewport_cols,
+            WorkspaceInfo::detect_at(&root),
+            self.screen_config(),
+        );
+        self.tabs.push(Tab {
+            id,
+            root,
+            scene: self.scene_default.clone(),
+            cmd_tx,
+            screen: Some(screen),
+        });
+        id
+    }
+
+    /// The status-row state a newly built screen starts with (see
+    /// [`ScreenConfig`]).
+    fn screen_config(&self) -> ScreenConfig {
+        let active = self.ctx.connections.active.as_ref();
+        ScreenConfig {
+            provider: active.and_then(|a| self.provider_display_name(&a.provider)),
+            model: active.and_then(|a| a.model.clone()),
+            model_display: self.active_model_display(),
+            variant: active.and_then(|a| a.variant.clone()),
+            context_length: self.active_context_length(),
+            peaks: self.active_peaks(),
+        }
+    }
+
+    /// Sends a command every tab's core has to see: the active provider, the
+    /// model, the theme, a config reload. Those are the user's, not a tab's, so a
+    /// pick made in one tab has to reach the cores behind the others too —
+    /// otherwise a background tab's next turn runs on the model the sidebar no
+    /// longer shows.
+    fn send_all(&self, cmd: shuvarie_core::Command) {
+        for tab in &self.tabs {
+            if tab.id != self.active {
+                let _ = tab.cmd_tx.try_send(cmd.clone());
+            }
+        }
+        self.ctx.send(cmd);
     }
 
     /// Notifications queued by `update` that have to reach the terminal: a
@@ -974,6 +1180,22 @@ impl App {
                             }
                             KeyCode::Char('t') | KeyCode::Char('T') if ctrl(&key) => {
                                 return Some(AppMessage::CycleModelVariant);
+                            }
+                            // Tabs: never reached with a single tab, so the
+                            // composer keeps every chord it had before tabs
+                            // existed.
+                            KeyCode::Left if alt(&key) && self.tabs.len() > 1 => {
+                                return Some(AppMessage::CycleTab { forward: false });
+                            }
+                            KeyCode::Right if alt(&key) && self.tabs.len() > 1 => {
+                                return Some(AppMessage::CycleTab { forward: true });
+                            }
+                            KeyCode::Char(digit @ '1'..='9')
+                                if alt(&key) && self.tabs.len() > 1 =>
+                            {
+                                return Some(AppMessage::GotoTab {
+                                    position: usize::from(digit as u8 - b'1'),
+                                });
                             }
                             _ => {}
                         },
@@ -1409,8 +1631,23 @@ impl App {
                 self.overlay = Overlay::CommandMenu;
             }
             AppMessage::CycleModelVariant => {
-                self.ctx.send(shuvarie_core::Command::CycleVariant);
+                self.send_all(shuvarie_core::Command::CycleVariant);
             }
+            AppMessage::CycleTab { forward } => {
+                // A single tab has nowhere to cycle to, and the keys stay free
+                // for the composer in that case.
+                if self.tabs.len() > 1 {
+                    let current = self.active_index();
+                    let len = self.tabs.len();
+                    let next = if forward {
+                        (current + 1) % len
+                    } else {
+                        (current + len - 1) % len
+                    };
+                    self.switch_to_position(next);
+                }
+            }
+            AppMessage::GotoTab { position } => self.switch_to_position(position),
             AppMessage::RequestQuit => {
                 self.open_confirm_quit();
             }
@@ -1527,8 +1764,7 @@ impl App {
                     match effect {
                         variant::VariantEffect::Set { variant } => {
                             self.close_overlay();
-                            self.ctx
-                                .send(shuvarie_core::Command::SelectVariant { variant });
+                            self.send_all(shuvarie_core::Command::SelectVariant { variant });
                         }
                         variant::VariantEffect::Close => self.close_overlay(),
                     }
@@ -1549,7 +1785,7 @@ impl App {
                             self.theme_backup = None;
                             self.current_theme_pref = pref.clone();
                             self.close_overlay();
-                            self.ctx.send(shuvarie_core::Command::SetUiTheme { pref });
+                            self.send_all(shuvarie_core::Command::SetUiTheme { pref });
                         }
                         ThemePickerEffect::Close => {
                             // Walked away without picking: repaint with the
@@ -1702,11 +1938,11 @@ impl App {
                             // surface immediately.
                             let oauth_login = shuvarie_core::catalog::oauth_device_login(&pc);
                             self.pending_model_pick = Some(id.clone());
-                            self.ctx.send(shuvarie_core::Command::AddProvider {
+                            self.send_all(shuvarie_core::Command::AddProvider {
                                 id: id.clone(),
                                 config: pc,
                             });
-                            self.ctx.send(shuvarie_core::Command::SetActiveProvider {
+                            self.send_all(shuvarie_core::Command::SetActiveProvider {
                                 name: id.clone(),
                             });
                             self.ctx.send(shuvarie_core::Command::ListModels {
@@ -1739,7 +1975,7 @@ impl App {
                             // unusable without a model, so a half-saved
                             // selection would leave the shell checks with
                             // nothing to ask.
-                            self.ctx.send(shuvarie_core::Command::SetDecisionProvider {
+                            self.send_all(shuvarie_core::Command::SetDecisionProvider {
                                 name,
                                 api_key,
                                 base_url: Some(base_url),
@@ -1764,12 +2000,11 @@ impl App {
                                     .map(|a| a.provider.as_str())
                                     != Some(provider.as_str())
                             {
-                                self.ctx.send(shuvarie_core::Command::SetActiveProvider {
+                                self.send_all(shuvarie_core::Command::SetActiveProvider {
                                     name: provider,
                                 });
                             }
-                            self.ctx
-                                .send(shuvarie_core::Command::SetActiveModel { model });
+                            self.send_all(shuvarie_core::Command::SetActiveModel { model });
                             self.leave_model_picker();
                         }
                         ModelPickerEffect::FetchRegistries(ids) => {
@@ -1789,8 +2024,9 @@ impl App {
                                 .is_none_or(|a| a.model.is_none())
                                 && let Some(first) = self.model_picker.active_default_model()
                             {
-                                self.ctx
-                                    .send(shuvarie_core::Command::SetActiveModel { model: first });
+                                self.send_all(shuvarie_core::Command::SetActiveModel {
+                                    model: first,
+                                });
                             }
                             self.leave_model_picker();
                         }
@@ -1850,6 +2086,7 @@ impl App {
                 }
             }
             AppMessage::Resized { rows, cols } => {
+                self.viewport_cols = cols;
                 self.session
                     .sidebar
                     .update(SidebarMessage::SetWidth { cols });
@@ -1961,8 +2198,7 @@ impl App {
                             .and_then(|a| a.model.as_deref())
                             != Some(model.as_str())
                     {
-                        self.ctx
-                            .send(shuvarie_core::Command::SetActiveModel { model });
+                        self.send_all(shuvarie_core::Command::SetActiveModel { model });
                     } else {
                         self.session.update(SessionMessage::UpdateConfig {
                             provider: self.provider_display_name(&provider_name),
@@ -2333,8 +2569,7 @@ impl App {
                 }
                 Some(arg) => {
                     if let Some(variant) = variant::resolve_arg(&variants, &arg) {
-                        self.ctx
-                            .send(shuvarie_core::Command::SelectVariant { variant });
+                        self.send_all(shuvarie_core::Command::SelectVariant { variant });
                     } else {
                         self.session.update(SessionMessage::ShowError {
                             error: format!(
@@ -2420,7 +2655,7 @@ impl App {
         theme::set(colors);
         self.session.update(SessionMessage::ThemeChanged);
         self.current_theme_pref = pref.clone();
-        self.ctx.send(shuvarie_core::Command::SetUiTheme { pref });
+        self.send_all(shuvarie_core::Command::SetUiTheme { pref });
     }
 
     /// The spinners currently animating, so the render loop can wake at the
@@ -2611,7 +2846,7 @@ impl App {
                 }
             }
             CommandAction::Reload => {
-                self.ctx.send(shuvarie_core::Command::Reload);
+                self.send_all(shuvarie_core::Command::Reload);
             }
             CommandAction::McpServers => {
                 self.ctx.send(shuvarie_core::Command::McpList);
@@ -2939,7 +3174,19 @@ impl App {
     /// what the normal path shows, and what the screensaver's scene sweeps in
     /// over, so both paint it the same way.
     fn view_session_page(&self, frame: &mut Frame<'_>, area: Rect, stacked: bool) {
-        self.session.view(frame, area);
+        // The strip takes the top row once there is a choice to make; the
+        // dialogs below still centre on the whole area, so opening one never
+        // nudges the screen a row down.
+        let page = if self.shows_tab_bar() {
+            let [bar, page] =
+                Layout::vertical([Constraint::Length(tabs::BAR_HEIGHT), Constraint::Min(0)])
+                    .areas(area);
+            self.view_tab_bar(frame, bar);
+            page
+        } else {
+            area
+        };
+        self.session.view(frame, page);
         if let Some(form) = &self.add_provider_form {
             form.view(frame, area, stacked, false);
         }
@@ -2961,6 +3208,28 @@ impl App {
         self.todo_popup.view(frame, area, stacked);
         self.peak_table.view(frame, area, stacked);
         self.view_popups(frame, area, stacked);
+    }
+
+    /// Paints the tab strip: each tab's number, label, and busy mark, with the
+    /// active one in the accent colour. The active tab's screen is staged into
+    /// `session`, so its label and busy state are read from there.
+    fn view_tab_bar(&self, frame: &mut Frame<'_>, area: Rect) {
+        let entries: Vec<TabBarEntry> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(position, tab)| {
+                let active_screen = (tab.id == self.active).then_some(&self.session);
+                let screen = active_screen.or(tab.screen.as_ref());
+                TabBarEntry {
+                    position,
+                    label: tabs::tab_label(screen, &tab.root),
+                    busy: screen.is_some_and(SessionScreen::is_busy),
+                    active: tab.id == self.active,
+                }
+            })
+            .collect();
+        tabs::view(frame, area, &entries);
     }
 
     /// Paints the dialogs that sit above whatever page is showing: the quit
@@ -4948,5 +5217,188 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| (s.style.fg, s.style.bg)))
             .collect()
+    }
+
+    /// An app with `count` tabs, plus each tab's command receiver in strip
+    /// order. The first tab is the one `App::new` builds.
+    fn app_with_tabs(
+        count: usize,
+    ) -> (
+        App,
+        Vec<tokio::sync::mpsc::Receiver<shuvarie_core::Command>>,
+    ) {
+        let (mut app, first) = app_with_rx(connected());
+        // Past onboarding: keys route to the session, as they do once a provider
+        // is configured and the app is running.
+        app.welcome.close();
+        app.overlay = Overlay::None;
+        let mut receivers = vec![first];
+        for i in 1..count {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            app.open_tab(PathBuf::from(format!("/workspace/project-{i}")), tx);
+            receivers.push(rx);
+        }
+        (app, receivers)
+    }
+
+    #[test]
+    fn the_tab_bar_stays_hidden_until_there_is_a_second_tab() {
+        let (app, _receivers) = app_with_tabs(1);
+        assert!(
+            !app.shows_tab_bar(),
+            "one tab has nothing to choose between"
+        );
+
+        let (app, _receivers) = app_with_tabs(2);
+        assert!(app.shows_tab_bar());
+    }
+
+    #[test]
+    fn switching_parks_one_screen_and_stages_the_other() {
+        let (mut app, _receivers) = app_with_tabs(2);
+        assert_eq!(app.tabs.len(), 2);
+        assert!(
+            app.tabs[0].screen.is_none(),
+            "the active tab's screen is staged into `session`"
+        );
+        assert!(app.tabs[1].screen.is_some(), "the others stay parked");
+
+        let second = app.tabs[1].id;
+        app.switch_to_position(1);
+        assert_eq!(app.active_index(), 1);
+        assert!(app.tabs[1].screen.is_none(), "the staging moved over");
+        assert!(app.tabs[0].screen.is_some(), "and the first is now parked");
+        assert_eq!(second, app.tabs[app.active_index()].id);
+    }
+
+    #[test]
+    fn each_tab_keeps_its_own_draft_and_session() {
+        let (mut app, _receivers) = app_with_tabs(2);
+        app.session.session_id = Some(uuid::Uuid::now_v7());
+        app.session.input.buffer.set("half-written prompt");
+        let first_session = app.session.session_id;
+
+        app.switch_to_position(1);
+        assert!(
+            app.session.input.is_empty(),
+            "the second tab starts on a clean composer"
+        );
+        assert_eq!(app.session.session_id, None, "and on a fresh session");
+        app.session.input.buffer.set("the other agent");
+
+        app.switch_to_position(0);
+        assert_eq!(app.session.input.buffer.value, "half-written prompt");
+        assert_eq!(app.session.session_id, first_session);
+
+        app.switch_to_position(1);
+        assert_eq!(app.session.input.buffer.value, "the other agent");
+        assert_eq!(app.session.session_id, None);
+    }
+
+    #[test]
+    fn cycling_wraps_around_the_strip_and_goto_lands_by_position() {
+        let (mut app, _receivers) = app_with_tabs(3);
+        assert_eq!(app.active_index(), 0);
+
+        app.update(AppMessage::CycleTab { forward: true });
+        assert_eq!(app.active_index(), 1);
+        app.update(AppMessage::CycleTab { forward: true });
+        app.update(AppMessage::CycleTab { forward: true });
+        assert_eq!(app.active_index(), 0, "forward wraps back to the first");
+        app.update(AppMessage::CycleTab { forward: false });
+        assert_eq!(app.active_index(), 2, "backward wraps to the last");
+
+        app.update(AppMessage::GotoTab { position: 1 });
+        assert_eq!(app.active_index(), 1);
+        // Out of range is a no-op rather than a panic: `Alt+9` on a three-tab
+        // strip lands nowhere.
+        app.update(AppMessage::GotoTab { position: 8 });
+        assert_eq!(app.active_index(), 1);
+    }
+
+    #[test]
+    fn only_the_active_tab_receives_session_commands() {
+        let (mut app, mut receivers) = app_with_tabs(2);
+        app.ctx.send(shuvarie_core::Command::Ping);
+        assert!(matches!(
+            receivers[0].try_recv(),
+            Ok(shuvarie_core::Command::Ping)
+        ));
+        assert!(
+            receivers[1].try_recv().is_err(),
+            "the background tab's core is not addressed"
+        );
+
+        app.switch_to_position(1);
+        app.ctx.send(shuvarie_core::Command::Ping);
+        assert!(receivers[0].try_recv().is_err());
+        assert!(matches!(
+            receivers[1].try_recv(),
+            Ok(shuvarie_core::Command::Ping)
+        ));
+    }
+
+    #[test]
+    fn a_connection_command_reaches_every_tabs_core() {
+        let (mut app, mut receivers) = app_with_tabs(2);
+        app.run_command(CommandAction::Reload, None);
+        for (index, receiver) in receivers.iter_mut().enumerate() {
+            assert!(
+                matches!(receiver.try_recv(), Ok(shuvarie_core::Command::Reload)),
+                "tab {index} has to reload too: the config is the user's"
+            );
+        }
+    }
+
+    #[test]
+    fn the_tab_keys_are_free_when_a_single_tab_is_open() {
+        let (app, _receivers) = app_with_tabs(1);
+        for code in [KeyCode::Left, KeyCode::Right, KeyCode::Char('2')] {
+            let key = termina::event::KeyEvent::new(code, Modifiers::ALT);
+            assert!(
+                !matches!(
+                    app.map_event(Event::Terminal(TermEvent::Key(key))),
+                    Some(AppMessage::CycleTab { .. } | AppMessage::GotoTab { .. })
+                ),
+                "{code:?} stays with the composer"
+            );
+        }
+    }
+
+    #[test]
+    fn alt_arrows_cycle_and_alt_digits_jump() {
+        let (app, _receivers) = app_with_tabs(3);
+        let key = |code| {
+            Event::Terminal(TermEvent::Key(termina::event::KeyEvent::new(
+                code,
+                Modifiers::ALT,
+            )))
+        };
+
+        assert!(matches!(
+            app.map_event(key(KeyCode::Right)),
+            Some(AppMessage::CycleTab { forward: true })
+        ));
+        assert!(matches!(
+            app.map_event(key(KeyCode::Left)),
+            Some(AppMessage::CycleTab { forward: false })
+        ));
+        assert!(matches!(
+            app.map_event(key(KeyCode::Char('3'))),
+            Some(AppMessage::GotoTab { position: 2 })
+        ));
+        // A digit with no tab behind it still maps; the update is what ignores
+        // it, so the key never falls through to the composer and gets typed.
+        assert!(matches!(
+            app.map_event(key(KeyCode::Char('9'))),
+            Some(AppMessage::GotoTab { position: 8 })
+        ));
+        // The plain digit is text.
+        assert!(matches!(
+            app.map_event(Event::Terminal(TermEvent::Key(
+                termina::event::KeyEvent::new(KeyCode::Char('2'), Modifiers::NONE)
+            ))),
+            Some(AppMessage::Session(SessionMessage::Text(_)))
+        ));
     }
 }

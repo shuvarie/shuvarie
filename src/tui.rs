@@ -64,6 +64,8 @@ mod session_picker;
 mod sidebar;
 mod slash;
 mod spinner;
+/// The tab strip: one agent per tab, each with its own core task and workspace.
+mod tabs;
 mod theme;
 mod theme_picker;
 mod title;
