@@ -1,18 +1,12 @@
 use std::path::PathBuf;
 
-use shuvarie_core::{
-    Category, Config, ScanItem, SceneSet, ThemeSet, TrustFile, TrustGrants, WorkspaceScan,
-};
+use shuvarie_core::{Category, Config, ScanItem, ThemeSet, TrustFile, TrustGrants, WorkspaceScan};
 
 use crate::tui::trust::{TrustPromptOutcome, run_prompt};
 
 pub struct Resolved {
     pub config: Config,
     pub grants: TrustGrants,
-    /// The merged scene set for the run: the config chain's `scenes`
-    /// sections plus the `scene.d` drop-in dirs under their trust rules,
-    /// with a warning per same-level conflict.
-    pub scenes: SceneSet,
     /// The merged theme set for the run: the config chain's `themes`
     /// sections plus the `themes.d` drop-in dirs under their trust rules,
     /// with a warning per same-level conflict or `themes.d` problem. The
@@ -114,9 +108,13 @@ pub fn resolve_with_grants(
     load_under(&cwd, explicit_config, grants)
 }
 
-/// Loads the config chain under `grants` and resolves the scenes and theme
-/// sets for it. Shared by the interactive [`resolve`] and the headless
+/// Loads the config chain under `grants` and resolves the theme set for it.
+/// Shared by the interactive [`resolve`] and the headless
 /// [`resolve_with_grants`].
+///
+/// The scene set is deliberately absent: scenes are per workspace, so they are
+/// resolved where the workspace is known — for each core task, by the spawner
+/// ([`crate::spawn::CoreSpawner::spawn`]) rather than once for the process.
 fn load_under(
     cwd: &std::path::Path,
     explicit_config: Option<&PathBuf>,
@@ -126,12 +124,6 @@ fn load_under(
         Some(path) => Config::load_explicit(path)?,
         None => Config::load_trusted(cwd, &grants)?,
     };
-    let scenes = Config::load_scenes(
-        &config,
-        cwd,
-        &grants,
-        explicit_config.as_ref().map(|p| p.as_path()),
-    )?;
     let theme_set = Config::load_themes(
         &config,
         cwd,
@@ -141,7 +133,6 @@ fn load_under(
     Ok(Resolved {
         config,
         grants,
-        scenes,
         theme_set,
     })
 }

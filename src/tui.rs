@@ -8,13 +8,13 @@ use termina::{
     escape::csi::{Csi, Keyboard, Window},
     event::Event as TerminalEvent,
 };
-use tokio::sync::mpsc::{Receiver, Sender};
 
-use shuvarie_core::{Command, Config, Connections, Event as CoreEvent, ThemeSet};
+use shuvarie_core::{Config, Connections, ThemeSet};
 
 use crate::tui::event::Event;
 
 use self::app::{App, AppEffect, AppMessage};
+use crate::spawn::CoreHandle;
 
 pub mod add_decision_provider;
 pub mod add_provider;
@@ -83,8 +83,7 @@ pub enum TuiResponse {
 pub async fn run_tui(
     config: Config,
     theme_set: ThemeSet,
-    cmd_tx: Sender<Command>,
-    event_rx: Receiver<CoreEvent>,
+    mut core: CoreHandle,
 ) -> io::Result<Option<TuiResponse>> {
     let mut term = PlatformTerminal::new()?;
     term.enter_raw_mode()?;
@@ -135,7 +134,9 @@ pub async fn run_tui(
     }
     let mut rat = ratatui::Terminal::new(TerminaBackend::new(term))?;
     let connections = Connections::load().map_err(|e| io::Error::other(e.to_string()))?;
-    let workspace = workspace::WorkspaceInfo::detect();
+    // The sidebar shows the workspace of the core this tab drives, not the one
+    // the process was launched from: a tab spawned elsewhere has its own.
+    let workspace = workspace::WorkspaceInfo::detect_at(core.root());
     // Watch the workspace's `HEAD` file for the sidebar's branch label; the
     // watch lives as long as the render loop (`branch_watch` is consumed by
     // `render_tui`).
@@ -147,7 +148,7 @@ pub async fn run_tui(
         theme_choices,
         config.registries.clone(),
         connections,
-        cmd_tx,
+        core.cmd_tx.clone(),
         initial_cols,
         workspace,
     );
@@ -162,7 +163,7 @@ pub async fn run_tui(
     let session_id = render_tui(
         app,
         &mut rat,
-        event_rx,
+        &mut core,
         event_stream,
         frame_budget,
         branch_watch,
@@ -172,6 +173,10 @@ pub async fn run_tui(
     let deinit = deinit_terminal(rat.backend_mut().terminal_mut(), modify_other_keys);
     let session_id = session_id?;
     deinit?;
+    // The app's command sender went with the render loop, so the core's select
+    // loop has already broken; the await releases its session lock and stops
+    // its LSP and MCP managers before the terminal is handed back.
+    core.shutdown().await.map_err(io::Error::other)?;
 
     if let Some(session_id) = session_id {
         return Ok(Some(TuiResponse::SessionSaved { session_id }));
@@ -200,7 +205,7 @@ fn frame_budget(frame_rate: u32) -> Option<Duration> {
 async fn render_tui(
     mut app: App,
     rat: &mut ratatui::Terminal<TerminaBackend<PlatformTerminal>>,
-    mut event_rx: Receiver<CoreEvent>,
+    core: &mut CoreHandle,
     mut event_stream: EventStream,
     frame_budget: Option<Duration>,
     mut branch_watch: git_watch::BranchWatch,
@@ -350,7 +355,7 @@ where
                     apply_msg(&mut app, rat.backend_mut().terminal_mut(), msg)
                 }
                 // Core event — drain all already-queued core events as one batch.
-                ev = event_rx.recv() => {
+                ev = core.event_rx.recv() => {
                     let Some(ev) = ev else { break 'render_loop app.session.session_id; };
                     let msg = app.map_event(Event::Core(ev));
                     apply_msg(&mut app, rat.backend_mut().terminal_mut(), msg)

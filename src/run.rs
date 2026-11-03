@@ -3,27 +3,21 @@
 
 use std::io::Write;
 
-use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::task::JoinHandle;
-
 use shuvarie_core::{Command, Event, PermissionAnswer};
 
 use crate::cli::RunArgs;
+use crate::spawn::CoreHandle;
 
 /// Runs one prompt to completion. Assistant text goes to stdout — flushed as
 /// it arrives, so it pipes cleanly — while tool activity, permission decisions,
 /// retry notices, and the resume hint go to stderr. Returns an error, and so a
 /// non-zero exit, when the turn fails.
-pub async fn run_cli(
-    args: RunArgs,
-    cmd_tx: Sender<Command>,
-    mut event_rx: Receiver<Event>,
-    core: JoinHandle<()>,
-) -> color_eyre::Result<()> {
+pub async fn run_cli(args: RunArgs, mut core: CoreHandle) -> color_eyre::Result<()> {
     // Enter headless mode before the prompt, so the turn's roster and preamble
     // are built without the `question` tool and with the non-interactive note.
-    let _ = cmd_tx.send(Command::SetHeadless).await;
-    if cmd_tx
+    let _ = core.cmd_tx.send(Command::SetHeadless).await;
+    if core
+        .cmd_tx
         .send(Command::SendMessage {
             content: args.prompt.join(" "),
             attachments: Vec::new(),
@@ -40,7 +34,7 @@ pub async fn run_cli(
     let mut trailing_newline = true;
     let mut result: Option<Outcome> = None;
 
-    while let Some(event) = event_rx.recv().await {
+    while let Some(event) = core.event_rx.recv().await {
         if let Some(terminal) = terminal_outcome(&event) {
             result = Some(terminal);
             break;
@@ -99,7 +93,8 @@ pub async fn run_cli(
             } => {
                 let decision = args.permission_handle.decision(allow_dir);
                 eprintln!("permission: {description} -> {}", decision_label(decision));
-                let _ = cmd_tx
+                let _ = core
+                    .cmd_tx
                     .send(Command::PermissionDecide { id, decision })
                     .await;
             }
@@ -107,7 +102,8 @@ pub async fn run_cli(
                 // The headless roster omits the `question` tool, so this should
                 // not happen; answer defensively so a stray ask cannot hang.
                 eprintln!("warning: a question was asked in run mode; dismissing it");
-                let _ = cmd_tx
+                let _ = core
+                    .cmd_tx
                     .send(Command::AnswerQuestion { id, answers: None })
                     .await;
             }
@@ -129,12 +125,12 @@ pub async fn run_cli(
         }
     }
 
-    // Drop our end of the command channel so the core's select loop breaks and
-    // it shuts down (releasing the session lock, stopping LSP/MCP) before we
-    // await it.
-    drop(cmd_tx);
-    core.await
-        .map_err(|e| color_eyre::eyre::eyre!("core task panicked: {e}"))?;
+    // Stop the core before reporting: dropping the command sender ends its
+    // select loop, and awaiting the task releases the session lock (and stops
+    // LSP/MCP) before the resume hint prints.
+    core.shutdown()
+        .await
+        .map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
 
     if stdout_used && !trailing_newline {
         println!();

@@ -14,8 +14,11 @@ pub struct WorkspaceInfo {
 }
 
 impl WorkspaceInfo {
-    pub fn detect() -> Self {
-        let path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    /// The workspace rooted at `path`: what a tab's sidebar shows for the core
+    /// it drives, which is not necessarily the directory the process was
+    /// started from.
+    pub fn detect_at(path: &Path) -> Self {
+        let path = path.to_path_buf();
         let home = dirs::home_dir();
         let branch = detect_branch(&path);
         Self { path, home, branch }
@@ -448,9 +451,12 @@ mod tests {
     }
 
     #[test]
-    fn detect_reports_current_dir() {
-        let info = WorkspaceInfo::detect();
-        assert!(!info.path.as_os_str().is_empty());
+    fn detect_at_reports_the_directory_it_was_given() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let info = WorkspaceInfo::detect_at(dir.path());
+        assert_eq!(info.path, dir.path());
+        assert!(info.branch.is_none(), "a bare directory is no repository");
+        assert!(info.home.is_some());
     }
 
     #[test]

@@ -1,15 +1,16 @@
 use clap::Parser;
 #[cfg(target_env = "musl")]
 use mimalloc_safe::MiMalloc;
-use tokio::sync::mpsc::channel;
 
 mod cli;
 mod run;
+mod spawn;
 mod trust;
 mod tui;
 mod update;
 
 use crate::cli::show_resume_hint;
+use crate::spawn::CoreSpawner;
 
 #[cfg(target_env = "musl")]
 #[global_allocator]
@@ -67,35 +68,20 @@ async fn main() -> color_eyre::Result<()> {
     let Some(trust::Resolved {
         config,
         grants,
-        scenes,
         theme_set,
     }) = resolved
     else {
         return Ok(());
     };
 
-    // The store choice follows the config: the shared global data dir when
-    // `db { global-store }` is set, else the workspace-local DB. Resolving
-    // first means a store is never created for a run that quits at the trust
-    // prompt. `--transient` overrides both with an in-memory DB.
+    // The process-wide inputs are settled, so the core is spawned through the
+    // same path a later tab takes: the store choice (`db { global-store }`), the
+    // permission rules, and the config chain are resolved against a workspace
+    // root, never against the process. Resolving trust first means a store is
+    // still never created for a run that quits at the prompt.
     let transient = run_args.as_ref().is_some_and(|run| run.transient);
-    // The workspace everything below is pinned to: the directory the process
-    // runs in (`--dir` has already applied). It is passed explicitly rather
-    // than re-read from the cwd at each layer, so a per-tab core task can use
-    // the same code path with its own root.
     let workspace_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let store = if transient {
-        shuvarie_db::Store::open_in_memory().await?
-    } else {
-        shuvarie_db::Store::for_workspace(&workspace_root, config.db.global_store).await?
-    };
-
-    let (cmd_tx, cmd_rx) = channel::<shuvarie_core::Command>(64);
-    let (event_tx, event_rx) = channel::<shuvarie_core::Event>(64);
-    let permissions = std::sync::Arc::new(
-        shuvarie_core::permissions::Permissions::build(&config.permissions, &workspace_root)
-            .map_err(|e| color_eyre::eyre::eyre!(e))?,
-    );
+    let spawner = CoreSpawner::new(args.config.clone(), grants.clone(), transient);
     let startup = if let Some(id) = args.session {
         shuvarie_core::StartupSession::Session(id)
     } else if args.current {
@@ -103,30 +89,17 @@ async fn main() -> color_eyre::Result<()> {
     } else {
         shuvarie_core::StartupSession::None
     };
-    let core = tokio::spawn(shuvarie_core::run(
-        config.clone(),
-        shuvarie_core::Connections::load()?,
-        store,
-        startup,
-        args.config,
-        None,
-        permissions,
-        grants,
-        scenes,
-        cmd_rx,
-        event_tx,
-    ));
+    let core = spawner
+        .spawn(&workspace_root, startup)
+        .await
+        .map_err(|e| color_eyre::eyre::eyre!(e))?;
 
     if let Some(run) = run_args {
-        return run::run_cli(run, cmd_tx, event_rx, core).await;
+        return run::run_cli(run, core).await;
     }
 
-    let res = tui::run_tui(config, theme_set, cmd_tx.clone(), event_rx).await;
-    drop(cmd_tx);
-    let core_res = core.await;
-
+    let res = tui::run_tui(config, theme_set, core).await;
     let res = res?;
-    core_res?;
 
     if let Some(res_enum) = res {
         match res_enum {
