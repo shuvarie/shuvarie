@@ -45,6 +45,10 @@ TLDR: **You must know what you're doing.**
 If you have used AI to write the code during your contribution **no matter entirely or partly**,
 please add the following text at the top of the commit description (next line of the commit summary) and your pull request:
 
+> [!NOTE]
+>
+> If you use Shuvarie, you can use the `/assisted-by` slash command in an existing session for generating the information with ease.
+
 ```
 Assisted-By: <model vendor>/<model name>[, <other models>...] via <tool name>[, <other models and tools>...]
 ```

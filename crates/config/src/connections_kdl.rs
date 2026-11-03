@@ -5,6 +5,7 @@ use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use super::kdl_util::{autoformat, node_error, parse_document};
 use super::{Active, Connections, DecisionActive, DecisionProviderConfig, ProviderConfig};
 use crate::Result;
+use crate::connections::normalize_env_name;
 
 pub(crate) fn from_kdl(contents: &str) -> Result<Connections> {
     from_document(&parse_document(contents)?, contents)
@@ -481,6 +482,7 @@ fn parse_provider(
     let mut kind = None;
     let mut catalog = None;
     let mut api_key = None;
+    let mut api_key_env = None;
     let mut base_url = None;
     if let Some(children) = node.children() {
         for child in children.nodes() {
@@ -504,6 +506,22 @@ fn parse_provider(
                 "kind" => kind = as_string(value)?,
                 "catalog" => catalog = as_string(value)?,
                 "api-key" => api_key = as_string(value)?,
+                // Selune spells the reference `$OPENAI_API_KEY`; accept both
+                // spellings and store the bare name.
+                "api-key-env" => {
+                    let raw = as_string(value)?;
+                    api_key_env = match raw.as_deref().and_then(normalize_env_name) {
+                        Some(name) => Some(name),
+                        None => {
+                            return Err(node_error(
+                                input,
+                                child,
+                                "`api-key-env` must name an environment variable",
+                                Some("expected: api-key-env \"OPENAI_API_KEY\"".into()),
+                            ));
+                        }
+                    };
+                }
                 "base-url" => base_url = as_string(value)?,
                 _ => {}
             }
@@ -526,6 +544,7 @@ fn parse_provider(
         kind,
         catalog,
         api_key,
+        api_key_env,
         base_url,
     };
     if providers.insert(id, config).is_some() {
@@ -582,6 +601,11 @@ pub(crate) fn to_kdl(connections: &Connections) -> Result<String> {
         if let Some(key) = &config.api_key {
             let mut child = KdlNode::new("api-key");
             child.push(KdlEntry::new(key.as_str()));
+            children.nodes_mut().push(child);
+        }
+        if let Some(env) = &config.api_key_env {
+            let mut child = KdlNode::new("api-key-env");
+            child.push(KdlEntry::new(env.as_str()));
             children.nodes_mut().push(child);
         }
         if let Some(url) = &config.base_url {

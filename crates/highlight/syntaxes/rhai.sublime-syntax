@@ -8,7 +8,7 @@
 # keywords, and called names. Everything else stays the default text color, so a
 # script full of `file.len` does not read as a wall of function names.
 #
-# The forms covered here are the ones Rhai 1.26.1's tokenizer accepts (checked
+# The forms covered here are the ones Rhai 1.27's tokenizer accepts (checked
 # against `rhai/src/tokenizer.rs` and the language cheat sheet). A rule that is
 # merely *approximate* is worse than no rule: a string form that never closes
 # paints the rest of the file as string text.

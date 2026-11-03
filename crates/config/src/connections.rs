@@ -69,7 +69,12 @@ pub struct ProviderConfig {
     /// requirements, context limits, and pricing. When absent,
     /// [`Self::catalog_id`] falls back to `kind` for legacy configs.
     pub catalog: Option<String>,
+    /// The literal key, written to `connections.kdl` in plaintext.
     pub api_key: Option<String>,
+    /// The name of an environment variable holding the key (Selune's catalog
+    /// spells it `$OPENAI_API_KEY`). Used when no literal [`Self::api_key`] is
+    /// stored, so a pact can keep its secret out of the file entirely.
+    pub api_key_env: Option<String>,
     pub base_url: Option<String>,
 }
 
@@ -117,6 +122,7 @@ impl ProviderConfig {
             kind: kind.into(),
             catalog: None,
             api_key,
+            api_key_env: None,
             base_url,
         }
     }
@@ -127,11 +133,51 @@ impl ProviderConfig {
         self
     }
 
+    /// Set the environment variable the key is read from (a bare name, or a
+    /// Selune-style `$NAME` reference — the sigil is stripped).
+    pub fn with_api_key_env(mut self, env: Option<impl AsRef<str>>) -> Self {
+        self.api_key_env = env.as_ref().and_then(|e| normalize_env_name(e.as_ref()));
+        self
+    }
+
+    /// The key to connect with: the literal `api-key` when one is stored, else
+    /// the value of the environment variable named by `api-key-env`. Blank
+    /// values count as absent, so an empty `api-key` line does not shadow a set
+    /// variable.
+    pub fn resolved_api_key(&self) -> Option<String> {
+        let literal = self
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty());
+        if let Some(key) = literal {
+            return Some(key.to_string());
+        }
+        let name = self.api_key_env.as_deref().and_then(normalize_env_name)?;
+        let value = std::env::var(name).ok()?;
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    }
+
     /// The Selune catalog id for metadata lookups: the explicit `catalog`
     /// field, else `kind` (which held the catalog id in older configs).
     pub fn catalog_id(&self) -> Option<&str> {
         self.catalog.as_deref().or(Some(self.kind.as_str()))
     }
+}
+
+/// Strip the environment-variable sigil from a name so bare (`OPENAI_API_KEY`)
+/// and Selune-style (`$OPENAI_API_KEY`, `${OPENAI_API_KEY}`) references agree.
+/// `None` when nothing is left.
+pub fn normalize_env_name(name: &str) -> Option<String> {
+    let name = name.trim();
+    let name = name.strip_prefix('$').unwrap_or(name);
+    let name = match name.strip_prefix('{').and_then(|n| n.strip_suffix('}')) {
+        Some(inner) => inner,
+        None => name,
+    };
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 impl DecisionProviderConfig {
@@ -590,5 +636,81 @@ mod tests {
     fn catalog_id_falls_back_to_legacy_kind() {
         let pc = ProviderConfig::new("cloud", "ollama-cloud", None, None);
         assert_eq!(pc.catalog_id(), Some("ollama-cloud"));
+    }
+
+    #[test]
+    fn parses_api_key_env_in_both_spellings() {
+        let text = "providers {\n    provider id=\"a\" name=\"Acme\" {\n        kind \"openai\"\n        api-key-env \"$OPENAI_API_KEY\"\n    }\n    provider id=\"b\" name=\"Beta\" {\n        kind \"anthropic\"\n        api-key-env \"ANTHROPIC_API_KEY\"\n    }\n}";
+        let parsed: Connections = connections_kdl::from_kdl(text).unwrap();
+        assert_eq!(
+            parsed.providers["a"].api_key_env.as_deref(),
+            Some("OPENAI_API_KEY"),
+            "Selune's `$NAME` reference is stored as the bare name"
+        );
+        assert!(parsed.providers["a"].api_key.is_none());
+        assert_eq!(
+            parsed.providers["b"].api_key_env.as_deref(),
+            Some("ANTHROPIC_API_KEY")
+        );
+
+        let saved = connections_kdl::to_kdl(&parsed).unwrap();
+        assert!(
+            saved.contains("api-key-env OPENAI_API_KEY")
+                || saved.contains("api-key-env \"OPENAI_API_KEY\""),
+            "{saved}"
+        );
+        let reparsed: Connections = connections_kdl::from_kdl(&saved).unwrap();
+        assert_eq!(parsed, reparsed);
+    }
+
+    #[test]
+    fn rejects_blank_api_key_env() {
+        let text = "providers {\n    provider id=\"a\" name=\"Acme\" {\n        kind \"openai\"\n        api-key-env \"  \"\n    }\n}";
+        let err = connections_kdl::from_kdl(text).unwrap_err();
+        assert!(err.to_string().contains("environment variable"), "{err}");
+    }
+
+    #[test]
+    fn resolved_api_key_prefers_literal_then_env() {
+        let mut pc = ProviderConfig::new("acme", "openai", None, None)
+            .with_api_key_env(Some("$SHUVARIE_TEST_KEY"));
+        assert_eq!(pc.api_key_env.as_deref(), Some("SHUVARIE_TEST_KEY"));
+        assert_eq!(pc.resolved_api_key(), None, "the variable is not set");
+
+        // `api_key_env` is read at resolution time, so an unset variable simply
+        // yields no key rather than failing to load.
+        assert_eq!(
+            pc.clone()
+                .with_api_key_env(Some("SHUVARIE_TEST_KEY_DEFINITELY_UNSET"))
+                .resolved_api_key(),
+            None
+        );
+
+        pc.api_key = Some("  ".into());
+        assert_eq!(
+            pc.resolved_api_key(),
+            None,
+            "a blank literal does not shadow the variable"
+        );
+        pc.api_key = Some(" sk-literal ".into());
+        assert_eq!(pc.resolved_api_key().as_deref(), Some("sk-literal"));
+    }
+
+    #[test]
+    fn normalize_env_name_strips_the_sigil() {
+        assert_eq!(
+            normalize_env_name("OPENAI_API_KEY").as_deref(),
+            Some("OPENAI_API_KEY")
+        );
+        assert_eq!(
+            normalize_env_name("$OPENAI_API_KEY").as_deref(),
+            Some("OPENAI_API_KEY")
+        );
+        assert_eq!(
+            normalize_env_name("${OPENAI_API_KEY}").as_deref(),
+            Some("OPENAI_API_KEY")
+        );
+        assert_eq!(normalize_env_name("  "), None);
+        assert_eq!(normalize_env_name("$"), None);
     }
 }

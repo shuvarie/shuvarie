@@ -267,6 +267,11 @@ pub(crate) async fn run_shell_command(
         }
     };
 
+    // The interval gate above may never have fired after the process's last
+    // output (a short command can finish between ticks): always surface the
+    // final capture, so a raw-mode consumer sees the whole buffer and a
+    // tail-mode one is not left showing a stale prefix.
+    shell_tx.send_streams(command, &out, &err).await;
     for reader in readers {
         let _ = reader.await;
     }

@@ -196,8 +196,11 @@ pub enum Command {
         /// itself becomes the tip and nothing is recalled into the input.
         after: bool,
     },
-    /// Delete a branch of the session tree: the node and all of its
-    /// descendants (must not contain the active leaf).
+    /// Delete a subtree of the session tree: the node and all of its
+    /// descendants, with their tool calls and embeddings. Deleting a node on
+    /// the active path rewinds the path to the node's parent first (a root's
+    /// deletion leaves an empty conversation) and reloads the chat pane;
+    /// off-path deletions only refresh the tree. Refused while a turn runs.
     DeleteBranch {
         node: u64,
     },

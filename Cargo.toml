@@ -101,7 +101,7 @@ members = ["crates/*"]
 exclude = ["vendor/frameplay", "vendor/selune"]
 
 [workspace.package]
-version = "0.5.3"
+version = "0.5.6"
 edition = "2024"
 authors = ["Charles Dong <chardon_cs@proton.me>"]
 license = "MIT"
@@ -132,7 +132,11 @@ reqwest = "0.13"
 # The codemode scripting language. `serde` is the JSON bridge tools use to
 # cross between the host and a script; nothing else is wanted from it (no
 # `sync`, no `no_module` -- static modules are the call surface).
-rhai = { version = "1.26", features = ["serde"] }
+# 1.27's `compact_str` feature is deliberately *not* on: it only swaps the type
+# behind `ImmutableString`/`Map` keys, and `smartstring` -- archived and
+# unmaintained (RUSTSEC-2026-0249) -- stays a hard dependency either way until
+# Rhai 2.0, so the swap buys nothing and changes the key type for no reason.
+rhai = { version = "1.27", features = ["serde"] }
 # Do NOT include `rig`. It has too many implicit dependencies.
 rig-agent = "0.45"
 rig-core = { version = "0.45", features = ["reqwest"] }

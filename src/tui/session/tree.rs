@@ -34,6 +34,10 @@ pub enum TreeEffect {
         summarize: bool,
         after: bool,
     },
+    /// Delete the selected row's subtree (the node plus every descendant and
+    /// its tool calls). A row on the active path takes the rest of the
+    /// conversation with it: the path rewinds to the row's parent, and a
+    /// root's deletion leaves an empty conversation.
     DeleteBranch {
         node: u64,
     },
@@ -72,10 +76,12 @@ struct TreeRow {
     glyph: &'static str,
     text: String,
     role: Role,
+    /// The row's parent node: where the active path (and the selection)
+    /// lands when this row's subtree is deleted.
+    parent: Option<u64>,
     on_path: bool,
     is_tip: bool,
     summary: bool,
-    deletable: bool,
 }
 
 pub struct TreePopup {
@@ -85,6 +91,9 @@ pub struct TreePopup {
     pub offset: usize,
     pub summarize: bool,
     pub confirm_delete: bool,
+    /// The node to select once a delete refreshes the rows: the deleted
+    /// node's parent, which is the row the active path rewound to.
+    select_after_refresh: Option<u64>,
     busy: bool,
 }
 
@@ -97,6 +106,7 @@ impl TreePopup {
             offset: 0,
             summarize: false,
             confirm_delete: false,
+            select_after_refresh: None,
             busy: false,
         }
     }
@@ -113,12 +123,14 @@ impl TreePopup {
         self.offset = 0;
         self.summarize = false;
         self.confirm_delete = false;
+        self.select_after_refresh = None;
         self.recompute_offset();
     }
 
     pub fn close(&mut self) {
         self.open = false;
         self.confirm_delete = false;
+        self.select_after_refresh = None;
     }
 
     /// View-only mode while a turn runs: forking and branch deletion wait
@@ -131,8 +143,14 @@ impl TreePopup {
         }
     }
 
+    /// Rebuild the rows from a reloaded tree, keeping the selection on the
+    /// same node — or on the node a delete handed over (the deleted row's
+    /// parent), which outlives the refresh.
     pub fn set_rows(&mut self, session: &shuvarie_core::Session) {
-        let keep = self.rows.get(self.selected).map(|row| row.node_id);
+        let keep = self
+            .select_after_refresh
+            .take()
+            .or_else(|| self.rows.get(self.selected).map(|row| row.node_id));
         self.rows = build_rows(session);
         self.selected = keep
             .and_then(|id| self.rows.iter().position(|row| row.node_id == id))
@@ -221,18 +239,19 @@ impl TreePopup {
                 if self.busy {
                     return None;
                 }
-                if self.confirm_delete {
-                    let row = self.rows.get(self.selected)?;
-                    let node = row.node_id;
-                    self.confirm_delete = false;
-                    Some(TreeEffect::DeleteBranch { node })
-                } else {
-                    self.confirm_delete = self
-                        .rows
-                        .get(self.selected)
-                        .is_some_and(|row| row.deletable);
-                    None
+                let (node, parent) = self
+                    .rows
+                    .get(self.selected)
+                    .map(|r| (r.node_id, r.parent))?;
+                if !self.confirm_delete {
+                    self.confirm_delete = true;
+                    return None;
                 }
+                self.confirm_delete = false;
+                // The subtree (and, on the active path, its tail) goes with
+                // the node: the next refresh selects the surviving parent.
+                self.select_after_refresh = parent;
+                Some(TreeEffect::DeleteBranch { node })
             }
             TreeMessage::CancelDelete => {
                 self.confirm_delete = false;
@@ -271,7 +290,16 @@ impl TreePopup {
             }
 
             let hint = if self.confirm_delete {
-                theme::help_line(&[("Enter", "delete branch"), ("Esc", "cancel")])
+                // Deleting a row on the active path takes the rest of the
+                // conversation with it: the path rewinds to the row's parent.
+                // A root has none, so its deletion empties the conversation.
+                let label = match self.rows.get(self.selected) {
+                    Some(row) if !row.on_path => "delete branch",
+                    Some(row) if row.parent.is_some() => "delete & rewind",
+                    Some(_) => "delete all",
+                    None => "delete",
+                };
+                theme::help_line(&[("Enter", label), ("Esc", "cancel")])
             } else if self.busy {
                 theme::help_line(&[
                     ("↑↓", "walk"),
@@ -288,7 +316,7 @@ impl TreePopup {
                     ("↑↓", "walk"),
                     ("Enter", "fork here"),
                     ("s", summarize_label),
-                    ("d", "delete branch"),
+                    ("d", "delete"),
                     ("Esc", "close"),
                 ])
             };
@@ -395,10 +423,10 @@ fn build_rows(session: &shuvarie_core::Session) -> Vec<TreeRow> {
             glyph,
             text,
             role: node.role,
+            parent: node.parent,
             on_path: node.on_path,
             is_tip: Some(node.id) == tip,
             summary: node.summary,
-            deletable: !node.on_path,
         });
         for tool in node.tools.iter().rev() {
             rows.push(TreeRow {
@@ -409,10 +437,10 @@ fn build_rows(session: &shuvarie_core::Session) -> Vec<TreeRow> {
                 glyph: "⚙",
                 text: tool_line(tool),
                 role: Role::Assistant,
+                parent: node.parent,
                 on_path: node.on_path,
                 is_tip: false,
                 summary: false,
-                deletable: !node.on_path,
             });
         }
     }
@@ -536,8 +564,12 @@ mod tests {
         assert_eq!(popup.rows[2].guide, "   ├─ ");
         assert_eq!(popup.rows[3].guide, "   │  ");
         assert_eq!(popup.rows[4].guide, "   └─ ");
-        assert!(!popup.rows[0].deletable, "on-path rows are not deletable");
-        assert!(popup.rows[4].deletable);
+        assert_eq!(popup.rows[0].parent, None, "a root row has no parent");
+        assert_eq!(
+            popup.rows[3].parent,
+            Some(2),
+            "tool rows rewind to their reply's parent"
+        );
         assert!(
             !popup.rows[0].walks_after,
             "prompt rows fork before themselves"
@@ -597,30 +629,65 @@ mod tests {
     }
 
     #[test]
-    fn delete_requires_a_second_press_and_only_off_path_nodes() {
+    fn delete_arms_on_any_row_and_hands_over_its_parent() {
         let session = session_with(
             vec![
                 node(1, None, Role::User, 0, "ask", true),
-                node(2, Some(1), Role::Assistant, 1, "off", false),
+                node(2, Some(1), Role::Assistant, 1, "reply", true),
+                node(3, Some(2), Role::User, 2, "off", false),
             ],
-            1,
+            2,
         );
         let mut popup = popup_for(&session);
-        popup.selected = 0;
-        assert!(
-            popup.update(TreeMessage::Delete).is_none(),
-            "on-path node cannot be armed for deletion"
-        );
         popup.selected = 1;
         assert!(
             popup.update(TreeMessage::Delete).is_none(),
-            "first press arms"
+            "the first press only arms"
         );
-        assert!(popup.confirm_delete);
+        assert!(popup.confirm_delete, "on-path rows are deletable too");
         match popup.update(TreeMessage::Delete) {
             Some(TreeEffect::DeleteBranch { node }) => assert_eq!(node, 2),
             other => panic!("expected delete effect, got {other:?}"),
         }
+        assert!(!popup.confirm_delete);
+        assert_eq!(
+            popup.select_after_refresh,
+            Some(1),
+            "the refresh selects the parent the path rewound to"
+        );
+
+        popup.selected = 2;
+        assert!(popup.update(TreeMessage::Delete).is_none());
+        match popup.update(TreeMessage::Delete) {
+            Some(TreeEffect::DeleteBranch { node }) => assert_eq!(node, 3),
+            other => panic!("expected delete effect, got {other:?}"),
+        }
+        assert_eq!(popup.select_after_refresh, Some(2));
+    }
+
+    #[test]
+    fn deleting_an_on_path_row_selects_its_parent_after_the_refresh() {
+        let session = session_with(
+            vec![
+                node(1, None, Role::User, 0, "ask", true),
+                node(2, Some(1), Role::Assistant, 1, "reply", true),
+            ],
+            2,
+        );
+        let mut popup = popup_for(&session);
+        popup.selected = 1;
+        popup.update(TreeMessage::Delete);
+        popup.update(TreeMessage::Delete);
+
+        // The reload after the delete: node 2 and its subtree are gone.
+        let reloaded = session_with(vec![node(1, None, Role::User, 0, "ask", true)], 1);
+        popup.set_rows(&reloaded);
+        assert_eq!(popup.rows.len(), 1);
+        assert_eq!(
+            popup.rows[popup.selected].node_id, 1,
+            "the parent takes over the selection"
+        );
+        assert_eq!(popup.select_after_refresh, None, "the handover is one-shot");
     }
 
     #[test]
@@ -676,7 +743,6 @@ mod tests {
         let popup = popup_for(&session);
         assert_eq!(popup.selected, 0);
         assert!(popup.rows.iter().all(|row| !row.is_tip));
-        assert!(popup.rows.iter().all(|row| row.deletable));
     }
 
     #[test]

@@ -12,17 +12,17 @@
 //! The shape of this document follows the Rhai cheat sheet
 //! (<https://optozorax.github.io/rhai_cheats/>) where a lookup table is the
 //! right form, and the function lists were taken from the Rhai Book
-//! (<https://rhai.rs/book/>), which documents this same 1.26 series.
+//! (<https://rhai.rs/book/>), which documents this same 1.27 series.
 //!
 //! Every claim has been checked against the Rhai this tool actually builds
-//! (1.26.1, default features) by running it, because both sources describe the
-//! language in general and this build is behind in places. A table entry the
-//! engine rejects is worse than no entry, so `round(x, n)`, `substr`, string
-//! `find`, `get(k, d)`, `for key in map`, `this` methods, method-call sugar on
-//! script functions, `let x = try { }`, and BLOBs are all absent here because
-//! they do not run -- and `tests/spike.rs` pins each one that would otherwise
-//! be tempting, so an upgrade that adds one fails the build instead of leaving
-//! this document quietly wrong.
+//! (1.27, default features plus `serde`) by running it, because both sources
+//! describe the language in general and this build is behind in places. A table
+//! entry the engine rejects is worse than no entry, so `round(x, n)`, `substr`,
+//! string `find`, `get(k, d)`, `for key in map`, `this` methods, method-call
+//! sugar on script functions, `let x = try { }`, and BLOBs are all absent here
+//! because they do not run -- and `tests/spike.rs` pins each one that would
+//! otherwise be tempting, so an upgrade that adds one fails the build instead
+//! of leaving this document quietly wrong.
 
 /// The skill's name, as `skill` invocations and the roster see it.
 pub const NAME: &str = "codemode";

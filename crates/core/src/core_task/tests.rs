@@ -207,6 +207,39 @@ fn next_connection_retry_caps_at_max() {
     assert_eq!(next_turn_retry(1, 1), None);
 }
 
+/// Only content counts as an attempt getting going: the bridge maps the rig
+/// items it does not handle to empty deltas, so an attempt whose sole item is one
+/// of those never got anywhere and its failure continues the chain.
+#[test]
+fn progress_is_content_not_bookkeeping() {
+    assert!(!shows_progress(&StreamItem::Delta {
+        text: String::new()
+    }));
+    assert!(!shows_progress(&StreamItem::Reasoning {
+        text: String::new()
+    }));
+    assert!(!shows_progress(&StreamItem::Overflow));
+    assert!(!shows_progress(&StreamItem::Error {
+        message: "boom".into(),
+        reason: "Turn error".into(),
+    }));
+    assert!(shows_progress(&StreamItem::Delta {
+        text: "half ".into()
+    }));
+    assert!(shows_progress(&StreamItem::Reasoning {
+        text: "thinking".into()
+    }));
+    assert!(shows_progress(&main_tool_start("grep", "c1")));
+    assert!(shows_progress(&main_tool_result("grep", "c1")));
+    assert!(
+        shows_progress(&StreamItem::Usage {
+            usage: TokenUsage::default(),
+            worker: None,
+        }),
+        "a request that completed is progress, streamed text or not"
+    );
+}
+
 #[tokio::test]
 async fn stream_events_forward_and_accumulate_usage() {
     let client =
@@ -533,6 +566,7 @@ async fn stream_error_schedules_turn_retry_and_leaves_session_clean() {
         StreamOutcome::RetryableFailure {
             reason: "Turn error".into(),
             message: "boom".into(),
+            progressed: true,
         },
     );
     // No `StreamError` either: only the run loop emits one, after
@@ -2404,6 +2438,7 @@ async fn resumed_attempt_finishes_the_interrupted_reply_row() {
         StreamOutcome::RetryableFailure {
             reason: "Connection reset".into(),
             message: "dropped again".into(),
+            progressed: true,
         }
     );
     let stored = store.load_session(id).await.unwrap();
@@ -2744,10 +2779,77 @@ async fn fork_session_undo_on_a_root_only_session_starts_over() {
 }
 
 #[tokio::test]
-async fn delete_branch_refuses_the_active_leaf() {
+async fn delete_branch_on_the_active_path_rewinds_to_the_parent() {
     let (mut store, sid, ids) = chain_session().await;
+    let rewound = delete_branch(&mut store, sid, ids[2]).await.unwrap();
+    assert_eq!(
+        rewound,
+        Some(true),
+        "the deleted node sits on the active path"
+    );
     let stored = store.load_session(sid).await.unwrap();
-    assert!(subtree_contains(&stored, ids[0], stored.leaf_id));
+    assert_eq!(
+        stored.leaf_id,
+        Some(ids[1]),
+        "the path rewinds to the deleted node's parent"
+    );
+    assert_eq!(stored.messages.len(), 2, "the subtree goes with the node");
+
+    let loaded = Session::from_stored(store.load_session(sid).await.unwrap());
+    assert_eq!(loaded.leaf_id, Some(ids[1]));
+    assert_eq!(
+        loaded.messages.len(),
+        2,
+        "the chat keeps the surviving path"
+    );
+}
+
+#[tokio::test]
+async fn delete_branch_at_the_root_empties_the_active_path() {
+    let (mut store, sid, ids) = chain_session().await;
+    let rewound = delete_branch(&mut store, sid, ids[0]).await.unwrap();
+    assert_eq!(rewound, Some(true));
+    let stored = store.load_session(sid).await.unwrap();
+    assert_eq!(
+        stored.leaf_id,
+        Some(shuvarie_db::EMPTY_LEAF),
+        "a root has no parent to rewind to: the path is cleared"
+    );
+    assert!(stored.messages.is_empty());
+}
+
+#[tokio::test]
+async fn delete_branch_off_the_active_path_keeps_the_leaf() {
+    let (mut store, sid, ids) = chain_session().await;
+    let sibling = store
+        .append_message(sid, Some(ids[1]), shuvarie_llm::Role::User, "sibling")
+        .await
+        .unwrap();
+    // Appending moved the leaf onto the sibling branch; walk back to the
+    // chain's own tail so the sibling sits off the active path.
+    store.set_active_leaf(sid, Some(ids[3])).await.unwrap();
+
+    let rewound = delete_branch(&mut store, sid, sibling.id).await.unwrap();
+    assert_eq!(
+        rewound,
+        Some(false),
+        "the deleted subtree held no active path node"
+    );
+    let stored = store.load_session(sid).await.unwrap();
+    assert_eq!(stored.leaf_id, Some(ids[3]), "the active path is untouched");
+    assert_eq!(stored.messages.len(), 4, "only the sibling branch went");
+}
+
+#[tokio::test]
+async fn delete_branch_of_an_unknown_node_is_a_no_op() {
+    let (mut store, sid, ids) = chain_session().await;
+    let rewound = delete_branch(&mut store, sid, ids[3] + 1_000)
+        .await
+        .unwrap();
+    assert_eq!(rewound, None, "a stale node has nothing to delete");
+    let stored = store.load_session(sid).await.unwrap();
+    assert_eq!(stored.messages.len(), 4, "nothing is deleted");
+    assert_eq!(stored.leaf_id, Some(ids[3]));
 }
 
 #[tokio::test]
@@ -2973,6 +3075,7 @@ async fn resume_ctx(store: Store, session: Session) -> (CoreCtx, Receiver<Event>
         ))),
         mcp: crate::mcp_manager::mcp_manager(&config.tools.mcp),
         active_stream: None,
+        flow: None,
         turn_state: None,
         turn_started: None,
         event_tx,
@@ -3160,7 +3263,7 @@ async fn turn_retry_resume_keeps_the_interrupted_partial_branch() {
     // reply under it; the pane keeps its in-flight turn (no reload). The
     // request appends nothing: the partial's last message — the tool results
     // answering its cut-off call — is re-sent as the prompt itself.
-    let request = resume_request(&guard, ResumeMode::TurnRetry).expect("a turn to resume");
+    let request = ResumePlan::of(&guard).expect("a turn to resume");
     assert_eq!(
         request.prompt.role,
         shuvarie_llm::Role::User,
@@ -3209,6 +3312,352 @@ async fn turn_retry_resume_keeps_the_interrupted_partial_branch() {
 }
 
 #[tokio::test]
+async fn retryable_failure_records_a_cut_off_tool_call() {
+    // A connection that drops while a tool runs must leave the call on the
+    // reply row as a killed record: the reloaded request and the retried model
+    // both continue from its result instead of reading a turn in which the call
+    // never happened (and blindly re-issuing a side-effecting one).
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store
+        .create_session("retry", None, None, None)
+        .await
+        .unwrap();
+    store
+        .append_message(id, None, shuvarie_llm::Role::User, "go")
+        .await
+        .unwrap();
+    let session = Arc::new(Mutex::new(Session::from_stored(
+        store.load_session(id).await.unwrap(),
+    )));
+
+    let outcome = drive_turn_attempt(
+        &store,
+        &session,
+        vec![
+            main_tool_start("read_file", "c1"),
+            StreamItem::Error {
+                message: "boom".into(),
+                reason: "Connection reset".into(),
+            },
+        ],
+        None,
+    )
+    .await;
+    assert!(matches!(outcome, StreamOutcome::RetryableFailure { .. }));
+
+    let stored = store.load_session(id).await.unwrap();
+    assert_eq!(stored.messages.len(), 2, "the reply row was created");
+    let reply_id = stored.messages[1].id;
+    assert!(
+        stored.messages[1].interrupted,
+        "the cut attempt stays interrupted"
+    );
+    let call = stored
+        .tool_calls
+        .iter()
+        .find(|tc| tc.message_id == reply_id)
+        .expect("the cut-off call is recorded");
+    assert!(call.killed, "the call never returned");
+    assert!(call.output.is_empty(), "a killed call has no output");
+
+    // The reload rebuilds the request from that record: the resumed prompt is
+    // the tool result answering the cut-off call, and the row is continued.
+    let reloaded = Session::from_stored(stored);
+    let request = ResumePlan::of(&reloaded).expect("a turn to resume");
+    assert_eq!(request.prompt.role, shuvarie_llm::Role::User);
+    assert_eq!(request.prompt.tool_results.len(), 1);
+    assert_eq!(request.prompt.tool_results[0].name, "read_file");
+    assert_eq!(
+        request
+            .continuation
+            .expect("the row is continued")
+            .message_id,
+        reply_id
+    );
+}
+
+#[tokio::test]
+async fn cut_running_stream_leaves_a_finishing_turn_alone() {
+    // A cancel racing the reply commit (or a compaction splice) must not abort
+    // the task mid-sequence: the turn reports its own outcome instead.
+    let store = Store::open_in_memory().await.unwrap();
+    let (mut ctx, mut event_rx) = resume_ctx(store, Session::new()).await;
+    let handle = tokio::spawn(std::future::pending::<()>()).abort_handle();
+    ctx.active_stream = Some(handle);
+    let turn_state = Arc::new(Mutex::new(TurnState::default()));
+    turn_state.lock().await.finishing = true;
+    ctx.turn_state = Some(turn_state);
+    let mut questions = std::collections::HashMap::new();
+    let mut permissions = std::collections::HashMap::new();
+
+    let cut = cut_running_stream(&mut ctx, &mut questions, &mut permissions).await;
+
+    assert!(!cut, "a finishing turn is not cut");
+    assert!(
+        ctx.active_stream.is_some(),
+        "the handle is kept so the task can report"
+    );
+    assert!(
+        event_rx.try_recv().is_err(),
+        "no cancellation is surfaced while the task finishes"
+    );
+}
+
+#[tokio::test]
+async fn a_cooperative_cancel_persists_the_partial_as_interrupted() {
+    // The run stopped at a hook boundary and reported `Cancelled`: the partial
+    // reply is a turn the user cut, not a failed attempt, so no retry follows.
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store
+        .create_session("cancel", None, None, None)
+        .await
+        .unwrap();
+    store
+        .append_message(id, None, shuvarie_llm::Role::User, "go")
+        .await
+        .unwrap();
+    let session = Arc::new(Mutex::new(Session::from_stored(
+        store.load_session(id).await.unwrap(),
+    )));
+
+    let outcome = drive_turn_attempt(
+        &store,
+        &session,
+        vec![
+            StreamItem::Delta {
+                text: "partial".into(),
+            },
+            StreamItem::Cancelled {
+                reason: "cancelled by the user".into(),
+            },
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(outcome, StreamOutcome::Cancelled);
+
+    let stored = store.load_session(id).await.unwrap();
+    assert_eq!(stored.messages.len(), 2, "the partial reply was committed");
+    let reply = &stored.messages[1];
+    assert_eq!(reply.content, "partial");
+    assert!(reply.interrupted, "a user cut marks the turn interrupted");
+}
+
+#[tokio::test]
+async fn a_cut_worker_call_is_persisted_as_killed() {
+    // A worker spawned from the manager's batch is a call like any other: cut
+    // off mid-run it leaves a killed record, so the reloaded turn keeps the
+    // worker block the live pane showed instead of losing it.
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store
+        .create_session("worker", None, None, None)
+        .await
+        .unwrap();
+    store
+        .append_message(id, None, shuvarie_llm::Role::User, "go")
+        .await
+        .unwrap();
+    let session = Arc::new(Mutex::new(Session::from_stored(
+        store.load_session(id).await.unwrap(),
+    )));
+
+    let outcome = drive_turn_attempt(
+        &store,
+        &session,
+        vec![
+            StreamItem::WorkerStart {
+                name: "explore_workspace".into(),
+                args: serde_json::json!({"task": "look around"}),
+                call_id: "w1".into(),
+            },
+            StreamItem::Cancelled {
+                reason: "cancelled by the user".into(),
+            },
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(outcome, StreamOutcome::Cancelled);
+
+    let stored = store.load_session(id).await.unwrap();
+    assert_eq!(stored.messages.len(), 2, "the reply row was created");
+    let reply_id = stored.messages[1].id;
+    assert!(stored.messages[1].interrupted);
+    let call = stored
+        .tool_calls
+        .iter()
+        .find(|tc| tc.message_id == reply_id)
+        .expect("the cut worker call is recorded");
+    assert_eq!(call.name, "explore_workspace");
+    assert!(call.killed, "the worker never returned");
+    assert_eq!(
+        call.worker.as_deref(),
+        Some(""),
+        "the empty worker name is the TUI's worker-call marker"
+    );
+    assert!(
+        call.args_json.contains("look around"),
+        "the record keeps the call's arguments: {}",
+        call.args_json
+    );
+}
+
+#[tokio::test]
+async fn a_completed_worker_call_leaves_no_killed_record() {
+    // The complement of the test above: a worker that returned before the cut
+    // is a completed call, so the interrupted row must not carry a phantom
+    // killed record for it.
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store
+        .create_session("worker", None, None, None)
+        .await
+        .unwrap();
+    store
+        .append_message(id, None, shuvarie_llm::Role::User, "go")
+        .await
+        .unwrap();
+    let session = Arc::new(Mutex::new(Session::from_stored(
+        store.load_session(id).await.unwrap(),
+    )));
+
+    let outcome = drive_turn_attempt(
+        &store,
+        &session,
+        vec![
+            StreamItem::WorkerStart {
+                name: "explore_workspace".into(),
+                args: serde_json::json!({"task": "look around"}),
+                call_id: "w1".into(),
+            },
+            StreamItem::WorkerResult {
+                name: "explore_workspace".into(),
+                output: "summary".into(),
+                ok: true,
+                spawn: Some(1),
+                call_id: "w1".into(),
+            },
+            StreamItem::Delta {
+                text: "partial".into(),
+            },
+            StreamItem::Cancelled {
+                reason: "cancelled by the user".into(),
+            },
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(outcome, StreamOutcome::Cancelled);
+
+    let stored = store.load_session(id).await.unwrap();
+    assert_eq!(stored.messages.len(), 2, "the partial reply was committed");
+    let reply_id = stored.messages[1].id;
+    assert!(
+        stored.tool_calls.iter().all(|tc| tc.message_id != reply_id),
+        "the returned worker call is not persisted as killed: {:?}",
+        stored.tool_calls
+    );
+}
+
+#[tokio::test]
+async fn overflow_resume_continues_the_interrupted_row_past_the_summary() {
+    // The auto-continue after an overflow reloads the compacted session and
+    // resumes the interrupted turn. Compaction changed what the pane shows, not
+    // which row the answer lands in: the resumed attempt fills the partial
+    // reply row, so the turn cannot end with one sentence split across two
+    // assistant rows.
+    let mut store = Store::open_in_memory().await.unwrap();
+    let sid = store
+        .create_session("overflow", None, None, None)
+        .await
+        .unwrap();
+    let u1 = store
+        .append_message(sid, None, shuvarie_llm::Role::User, "one")
+        .await
+        .unwrap();
+    let a1 = store
+        .append_assistant_message(
+            sid,
+            Some(u1.id),
+            "r1",
+            &[],
+            &[],
+            false,
+            TokenUsage::default(),
+            0.0,
+            &TokenUsage::default(),
+            &shuvarie_db::Attribution::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    let summary = store
+        .append_summary(sid, Some(a1.id), "summary of one")
+        .await
+        .unwrap();
+    let u2 = store
+        .append_message(sid, Some(summary.id), shuvarie_llm::Role::User, "two")
+        .await
+        .unwrap();
+    let partial = store
+        .append_assistant_message(
+            sid,
+            Some(u2.id),
+            "r2*",
+            &[],
+            &[],
+            true,
+            TokenUsage::default(),
+            0.0,
+            &TokenUsage::default(),
+            &shuvarie_db::Attribution::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    let session = Session::from_stored(store.load_session(sid).await.unwrap());
+    assert_eq!(session.leaf_id, Some(partial.id));
+    assert_eq!(session.summaries.len(), 1, "the path carries the summary");
+    let (mut ctx, mut event_rx) = resume_ctx(store, session).await;
+
+    ctx.resume_last_turn(ResumeMode::Overflow).await;
+
+    // The request is the compacted conversation: the summary replaces everything
+    // before it, and the reply's trailing run rides as an assistant prefill.
+    let guard = ctx.session.as_ref().unwrap().lock().await;
+    let plan = ResumePlan::of(&guard).expect("a turn to resume");
+    assert_eq!(plan.prompt.role, shuvarie_llm::Role::Assistant);
+    assert_eq!(plan.prompt.content, "r2*");
+    let prior: Vec<&str> = plan.prior.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(prior, vec!["summary of one", "two"]);
+    let continuation = plan
+        .continuation
+        .expect("the interrupted row is continued, not duplicated");
+    assert_eq!(continuation.message_id, partial.id);
+    assert_eq!(
+        continuation.seq, 4,
+        "the partial's index in the compacted path"
+    );
+    assert!(
+        continuation.prefilled,
+        "the prefill continues the partial's trailing run"
+    );
+    drop(guard);
+
+    // The pane reloads the compacted session — the history under the turn moved
+    // — and then the replay hits the harness's no-active-provider guard.
+    let first = event_rx.recv().await.expect("the pane reload");
+    assert!(
+        matches!(first, Event::Forked { .. }),
+        "unexpected event: {first:?}"
+    );
+    let second = event_rx.recv().await.expect("replay guard error");
+    assert!(
+        matches!(second, Event::StreamError { ref error } if error == "no active provider"),
+        "unexpected event: {second:?}"
+    );
+}
+
+#[tokio::test]
 async fn turn_retry_resume_does_not_rewind_past_a_user_tip() {
     // When the turn failed before producing any output (no assistant row
     // exists), the active tip is the user prompt itself: the resume leaves
@@ -3242,7 +3691,7 @@ async fn turn_retry_resume_does_not_rewind_past_a_user_tip() {
     // attached — the request is the original one, unchanged — and the attempt
     // hits the harness's no-active-provider guard.
     let guard = ctx.session.as_ref().unwrap().lock().await;
-    let request = resume_request(&guard, ResumeMode::TurnRetry).expect("a turn to resume");
+    let request = ResumePlan::of(&guard).expect("a turn to resume");
     assert_eq!(request.prompt.role, shuvarie_llm::Role::User);
     assert_eq!(request.prompt.content, "hi");
     assert!(request.prior.is_empty(), "the prompt itself is replayed");
@@ -3322,7 +3771,7 @@ async fn turn_retry_resume_continues_the_interrupted_reply() {
     // The retried request continues the interrupted reply with no cue at all:
     // the reply's own text is re-sent as an assistant prefill, so the model
     // simply carries on with that sentence.
-    let request = resume_request(&guard, ResumeMode::TurnRetry).expect("a turn to resume");
+    let request = ResumePlan::of(&guard).expect("a turn to resume");
     assert_eq!(request.prompt.role, shuvarie_llm::Role::Assistant);
     assert_eq!(request.prompt.content, "r2*");
     let prior: Vec<&str> = request.prior.iter().map(|m| m.content.as_str()).collect();
@@ -3406,7 +3855,7 @@ async fn turn_retry_resume_keeps_the_turn_after_an_empty_retry_tip() {
         "the tip (with its tool records) stays the active branch node"
     );
     let guard = ctx.session.as_ref().unwrap().lock().await;
-    let request = resume_request(&guard, ResumeMode::TurnRetry).expect("a turn to resume");
+    let request = ResumePlan::of(&guard).expect("a turn to resume");
     // The empty tip carries nothing, so the path ends on the first partial's
     // text: that is what the model is handed back, mid-turn, to continue.
     assert_eq!(request.prompt.role, shuvarie_llm::Role::Assistant);

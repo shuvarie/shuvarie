@@ -6,7 +6,7 @@ use std::time::Instant;
 use ratatui::prelude::*;
 use serde_json::Value;
 use shuvarie_core::tools::todos::{TodoStatus, done_total, parse_items};
-use shuvarie_llm::{FileChange, PatchFileKind};
+use shuvarie_llm::{DiffLine, FileChange, PatchFileKind};
 use unicode_width::UnicodeWidthStr;
 
 use super::{
@@ -150,9 +150,11 @@ impl ToolBlock {
 
     /// Open the block queued rather than running: the call was announced with
     /// the batch but rig has not given it a concurrency slot yet. The header
-    /// holds a still `◇` until [`ToolMessage::Run`] opens its turn.
+    /// holds a still `◇` until [`ToolMessage::Run`] opens its turn, and the
+    /// block carries no clock — waiting is not time the call spent running.
     pub fn queued(mut self) -> Self {
         self.status = ToolStatus::Waiting;
+        self.started_at = None;
         self
     }
 
@@ -225,6 +227,14 @@ impl ToolBlock {
     /// waiting glyph, static — nothing of the call has begun).
     pub fn is_waiting(&self) -> bool {
         self.status == ToolStatus::Waiting
+    }
+
+    /// Whether the block carries its bottom meta row: only the long-running
+    /// tools, and not while the call is still queued — a queued call has not
+    /// begun, so the row appears (at `0.0s`) when its turn comes rather than
+    /// counting a wait that is not its own time.
+    fn shows_elapsed_row(&self) -> bool {
+        shows_elapsed(&self.name) && !self.is_waiting()
     }
 
     /// Flip the collapse state of the output rows.
@@ -318,7 +328,7 @@ impl ToolBlock {
             padding_rows: 2 * u32::from(BLOCK_PADDING.1),
             tool_header_width: (self.name.chars().count() + 1) as u32
                 + UnicodeWidthStr::width(self.args.as_str()).min(120) as u32,
-            tool_rows: u32::from(shows_elapsed(&self.name)),
+            tool_rows: u32::from(self.shows_elapsed_row()),
             ..TurnEst::default()
         };
         let output_rows = self.output.lines().count() as u32;
@@ -436,10 +446,14 @@ impl ToolBlock {
                     return false;
                 }
                 self.status = ToolStatus::Running;
-                // The header swaps its waiting glyph for the spinner and a
-                // `question` block's body its queued note: the bump keys the body
-                // and estimate caches so neither survives the handover. (Registering
-                // the header as a spinner slot is the turn's job, on its rev.)
+                // The clock starts with the run, not the batch's announcement:
+                // the wait in the queue is not time this call spent running.
+                self.started_at = Some(Instant::now());
+                // The header swaps its waiting glyph for the spinner, the body
+                // gains the elapsed meta row, and a `question` block's body its
+                // asking note: the bump keys the body and estimate caches so
+                // none of them survives the handover. (Registering the header as
+                // a spinner slot is the turn's job, on its rev.)
                 self.body_rev += 1;
                 true
             }
@@ -465,7 +479,7 @@ impl ToolBlock {
         let mut chunks = Vec::with_capacity(body.len() + 2);
         chunks.push(BodyChunk::fixed(self.header_lines(inner_w)));
         chunks.extend(body.iter().cloned());
-        if shows_elapsed(&self.name) {
+        if self.shows_elapsed_row() {
             chunks.push(BodyChunk::fixed(vec![elapsed_line(self)]));
         }
         Segment {
@@ -860,6 +874,53 @@ fn push_codemode_script(body: &mut BodyBuilder, tool: &ToolBlock) {
     body.fixed(Line::from(""));
 }
 
+/// Row text as the block paints it: tabs become spaces on the same four-column
+/// stops markdown code blocks use, so a tab-indented file keeps its
+/// indentation instead of losing it (a terminal paints a tab as nothing) and
+/// the wrap count, measured on the row text, counts the columns the tab stands
+/// for.
+fn display_text(text: &str) -> String {
+    shuvarie_highlight::code::expand_tabs(text)
+}
+
+/// Diff rows as the block paints them: [`display_text`] over each row's text,
+/// with the partially-edited runs (byte ranges into that text) moved onto the
+/// expansion.
+fn display_diff(diff: &[DiffLine]) -> BodySource {
+    if !diff.iter().any(|line| line.text.contains('\t')) {
+        return BodySource::Diff {
+            lines: Rc::from(diff),
+        };
+    }
+    let lines: Vec<DiffLine> = diff
+        .iter()
+        .map(|line| {
+            let (text, map) = shuvarie_highlight::code::expand_tabs_mapped(&line.text);
+            let edits = line
+                .edits
+                .iter()
+                .map(|&(start, end)| (mapped_offset(&map, start), mapped_offset(&map, end)))
+                .collect();
+            DiffLine {
+                text,
+                edits,
+                ..line.clone()
+            }
+        })
+        .collect();
+    BodySource::Diff {
+        lines: lines.into(),
+    }
+}
+
+/// Where the byte at `offset` of the original text lands in its tab-expanded
+/// form; past the end it takes the end itself.
+fn mapped_offset(map: &[u32], offset: u32) -> u32 {
+    map.get(offset as usize)
+        .copied()
+        .unwrap_or_else(|| map[map.len() - 1])
+}
+
 fn push_output_rows(tool: &ToolBlock, body: &mut BodyBuilder, is_shell: bool) -> bool {
     let (stdout_body, stderr_body): (&str, &str) = if is_shell {
         let (_, body) = split_status_line(&tool.output);
@@ -874,7 +935,7 @@ fn push_output_rows(tool: &ToolBlock, body: &mut BodyBuilder, is_shell: bool) ->
         let mut has_output = false;
         if stdout_count > 0 {
             body.rows(BodySource::Text {
-                rows: TextRows::new(stdout_body),
+                rows: TextRows::new(display_text(stdout_body)),
                 prefix: "",
                 style: Style::new().fg(theme::text_dim()),
             });
@@ -885,7 +946,7 @@ fn push_output_rows(tool: &ToolBlock, body: &mut BodyBuilder, is_shell: bool) ->
                 body.fixed(Line::from(""));
             }
             body.rows(BodySource::Text {
-                rows: TextRows::new(stderr_body),
+                rows: TextRows::new(display_text(stderr_body)),
                 prefix: "",
                 style: Style::new().fg(theme::error()),
             });
@@ -912,7 +973,7 @@ fn push_tail_rows(body: &mut BodyBuilder, text: &str, fg: Color) -> bool {
     let hidden = count.saturating_sub(COLLAPSED_OUTPUT_LINES as u32);
     let mut pushed = false;
     for row in text.lines().skip(hidden as usize) {
-        body.fixed(Line::from(Span::raw(row.to_string()).fg(fg)));
+        body.fixed(Line::from(Span::raw(display_text(row)).fg(fg)));
         pushed = true;
     }
     if hidden > 0 {
@@ -993,12 +1054,11 @@ fn push_todo_rows(
 }
 
 /// The bottom meta row of a tool block: `Elapsed 4.5s` while the call runs,
-/// `Queued 4.5s` while it is still waiting for a concurrency slot, `Took 10.3s`
-/// once it finishes — the finished value comes from the core-measured duration.
-/// Only shown for `shows_elapsed` blocks, with the value dimmed like the label
-/// so timing never competes with the block's content. The clock runs from the
-/// batch's announcement either way, so the label changes at the handover and
-/// the number does not jump.
+/// `Took 10.3s` once it finishes — the finished value comes from the
+/// core-measured duration. Only shown for `shows_elapsed` blocks that are not
+/// still queued, with the value dimmed like the label so timing never competes
+/// with the block's content. A queued call has no clock, so the row appears at
+/// `0.0s` when its turn comes.
 fn elapsed_line(tool: &ToolBlock) -> Line<'static> {
     if tool.is_active() {
         let ms = tool
@@ -1006,13 +1066,7 @@ fn elapsed_line(tool: &ToolBlock) -> Line<'static> {
             .map(|started| started.elapsed().as_millis() as u64)
             .unwrap_or_default();
         Line::from(vec![
-            Span::raw(if tool.is_waiting() {
-                "  Queued "
-            } else {
-                "  Elapsed "
-            })
-            .fg(theme::text_muted())
-            .italic(),
+            Span::raw("  Elapsed ").fg(theme::text_muted()).italic(),
             Span::raw(format_duration_ms(ms))
                 .fg(theme::text_muted())
                 .italic(),
@@ -1127,9 +1181,7 @@ fn push_file_change_rows(body: &mut BodyBuilder, change: &FileChange) {
                 Span::raw("  ── diff: ").fg(theme::text_muted()),
                 Span::raw(path.clone()).fg(theme::accent()),
             ]));
-            body.rows(BodySource::Diff {
-                lines: Rc::from(diff.as_slice()),
-            });
+            body.rows(display_diff(diff));
         }
         FileChange::Write { path, content, .. } => {
             body.fixed(Line::from(vec![
@@ -1137,7 +1189,7 @@ fn push_file_change_rows(body: &mut BodyBuilder, change: &FileChange) {
                 Span::raw(path.clone()).fg(theme::accent()),
             ]));
             body.rows(BodySource::Numbered {
-                rows: TextRows::new(content.as_str()),
+                rows: TextRows::new(display_text(content)),
             });
         }
         FileChange::Delete { path, .. } => {
@@ -1161,7 +1213,9 @@ fn push_file_change_rows(body: &mut BodyBuilder, change: &FileChange) {
                             Span::raw(file.path.clone()).fg(theme::accent()),
                         ]));
                         body.rows(BodySource::Numbered {
-                            rows: TextRows::new(file.new.as_deref().unwrap_or_default()),
+                            rows: TextRows::new(display_text(
+                                file.new.as_deref().unwrap_or_default(),
+                            )),
                         });
                     }
                     (PatchFileKind::Update, Some(target)) => {
@@ -1171,18 +1225,14 @@ fn push_file_change_rows(body: &mut BodyBuilder, change: &FileChange) {
                             Span::raw(" → ").fg(theme::text_muted()),
                             Span::raw(target.clone()).fg(theme::accent()),
                         ]));
-                        body.rows(BodySource::Diff {
-                            lines: Rc::from(file.diff.as_slice()),
-                        });
+                        body.rows(display_diff(&file.diff));
                     }
                     (PatchFileKind::Update, None) => {
                         body.fixed(Line::from(vec![
                             Span::raw("  ── diff: ").fg(theme::text_muted()),
                             Span::raw(file.path.clone()).fg(theme::accent()),
                         ]));
-                        body.rows(BodySource::Diff {
-                            lines: Rc::from(file.diff.as_slice()),
-                        });
+                        body.rows(display_diff(&file.diff));
                     }
                 }
             }
@@ -1476,11 +1526,11 @@ mod tests {
         assert!(!killed.update(ToolMessage::Kill), "and only once");
     }
 
-    /// The meta row of a queued `shows_elapsed` block counts the wait rather than
-    /// claiming time spent running; the handover relabels it without resetting the
-    /// clock the batch's announcement started.
+    /// A queued `shows_elapsed` block carries no meta row at all — the wait is not
+    /// time the call spent running — and the row appears at `0.0s` when its turn
+    /// comes: the clock starts with the run, not with the batch's announcement.
     #[test]
-    fn a_queued_block_meta_row_counts_its_wait() {
+    fn a_queued_block_has_no_meta_row_until_it_runs() {
         let env = ChatEnv {
             rev: 0,
             lsp_diagnostics: &BTreeMap::new(),
@@ -1488,14 +1538,24 @@ mod tests {
         };
         let mut block = queued_block("explore_workspace", r#"{"task":"map it"}"#);
         let text = block_text(&block, &env);
-        assert!(text.contains("Queued"), "{text}");
-        assert!(!text.contains("Elapsed"), "{text}");
+        assert!(!text.contains("Queued"), "no wait row: {text}");
+        assert!(!text.contains("Elapsed"), "no clock yet: {text}");
+        assert_eq!(
+            block.est().tool_rows,
+            0,
+            "the estimate reserves no meta row while queued"
+        );
 
         block.update(ToolMessage::Run);
         let text = block_text(&block, &env);
         assert!(
-            text.contains("Elapsed") && !text.contains("Queued"),
-            "{text}"
+            text.contains("Elapsed 0.0s"),
+            "the clock starts at zero: {text}"
+        );
+        assert_eq!(
+            block.est().tool_rows,
+            1,
+            "the promoted block's meta row is accounted again"
         );
     }
 
@@ -1589,6 +1649,118 @@ mod tests {
             .find(|r| r.contains("+        let value = new();"))
             .unwrap_or_else(|| panic!("plus row missing: {rows:?}"));
         assert_eq!(minus.find('-').unwrap(), plus.find('+').unwrap());
+    }
+
+    /// A tab in a block's content stands for four columns: a terminal paints a
+    /// tab as nothing, so a row that kept one would lose its indentation — and
+    /// the wrap count, measured on the row text, would miss its columns.
+    #[test]
+    fn output_tabs_render_four_wide() {
+        let env = ChatEnv {
+            rev: 0,
+            lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
+        };
+        let mut block = ToolBlock::new(
+            "run_shell",
+            r#"{"command":"ls"}"#.to_string(),
+            None,
+            None,
+            None,
+        );
+        block.update(ToolMessage::Output {
+            stdout: "\tindented\nlet x\t= 1;".into(),
+            stderr: String::new(),
+        });
+        let collapsed = block_text(&block, &env);
+        assert!(collapsed.contains("    indented"), "preview: {collapsed}");
+
+        block.toggle();
+        let text = block_text(&block, &env);
+        assert!(text.contains("    indented"), "expanded: {text}");
+        assert!(text.contains("let x   = 1;"), "interior tab: {text}");
+        assert!(!text.contains('\t'), "no raw tab survives: {text}");
+    }
+
+    /// New-file content renders as a numbered listing: a tab-indented first
+    /// line keeps its four columns behind the gutter.
+    #[test]
+    fn new_file_content_tabs_render_four_wide() {
+        let env = ChatEnv {
+            rev: 0,
+            lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
+        };
+        let mut block = ToolBlock::new(
+            "write_file",
+            r#"{"path":"a.rs"}"#.to_string(),
+            None,
+            None,
+            None,
+        );
+        block.update(ToolMessage::Finish {
+            ok: true,
+            output: String::new(),
+            stderr: String::new(),
+            file_change: Some(FileChange::Write {
+                path: "a.rs".to_string(),
+                content: "\tfn main() {}".to_string(),
+                original: None,
+            }),
+            duration_ms: 5,
+        });
+        let text = block_text(&block, &env);
+        assert!(text.contains("1     fn main() {}"), "{text}");
+        assert!(!text.contains('\t'), "no raw tab survives: {text}");
+    }
+
+    /// Diff rows expand their tabs too, and the partially-edited runs (byte
+    /// ranges into the row's text) move onto the expansion so the emphasis
+    /// still covers the run it was computed for.
+    #[test]
+    fn diff_row_tabs_render_four_wide() {
+        let env = ChatEnv {
+            rev: 0,
+            lsp_diagnostics: &BTreeMap::new(),
+            media: crate::tui::session::media::shared_test_store(),
+        };
+        let diff = vec![DiffLine {
+            kind: DiffLineKind::Add,
+            old_line: None,
+            new_line: Some(1),
+            text: "\tlet value = new();\n".to_string(),
+            // `value` in the original row.
+            edits: vec![(5, 10)],
+        }];
+
+        let BodySource::Diff { lines } = display_diff(&diff) else {
+            panic!("a diff projection");
+        };
+        assert_eq!(lines[0].text, "    let value = new();\n");
+        assert_eq!(lines[0].edits, vec![(8, 13)], "emphasis follows the tab");
+
+        let mut block = ToolBlock::new(
+            "edit_file",
+            r#"{"path":"a.rs"}"#.to_string(),
+            None,
+            None,
+            None,
+        );
+        block.update(ToolMessage::Finish {
+            ok: true,
+            output: String::new(),
+            stderr: String::new(),
+            file_change: Some(FileChange::Edit {
+                path: "a.rs".to_string(),
+                diff,
+                original: String::new(),
+                new: String::new(),
+            }),
+            duration_ms: 5,
+        });
+        let text = block_text(&block, &env);
+        assert!(text.contains("+    let value = new();"), "{text}");
+        assert!(!text.contains('\t'), "no raw tab survives: {text}");
     }
 
     #[test]

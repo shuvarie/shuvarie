@@ -43,7 +43,7 @@ pub fn setup(
                 crate::core_task::device_code_handler(kind.r#type, pc.name.clone(), event_tx);
             let c = ProviderClient::build_with_device_code(
                 kind,
-                pc.api_key.as_deref(),
+                pc.resolved_api_key().as_deref(),
                 base_url.as_deref(),
                 on_device_code,
             )

@@ -456,6 +456,21 @@ fn expand_tabs_on_tab_stops() {
     assert_eq!(code::expand_tabs("no tabs"), "no tabs");
 }
 
+/// The mapped expansion carries byte ranges along with the padding, so a diff
+/// row's emphasized run still covers the same characters once its tabs are
+/// spaces.
+#[test]
+fn expand_tabs_maps_byte_offsets() {
+    let (text, map) = code::expand_tabs_mapped("a\tb");
+    assert_eq!(text, "a   b");
+    assert_eq!(map, vec![0, 1, 4, 5], "'a', the tab, 'b', and the end");
+
+    // A multi-byte character's bytes all map to where it starts.
+    let (text, map) = code::expand_tabs_mapped("é\tx");
+    assert_eq!(text, "é   x");
+    assert_eq!(map, vec![0, 0, 2, 5, 6]);
+}
+
 #[test]
 fn keep_indent_converts_leading_whitespace() {
     let line = Line::from(Span::raw("  code".to_string()));
