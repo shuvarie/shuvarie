@@ -156,7 +156,7 @@ fn tool_names_are_not_always_callable_names() {
 /// the turn's permission flow), never elided as an unused effect, never folded
 /// or reused for a second evaluation.
 ///
-/// Rhai 1.26 does none of those even for a naively registered function, so this
+/// Rhai 1.27 does none of those even for a naively registered function, so this
 /// test would pass without the marking. It asserts the guarantee we rely on
 /// rather than Rhai's current optimizer: the naive metadata (pure, cacheable)
 /// is the opposite of what a tool call is, so it stays marked.
@@ -598,14 +598,16 @@ fn errors_carry_positions() {
     );
     assert_eq!(err.position().line(), Some(2));
 
-    // Not every runtime error does: an arithmetic failure reports `none`, so
-    // the result block has to render a missing position rather than assume one.
+    // A built-in operation carries one too, as of 1.27: `Division by zero:
+    // 1 / 0 (line 2, position 3)`. Before that an arithmetic failure reported
+    // `none`, so a script that divided by zero in the middle of a long run
+    // pointed nowhere.
     let err = engine.eval::<Dynamic>("let x = 1;\n1 / 0").unwrap_err();
     assert!(
         matches!(*err, EvalAltResult::ErrorArithmetic(..)),
         "unexpected error: {err}"
     );
-    assert_eq!(err.position().line(), None);
+    assert_eq!(err.position().line(), Some(2));
 
     let parse = engine.compile("let x = ;").unwrap_err();
     assert_eq!(parse.position().line(), Some(1));
@@ -892,17 +894,24 @@ fn a_closure_cannot_touch_the_value_it_is_iterating() {
     for method in ["keys", "values"] {
         let script = format!("let m = #{{ a: 1, b: 5, c: 2 }}; m.{method}().map(|_v| m.len()).len");
         let err = engine.eval::<Dynamic>(&script).unwrap_err();
-        // The race arrives wrapped in the call frames (`map`, then the closure),
-        // so it has to be found down the chain -- the same walk `classify` does
-        // to name it in the result block.
         assert!(
             innermost_is_data_race(&err),
             "`{method}` should hold the map: {err}"
         );
-        // ...and the frames are why the result block has to unwrap: the race's
-        // own variable name is empty here, so it can only describe the shape.
-        assert_eq!(err.position().line(), Some(1));
+        // 1.27 raises the race at the native-call boundary: no `ErrorInFunctionCall`
+        // frames, and no position either -- so the result block renders no
+        // `at line`, and can only describe the shape rather than point at it.
+        assert!(matches!(*err, EvalAltResult::ErrorDataRace(..)), "{err}");
+        assert_eq!(err.position().line(), None);
     }
+
+    // Inside a script function the race does arrive wrapped, with the call site
+    // as the outer position -- the shape `classify` unwraps to name the cause.
+    let err = engine
+        .eval::<Dynamic>("fn boom() { let m = #{ a: 1 }; m.keys().map(|_v| m.len()).len }\nboom()")
+        .unwrap_err();
+    assert!(innermost_is_data_race(&err), "{err}");
+    assert_eq!(err.position().line(), Some(2));
 
     // A plain array reduce that reads its own accumulator is fine: nothing
     // outlives the closure.
@@ -1010,7 +1019,7 @@ fn map_literal_keys_are_literals_not_expressions() {
 /// The skill's tables are a lookup aid, so an entry that does not run costs a
 /// whole round trip. These are the Rhai cheat sheet entries that this engine
 /// does **not** have -- the sheet tracks a newer Rhai than the one codemode
-/// builds (1.26.1, default features).
+/// builds (1.27, default features plus `serde`).
 ///
 /// Pinned rather than merely omitted: if an upgrade adds one, the reference
 /// should gain the row, and this test is where that shows up.

@@ -356,7 +356,7 @@ mod tests {
         );
     }
 
-    /// Every numeric form Rhai 1.26 accepts is one span, not a digit followed by
+    /// Every numeric form Rhai 1.27 accepts is one span, not a digit followed by
     /// a name (`0b1010`) or a number cut at the exponent (`1.23e-4`).
     #[test]
     fn every_numeric_literal_is_one_token() {
@@ -388,7 +388,7 @@ mod tests {
         }
     }
 
-    /// The operators 1.26 has, including the multi-character ones a reader would
+    /// The operators 1.27 has, including the multi-character ones a reader would
     /// otherwise see as stray punctuation.
     #[test]
     fn multi_character_operators_are_one_token() {
