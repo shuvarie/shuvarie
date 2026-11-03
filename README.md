@@ -29,6 +29,7 @@
 - **Rule by the code of chivalry** — every tool call passes the permission wards: allowed, denied, or brought before your seat. A denied incantation cuts the turn; a questionable one waits for your seal.
 - **Swear oaths (scenes)** — change the knight's oath mid-campaign: each scene is a named bundle of system prelude, injected hooks, and a tool roster, forged in KDL. Built-in oaths ride along: **Advisor** (advice and planning, read-only), **Reviewer** (code review without edits), and **Orchestrator** (agent orchestration: delegate subtasks to subagent workers — a planning bench for design-heavy topics, the execution workers for the doing — then verify and integrate) — reshaped fieldwise in KDL or shadowed by your own.
 - **Gather a party** — worker subagents ride out on their own errands with their own preambles and tools — scenes can also forge extra members (`description` + `toolset`) — or stand down by decree.
+- **Ride several quests at once (tabs)** — each tab is its own knight in its own keep: `/newtab ~/another-project` summons a second agent there, and the first rides on undisturbed while you talk to the second. `Alt+←`/`Alt+→` between them, `Alt+1…9` leaps straight to one, `/closetab` sends one home.
 - **Walk the threads of fate** — every turn is a branch in a living tree: `/tree` to walk it, fork it, strike it from the tale; `/undo` and `/replay` to ride the roads not taken. No file is ever reverted — only fate re-chosen.
 - **Employ scribes of Candlekeep** — when a quest outgrows the patron's memory, the elder scrolls are condensed into a summary while the recent past stays verbatim, and the ride goes on unbroken.
 - **Fill the spellbook (skills)** — lay `SKILL.md` scrolls in `.agents/skills`; they are found, validated, shelved in the sidebar, and cast with `/skill:<name>`.
@@ -94,5 +95,6 @@ A pact can keep its secret out of the scroll instead: write `api-key-env "ANTHRO
 - `/export [path]` — have this quest's chronicle scribed to JSON
 - `/reload` — re-read the scrolls and spellbooks without leaving the saddle
 - `/skill:<name> [args]` — cast a learned spell
+- `/newtab [path]`, `/closetab` — summon another knight in another keep, or send one home; `Alt+←`/`Alt+→` and `Alt+1…9` ride between them
 
 > The wards are set, the pact is sworn, the dice are cast. Ride forth, True Soul — the dungeon awaits. ⚔️

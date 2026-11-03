@@ -102,7 +102,9 @@ struct Cores {
     /// tab leaves nothing behind here.
     events: SelectAll<BoxStream<'static, (TabId, shuvarie_core::Event)>>,
     /// Workspace watch wakeups, tagged the same way: a tab's sidebar refreshes
-    /// its own branch label when its `.git/HEAD` moves.
+    /// its own branch label when its `.git/HEAD` moves. Unlike the event
+    /// streams, these have no natural end, so closing a tab retires its stream
+    /// through that tab's stop signal (see [`Cores::close`]).
     branches: SelectAll<BoxStream<'static, TabId>>,
     /// What stops each tab's core: its command sender and its task. The event
     /// receiver went into `events`, and the branch watch into `branches`.
@@ -112,6 +114,10 @@ struct Cores {
 struct LiveCore {
     cmd_tx: tokio::sync::mpsc::Sender<shuvarie_core::Command>,
     join: tokio::task::JoinHandle<()>,
+    /// Ends this tab's branch-watch stream. A dropped sender resolves the
+    /// receiver with an error, which the stream reads as "stop" — so dropping
+    /// this releases the filesystem watch behind it.
+    stop_watch: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl Cores {
@@ -129,16 +135,19 @@ impl Cores {
     /// Takes over a freshly spawned core for `tab`.
     fn add(&mut self, tab: TabId, core: CoreHandle) {
         let parts = core.into_parts();
+        let (stop_watch, stopped) = tokio::sync::oneshot::channel();
         self.events.push(core_events(tab, parts.event_rx));
         self.branches.push(branch_wakes(
             tab,
             git_watch::BranchWatch::start(&parts.root),
+            stopped,
         ));
         self.live.insert(
             tab,
             LiveCore {
                 cmd_tx: parts.cmd_tx,
                 join: parts.join,
+                stop_watch: Some(stop_watch),
             },
         );
     }
@@ -152,15 +161,23 @@ impl Cores {
         let Some(live) = self.live.remove(&tab) else {
             return Ok(());
         };
+        let LiveCore {
+            cmd_tx,
+            join,
+            stop_watch,
+        } = live;
         // Cut a live turn first. Dropping the sender ends the core's select loop,
         // but a turn already streaming runs in its own task: without the cancel
         // it would keep the model talking (and billing) with nowhere to deliver.
         // Unlike a quit, the process carries on, so this one is worth the send.
-        let _ = live.cmd_tx.try_send(shuvarie_core::Command::CancelStream);
-        drop(live.cmd_tx);
-        live.join
-            .await
-            .map_err(|e| format!("core task failed: {e}"))
+        let _ = cmd_tx.try_send(shuvarie_core::Command::CancelStream);
+        drop(cmd_tx);
+        // End the tab's branch stream, which drops the `.git/HEAD` watch it
+        // holds. `BranchWatch::next` parks instead of resolving its channel, so
+        // this signal is the only end the stream has; `unfold` drops its state
+        // (watch included) the moment the stream yields `None`.
+        drop(stop_watch);
+        join.await.map_err(|e| format!("core task failed: {e}"))
     }
 
     /// Stops every core, once the App (and so its senders) is gone.
@@ -194,17 +211,32 @@ fn core_events(
 }
 
 /// One tab's workspace watch as a stream of "this tab's branch may have
-/// changed" wakeups.
+/// changed" wakeups, ending when the tab is closed.
 ///
-/// `BranchWatch::next` never resolves to a closed channel, so this stream only
-/// ends if the watch itself is dropped — i.e. never while the tab lives. A closed
-/// tab keeps one idle stream (the watcher still watches a directory nothing is
-/// drawing); it produces nothing and its wakeups are dropped by the App.
-fn branch_wakes(tab: TabId, watch: git_watch::BranchWatch) -> BoxStream<'static, TabId> {
-    futures_util::stream::unfold((tab, watch), |(tab, mut watch)| async move {
-        watch.next().await;
-        Some((tab, (tab, watch)))
-    })
+/// `BranchWatch::next` never resolves to a closed channel: it parks instead, so
+/// the watch cannot signal its own end. The `stop` signal is that end — dropped
+/// by [`Cores::close`], which makes this stream yield `None` so `SelectAll`
+/// retires it and the watch is dropped with it. Without it every closed tab
+/// would leave an inotify subscription on a directory nothing draws, for the
+/// rest of the run.
+fn branch_wakes(
+    tab: TabId,
+    watch: git_watch::BranchWatch,
+    stop: tokio::sync::oneshot::Receiver<()>,
+) -> BoxStream<'static, TabId> {
+    futures_util::stream::unfold(
+        (tab, watch, stop),
+        |(tab, mut watch, mut stop)| async move {
+            tokio::select! {
+                // The tab closed (or the signal was dropped): end the stream.
+                _ = &mut stop => None,
+                // Cancelling this future is safe: `BranchWatch::next` only
+                // awaits its receiver, so a wakeup is either delivered or still
+                // queued.
+                _ = watch.next() => Some((tab, (tab, watch, stop))),
+            }
+        },
+    )
     .boxed()
 }
 pub async fn run_tui(
@@ -1063,5 +1095,85 @@ mod tests {
         assert!(cell_size_report(&report));
         let other = TerminalEvent::Csi(Csi::Window(Box::new(Window::ReportWindowState)));
         assert!(!cell_size_report(&other));
+    }
+
+    /// Closing a tab has to end its branch stream, because that is what drops the
+    /// `.git/HEAD` watch the stream owns: `BranchWatch::next` parks rather than
+    /// resolving a closed channel, so nothing else would ever end it.
+    ///
+    /// The watch here is on a directory that is not a repository, so it produces
+    /// no wakeups at all — which is the shape of the leak: a tab whose watch never
+    /// fires still holds an inotify subscription until the run ends.
+    #[tokio::test]
+    async fn a_closed_tabs_branch_stream_ends_and_releases_its_watch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let mut wakes = branch_wakes(
+            TabId::new(7),
+            git_watch::BranchWatch::start(dir.path()),
+            stopped,
+        );
+
+        // While the tab lives the stream stays open and silent: an idle watch
+        // wakes for nothing, and yielding `None` here would retire a live tab's.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), wakes.next())
+                .await
+                .is_err(),
+            "an idle watch must not end the stream"
+        );
+
+        // Dropping the signal is what `Cores::close` does.
+        drop(stop);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), wakes.next())
+                .await
+                .expect("the stream ends once the tab closes")
+                .is_none(),
+            "a closed tab's stream yields `None`, so `SelectAll` retires it"
+        );
+    }
+
+    /// The stream still reports wakeups while the tab is open — the stop signal
+    /// must not swallow the wakes it was added beside.
+    #[tokio::test]
+    async fn an_open_tabs_branch_stream_still_reports_wakeups() {
+        use super::workspace::testing::seed_git_repo;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        seed_git_repo(dir.path(), "main");
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let mut wakes = branch_wakes(
+            TabId::new(3),
+            git_watch::BranchWatch::start(dir.path()),
+            stopped,
+        );
+
+        // Let the platform watch register before the write (FSEvents starts its
+        // stream asynchronously).
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        std::fs::write(dir.path().join(".git/HEAD"), "ref: refs/heads/other\n")
+            .expect("switch branch");
+
+        // A checkout elsewhere rewrites HEAD; the watcher wakes the stream.
+        let woken = tokio::time::timeout(Duration::from_secs(10), wakes.next()).await;
+        assert_eq!(
+            woken.expect("a rewritten HEAD wakes the stream"),
+            Some(TabId::new(3))
+        );
+
+        // The stream outlives the wakeup, still owned by its tab. One write can
+        // raise more than one notify event, so the next yield may be another
+        // wakeup (or nothing at all) — what must never happen is the end of the
+        // stream, which is the stop signal's job alone.
+        assert!(!stop.is_closed(), "the tab is still open");
+        match tokio::time::timeout(Duration::from_millis(50), wakes.next()).await {
+            // Nothing further to report: the stream is still waiting.
+            Err(_) => {}
+            // A second event for the same write, still tagged correctly.
+            Ok(Some(tab)) => assert_eq!(tab, TabId::new(3)),
+            Ok(None) => panic!("only the stop signal may end a live tab's stream"),
+        }
     }
 }
