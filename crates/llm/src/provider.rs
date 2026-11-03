@@ -8,10 +8,21 @@ use rig_core::operation::{Completion, Embedding};
 use rig_core::providers::{anthropic, chatgpt, cohere, copilot, gemini, ollama, openai, voyageai};
 
 use crate::auth::DeviceCodeHandler;
+use crate::flow::{FlowControl, LedgerHook};
 use crate::message::ChatMsg;
 use crate::stream::{StreamItem, StreamStream};
 use crate::tool::{DynamicTool, FileChangeHook};
 use crate::{LlmError, Result};
+
+/// A streamed run plus the handle that controls it.
+///
+/// The stream is what the core already consumes; the control lets the run loop
+/// stop the run at a boundary (and see what it recorded) instead of aborting
+/// the task.
+pub struct ControlledStream {
+    pub stream: StreamStream,
+    pub control: FlowControl,
+}
 
 /// The transport a provider connection streams on: the protocol kind plus the
 /// optional vendor dialect. Selune 0.4 folds the OpenAI-compatible vendors
@@ -709,8 +720,43 @@ impl ProviderClient {
         worker_via(model, req).await
     }
 
+    /// [`Self::stream_controlled`] without the control handle: callers that do
+    /// not cancel or inspect the run (workers, tests) keep using this.
     #[allow(clippy::too_many_arguments)]
     pub async fn stream(
+        &self,
+        model: &str,
+        preamble: Option<&str>,
+        prompt: &ChatMsg,
+        history: &[ChatMsg],
+        blobs: &crate::attachment::Blobs,
+        tools: Vec<DynamicTool>,
+        workers: &mut [crate::agent::WorkerAgent],
+        max_turns: usize,
+        tool_concurrency: usize,
+        context_budget: Option<crate::context_hook::ContextBudget>,
+        seed_usage: Option<crate::TokenUsage>,
+    ) -> StreamStream {
+        self.stream_controlled(
+            model,
+            preamble,
+            prompt,
+            history,
+            blobs,
+            tools,
+            workers,
+            max_turns,
+            tool_concurrency,
+            context_budget,
+            seed_usage,
+        )
+        .await
+        .stream
+    }
+
+    /// Stream a chat turn and hand back the run's control handle alongside it.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn stream_controlled(
         &self,
         model: &str,
         preamble: Option<&str>,
@@ -730,21 +776,28 @@ impl ProviderClient {
         tool_concurrency: usize,
         context_budget: Option<crate::context_hook::ContextBudget>,
         seed_usage: Option<crate::TokenUsage>,
-    ) -> StreamStream {
+    ) -> ControlledStream {
+        let control = FlowControl::new();
         let list = match self.resolved_list().await {
             Ok(list) => list,
             Err(error) => {
-                return Box::pin(futures_util::stream::iter([StreamItem::Error {
-                    message: error.to_string(),
-                    reason: "Sign-in required".into(),
-                }]));
+                return ControlledStream {
+                    stream: Box::pin(futures_util::stream::iter([StreamItem::Error {
+                        message: error.to_string(),
+                        reason: "Sign-in required".into(),
+                    }])),
+                    control,
+                };
             }
         };
         let Some(model) = list.completion_model(model) else {
-            return Box::pin(futures_util::stream::iter([StreamItem::Error {
-                message: "voyageai supports embeddings only, not completions".into(),
-                reason: "Turn error".into(),
-            }]));
+            return ControlledStream {
+                stream: Box::pin(futures_util::stream::iter([StreamItem::Error {
+                    message: "voyageai supports embeddings only, not completions".into(),
+                    reason: "Turn error".into(),
+                }])),
+                control,
+            };
         };
         let tracker = crate::context_hook::UsageTracker::new();
         // Seed the measured compaction trigger with the previous turn's last
@@ -780,7 +833,7 @@ impl ProviderClient {
             FileChangeHook::new().with_early_finish(worker_names.clone(), None, None, early_tx);
         receivers.push(early_rx);
 
-        stream_via(
+        let stream = stream_via(
             model,
             preamble,
             dynamic,
@@ -794,8 +847,10 @@ impl ProviderClient {
             max_turns,
             tool_concurrency,
             tracker,
+            control.clone(),
         )
-        .await
+        .await;
+        ControlledStream { stream, control }
     }
 }
 
@@ -905,6 +960,7 @@ async fn worker_via(
         req.context_budget.clone(),
         tracker,
         file_hook.clone(),
+        None,
     );
     run_worker_agent(
         agent,
@@ -935,6 +991,7 @@ async fn stream_via(
     max_turns: usize,
     tool_concurrency: usize,
     tracker: std::sync::Arc<crate::context_hook::UsageTracker>,
+    control: FlowControl,
 ) -> StreamStream {
     let agent = agent_with_tools(
         model,
@@ -943,6 +1000,7 @@ async fn stream_via(
         context_budget,
         tracker_for_hook,
         file_hook.clone(),
+        Some(control.clone()),
     );
     // `tool_concurrency` caps how many tools run at once within an assistant
     // message — a batch of worker briefs in an orchestration scene spawns in
@@ -957,7 +1015,7 @@ async fn stream_via(
         .max_turns(max_turns)
         .tool_concurrency(tool_concurrency)
         .stream();
-    map_agent_stream(stream, receivers, worker_names, tracker, file_hook)
+    map_agent_stream(stream, receivers, worker_names, tracker, file_hook, control)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -968,21 +1026,24 @@ fn agent_with_tools(
     context_budget: Option<crate::context_hook::ContextBudget>,
     tracker: std::sync::Arc<crate::context_hook::UsageTracker>,
     file_hook: FileChangeHook,
+    control: Option<FlowControl>,
 ) -> rig_agent::agent::Agent {
     let builder = rig_agent::agent::AgentBuilder::new(model);
     let builder = match preamble {
         Some(p) => builder.preamble(p),
         None => builder.without_preamble(),
     };
-    if let Some(budget) = context_budget {
-        builder
-            .dynamic_tools(dynamic)
-            .add_hook(crate::context_hook::ContextHook::new(budget, tracker))
-            .add_hook(file_hook)
-            .build()
-    } else {
-        builder.dynamic_tools(dynamic).add_hook(file_hook).build()
-    }
+    let builder = builder.dynamic_tools(dynamic);
+    let builder = match context_budget {
+        Some(budget) => builder.add_hook(crate::context_hook::ContextHook::new(budget, tracker)),
+        None => builder,
+    };
+    let builder = builder.add_hook(file_hook);
+    let builder = match control {
+        Some(control) => builder.add_hook(LedgerHook::new(control)),
+        None => builder,
+    };
+    builder.build()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1098,6 +1159,7 @@ fn map_agent_stream(
     worker_names: std::collections::HashSet<String>,
     tracker: std::sync::Arc<crate::context_hook::UsageTracker>,
     file_hook: FileChangeHook,
+    control: FlowControl,
 ) -> StreamStream {
     let mut tool_called = false;
     let mut turn_text = TurnText::default();
@@ -1196,6 +1258,9 @@ fn map_agent_stream(
             }
         }
         Ok(rig_agent::agent::MultiTurnStreamItem::FinalResponse(resp)) => {
+            // The final response is the run's last cancellable work: from here
+            // the caller commits, and a cancel must not abort that.
+            control.mark_finishing();
             let text = if turn_text.is_empty() && tool_called {
                 String::new()
             } else {
@@ -1217,23 +1282,33 @@ fn map_agent_stream(
             text: String::new(),
         },
         Err(e) => {
-            let message = e.to_string();
-            if message.contains(crate::context_hook::OVERFLOW_REASON)
-                || crate::retry::is_context_length_error(&message)
-            {
-                // Either the hook stopped the run pre-call (the measured
-                // trigger) or the provider itself rejected the request as
-                // too long (a genuine overflow that slipped past the
-                // trigger): both compact the session and auto-continue.
-                StreamItem::Overflow
+            // A cooperative cancel is a normal end, not a retryable provider
+            // failure: report it as its own item so the core persists the
+            // partial turn instead of scheduling a retry.
+            if let rig_agent::completion::PromptError::Cancelled { reason, .. } = &e {
+                control.mark_finishing();
+                StreamItem::Cancelled {
+                    reason: reason.clone(),
+                }
             } else {
-                // Every error from the turn retries: connection failures
-                // keep their specific label, everything else falls back to
-                // the generic one.
-                let reason = crate::retry::classify_connection_error(&e)
-                    .map(|failure| failure.reason)
-                    .unwrap_or_else(|| "Turn error".to_string());
-                StreamItem::Error { message, reason }
+                let message = e.to_string();
+                if message.contains(crate::context_hook::OVERFLOW_REASON)
+                    || crate::retry::is_context_length_error(&message)
+                {
+                    // Either the hook stopped the run pre-call (the measured
+                    // trigger) or the provider itself rejected the request as
+                    // too long (a genuine overflow that slipped past the
+                    // trigger): both compact the session and auto-continue.
+                    StreamItem::Overflow
+                } else {
+                    // Every error from the turn retries: connection failures
+                    // keep their specific label, everything else falls back to
+                    // the generic one.
+                    let reason = crate::retry::classify_connection_error(&e)
+                        .map(|failure| failure.reason)
+                        .unwrap_or_else(|| "Turn error".to_string());
+                    StreamItem::Error { message, reason }
+                }
             }
         }
     });
@@ -1740,7 +1815,41 @@ mod tests {
                 worker_names,
                 crate::context_hook::UsageTracker::new(),
                 file_hook,
+                FlowControl::new(),
             )
+        }
+
+        #[tokio::test]
+        async fn a_cancelled_run_maps_to_stream_cancelled_not_an_error() {
+            // A cooperative stop must not look like a provider failure: the
+            // core retries those, and a retry after a user cancel would
+            // resurrect the turn.
+            let model = MockCompletionModel::from_stream_turns([vec![
+                MockStreamEvent::text("hello"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ]]);
+            let control = FlowControl::new();
+            let agent = rig_agent::agent::AgentBuilder::new(model)
+                .add_hook(LedgerHook::new(control.clone()))
+                .build();
+            control.cancel();
+            let stream = agent
+                .prompt(rig_core::message::Message::user("go"))
+                .stream();
+            let mut mapped = map_agent_stream(
+                stream,
+                Vec::new(),
+                HashSet::new(),
+                crate::context_hook::UsageTracker::new(),
+                FileChangeHook::new(),
+                control,
+            );
+
+            let item = mapped.next().await.expect("a terminal item");
+            assert!(
+                matches!(item, StreamItem::Cancelled { .. }),
+                "a cooperative cancel is not an error: {item:?}"
+            );
         }
 
         fn results_named(items: &[StreamItem], name: &str) -> usize {

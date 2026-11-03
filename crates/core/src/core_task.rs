@@ -40,6 +40,10 @@ enum StreamOutcome {
     /// is true when the session history was successfully summarized so the
     /// next turn can continue with `[summary, tail]`.
     Overflowed { compacted: bool },
+    /// The run was stopped cooperatively through its flow control (a user
+    /// cancel). The partial turn is persisted as interrupted and no retry is
+    /// scheduled.
+    Cancelled,
     /// The turn failed with an error that schedules the timeout retry (a
     /// connection failure, provider API error, malformed tool call, worker
     /// failure, ...). The run loop resumes the turn after a backoff, up to
@@ -207,7 +211,9 @@ fn shows_progress(item: &shuvarie_llm::StreamItem) -> bool {
         | shuvarie_llm::StreamItem::ShellOutput { .. }
         | shuvarie_llm::StreamItem::Usage { .. }
         | shuvarie_llm::StreamItem::Done { .. } => true,
-        shuvarie_llm::StreamItem::Overflow | shuvarie_llm::StreamItem::Error { .. } => false,
+        shuvarie_llm::StreamItem::Overflow
+        | shuvarie_llm::StreamItem::Cancelled { .. }
+        | shuvarie_llm::StreamItem::Error { .. } => false,
     }
 }
 
@@ -236,6 +242,10 @@ struct CoreCtx {
     /// bridged into the roster per turn.
     mcp: shuvarie_mcp::SharedMcpManager,
     active_stream: Option<AbortHandle>,
+    /// Control handle of the run behind `active_stream`: a user cancel asks it
+    /// to stop at the next boundary, and only falls back to aborting the task
+    /// when the run does not reach one.
+    flow: Option<shuvarie_llm::FlowControl>,
     turn_state: Option<Arc<Mutex<TurnState>>>,
     /// Wall clock of the turn being dispatched: set when a new user turn is
     /// accepted ([`CoreCtx::start_user_turn`]) so the spawned turn's
@@ -307,6 +317,10 @@ pub async fn run(
     // making progress never spends its whole budget on one flaky window.
     let mut turn_retries: usize = 0;
     let mut pending_retry: Option<PendingRetry> = None;
+    // A cooperative cancel's grace: the run gets this long to reach a hook
+    // boundary and persist itself before the task is aborted outright.
+    const CANCEL_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+    let mut cancel_deadline: Option<tokio::time::Instant> = None;
 
     // Steered prompts: submissions made while the agent loop is busy. Queued
     // in order; the front is dispatched as the next user turn at the next
@@ -484,6 +498,7 @@ pub async fn run(
         lsp,
         mcp,
         active_stream: None,
+        flow: None,
         turn_state: None,
         turn_started: None,
         event_tx,
@@ -519,9 +534,30 @@ pub async fn run(
 
     loop {
         let retry_deadline = pending_retry.as_ref().map(|p| p.deadline);
+        let cancel_at = cancel_deadline;
         tokio::select! {
             cmd = cmd_rx.recv() => {
-                let Some(cmd) = cmd else { break };
+                let Some(cmd) = cmd else {
+                    // The command channel closed (the TUI exited): a turn still
+                    // in flight is persisted as interrupted instead of being
+                    // dropped with the task. A turn already inside a terminal
+                    // sequence is left to land — bounded, so a wedged worker
+                    // cannot hold shutdown forever.
+                    let aborted = cut_running_stream(
+                        &mut ctx,
+                        &mut pending_questions,
+                        &mut pending_permissions,
+                    )
+                    .await;
+                    if !aborted && ctx.active_stream.is_some() {
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_secs(2),
+                            stream_done_rx.recv(),
+                        )
+                        .await;
+                    }
+                    break;
+                };
                 match cmd {
                     Command::Ping => {
                         let _ = ctx.event_tx.send(Event::Pong).await;
@@ -937,6 +973,22 @@ pub async fn run(
                         });
                     }
                     Command::CancelStream => {
+                        let live = ctx
+                            .active_stream
+                            .as_ref()
+                            .is_some_and(|handle| !handle.is_finished());
+                        if live && let Some(flow) = ctx.flow.clone() {
+                            // Ask the run to stop at its next boundary; it
+                            // persists its own partial and reports
+                            // `StreamOutcome::Cancelled`. Dismissing the asks
+                            // lets a tool blocked on one return to a boundary.
+                            dismiss_pending_questions(&mut pending_questions);
+                            dismiss_pending_permissions(&mut pending_permissions);
+                            flow.cancel();
+                            cancel_deadline =
+                                Some(tokio::time::Instant::now() + CANCEL_GRACE);
+                            continue;
+                        }
                         let mut aborted = cut_running_stream(
                             &mut ctx,
                             &mut pending_questions,
@@ -1740,8 +1792,14 @@ pub async fn run(
             }
             outcome = stream_done_rx.recv() => {
                 let Some(outcome) = outcome else { continue };
+                // Any terminal outcome ends the run: a pending cancel grace no
+                // longer has a target, and the control handle is spent.
+                cancel_deadline = None;
+                ctx.flow = None;
                 match outcome {
-                    StreamOutcome::Finished | StreamOutcome::Preempted => {
+                    StreamOutcome::Finished
+                    | StreamOutcome::Preempted
+                    | StreamOutcome::Cancelled => {
                         overflow_retries = 0;
                         turn_retries = 0;
                         ctx.active_stream = None;
@@ -1836,6 +1894,33 @@ pub async fn run(
                 // pane keeps its in-flight turn: a turn that finally succeeds
                 // commits one reply, as if the cut never happened.
                 ctx.resume_last_turn(ResumeMode::TurnRetry).await;
+            }
+            _ = async {
+                if let Some(deadline) = cancel_at {
+                    tokio::time::sleep_until(deadline).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }, if cancel_at.is_some() => {
+                cancel_deadline = None;
+                // The run did not reach a hook boundary within the grace (a
+                // wedged tool, a silent provider): fall back to the hard cut.
+                // A run that reached its commit already is left alone by
+                // `cut_running_stream`'s finishing guard.
+                let aborted = cut_running_stream(
+                    &mut ctx,
+                    &mut pending_questions,
+                    &mut pending_permissions,
+                )
+                .await;
+                if aborted {
+                    ctx.steer.reset();
+                    if !steered.is_empty() {
+                        let (content, attachments, model) = steered.remove(0);
+                        ctx.active_stream = None;
+                        ctx.start_user_turn(content, attachments, true, model).await;
+                    }
+                }
             }
         }
     }
@@ -1992,6 +2077,13 @@ struct TurnState {
     /// attempts, compaction pauses, and tool calls all inside it. `None` when
     /// the caller had no start to hand over (tests).
     started: Option<std::time::Instant>,
+    /// Set once this attempt has entered a terminal sequence — the reply
+    /// commit, the error/overflow persist, or compaction. The run loop must not
+    /// abort the task now: [`cut_running_stream`] leaves it to finish and
+    /// report its own outcome, exactly as it already does while a steer cut is
+    /// finalizing. Without this, a cancel racing the commit or a compaction
+    /// splice tears the row (or detaches the tail from the active path).
+    finishing: bool,
 }
 
 impl TurnState {
@@ -2970,6 +3062,9 @@ impl CoreCtx {
         let Some(s) = &self.session else {
             return;
         };
+        // Any prior run is over by the time a new request is built: a stale
+        // handle must never be the target of a cancel.
+        self.flow = None;
         // The prompt's attachment metadata for the request, collected up
         // front since the push below consumes the prepared attachments.
         let prompt_metas: Vec<shuvarie_llm::Attachment> = attachments
@@ -3319,8 +3414,8 @@ impl CoreCtx {
             attachments: prompt_attachments,
             ..prompt
         };
-        let stream = client
-            .stream(
+        let controlled = client
+            .stream_controlled(
                 &model,
                 Some(&preamble),
                 &prompt,
@@ -3334,11 +3429,14 @@ impl CoreCtx {
                 seed_usage,
             )
             .await;
+        // The run loop cancels cooperatively through this handle: the run
+        // persists its own partial turn at the next boundary.
+        self.flow = Some(controlled.control);
         // Live `run_shell` output flows through the same merged turn stream as
         // the agent's own items, so a chunk is always processed after its call's
         // `ToolStart` (the sub-streams poll after the agent stream) and resolves
         // to its own call id in the stream loop.
-        let stream = merge_turn_channels(stream, shell_rx);
+        let stream = merge_turn_channels(controlled.stream, shell_rx);
         let tx = self.event_tx.clone();
         let session_shared = s.clone();
         let client_shared = client.clone();
@@ -3604,7 +3702,19 @@ async fn cut_running_stream(
         ctx.active_stream = Some(handle);
         return false;
     }
+    let finishing = match &ctx.turn_state {
+        Some(ts) => ts.lock().await.finishing,
+        None => false,
+    };
+    if finishing {
+        // The attempt is inside a terminal sequence (the reply commit, an
+        // error/overflow persist, or compaction). Aborting mid-sequence would
+        // tear the row or detach the compacted tail; let it finish and report.
+        ctx.active_stream = Some(handle);
+        return false;
+    }
     handle.abort();
+    ctx.flow = None;
     dismiss_pending_questions(pending_questions);
     dismiss_pending_permissions(pending_permissions);
     persist_interrupted_turn(
@@ -4267,6 +4377,11 @@ async fn stream_stream_to_events(
                     .await;
             }
             shuvarie_llm::StreamItem::Done { mut text, usage } => {
+                // The model's reply is complete: from here on the task only
+                // drains stragglers and commits. A cancel must not abort that
+                // commit, so the turn is marked finishing before anything can
+                // race it.
+                turn_state.lock().await.finishing = true;
                 // A provider that reports the reply only in its final item
                 // (no text deltas) still gets it into the run list, after the
                 // partial's text a retry continues.
@@ -4301,12 +4416,40 @@ async fn stream_stream_to_events(
                 // stream and drains the worker receivers before returning
                 // `None`.
             }
+            shuvarie_llm::StreamItem::Cancelled { reason } => {
+                // A cooperative cancel is a user cut, not a failure: persist
+                // the partial turn as interrupted and let the run loop
+                // dispatch whatever was steered behind it. `finishing` blocks
+                // an abort racing this persist.
+                let _ = reason;
+                turn_state.lock().await.finishing = true;
+                persist_interrupted_turn(
+                    Some(turn_state.clone()),
+                    &mut store,
+                    &Some(session.clone()),
+                    &event_tx,
+                )
+                .await;
+                let _ = event_tx.send(Event::StreamCancelled).await;
+                done = None;
+                outcome = StreamOutcome::Cancelled;
+                break;
+            }
             shuvarie_llm::StreamItem::Error { message, reason } => {
+                let pending_tools = {
+                    let mut ts = turn_state.lock().await;
+                    ts.finishing = true;
+                    ts.pending_tools.clone()
+                };
                 persist_stream_error(
                     assistant_message_id,
+                    assistant_seq,
                     continuation_seq,
                     &text_segments,
                     &pending_reasoning,
+                    &turn_tool_records,
+                    &pending_tools,
+                    tool_seq,
                     &session,
                     &mut store,
                     &attribution,
@@ -4322,11 +4465,23 @@ async fn stream_stream_to_events(
                 break;
             }
             shuvarie_llm::StreamItem::Overflow => {
+                // Compaction and the persist below are a terminal sequence: no
+                // cancel may abort them between the summary append, the tail
+                // reparent and the leaf restore.
+                let pending_tools = {
+                    let mut ts = turn_state.lock().await;
+                    ts.finishing = true;
+                    ts.pending_tools.clone()
+                };
                 persist_stream_error(
                     assistant_message_id,
+                    assistant_seq,
                     continuation_seq,
                     &text_segments,
                     &pending_reasoning,
+                    &turn_tool_records,
+                    &pending_tools,
+                    tool_seq,
                     &session,
                     &mut store,
                     &attribution,
@@ -4411,7 +4566,11 @@ async fn stream_stream_to_events(
         // reply row and the TUI's footer carry the same value. Taken from the
         // turn state rather than the clock here: a retried turn's clock starts
         // at its prompt's accept, not at this attempt's.
-        let meta = turn_state.lock().await.meta();
+        let meta = {
+            let mut ts = turn_state.lock().await;
+            ts.finishing = true;
+            ts.meta()
+        };
         let duration_ms = meta.duration_ms;
         let mut guard = session.lock().await;
         let combined = {
@@ -5004,26 +5163,49 @@ async fn handle_auth_provider_login(
 /// marked interrupted; a retry that continues it keeps updating that same row
 /// (`continuation_seq`) and clears the marker when the retry lands, so the turn
 /// ends with one uninterrupted-looking reply.
+///
+/// The attempt's tool calls are part of that progress. Completed calls are
+/// already on the row (`tool_records`); the calls that started but never
+/// returned are written as killed records here. A retried model must not read a
+/// turn in which a side-effecting call it made simply never happened — it would
+/// re-issue it blind, and its own previous reply would silently lose a call.
 #[allow(clippy::too_many_arguments)]
 async fn persist_stream_error(
     assistant_message_id: Option<u64>,
+    assistant_seq: u64,
     continuation_seq: Option<u64>,
     text_segments: &[shuvarie_db::TextSegment],
     pending_reasoning: &[shuvarie_db::ReasoningSegment],
+    tool_records: &[crate::tool_record::ToolRecord],
+    pending_tools: &[PendingToolCall],
+    tool_seq: u64,
     session: &Arc<Mutex<Session>>,
     store: &mut Store,
     attribution: &shuvarie_db::Attribution,
     event_tx: &Sender<Event>,
 ) {
     let text = shuvarie_db::join_text_segments(text_segments);
-    if text.is_empty() && pending_reasoning.is_empty() {
+    // A failure that produced nothing at all — no text, reasoning, completed
+    // call or started call — has no row to settle.
+    if text.is_empty()
+        && pending_reasoning.is_empty()
+        && tool_records.is_empty()
+        && pending_tools.is_empty()
+    {
         return;
     }
-    let guard = session.lock().await;
-    let id = guard.id;
-    drop(guard);
+    let id = { session.lock().await.id };
     let Some(id) = id else {
         return;
+    };
+    // A call that never returned is persisted as killed, exactly as a user
+    // cancel persists it (`persist_interrupted_turn`): a reload and the retried
+    // request both continue from its result instead of losing the call.
+    let killed = match assistant_message_id {
+        Some(msg_id) if !pending_tools.is_empty() => {
+            killed_records(pending_tools, msg_id, assistant_seq)
+        }
+        _ => Vec::new(),
     };
     if let Some(msg_id) = assistant_message_id {
         let _ = store
@@ -5043,6 +5225,26 @@ async fn persist_stream_error(
                 None,
             )
             .await;
+        for (i, record) in killed.iter().enumerate() {
+            let _ = store
+                .append_tool_call(
+                    id,
+                    msg_id,
+                    tool_seq + i as u64,
+                    &record.name,
+                    &record.args_json,
+                    &record.output,
+                    &record.stderr,
+                    record.ok,
+                    record.killed,
+                    record.worker.as_deref(),
+                    "",
+                    None,
+                    None,
+                    record.duration_ms,
+                )
+                .await;
+        }
     } else if !text.is_empty() {
         let parent = { session.lock().await.leaf_id };
         if let Ok(msg) = store
@@ -5083,6 +5285,13 @@ async fn persist_stream_error(
     if !text_segments.is_empty() {
         g.text_segments.insert(seq, text_segments.to_vec());
     }
+    // The row's calls — the seeded continuation included — replace whatever
+    // the in-memory path held for it, so the next request (a reload does not
+    // necessarily happen: exhausted retries leave this session live) sees one
+    // complete call sequence.
+    g.tool_records.retain(|record| record.message_seq != seq);
+    g.tool_records.extend(tool_records.iter().cloned());
+    g.tool_records.extend(killed);
     g.interrupted.insert(seq, true);
     drop(g);
     record_and_broadcast_model_use(session, attribution, event_tx).await;

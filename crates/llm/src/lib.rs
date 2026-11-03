@@ -4,6 +4,7 @@ pub mod auth;
 mod context_hook;
 mod error;
 pub mod file_change;
+pub mod flow;
 pub mod message;
 pub mod model;
 pub mod provider;
@@ -24,9 +25,12 @@ pub use error::{LlmError, Result};
 pub use file_change::{
     DiffLine, DiffLineKind, FileChange, PatchFileChange, PatchFileKind, ShellStreams,
 };
+pub use flow::{
+    CANCEL_REASON, FlowControl, FlowPhase, Ledger, LedgerHook, RecordedCall, RequestSnapshot,
+};
 pub use message::{ChatMsg, ChatToolCall, ChatToolResult, Role, to_rig_message};
 pub use model::Model;
-pub use provider::{ProviderClient, ProviderKind};
+pub use provider::{ControlledStream, ProviderClient, ProviderKind};
 pub use retry::{ConnectionFailure, classify_connection_error};
 pub use stream::{StreamItem, StreamStream};
 pub use tool::*;

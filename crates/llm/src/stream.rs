@@ -85,6 +85,14 @@ pub enum StreamItem {
     /// The run was stopped because the context budget was exceeded. The
     /// caller should compact the session history before continuing.
     Overflow,
+    /// The run was stopped cooperatively through its [`FlowControl`]. This is a
+    /// normal end (the caller persists the partial turn as interrupted), never
+    /// a retryable failure.
+    ///
+    /// [`FlowControl`]: crate::FlowControl
+    Cancelled {
+        reason: String,
+    },
     /// A failure from the turn: a connection loss (timeout, reset, refused,
     /// HTTP 408/429/5xx), a provider API error, a malformed tool call, a
     /// worker failure, ... Every turn error leads to the timeout-retry flow

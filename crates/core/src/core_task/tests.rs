@@ -3075,6 +3075,7 @@ async fn resume_ctx(store: Store, session: Session) -> (CoreCtx, Receiver<Event>
         ))),
         mcp: crate::mcp_manager::mcp_manager(&config.tools.mcp),
         active_stream: None,
+        flow: None,
         turn_state: None,
         turn_started: None,
         event_tx,
@@ -3308,6 +3309,138 @@ async fn turn_retry_resume_keeps_the_interrupted_partial_branch() {
         matches!(first, Event::StreamError { ref error } if error == "no active provider"),
         "unexpected event: {first:?}"
     );
+}
+
+#[tokio::test]
+async fn retryable_failure_records_a_cut_off_tool_call() {
+    // A connection that drops while a tool runs must leave the call on the
+    // reply row as a killed record: the reloaded request and the retried model
+    // both continue from its result instead of reading a turn in which the call
+    // never happened (and blindly re-issuing a side-effecting one).
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store
+        .create_session("retry", None, None, None)
+        .await
+        .unwrap();
+    store
+        .append_message(id, None, shuvarie_llm::Role::User, "go")
+        .await
+        .unwrap();
+    let session = Arc::new(Mutex::new(Session::from_stored(
+        store.load_session(id).await.unwrap(),
+    )));
+
+    let outcome = drive_turn_attempt(
+        &store,
+        &session,
+        vec![
+            main_tool_start("read_file", "c1"),
+            StreamItem::Error {
+                message: "boom".into(),
+                reason: "Connection reset".into(),
+            },
+        ],
+        None,
+    )
+    .await;
+    assert!(matches!(outcome, StreamOutcome::RetryableFailure { .. }));
+
+    let stored = store.load_session(id).await.unwrap();
+    assert_eq!(stored.messages.len(), 2, "the reply row was created");
+    let reply_id = stored.messages[1].id;
+    assert!(
+        stored.messages[1].interrupted,
+        "the cut attempt stays interrupted"
+    );
+    let call = stored
+        .tool_calls
+        .iter()
+        .find(|tc| tc.message_id == reply_id)
+        .expect("the cut-off call is recorded");
+    assert!(call.killed, "the call never returned");
+    assert!(call.output.is_empty(), "a killed call has no output");
+
+    // The reload rebuilds the request from that record: the resumed prompt is
+    // the tool result answering the cut-off call, and the row is continued.
+    let reloaded = Session::from_stored(stored);
+    let request = resume_request(&reloaded, ResumeMode::TurnRetry).expect("a turn to resume");
+    assert_eq!(request.prompt.role, shuvarie_llm::Role::User);
+    assert_eq!(request.prompt.tool_results.len(), 1);
+    assert_eq!(request.prompt.tool_results[0].name, "read_file");
+    assert_eq!(
+        request
+            .continuation
+            .expect("the row is continued")
+            .message_id,
+        reply_id
+    );
+}
+
+#[tokio::test]
+async fn cut_running_stream_leaves_a_finishing_turn_alone() {
+    // A cancel racing the reply commit (or a compaction splice) must not abort
+    // the task mid-sequence: the turn reports its own outcome instead.
+    let store = Store::open_in_memory().await.unwrap();
+    let (mut ctx, mut event_rx) = resume_ctx(store, Session::new()).await;
+    let handle = tokio::spawn(std::future::pending::<()>()).abort_handle();
+    ctx.active_stream = Some(handle);
+    let turn_state = Arc::new(Mutex::new(TurnState::default()));
+    turn_state.lock().await.finishing = true;
+    ctx.turn_state = Some(turn_state);
+    let mut questions = std::collections::HashMap::new();
+    let mut permissions = std::collections::HashMap::new();
+
+    let cut = cut_running_stream(&mut ctx, &mut questions, &mut permissions).await;
+
+    assert!(!cut, "a finishing turn is not cut");
+    assert!(
+        ctx.active_stream.is_some(),
+        "the handle is kept so the task can report"
+    );
+    assert!(
+        event_rx.try_recv().is_err(),
+        "no cancellation is surfaced while the task finishes"
+    );
+}
+
+#[tokio::test]
+async fn a_cooperative_cancel_persists_the_partial_as_interrupted() {
+    // The run stopped at a hook boundary and reported `Cancelled`: the partial
+    // reply is a turn the user cut, not a failed attempt, so no retry follows.
+    let mut store = Store::open_in_memory().await.unwrap();
+    let id = store
+        .create_session("cancel", None, None, None)
+        .await
+        .unwrap();
+    store
+        .append_message(id, None, shuvarie_llm::Role::User, "go")
+        .await
+        .unwrap();
+    let session = Arc::new(Mutex::new(Session::from_stored(
+        store.load_session(id).await.unwrap(),
+    )));
+
+    let outcome = drive_turn_attempt(
+        &store,
+        &session,
+        vec![
+            StreamItem::Delta {
+                text: "partial".into(),
+            },
+            StreamItem::Cancelled {
+                reason: "cancelled by the user".into(),
+            },
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(outcome, StreamOutcome::Cancelled);
+
+    let stored = store.load_session(id).await.unwrap();
+    assert_eq!(stored.messages.len(), 2, "the partial reply was committed");
+    let reply = &stored.messages[1];
+    assert_eq!(reply.content, "partial");
+    assert!(reply.interrupted, "a user cut marks the turn interrupted");
 }
 
 #[tokio::test]
