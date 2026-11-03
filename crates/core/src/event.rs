@@ -297,13 +297,14 @@ pub enum Event {
     },
     /// The session forked: the active path now ends at a different node (an
     /// `/undo` fork before the last user prompt, a `/tree` fork before a
-    /// turn node, or a `/tree` tool row walking to its reply). Carries the
+    /// turn node, a `/tree` tool row walking to its reply, or a `/tree`
+    /// delete of an on-path node rewinding to its parent). Carries the
     /// reloaded session plus the forked-away node's content to recall into
     /// the input (`prompt: Some`) or `None` for marker forks, walk-to-reply
-    /// forks, and automatic resumes (a replay, or the overflow continue after
-    /// compaction — a plain turn retry keeps the pane's in-flight turn
-    /// instead, since it finishes the interrupted reply rather than reloading
-    /// the session).
+    /// forks, rewinds, and automatic resumes (a replay, or the overflow
+    /// continue after compaction — a plain turn retry keeps the pane's
+    /// in-flight turn instead, since it finishes the interrupted reply rather
+    /// than reloading the session).
     Forked {
         session: crate::Session,
         prompt: Option<String>,

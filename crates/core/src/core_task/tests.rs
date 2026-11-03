@@ -2779,10 +2779,77 @@ async fn fork_session_undo_on_a_root_only_session_starts_over() {
 }
 
 #[tokio::test]
-async fn delete_branch_refuses_the_active_leaf() {
+async fn delete_branch_on_the_active_path_rewinds_to_the_parent() {
     let (mut store, sid, ids) = chain_session().await;
+    let rewound = delete_branch(&mut store, sid, ids[2]).await.unwrap();
+    assert_eq!(
+        rewound,
+        Some(true),
+        "the deleted node sits on the active path"
+    );
     let stored = store.load_session(sid).await.unwrap();
-    assert!(subtree_contains(&stored, ids[0], stored.leaf_id));
+    assert_eq!(
+        stored.leaf_id,
+        Some(ids[1]),
+        "the path rewinds to the deleted node's parent"
+    );
+    assert_eq!(stored.messages.len(), 2, "the subtree goes with the node");
+
+    let loaded = Session::from_stored(store.load_session(sid).await.unwrap());
+    assert_eq!(loaded.leaf_id, Some(ids[1]));
+    assert_eq!(
+        loaded.messages.len(),
+        2,
+        "the chat keeps the surviving path"
+    );
+}
+
+#[tokio::test]
+async fn delete_branch_at_the_root_empties_the_active_path() {
+    let (mut store, sid, ids) = chain_session().await;
+    let rewound = delete_branch(&mut store, sid, ids[0]).await.unwrap();
+    assert_eq!(rewound, Some(true));
+    let stored = store.load_session(sid).await.unwrap();
+    assert_eq!(
+        stored.leaf_id,
+        Some(shuvarie_db::EMPTY_LEAF),
+        "a root has no parent to rewind to: the path is cleared"
+    );
+    assert!(stored.messages.is_empty());
+}
+
+#[tokio::test]
+async fn delete_branch_off_the_active_path_keeps_the_leaf() {
+    let (mut store, sid, ids) = chain_session().await;
+    let sibling = store
+        .append_message(sid, Some(ids[1]), shuvarie_llm::Role::User, "sibling")
+        .await
+        .unwrap();
+    // Appending moved the leaf onto the sibling branch; walk back to the
+    // chain's own tail so the sibling sits off the active path.
+    store.set_active_leaf(sid, Some(ids[3])).await.unwrap();
+
+    let rewound = delete_branch(&mut store, sid, sibling.id).await.unwrap();
+    assert_eq!(
+        rewound,
+        Some(false),
+        "the deleted subtree held no active path node"
+    );
+    let stored = store.load_session(sid).await.unwrap();
+    assert_eq!(stored.leaf_id, Some(ids[3]), "the active path is untouched");
+    assert_eq!(stored.messages.len(), 4, "only the sibling branch went");
+}
+
+#[tokio::test]
+async fn delete_branch_of_an_unknown_node_is_a_no_op() {
+    let (mut store, sid, ids) = chain_session().await;
+    let rewound = delete_branch(&mut store, sid, ids[3] + 1_000)
+        .await
+        .unwrap();
+    assert_eq!(rewound, None, "a stale node has nothing to delete");
+    let stored = store.load_session(sid).await.unwrap();
+    assert_eq!(stored.messages.len(), 4, "nothing is deleted");
+    assert_eq!(stored.leaf_id, Some(ids[3]));
 }
 
 #[tokio::test]

@@ -1034,8 +1034,8 @@ impl Store {
 
     /// Delete a branch: the message `root_id` and all of its descendants,
     /// together with their tool calls and embeddings. Returns the deleted
-    /// message ids. The caller must ensure the active leaf is not inside the
-    /// subtree.
+    /// message ids. The caller must move the active leaf out of the subtree
+    /// first (core rewinds it to the deleted node's parent).
     pub async fn delete_branch(
         &mut self,
         session_id: uuid::Uuid,

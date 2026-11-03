@@ -1333,49 +1333,49 @@ pub async fn run(
                         turn_retries = 0;
                         let Some(s) = &ctx.session else { continue; };
                         let Some(sid) = s.lock().await.id else { continue; };
+                        let rewound = match delete_branch(&mut ctx.store, sid, node).await {
+                            // `None`: the node was already gone (a stale popup),
+                            // so the refresh below just catches the tree up.
+                            Ok(rewound) => rewound == Some(true),
+                            Err(e) => {
+                                let _ = ctx
+                                    .event_tx
+                                    .send(Event::SessionError {
+                                        error: format!("branch delete failed: {e}"),
+                                    })
+                                    .await;
+                                continue;
+                            }
+                        };
                         match ctx.store.load_session(sid).await {
                             Ok(stored) => {
-                                if subtree_contains(&stored, node, stored.leaf_id) {
+                                let session = Session::from_stored(stored);
+                                if rewound {
+                                    // The active path lost its tail with the
+                                    // deleted subtree: the live session walks
+                                    // back to the surviving parent, and the
+                                    // queued steered prompts belonged to the
+                                    // discarded context.
+                                    if let Some(s) = &ctx.session {
+                                        *s.lock().await = session.clone();
+                                    }
+                                    clear_steered(&mut steered, &ctx.steer, &ctx.event_tx).await;
                                     let _ = ctx
                                         .event_tx
-                                        .send(Event::SessionError {
-                                            error: "cannot delete the active branch".into(),
+                                        .send(Event::Forked {
+                                            session: session.clone(),
+                                            prompt: None,
                                         })
                                         .await;
-                                    continue;
                                 }
-                                if let Err(e) = ctx.store.delete_branch(sid, node).await {
-                                    let _ = ctx
-                                        .event_tx
-                                        .send(Event::SessionError {
-                                            error: format!("branch delete failed: {e}"),
-                                        })
-                                        .await;
-                                    continue;
-                                }
-                                match ctx.store.load_session(sid).await {
-                                    Ok(stored) => {
-                                        let _ = ctx
-                                            .event_tx
-                                            .send(Event::SessionTree {
-                                                session: Session::from_stored(stored),
-                                            })
-                                            .await;
-                                    }
-                                    Err(e) => {
-                                        let _ = ctx
-                                            .event_tx
-                                            .send(Event::SessionError {
-                                                error: e.to_string(),
-                                            })
-                                            .await;
-                                    }
-                                }
+                                let _ = ctx.event_tx.send(Event::SessionTree { session }).await;
                             }
                             Err(e) => {
                                 let _ = ctx
                                     .event_tx
-                                    .send(Event::SessionError { error: e.to_string() })
+                                    .send(Event::SessionError {
+                                        error: e.to_string(),
+                                    })
                                     .await;
                             }
                         }
@@ -2320,6 +2320,43 @@ fn subtree_contains(
         }
     }
     false
+}
+
+/// Delete the subtree rooted at `node`: the node itself, every descendant,
+/// and their tool calls. A node on the active path takes the path's tail with
+/// it, so the leaf first rewinds to the node's parent — deleting a root
+/// clears the path to an empty conversation. Returns whether the active path
+/// moved (the caller then reloads the chat pane), or `None` when the node is
+/// not in the tree (nothing to delete).
+async fn delete_branch(
+    store: &mut Store,
+    session_id: uuid::Uuid,
+    node: u64,
+) -> Result<Option<bool>, String> {
+    let stored = store
+        .load_session(session_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(parent) = stored
+        .messages
+        .iter()
+        .find(|m| m.id == node)
+        .map(|m| m.parent_id)
+    else {
+        return Ok(None);
+    };
+    let rewound = subtree_contains(&stored, node, stored.leaf_id);
+    if rewound {
+        store
+            .set_active_leaf(session_id, parent)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    store
+        .delete_branch(session_id, node)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(Some(rewound))
 }
 
 /// Fork the session at a node: the active path is re-rooted *before* the
