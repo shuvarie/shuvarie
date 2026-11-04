@@ -36,7 +36,7 @@ frameplay = "0.3"
 futures-util.workspace = true
 gix = { version = "0.90", default-features = false, features = ["sha1"] }
 nucleo = "0.5"
-notify = "8.2"
+notify = "9.0.0-rc.7"
 image.workspace = true
 ratatui-image = { version = "11.1", default-features = false, features = [
     "image-defaults",

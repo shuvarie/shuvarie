@@ -6,7 +6,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use notify::{RecommendedWatcher, RecursiveMode, Watcher, event::EventKind};
+use notify::{EventKindMask, RecommendedWatcher, RecursiveMode, Watcher, event::EventKind};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// A live watch on the workspace's git `HEAD` file, handing out unit
@@ -60,7 +60,9 @@ fn watch_head(head: &Path, tx: UnboundedSender<()>) -> Option<RecommendedWatcher
                 let _ = tx.send(());
             }
         },
-        notify::Config::default().with_poll_interval(Duration::from_secs(5)),
+        notify::Config::default()
+            .with_event_kinds(EventKindMask::CORE)
+            .with_poll_interval(Duration::from_secs(5)),
     )
     .ok()?;
     // Watch the directory, not the file, because a checkout replaces `HEAD`
@@ -74,16 +76,19 @@ fn watch_head(head: &Path, tx: UnboundedSender<()>) -> Option<RecommendedWatcher
 
 /// Whether an event means the git `HEAD` file was *rewritten*.
 ///
-/// Reads must not count. The inotify backend subscribes to `IN_OPEN` and
-/// `IN_CLOSE_NOWRITE` on top of the change masks, so every read of `HEAD`
-/// raises an event — and the TUI reads `HEAD` (through `gix`, which opens the
-/// repository config on the way) whenever a wake says the label may have
-/// changed. Waking on those closes a loop: the read wakes the watch, the wake
-/// makes the app read again, thousands of times a second, for as long as the
-/// TUI runs (measured: both the render loop and the watcher thread pinned a
-/// core while the app sat at an idle prompt). Only rewrites wake us: a checkout
-/// writes `HEAD` in place (a modify) or replaces it through the lockfile
-/// rename (create, rename, remove).
+/// Reads must not count. Every read of `HEAD` raises an access event, and the
+/// TUI reads `HEAD` (through `gix`, which opens the repository config on the
+/// way) whenever a wake says the label may have changed. Waking on those closes
+/// a loop: the read wakes the watch, the wake makes the app read again,
+/// thousands of times a second, for as long as the TUI runs (measured: both the
+/// render loop and the watcher thread pinned a core while the app sat at an
+/// idle prompt). Only rewrites wake us: a checkout writes `HEAD` in place (a
+/// modify) or replaces it through the lockfile rename (create, rename, remove).
+///
+/// `Config::with_event_kinds(EventKindMask::CORE)` already keeps access events
+/// out — on inotify by dropping `IN_OPEN`/`IN_CLOSE_NOWRITE` from the watch mask
+/// itself, so reads raise nothing at all — but filtering in the backend is a
+/// per-backend promise this check stays independent of.
 fn head_rewritten(event: &notify::Event) -> bool {
     !matches!(event.kind, EventKind::Access(_))
         && event
@@ -146,6 +151,9 @@ mod tests {
         // The app's own re-read of `HEAD` — the first thing a wake makes it do —
         // raises these. Waking on them re-arms the watch from the read itself,
         // which is the loop that burned ~120% CPU at an idle prompt.
+        // `EventKindMask::CORE` keeps the backends from sending them in the
+        // first place; this check must hold anyway, so a backend that lets one
+        // through cannot bring the loop back.
         assert!(!head_rewritten(&event(
             EventKind::Access(AccessKind::Open(AccessMode::Any)),
             "/repo/.git/HEAD"
