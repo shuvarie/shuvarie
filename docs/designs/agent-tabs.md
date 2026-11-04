@@ -236,13 +236,21 @@ offers that project's scenes. The default a *new session* starts under is likewi
 
 One row, and only once there is something to choose between — a single-tab session paints exactly as
 it did before tabs existed. An entry is `<number> <label>`, the label being the session title or, with
-no session yet, the workspace directory's name; a busy tab carries `●`; the active entry is the
-accent colour.
+no session yet, the workspace directory's name; a busy tab carries `●`.
 
-`bar_spans` is a pure function so the layout can be tested without a terminal. When the strip does not
-fit, the window is **anchored on the active tab** and grows outward, right before left, and the
-dropped runs collapse to `…`. A bar that dropped the tab you are looking at would be worse than no
-bar, and a bar anchored at the start would do exactly that as soon as you moved past its width.
+The active tab is the one entry with a **background**: `accent_bg`, the same fill the rest of the UI
+uses for a selected row (`list.rs`), with accent text and padded either side so the highlight
+surrounds the label rather than sitting under the letters alone. Inactive tabs stay on the bar's own
+`surface` background, in `text_muted` (or `text_dim` when busy). The fill is what makes the current
+tab readable from anywhere on the row instead of only by the colour of its letters — and it is why
+the entries carry padding at all.
+
+`bar_spans` is a pure function so the layout can be tested without a terminal, and
+`the_painted_bar_fills_the_active_tab_only` reads the cells back through a `TestBackend` to prove the
+fill reaches the screen rather than only the span. When the strip does not fit, the window is
+**anchored on the active tab** and grows outward, right before left, and the dropped runs collapse to
+`…`. A bar that dropped the tab you are looking at would be worse than no bar, and a bar anchored at
+the start would do exactly that as soon as you moved past its width.
 
 Keys: `Alt+Left` / `Alt+Right` cycle with wrap, `Alt+1` … `Alt+9` jump. All of them are gated on
 `tabs.len() > 1`, so with a single tab every chord the composer had before tabs is still the
@@ -277,4 +285,6 @@ The claims above that matter are pinned by tests, most of them in `app.rs` and `
 - `closing_a_tab_asks_the_loop_to_stop_the_tab_on_screen`, and that the strip is untouched until the
   loop answers.
 - `the_tab_keys_are_free_when_a_single_tab_is_open`.
-- The four `tabs.rs` layout tests, including the active tab surviving a bar narrower than the strip.
+- The `tabs.rs` bar tests: the active tab surviving a bar narrower than the strip, the fill landing on
+  the active entry alone (in the spans and, through a `TestBackend`, in the painted cells), and the
+  label falling back to the workspace directory.

@@ -100,7 +100,11 @@ pub struct TabBarEntry {
 pub const BAR_HEIGHT: u16 = 1;
 
 /// Gap between two entries.
-const GAP: usize = 2;
+const GAP: usize = 1;
+/// Space either side of an entry's text. The active tab is filled with a
+/// background, so the padding is what makes it read as a tab rather than as a
+/// highlighted word: a run of blanks under the same highlight.
+const PAD: usize = 1;
 /// What a collapsed run of tabs is drawn as.
 const ELLIPSIS: &str = "…";
 
@@ -112,9 +116,16 @@ fn entry_text(entry: &TabBarEntry) -> String {
     text
 }
 
+/// An entry as it is painted: its text, padded so the active tab's background
+/// surrounds it.
+fn entry_span_text(entry: &TabBarEntry) -> String {
+    let pad = " ".repeat(PAD);
+    format!("{pad}{}{pad}", entry_text(entry))
+}
+
 /// Lays the bar out as one row of spans: `1 title  2 other`, the active entry in
-/// the accent colour, a busy tab marked with a dot, and any tabs that do not fit
-/// collapsed into an ellipsis.
+/// the accent colour on the accent background, a busy tab marked with a dot, and
+/// any tabs that do not fit collapsed into an ellipsis.
 ///
 /// The window is anchored on the active tab and grows outward, so the tab the
 /// user is looking at is never the one that gets dropped when the strip is
@@ -124,7 +135,7 @@ pub fn bar_spans(entries: &[TabBarEntry], width: u16) -> Vec<Span<'static>> {
     if width == 0 || entries.is_empty() {
         return Vec::new();
     }
-    let texts: Vec<String> = entries.iter().map(entry_text).collect();
+    let texts: Vec<String> = entries.iter().map(entry_span_text).collect();
     let sizes: Vec<usize> = texts.iter().map(|text| text.width()).collect();
 
     // Everything fits: draw the whole strip.
@@ -171,8 +182,12 @@ pub fn bar_spans(entries: &[TabBarEntry], width: u16) -> Vec<Span<'static>> {
         }
         let text = &texts[start + offset];
         let span = Span::raw(text.clone());
+        // The active tab carries a background, not just a colour: it is the one
+        // the keys go to, and a filled block is what makes that obvious at a
+        // glance from anywhere on the row. The others stay on the bar's own
+        // background, dimmer the less they have to say.
         spans.push(if entry.active {
-            span.fg(theme::accent()).bold()
+            span.fg(theme::accent()).bg(theme::accent_bg()).bold()
         } else if entry.busy {
             span.fg(theme::text_dim())
         } else {
@@ -224,13 +239,47 @@ mod tests {
     #[test]
     fn a_short_strip_lists_every_tab_with_its_number() {
         let entries = [entry(0, "one", false, true), entry(1, "two", false, false)];
-        assert_eq!(bar_text(&entries, 40), "1 one  2 two");
+        // Padded either side, so the active tab's background surrounds it.
+        assert_eq!(bar_text(&entries, 40), " 1 one   2 two ");
         assert!(
             bar_spans(&entries, 40)
                 .iter()
                 .all(|span| { span.content.as_ref() != ELLIPSIS }),
             "nothing is dropped when the strip fits"
         );
+    }
+
+    /// The point of the padding: the tab the keys go to is the only one with a
+    /// background, so it is distinguishable from anywhere on the row rather than
+    /// only by the colour of its letters.
+    #[test]
+    fn only_the_active_entry_is_filled() {
+        let entries = [
+            entry(0, "first", false, false),
+            entry(1, "second", true, true),
+            entry(2, "third", false, false),
+        ];
+        for span in bar_spans(&entries, 80) {
+            let text = span.content.as_ref();
+            if text.contains("second") {
+                assert_eq!(
+                    span.style.bg,
+                    Some(theme::accent_bg()),
+                    "the active tab is filled"
+                );
+                assert_eq!(span.style.fg, Some(theme::accent()));
+                // The fill reaches past the label: that is the padding.
+                assert!(
+                    text.starts_with(' ') && text.ends_with(' '),
+                    "the highlight surrounds the label: {text:?}"
+                );
+            } else {
+                assert_eq!(
+                    span.style.bg, None,
+                    "`{text}` sits on the bar's own background"
+                );
+            }
+        }
     }
 
     #[test]
@@ -264,7 +313,7 @@ mod tests {
         let entries: Vec<TabBarEntry> =
             (0..8).map(|i| entry(i, "project", false, i == 0)).collect();
         let text = bar_text(&entries, 30);
-        assert!(text.starts_with("1 project"), "{text}");
+        assert!(text.starts_with(" 1 project"), "{text}");
         assert!(text.ends_with(ELLIPSIS), "the tail is collapsed: {text}");
         assert!(
             !text.contains("8 project"),
@@ -291,5 +340,46 @@ mod tests {
         assert_eq!(tab_label(None, &root), "shuvarie");
         // A filesystem root has no directory name to show, so the path stands.
         assert_eq!(tab_label(None, Path::new("/")), "/");
+    }
+
+    /// The fill has to reach the terminal, not just the span: `view` paints the
+    /// bar over its own block background, so this reads the painted cells back.
+    #[test]
+    fn the_painted_bar_fills_the_active_tab_only() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let entries = [
+            entry(0, "first", false, false),
+            entry(1, "second", false, true),
+            entry(2, "third", false, false),
+        ];
+        let mut terminal = Terminal::new(TestBackend::new(60, 1)).unwrap();
+        terminal
+            .draw(|frame| view(frame, frame.area(), &entries))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let row: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, 0)].symbol().to_string())
+            .collect();
+        let at = |needle: &str| row.find(needle).expect("the label is painted");
+
+        let filled = at("second");
+        let before = at("first");
+        let after = at("third");
+        assert_eq!(
+            buffer[(filled as u16, 0)].bg,
+            theme::accent_bg(),
+            "the active tab's cells carry its background: {row:?}"
+        );
+        assert_eq!(
+            buffer[(before as u16, 0)].bg,
+            theme::surface(),
+            "an inactive tab keeps the bar's background"
+        );
+        assert_eq!(buffer[(after as u16, 0)].bg, theme::surface());
+        // The bar's own trailing space is the block's background too, so the
+        // strip reads as one row with one raised tab in it.
+        assert_eq!(buffer[(buffer.area.width - 2, 0)].bg, theme::surface());
     }
 }
