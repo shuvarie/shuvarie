@@ -10,7 +10,7 @@ keywords.workspace = true
 categories = ["parsing", "text-processing"]
 
 [dependencies]
-calamine = "0.37"
+calamine = "0.38"
 csv = "1"
 html-to-markdown-rs = { version = "3", default-features = false }
 pdf-extract = "0.12.1"
