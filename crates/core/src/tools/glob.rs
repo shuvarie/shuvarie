@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use shuvarie_llm::{Tool, ToolContext, ToolExecutionError, ToolOutput};
 
-use crate::permissions::{Access, PathKind, resolve_read};
+use crate::permissions::{Access, PathKind};
 
 use super::arg_value;
 
@@ -49,7 +49,7 @@ impl Tool for Glob {
             let access = self.access.clone();
             let pattern = arg_value(&args, "pattern")?;
             let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
-            let abs = resolve_read(path)?;
+            let abs = access.resolve_read(path)?;
             access.authorize_path(PathKind::Read, &abs, path).await?;
             if abs.is_file() {
                 return Err(format!("glob path must be a directory: {path}"));

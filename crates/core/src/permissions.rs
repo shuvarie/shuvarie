@@ -13,50 +13,27 @@ use tokio::sync::{mpsc, oneshot};
 /// `except-hidden` filter: agent-owned skill dirs and the app's data dir.
 const HIDDEN_ROOT_EXEMPT: [&str; 2] = [".agents", shuvarie_config::WORKSPACE_DIR_NAME];
 
-pub(crate) fn workspace_root() -> Result<PathBuf, String> {
-    std::env::current_dir().map_err(|e| format!("cwd: {e}"))
-}
-
-pub(crate) fn expand_home(path: &str) -> String {
-    expand_home_in(path, dirs::home_dir().as_deref())
-}
-
-/// [`expand_home`] with an explicit home directory, so tests can exercise
-/// tilde expansion without mutating the process environment.
-pub(crate) fn expand_home_in(path: &str, home: Option<&std::path::Path>) -> String {
-    if (path == "~" || path.starts_with("~/") || path.starts_with("~\\"))
-        && let Some(home) = home
-    {
-        let rest = path
-            .strip_prefix("~/")
-            .or_else(|| path.strip_prefix("~\\"))
-            .unwrap_or("");
-        return home.join(rest).to_string_lossy().into_owned();
-    }
-    path.to_string()
-}
-
-/// Canonicalizes a read path (symlinks resolved). The permission engine, not
-/// this function, decides whether the path may be read.
-pub(crate) fn resolve_read(path: &str) -> Result<PathBuf, String> {
-    let root = workspace_root()?;
+/// Canonicalizes a read path under `root` (symlinks resolved). The permission
+/// engine, not this function, decides whether the path may be read.
+pub(crate) fn resolve_read_at(root: &Path, path: &str) -> Result<PathBuf, String> {
     let joined = root.join(expand_home(path));
     joined.canonicalize().map_err(|e| format!("{path}: {e}"))
 }
 
-/// Canonicalizes a write path, supporting targets that do not exist yet (the
-/// closest existing ancestor is canonicalized, missing components appended).
-/// The permission engine decides whether the target may be written.
-pub(crate) fn resolve_write(path: &str) -> Result<PathBuf, String> {
-    resolve_write_in(path, dirs::home_dir().as_deref())
+/// Canonicalizes a write path under `root`, supporting targets that do not
+/// exist yet (the closest existing ancestor is canonicalized, missing
+/// components appended). The permission engine decides whether the target may
+/// be written.
+pub(crate) fn resolve_write_at(root: &Path, path: &str) -> Result<PathBuf, String> {
+    resolve_write_in_at(root, path, dirs::home_dir().as_deref())
 }
 
-/// [`resolve_write`] with an explicit home directory, for tests.
-pub(crate) fn resolve_write_in(
+/// [`resolve_write_at`] with an explicit home directory, for tests.
+pub(crate) fn resolve_write_in_at(
+    root: &Path,
     path: &str,
     home: Option<&std::path::Path>,
 ) -> Result<PathBuf, String> {
-    let root = workspace_root()?;
     let joined = root.join(expand_home_in(path, home));
     if joined.exists() {
         return joined.canonicalize().map_err(|e| format!("{path}: {e}"));
@@ -81,6 +58,25 @@ pub(crate) fn resolve_write_in(
         abs.push(name);
     }
     Ok(abs)
+}
+
+pub(crate) fn expand_home(path: &str) -> String {
+    expand_home_in(path, dirs::home_dir().as_deref())
+}
+
+/// [`expand_home`] with an explicit home directory, so tests can exercise
+/// tilde expansion without mutating the process environment.
+pub(crate) fn expand_home_in(path: &str, home: Option<&std::path::Path>) -> String {
+    if (path == "~" || path.starts_with("~/") || path.starts_with("~\\"))
+        && let Some(home) = home
+    {
+        let rest = path
+            .strip_prefix("~/")
+            .or_else(|| path.strip_prefix("~\\"))
+            .unwrap_or("");
+        return home.join(rest).to_string_lossy().into_owned();
+    }
+    path.to_string()
 }
 
 /// Which side of a file tool is being authorized. Only the app-owned read
@@ -343,6 +339,11 @@ pub struct Permissions {
     shell: Vec<CompiledShellRule>,
     /// App-owned skill directories outside the workspace that stay readable.
     read_exempt: Vec<PathBuf>,
+    /// The workspace the rules were compiled against: the base every tool
+    /// resolves its relative paths and shell cwd from. Held here rather than
+    /// read from the process cwd, so one process can drive several workspaces
+    /// (one core task per TUI tab).
+    workspace_root: PathBuf,
 }
 
 impl std::fmt::Debug for Permissions {
@@ -353,6 +354,7 @@ impl std::fmt::Debug for Permissions {
             .field("shell_default", &self.shell_default)
             .field("path_rules", &self.paths.len())
             .field("shell_rules", &self.shell.len())
+            .field("workspace_root", &self.workspace_root)
             .finish()
     }
 }
@@ -383,7 +385,27 @@ impl Permissions {
                 dirs::home_dir().as_deref(),
                 shuvarie_config::config_dir().ok().as_deref(),
             ),
+            workspace_root: workspace_root.to_path_buf(),
         })
+    }
+
+    /// The workspace these rules were compiled against: the base for every
+    /// relative path a tool resolves and the directory `run_shell` starts in.
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+
+    /// Canonicalizes a read path against [`Self::workspace_root`] (see
+    /// [`resolve_read_at`]). The rules, not this, decide whether it may be
+    /// read.
+    pub(crate) fn resolve_read(&self, path: &str) -> Result<PathBuf, String> {
+        resolve_read_at(&self.workspace_root, path)
+    }
+
+    /// Canonicalizes a write path against [`Self::workspace_root`], allowing
+    /// targets that do not exist yet (see [`resolve_write_at`]).
+    pub(crate) fn resolve_write(&self, path: &str) -> Result<PathBuf, String> {
+        resolve_write_at(&self.workspace_root, path)
     }
 
     /// The decision for a canonicalized file path. `mode="ro"` rules match
@@ -810,6 +832,23 @@ impl Access {
     /// `None` = decision models are not wired into this access at all.
     pub fn decisions(&self) -> Option<&std::sync::Arc<crate::decisions::Decisions>> {
         self.decisions.as_ref()
+    }
+
+    /// The workspace this access resolves paths against: the tab's (or the
+    /// single run's) working directory, captured when the rules were compiled.
+    pub fn workspace_root(&self) -> &Path {
+        self.permissions.workspace_root()
+    }
+
+    /// Canonicalizes a read path against [`Self::workspace_root`].
+    pub fn resolve_read(&self, path: &str) -> Result<PathBuf, String> {
+        self.permissions.resolve_read(path)
+    }
+
+    /// Canonicalizes a write path against [`Self::workspace_root`], allowing
+    /// targets that do not exist yet.
+    pub fn resolve_write(&self, path: &str) -> Result<PathBuf, String> {
+        self.permissions.resolve_write(path)
     }
 
     /// Authorizes a canonicalized file path (see

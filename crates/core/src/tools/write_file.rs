@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use shuvarie_llm::{FileChange, Tool, ToolContext, ToolExecutionError, ToolOutput};
 
 use crate::lsp_manager::SharedManager;
-use crate::permissions::{Access, PathKind, resolve_write};
+use crate::permissions::{Access, PathKind};
 
 use super::{FileLocks, ReadCache, arg_value};
 
@@ -77,7 +77,7 @@ impl Tool for WriteFile {
                 Some("create") | Some("overwrite") | None => {}
                 Some(other) => return Err(format!("invalid mode '{other}' (expected 'create' or 'overwrite')")),
             }
-            let abs = resolve_write(&path)?;
+            let abs = access.resolve_write(&path)?;
             access.authorize_path(PathKind::Write, &abs, &path).await?;
             let _file_lock = locks.lock(&abs).await;
             let exists = abs.exists();

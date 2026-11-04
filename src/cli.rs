@@ -169,10 +169,6 @@ pub fn show_resume_hint(session_id: Uuid) {
     }
 }
 
-pub async fn init_default_store() -> shuvarie_db::Result<shuvarie_db::Store> {
-    shuvarie_db::Store::open(&shuvarie_db::Store::default_path()).await
-}
-
 /// Opens the store the CLI subcommands act on: the config's `db.global-store`
 /// decides between the shared global store and the workspace-local one. The
 /// config loads non-interactively — no trust prompt runs here — from the
@@ -184,12 +180,8 @@ async fn open_session_store(
         Some(path) => shuvarie_core::Config::load_explicit(path)?,
         None => shuvarie_core::Config::load()?,
     };
-    let store = if config.db.global_store {
-        shuvarie_db::Store::open_global().await?
-    } else {
-        init_default_store().await?
-    };
-    Ok(store)
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    Ok(shuvarie_db::Store::for_workspace(&root, config.db.global_store).await?)
 }
 
 pub async fn import_session(

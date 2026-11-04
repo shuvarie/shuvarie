@@ -5,7 +5,7 @@ use shuvarie_llm::{Tool, ToolContext, ToolExecutionError, ToolOutput};
 use super::{ReadCache, arg_value};
 use crate::{
     attachments::AttachmentSettings,
-    permissions::{Access, PathKind, resolve_read},
+    permissions::{Access, PathKind},
 };
 
 const DEFAULT_READ_LIMIT: usize = 2000;
@@ -158,7 +158,7 @@ impl Tool for ReadFile {
                     }
                 }
             }
-            let abs = resolve_read(&path)?;
+            let abs = access.resolve_read(&path)?;
             access.authorize_path(PathKind::Read, &abs, &path).await?;
             if abs.is_dir() {
                 return Err(format!("'{path}' is a directory, not a file"));

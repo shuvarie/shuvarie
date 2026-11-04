@@ -1,19 +1,20 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use shuvarie_llm::{Tool, ToolContext, ToolExecutionError, ToolOutput};
 
 use crate::lsp_manager::SharedManager;
 
-use super::workspace_root;
+use crate::permissions::Access;
 
 pub(crate) struct Lsp {
     lsp: SharedManager,
+    access: Access,
 }
 
 impl Lsp {
-    pub(crate) fn new(lsp: SharedManager) -> Self {
-        Self { lsp }
+    pub(crate) fn new(lsp: SharedManager, access: Access) -> Self {
+        Self { lsp, access }
     }
 }
 
@@ -56,6 +57,7 @@ impl Tool for Lsp {
         args: Value,
     ) -> Result<ToolOutput, ToolExecutionError> {
         let lsp = self.lsp.clone();
+        let root = self.access.workspace_root().to_path_buf();
         let result: Result<ToolOutput, String> = async move {
             let action = args
                 .get("action")
@@ -65,7 +67,7 @@ impl Tool for Lsp {
             let name = args.get("name").and_then(Value::as_str).map(String::from);
             let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
             if action == "analyze" {
-                return analyze_paths(&lsp, args.get("path").and_then(Value::as_str)).await;
+                return analyze_paths(&lsp, &root, args.get("path").and_then(Value::as_str)).await;
             }
             let mut mgr = lsp.lock().await;
             match action.as_str() {
@@ -126,9 +128,13 @@ const ANALYZE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// return the published diagnostics. The manager lock is released between
 /// polls so the core task's diagnostic pump can drain `publishDiagnostics`
 /// into the manager's map.
-async fn analyze_paths(lsp: &SharedManager, path: Option<&str>) -> Result<ToolOutput, String> {
+async fn analyze_paths(
+    lsp: &SharedManager,
+    root: &Path,
+    path: Option<&str>,
+) -> Result<ToolOutput, String> {
     let target = path.unwrap_or(".");
-    let abs = resolve(target)?;
+    let abs = resolve(root, target)?;
     let mut files: Vec<PathBuf> = Vec::new();
     if abs.is_dir() {
         let mut walk = ignore::WalkBuilder::new(&abs)
@@ -202,11 +208,10 @@ async fn analyze_paths(lsp: &SharedManager, path: Option<&str>) -> Result<ToolOu
     Ok(ToolOutput::text(out))
 }
 
-fn resolve(path: &str) -> Result<PathBuf, String> {
-    let root = workspace_root()?;
+fn resolve(root: &Path, path: &str) -> Result<PathBuf, String> {
     let joined = root.join(path);
     let canonical = joined.canonicalize().map_err(|e| format!("{path}: {e}"))?;
-    if !canonical.starts_with(&root) {
+    if !canonical.starts_with(root) {
         return Err(format!("{path} resolves outside the workspace"));
     }
     Ok(canonical)
