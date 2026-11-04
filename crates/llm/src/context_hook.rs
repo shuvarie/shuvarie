@@ -456,7 +456,7 @@ mod tests {
         }
     }
 
-    /// The hook sees history as `Arc<Message>` (rig 0.45 shares one canonical
+    /// The hook sees history as `Arc<Message>` (rig 0.46 shares one canonical
     /// message between the run and every hook); tests build it from plain
     /// messages.
     fn arced(messages: Vec<Message>) -> Vec<Arc<Message>> {

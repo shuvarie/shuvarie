@@ -288,7 +288,7 @@ impl Pending {
                 config,
                 authenticator,
             } => {
-                // rig 0.45 has no `Client::authenticate`: the credential is
+                // rig 0.46 has no `Client::authenticate`: the credential is
                 // resolved through the transport and configured onto the
                 // client (the `SignedInModel` handler re-resolves per request
                 // instead, but a resolved client — what `OAuthGate` caches —
@@ -380,7 +380,7 @@ fn device_code(handler: Option<&DeviceCodeHandler>) -> (chatgpt::auth::DeviceCod
 fn chatgpt_authenticator(handler: Option<&DeviceCodeHandler>) -> chatgpt::auth::Authenticator {
     let (device, allow_flow) = device_code(handler);
     // Credentials stay in this process's memory: the resolved client is
-    // cached by `OAuthGate`, so nothing needs to survive a restart (rig 0.45
+    // cached by `OAuthGate`, so nothing needs to survive a restart (rig 0.46
     // takes a `TokenStore` where it took an optional auth-file path).
     chatgpt::auth::Authenticator::new(
         chatgpt::auth::AuthSource::OAuth,

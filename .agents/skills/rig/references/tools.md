@@ -2,7 +2,7 @@
 
 Tools let an agent do more than generate text: they expose your Rust functions to the model so it can fetch data, run computations, or reach external systems. When the model decides a tool is needed, Rig parses the call, runs your code, feeds the result back, and continues the loop.
 
-Official docs: https://rig.rs/docs/concepts/tools · API: https://docs.rs/rig-core/latest/rig_core/tool/index.html (0.44: the contracts live in `rig-core-0.45.0/src/tool/`, the runtime registration in `rig-agent-0.45.0/src/tool/`)
+Official docs: https://rig.rs/docs/concepts/tools · API: https://docs.rs/rig-core/latest/rig_core/tool/index.html (0.46: the contracts live in `rig-core-0.46.0/src/tool/`, the runtime registration in `rig-agent-0.46.0/src/tool/`)
 
 ## Complete example (0.44)
 

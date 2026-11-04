@@ -114,7 +114,7 @@ async fn evaluate_sends_one_system_one_request_and_reads_the_answer() {
         outcome.answer("shell-safety"),
         Some(&DecisionAnswer::Noul { probability: 0.97 })
     );
-    // rig-typesafeai 0.45 reads only the counters Jev actually reports — the
+    // rig-typesafeai 0.46 reads only the counters Jev actually reports — the
     // input/output pair and, through OpenRouter, a `cost` — so the wire's own
     // `total_tokens` is no longer carried; shuvarie's `context_footprint`
     // derives a total from the counters.

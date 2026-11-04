@@ -2,9 +2,9 @@
 
 An `Agent` is Rig's primary building block. It bundles an erased completion model (`DynModel<Completion>`, registered as a handler on the agent's own effect bus) with a system prompt (`preamble`), optional context documents, tools, and (optionally) conversation memory, then runs the **agent loop** for you: send the prompt, execute any tools the model calls, feed results back, repeat until the model answers.
 
-Official docs: https://rig.rs/docs/concepts/agent · API: https://docs.rs/rig-agent/latest/rig_agent/agent/index.html (pinned to **0.45**: the crate sources under `rig-agent-0.45.0/src/agent/` are authoritative).
+Official docs: https://rig.rs/docs/concepts/agent · API: https://docs.rs/rig-agent/latest/rig_agent/agent/index.html (pinned to **0.46**: the crate sources under `rig-agent-0.46.0/src/agent/` are authoritative).
 
-> **Changed in 0.44** — this file documents 0.45 (with the 0.44-era detail it inherited). Headlines: the builder is *tool-state* generic (`AgentBuilder<ToolState = NoToolConfig>`, no model parameter); generation options are typed (`GenerationOptions`, `ProviderOptions`, `ModelSpec`); `PromptResponse::output()` is a **method returning `String`** (0.43 exposed an `output: String` field) and `PromptResponse::messages` is a plain `Vec<Message>` (0.43: `Option<Vec<Message>>`); the max-turns error is `PromptError::MaxTurns` (0.43: `MaxTurnsError`), and `StreamingError` is gone (see `agent-runner.md`).
+> **Changed in 0.44** — this file documents 0.46 (with the 0.44/0.45-era detail it inherited). Headlines: the builder is *tool-state* generic (`AgentBuilder<ToolState = NoToolConfig>`, no model parameter); generation options are typed (`GenerationOptions`, `ProviderOptions`, `ModelSpec`); `PromptResponse::output()` is a **method returning `String`** (0.43 exposed an `output: String` field) and `PromptResponse::messages` is a plain `Vec<Message>` (0.43: `Option<Vec<Message>>`); the max-turns error is `PromptError::MaxTurns` (0.43: `MaxTurnsError`), and `StreamingError` is gone (see `agent-runner.md`).
 
 ## Minimal agent
 

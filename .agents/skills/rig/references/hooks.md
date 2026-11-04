@@ -2,7 +2,7 @@
 
 Hooks let your code observe and steer the agent loop while `AgentRunner` drives the model and tool IO. Use them for logging, metrics, audit trails, approval flows, guardrails, request shaping, invalid-tool-call recovery, and streaming UI integration.
 
-Official docs: https://rig.rs/docs/concepts/hooks (the surface below is read from the crate sources: `rig-agent-0.45.0/src/agent/hook.rs`, `src/run/policy.rs`, `src/run/patch.rs` — the docs site may lag).
+Official docs: https://rig.rs/docs/concepts/hooks (the surface below is read from the crate sources: `rig-agent-0.46.0/src/agent/hook.rs`, `src/run/policy.rs`, `src/run/patch.rs` — the docs site may lag).
 
 A hook implements the `AgentHook` trait — a set of **typed methods, one per boundary**, each returning an event-specific action. Model calls and tool dispatches are *effects* on the run's bus, so the tool-call/tool-result boundaries are `on_dispatch` (before) / `on_outcome` (after); there is no `on_tool_call`/`on_tool_result`, and no `ToolResultAction`. Hooks live on the `AgentRunner` (driver) layer — the lower-level `AgentRun` state machine stays sans-IO. `AgentHook` is not generic over a model.
 

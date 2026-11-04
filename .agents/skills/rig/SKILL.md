@@ -8,15 +8,15 @@ description: >-
   a model catalog, build agents with tools and RAG context, drive runs with
   AgentRunner streams, extract typed structured output, manage conversation
   memory, and hook the agent loop for guardrails and approvals.
-  This skill covers Rig 0.45.x (`rig-core` and `rig-agent` depended on directly;
-  the `rig` facade is published for 0.45 but shuvarie deliberately avoids it) as
+  This skill covers Rig 0.46.x (`rig-core` and `rig-agent` depended on directly;
+  the `rig` facade is published for 0.46 but shuvarie deliberately avoids it) as
   used by the `shuvarie-llm` crate, with `shuvarie-decision` on `rig-core` +
   `rig-typesafeai`. Docs: guide at https://rig.rs/docs and API docs at
-  https://docs.rs/rig-core/0.45.0/rig_core/.
+  https://docs.rs/rig-core/0.46.0/rig_core/.
 license: MIT
 metadata:
   author: shuvarie
-  version: 0.45.0
+  version: 0.46.0
   category: Backend Development
   tags:
     - rust
@@ -27,7 +27,7 @@ metadata:
 
 Rig is a Rust library for building LLM-powered applications and agents. It gives you unified abstractions over **model providers** (OpenAI, Anthropic, Gemini, Ollama, and 20+ others), **tools**, **memory**, and **vector stores / RAG**, so you can wire up an agent in a few lines and scale to a production system without changing frameworks.
 
-This project (`shuvarie`) pins **Rig 0.45.0** — `rig-core` and `rig-agent` directly in `crates/llm/Cargo.toml` (`rig-core` with `features = ["reqwest"]`, plus `rig-reqwest` with `default-features = false` for the OAuth paths that need a transport before a client exists; the `rig` facade crate *is* published for 0.45 but shuvarie deliberately avoids it: "Do NOT include `rig`. It has too many implicit dependencies."). `crates/decision` depends on `rig-core` plus `rig-typesafeai` (its own System One wire). The `shuvarie-llm` crate is a thin wrapper over rig that exposes a `ProviderKind`-keyed `ProviderClient` (`selune::ProviderType` + an optional `selune::Dialect`) dispatching onto seven client families, plus model listing, embeddings, worker agents, and a streaming completion API; the root binary never calls `rig` directly (see `AGENTS.md`).
+This project (`shuvarie`) pins **Rig 0.46.0** — `rig-core` and `rig-agent` directly in `crates/llm/Cargo.toml` (`rig-core` with `features = ["reqwest"]`, plus `rig-reqwest` with `default-features = false` for the OAuth paths that need a transport before a client exists; the `rig` facade crate *is* published for 0.46 but shuvarie deliberately avoids it: "Do NOT include `rig`. It has too many implicit dependencies."). `crates/decision` depends on `rig-core` plus `rig-typesafeai` (its own System One wire). The `shuvarie-llm` crate is a thin wrapper over rig that exposes a `ProviderKind`-keyed `ProviderClient` (`selune::ProviderType` + an optional `selune::Dialect`) dispatching onto seven client families, plus model listing, embeddings, worker agents, and a streaming completion API; the root binary never calls `rig` directly (see `AGENTS.md`).
 
 > **What 0.44 gives you**
 > 1. **Provider clients are named per provider** (`openai::OpenAI`, `anthropic::Anthropic`, `gemini::Gemini`, `ollama::Ollama`, `cohere::Cohere`, `voyageai::VoyageAi`) and built from **configs**: `OpenAIConfig::new(key).client()` / `Config::from_env()?.client()` / `.connect(http)`. OpenAI-shaped **vendors** (Groq, Together, DeepSeek, Copilot, …) are *dialects*: their modules expose constructors that return the shared `OpenAI` client on their dialect (e.g. `openai::wire::GROQ`, `copilot::DIALECT`), so an OpenAI- or Anthropic-shaped client covers all of them. 0.44 harmonized the per-provider constructor story (Anthropic dialect, Bedrock builder, Vertex errors); **0.45 finished the job — Copilot lost its own client and is now purely a dialect**.
@@ -50,7 +50,15 @@ This project (`shuvarie`) pins **Rig 0.45.0** — `rig-core` and `rig-agent` dir
 > 5. **Crates split.** Memory left `rig-core` for its own **`rig-memory`** crate (sessions, compaction, stores, over `rig_core::conversation`); `rig_core::transcript` is gone (`invalid_arguments_feedback` moved to `rig_core::tool::feedback`); `rig_agent::bus` became `rig_agent::handlers` (`Handlers` + `ModelHandle` served inline). `rig_core` gained `conversation` (one `Conversation` model: entries, `Change`s, `TurnRecord`s, tool-call/result `pairing`) and `redact`.
 > 6. **rig-typesafeai stopped inventing `total_tokens`.** Its Jev/System One usage reads only what the wire reports (`input_tokens`, `output_tokens`, and OpenRouter's `cost`), so `Usage::total_tokens` is `None` there; shuvarie's `context_footprint` derives a total from the counters.
 
-Official docs: **Guide** at https://rig.rs/docs and **API docs** at https://docs.rs/rig-core/0.45.0/rig_core/ / https://docs.rs/rig-agent/0.45.0/rig_agent/. docs.rs now serves the 0.45 line; the crate sources under `~/.cargo/registry/src/*/rig-core-0.45.0` / `rig-agent-0.45.0` are the most precise reference (the modules are heavily documented), and `rig-core-0.45.0/TYPED_OPTIONS.md` explains the intent behind the typed-option/catalog work.
+> **What 0.46 changed** (the deltas this workspace had to absorb — everything above still holds)
+> 1. **`serde_json`'s features are the application's again.** `rig-core` stopped forcing `preserve_order` and `float_roundtrip` (it forced both through 0.45), so out of the box **JSON object keys sort by name** — including the `properties` of every tool definition's schema and the JSON text inside tool results, prompts and embeddings — and parsing a float can change its low bits. shuvarie states both features itself in the root `Cargo.toml` to keep a request's bytes what they were; drop them and a provider's own key order is lost while `float_roundtrip`-less numbers can round-trip as different text. Rig has no forwarding feature for this; `rig-cassette`/`traffic`, `rig-claude-cloak`, `rig-mcp-client` and BSON-backed stores still enable `preserve_order` (`rig-mongodb` included).
+> 2. **Provider-hosted tools are first class.** `ProviderToolDefinition { kind, config }` (`rig_core::completion`, `ProviderToolDefinition::new("web_search").with_config(..)`) rides `CompletionRequest::provider_tool(s)`, `RunSpec::provider_tools` and `AgentRunSpec::provider_tools`; they are appended to any raw `additional_params.tools` **after** the function tools, and `TurnPolicy` grew a `hosted` flag so a hosted call is not read as an unknown tool. Nothing shuvarie sets (`additional_params`) carries tools, so this is additive here.
+> 3. **A dialect may route by catalog.** `Quirks::routes_by_catalog` (OpenCode Zen only, so far) lets a model's catalog row pick Chat vs Responses in `OpenAiWire::new`, between the `model_route` hook and the dialect's `completion_route`. `config().completion_route()` therefore names a *default*, not the route a given model takes. New `Quirks` fields beside it: `strict_tools_prefix`/`strict_schema` (`StrictSchema::{OpenAi, DeepSeek}` — DeepSeek's strict calling has its own schema rewrite), `session_header`, `short_lived_key`, `catalog_priced`, `reasoning_ciphertext`, `system_role`. Dialect defaults shuvarie reaches are unchanged (`openai::wire::GROQ`, `MOONSHOT`, `MINIMAX`, `DOUBLEWORD`, … stay on the Chat route) — but MiniMax's base URL moved to `https://api.minimax.cn/v1`.
+> 4. **Telemetry records the tool definitions sent.** An agent completion span now carries them (`rig_core::telemetry::record_tool_definitions`, after dispatch hooks so it shows what actually went out), gated by `record_telemetry_content` as before.
+> 5. **The catalog was refreshed** from models.dev (2026-10-30 facts, GPT-6.1 Terra, Terra's Chat tool rule, a 12 h cache) with `catalog::details` split out; `catalog::lookup::edit_distance` is public. Override/lookup rules changed, so a hand-written `from_overrides` file is worth re-validating.
+> 6. **Ollama and the MCP client moved on.** Ollama grew a Messages route (its `/api/chat` wire is unchanged); the MCP client shipped as the off-by-default `rig-mcp-client` plugin, so nothing changes for shuvarie's direct `rmcp` use.
+
+Official docs: **Guide** at https://rig.rs/docs and **API docs** at https://docs.rs/rig-core/0.46.0/rig_core/ / https://docs.rs/rig-agent/0.46.0/rig_agent/. docs.rs now serves the 0.46 line; the crate sources under `~/.cargo/registry/src/*/rig-core-0.46.0` / `rig-agent-0.46.0` are the most precise reference (the modules are heavily documented), and `rig-core-0.46.0/TYPED_OPTIONS.md` explains the intent behind the typed-option/catalog work.
 
 ## Workspace / crate layout
 
@@ -62,9 +70,9 @@ Rig separates portable provider/backend contracts from the agent runtime:
 
 ```toml
 [dependencies]
-rig-core = { version = "0.45", features = ["reqwest"] }
-rig-agent = "0.45"
-rig-reqwest = { version = "0.45", default-features = false }   # only for the OAuth paths
+rig-core = { version = "0.46", features = ["reqwest"] }
+rig-agent = "0.46"
+rig-reqwest = { version = "0.46", default-features = false }   # only for the OAuth paths
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 ```
 
@@ -251,7 +259,7 @@ Use this to decide which reference file to load:
 | `test_utils` | `rig_core::test_utils` / `rig_agent::test_utils` (feature `test-utils`) | mock completion models/embeddings/memory/relay plus streaming and trace conformance helpers |
 | `schemars` / `serde` / `serde_json` | `rig_core::{schemars, serde, serde_json}` | re-exports so macro-generated code resolves through rig; **schemars v1.0** |
 
-## Provider List (rig-core 0.45)
+## Provider List (rig-core 0.46)
 
 Modules under `rig_core::providers::*`, each with its own client/section unless marked: `openai` (`OpenAI`), `anthropic` (`Anthropic`), `gemini` (`Gemini`), `ollama` (`Ollama`), `cohere` (`Cohere`), `voyageai` (`VoyageAi`, embeddings/rerank only), `copilot` (dialect + auth + its own catalogue wire — the client is `openai::OpenAI`), `chatgpt` (dialect + auth — the client is `openai::OpenAI`), `azure` (OpenAI-shaped resource routing — client is `openai::OpenAI`), and OpenAI/Anthropic-shaped **vendors** whose constructors build the shared client: `deepseek`, `doubleword`, `groq`, `huggingface`, `hyperbolic`, `llamacpp`, `minimax`, `mira`, `mistral`, `moonshot`, `openrouter`, `perplexity`, `together`, `venice`, `xai` (`xai::DIALECT`), `xiaomimimo`, `zai`. `providers::registry::ProviderRef` builds clients from data when the provider is chosen programmatically.
 
@@ -288,14 +296,15 @@ OpenAI-compatible vendors are reachable generically via `OpenAIConfig::with_key(
 19. **Expecting `additional_params` to be replaced wholesale** — it now deep-merges into the body and raw keys beat typed options (precedence: mapped options → `provider_options` → `additional_params`).
 20. **Reaching for `#[non_exhaustive]` types with an exhaustive `match`** — `CompletionRequest` and the invalid-tool-call policy types require a `_` arm.
 21. **Ignoring malformed tool arguments** — they reach `on_invalid_tool_call` (`InvalidToolCallReason::MalformedArguments`) and are subject to `max_consecutive_malformed_tool_calls`; the default path answers the call with corrective feedback (`rig_core::tool::feedback::invalid_arguments_feedback`) rather than failing the run.
-22. **Reaching for `Client::authenticate` / `CopilotConfig` / `DynamicTool::execute_with` / `ToolSet::from_dynamic_tools`** — 0.45 removed them. Resolve an `AuthContext` instead, build Copilot as `OpenAIConfig::with_key(&copilot::DIALECT, ..)`, run a dynamic tool with `run_with`, and register dynamic tools one by one with `add_dynamic_tool`.
-23. **Cloning the history in a hook** — 0.45 hands hooks `&[Arc<Message>]`; clone the `Arc`, never the message.
-24. **Expecting `rig_core::memory`** — memory lives in the `rig-memory` crate in 0.45, and `rig_core::transcript` is `rig_core::tool::feedback`.
+22. **Reaching for `Client::authenticate` / `CopilotConfig` / `DynamicTool::execute_with` / `ToolSet::from_dynamic_tools`** — gone since 0.45. Resolve an `AuthContext` instead, build Copilot as `OpenAIConfig::with_key(&copilot::DIALECT, ..)`, run a dynamic tool with `run_with`, and register dynamic tools one by one with `add_dynamic_tool`.
+23. **Cloning the history in a hook** — hooks take `&[Arc<Message>]`; clone the `Arc`, never the message.
+24. **Expecting `rig_core::memory`** — memory lives in the `rig-memory` crate (since 0.45), and `rig_core::transcript` is `rig_core::tool::feedback`.
+25. **Leaving `serde_json`'s features to rig** — since 0.46 rig forces neither `preserve_order` nor `float_roundtrip`, so an outgoing request's key order and number text are only stable if the application asks for them (see "What 0.46 changed").
 
 ## External Resources
 
 - **Rig website / guide**: https://rig.rs/docs
-- **Rig API docs (0.45)**: https://docs.rs/rig-core/0.45.0/rig_core/ · https://docs.rs/rig-agent/0.45.0/rig_agent/
+- **Rig API docs (0.46)**: https://docs.rs/rig-core/0.46.0/rig_core/ · https://docs.rs/rig-agent/0.46.0/rig_agent/
 - **GitHub**: https://github.com/0xPlaygrounds/rig
 - **Examples**: https://github.com/0xPlaygrounds/rig/tree/main/examples
 - **awesome-rig**: https://github.com/0xPlaygrounds/awesome-rig

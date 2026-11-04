@@ -2,7 +2,7 @@
 
 An `Extractor` turns unstructured text into a strongly-typed Rust value. Give it a target type and Rig drives an LLM to parse text into that type with type-safe deserialization and minimal boilerplate — useful for pulling entities, fields, or records out of free-form input.
 
-Official docs: https://rig.rs/docs/concepts/extractors · API: https://docs.rs/rig-agent/latest/rig_agent/extractor/index.html (authoritative reference: `rig-agent-0.45.0/src/extractor.rs`, `rig-agent-0.45.0/src/agent/typed.rs`, `rig-core-0.45.0/src/structured_output.rs`).
+Official docs: https://rig.rs/docs/concepts/extractors · API: https://docs.rs/rig-agent/latest/rig_agent/extractor/index.html (authoritative reference: `rig-agent-0.46.0/src/extractor.rs`, `rig-agent-0.46.0/src/agent/typed.rs`, `rig-core-0.46.0/src/structured_output.rs`).
 
 > **Changed in 0.44** — the structured-output *policy* is shared by the agent runtimes in `rig_core::structured_output` (output-tool name and description, instructions, reprompts, required-field check). A typed run is `AgentRunner<TypedOutput<T>>` and **shares every `AgentRunner` setter** (0.43 forwarded them one by one). `PromptResponse::output()` is a **method derived from `content`** (no `output: String` field), and 0.44 tightened the extractor to match: `StructuredOutputError` is `Prompt` / `Deserialization { output, error }` / `EmptyResponse`, and `ExtractorBuilder::retries` takes `usize`.
 

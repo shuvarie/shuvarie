@@ -2,7 +2,7 @@
 
 `AgentRunner` is the driver behind Rig's high-level agent prompt APIs. `agent.prompt("...")` **is** the runner: it returns an explicit run value for one prompt — one set of per-run options, one call to `run()`, `stream()`, or `run_channel()`. Nothing happens until it is driven (a stream that is dropped unpolled has done nothing).
 
-Official docs: https://rig.rs/docs/concepts/agentrunner · API: https://docs.rs/rig-agent/latest/rig_agent/agent/struct.AgentRunner.html (pinned to **0.45**: `rig-agent-0.45.0/src/agent/{runner.rs,streaming.rs,typed.rs}` is authoritative).
+Official docs: https://rig.rs/docs/concepts/agentrunner · API: https://docs.rs/rig-agent/latest/rig_agent/agent/struct.AgentRunner.html (pinned to **0.46**: `rig-agent-0.46.0/src/agent/{runner.rs,streaming.rs,typed.rs}` is authoritative).
 
 > **Changed in 0.44** — `AgentRunner<O = ()>` is now generic over what `.await` recovers (`O = ()` for the raw `PromptResponse`; `TypedRun<T> = AgentRunner<TypedOutput<T>>`), and it grew the typed-options, telemetry-content, unknown-finish-reason and malformed-argument setters below. `StreamingError` is **gone**: a stream yields `Result<MultiTurnStreamItem, PromptError>`, and `StreamedUserContent`/`StreamUserItem` is now `MultiTurnStreamItem::ToolResult { tool_result }`. Error renames: `CompletionError` → `Provider`, `MaxTurnsError` → `MaxTurns`, `PromptCancelled` → `Cancelled`, plus the new `UnknownToolCall`.
 

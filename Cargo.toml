@@ -137,18 +137,32 @@ reqwest = "0.13"
 # unmaintained (RUSTSEC-2026-0249) -- stays a hard dependency either way until
 # Rhai 2.0, so the swap buys nothing and changes the key type for no reason.
 rhai = { version = "1.27", features = ["serde"] }
-# Do NOT include `rig`. It has too many implicit dependencies.
-rig-agent = "0.45"
-rig-core = { version = "0.45", features = ["reqwest"] }
+# Do NOT include `rig`. It has too many implicit dependencies: the facade
+# declares every vector-store and embedding integration as an optional
+# dependency, and Cargo.lock records the whole resolve graph whether or not a
+# feature is on. Measured on 0.46, the one line adds ~194 lock entries (lancedb
+# -> lance -> datafusion -> arrow, fastembed -> ort/tokenizers, plus helixdb,
+# milvus, vectorize and cassette) and 20 duplicate crate versions, while
+# compiling nothing extra. `rig::…` is only a re-export of the `rig-core` and
+# `rig-agent` we name directly.
+rig-agent = "0.46"
+rig-core = { version = "0.46", features = ["reqwest"] }
 # The bundled reqwest transport rig's clients send through by default (already
 # in the tree through rig-core's `reqwest` feature). Named directly only for
 # the OAuth paths, which resolve a credential through a transport before any
 # client exists. TLS stays rig-core's `rustls` feature.
-rig-reqwest = { version = "0.45", default-features = false }
+rig-reqwest = { version = "0.46", default-features = false }
 rmcp = { version = "3.4", default-features = false }
 selune = "0.5"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# rig-core 0.46 stopped forcing these two features (it forced both through
+# 0.45). Without them JSON object keys sort by name -- including the schema
+# properties of every tool definition and the JSON text of tool results -- and
+# parsing a float can change its low bits, so the text a provider sent is not
+# the text replayed. Both are stated here to keep a request's bytes what they
+# were before the upgrade: `preserve_order` for a stable prompt prefix and the
+# provider's own key order, `float_roundtrip` for exact numbers.
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 sha2 = "0.11"
 shuvarie-codemode = { path = "crates/codemode", version = "0.5" }
 shuvarie-config = { path = "crates/config", version = "0.5" }

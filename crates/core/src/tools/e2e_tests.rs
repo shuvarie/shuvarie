@@ -73,7 +73,7 @@ fn roster(
         // wiring is a turn's, so a test that wants the tool builds it.
         None,
     );
-    // rig 0.45 has no `from_dynamic_tools`: a dynamic registration goes in
+    // rig 0.46 has no `from_dynamic_tools`: a dynamic registration goes in
     // through `add_dynamic_tool`, in the roster's order.
     let mut set = ToolSet::default();
     for tool in tools {

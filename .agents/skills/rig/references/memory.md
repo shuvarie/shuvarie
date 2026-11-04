@@ -56,7 +56,7 @@ Rules:
 | `PromptResponse::messages` | `Vec<Message>` — the run's transcript: the prompt, every accepted assistant turn, every committed tool result and any corrective feedback, *excluding* the input history. This, and only this, is what memory is asked to persist. |
 | `PromptResponse::messages()` | the same transcript by reference |
 
-In 0.45 there is no per-run append receipt (`memory_append` is gone): the `Writer` a session keeps is what persists, and a save that raced another writer is refused (`SessionError::Changed`) rather than merged.
+Since 0.45 there is no per-run append receipt (`memory_append` is gone): the `Writer` a session keeps is what persists, and a save that raced another writer is refused (`SessionError::Changed`) rather than merged.
 
 > **Resumed runs.** `Agent::resume(run)` continues a persisted run: its prompt and history are already inside the run, so **nothing is loaded**. Whether the run's added messages are appended at the end is the persisted run's business; in 0.45 there is no per-run receipt to inspect. Persist the finished run's `messages` yourself and never depend on the append there. `history`, `max_turns` and `unhandled_invalid_tool_call` on a resumed runner are inert for the same reason — the run carries its own.
 
@@ -70,7 +70,7 @@ Messages are `Serialize`/`Deserialize` — persisting a conversation is ordinary
 
 Raw history grows without bound — long histories are worse than just expensive (models get distracted; context windows overflow). The fix is managed forgetting: shape what `load` returns.
 
-In 0.45 the window is chosen when a request is built, not by a filter on `load`. `rig_memory::recent` gives the rule:
+Since 0.45 the window is chosen when a request is built, not by a filter on `load`. `rig_memory::recent` gives the rule:
 
 ```rust
 use rig_memory::recent::{LastMessages, TokenBudget, view};
