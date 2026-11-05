@@ -28,23 +28,20 @@ where
     if query.is_empty() {
         return (0..count).collect();
     }
-    let mut matcher = nucleo::Matcher::new(nucleo::Config::DEFAULT);
-    let pattern = nucleo::pattern::Pattern::parse(
-        query,
-        nucleo::pattern::CaseMatching::Smart,
-        nucleo::pattern::Normalization::Smart,
-    );
-    let mut buf = Vec::new();
-    let mut scored: Vec<(usize, u32)> = (0..count)
-        .filter_map(|i| {
-            let k = key(i);
-            pattern
-                .score(nucleo::Utf32Str::new(k.as_str(), &mut buf), &mut matcher)
-                .map(|s| (i, s))
-        })
-        .collect();
-    scored.sort_by_key(|b| std::cmp::Reverse(b.1));
-    scored.into_iter().map(|(i, _)| i).collect()
+    // `match_list` wants the haystacks up front, so every key is materialized
+    // once per keystroke -- the same number of `key` calls the per-item scorers
+    // make. Its default config is what is wanted here: no typo tolerance
+    // (`max_typos: Some(0)`, so a query only filters, never fuzzes into a
+    // neighbour), smart casing, and `ScoreThenIndexAsc`, which is the ordering
+    // already relied on -- ranking ties stay in list order instead of shuffling
+    // as the query is typed.
+    let haystacks: Vec<String> = (0..count).map(key).collect();
+    let mut matcher = neo_frizbee::Matcher::new(query, &neo_frizbee::Config::default());
+    matcher
+        .match_list(&haystacks)
+        .into_iter()
+        .map(|m| m.index as usize)
+        .collect()
 }
 
 pub struct Search {
@@ -89,7 +86,6 @@ impl Search {
         }
     }
 
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.query.is_empty()
     }
@@ -140,24 +136,61 @@ mod tests {
 
     #[test]
     fn empty_query_returns_all() {
-        let search = Search::new();
-        let items = ["gpt-4", "claude-3"];
-        let res = search.filter_indices(items.len(), |i| items[i].to_string());
-        assert_eq!(res.len(), 2);
+        let res = matches("", &["gpt-4", "claude-3"]);
+        assert_eq!(res, vec![0, 1]);
     }
 
     #[test]
     fn filters_and_sorts_by_score() {
-        let mut search = Search::new();
-        search.query = "gpt".into();
-        let items = ["claude-3-opus", "gpt-4", "gpt-3.5"];
-        let res = search.filter_indices(items.len(), |i| items[i].to_string());
+        let res = matches("gpt", &["claude-3-opus", "gpt-4", "gpt-3.5"]);
         assert!(res.contains(&1));
         assert!(res.contains(&2));
         assert!(!res.contains(&0));
         let gpt4 = res.iter().position(|&i| i == 1).unwrap();
         let gpt35 = res.iter().position(|&i| i == 2).unwrap();
-        assert!(gpt4 < gpt35, "exact-ish match should rank higher");
+        assert!(gpt4 < gpt35, "equal prefixes keep list order");
+    }
+
+    #[test]
+    fn a_prefix_hit_outranks_a_mid_string_hit() {
+        // The property the swap was made for: a query that starts a title is
+        // ranked above the same word appearing later in one, which nucleo's
+        // scoring did not consistently do for whole-phrase needles.
+        let res = matches("search", &["add a search box", "search: tune ranking"]);
+        assert_eq!(res, vec![1, 0]);
+    }
+
+    fn matches(query: &str, items: &[&str]) -> Vec<usize> {
+        let mut search = Search::new();
+        search.query = query.into();
+        search.filter_indices(items.len(), |i| items[i].to_string())
+    }
+
+    #[test]
+    fn a_typo_filters_the_row_out() {
+        // `max_typos: Some(0)` -- the query narrows the list, it never fuzzes
+        // into a neighbour, so a session list cannot offer an unrelated row.
+        assert!(matches("gpty", &["gpt-4", "gpt-3.5"]).is_empty());
+    }
+
+    #[test]
+    fn a_one_char_query_matches() {
+        // `fff-search`'s own query layer drops needles under 2 bytes; matching
+        // through its matcher directly does not, so the first keystroke narrows.
+        let res = matches("s", &["gpt-4", "session cleanup"]);
+        assert_eq!(res, vec![1]);
+    }
+
+    #[test]
+    fn a_lowercase_query_matches_any_casing() {
+        let res = matches("search", &["SEARCH the docs", "unrelated"]);
+        assert_eq!(res, vec![0]);
+    }
+
+    #[test]
+    fn an_empty_list_filters_to_nothing() {
+        assert!(matches("x", &[]).is_empty());
+        assert!(matches("", &[]).is_empty());
     }
 
     #[test]

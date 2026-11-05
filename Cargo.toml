@@ -40,7 +40,10 @@ futures-util.workspace = true
 # transports, credentials and mailmap for a library that is only ever pointed
 # at the repository the TUI is standing in.
 gix = { version = "0.90", default-features = false, features = ["sha1", "status"] }
-nucleo = "0.5"
+# The fuzzy matcher behind every popup's query row (`tui/search.rs`). Named
+# directly because it is the only place nucleo was used; it already arrives in
+# the tree through `fff-search`, so this is a swap rather than an addition.
+neo_frizbee = "0.13"
 notify = "9.0.0-rc.7"
 image.workspace = true
 # The global allocator (`main.rs`). `optional` here so that nothing but the

@@ -3935,8 +3935,8 @@ fn add_provider_list_height(area: Rect, stage: AddProviderStage, fullscreen: boo
 }
 
 fn session_picker_list_height(area: Rect) -> Option<u16> {
-    // Hint bar.
-    overlay_inner_list_height(area, 64, 36, 1)
+    // Query row + hint bar.
+    overlay_inner_list_height(area, 64, 36, 2)
 }
 
 fn attach_list_height(area: Rect) -> Option<u16> {
