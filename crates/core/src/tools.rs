@@ -4,6 +4,7 @@ mod delete_file;
 #[cfg(test)]
 mod e2e_tests;
 mod edit_file;
+mod fuzzy_find;
 mod glob;
 mod grep;
 mod list_dir;
@@ -36,6 +37,7 @@ use crate::shell::Shell;
 
 use decide::Decide;
 use edit_file::EditFile;
+use fuzzy_find::FuzzyFind;
 use glob::Glob;
 use grep::Grep;
 use list_dir::ListDir;
@@ -185,6 +187,32 @@ pub(crate) fn arg_value(args: &Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("missing string argument '{key}'"))
 }
 
+/// Whether a search-root-relative path lies under a dot entry.
+///
+/// fff's own walker only hides dot entries outside a git repository, so inside
+/// one it indexes `.env` and `.shuvarie/` as well -- which the tools must not
+/// return implicitly. A `path` naming a hidden entry still searches it: the
+/// root never counts as a hidden component of its own results.
+pub(crate) fn is_hidden_path(rel: &str) -> bool {
+    rel.split('/').any(|segment| segment.starts_with('.'))
+}
+
+/// A search hit's path as the caller sees it: prefixed with the search root as
+/// it was given (`"."` keeps workspace-relative paths), so a returned path can
+/// be handed straight back to `read_file` or `edit_file`.
+pub(crate) fn display_path(rel: &str, display_root: &str) -> String {
+    if rel.is_empty() {
+        display_root.to_string()
+    } else if display_root == "." {
+        rel.to_string()
+    } else {
+        Path::new(display_root)
+            .join(rel)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
 pub(crate) fn compute_diff(old: &str, new: &str) -> Vec<DiffLine> {
     let diff = similar::TextDiff::from_lines(old, new);
     let mut options = similar::InlineChangeOptions::new();
@@ -300,6 +328,9 @@ pub fn all_tools(
     }));
     tools.extend(scene_tool("glob", scene, &access, true, |access| {
         Glob::new(access)
+    }));
+    tools.extend(scene_tool("fuzzy_find", scene, &access, true, |access| {
+        FuzzyFind::new(access)
     }));
     if !skills.is_empty() {
         tools.extend(scene_tool(
@@ -423,6 +454,9 @@ pub fn read_tools(
     }));
     tools.extend(scene_tool("glob", scene, &access, true, |access| {
         Glob::new(access)
+    }));
+    tools.extend(scene_tool("fuzzy_find", scene, &access, true, |access| {
+        FuzzyFind::new(access)
     }));
     if !skills.is_empty() {
         tools.extend(scene_tool(
@@ -583,6 +617,7 @@ mod tests {
             "list_dir",
             "grep",
             "glob",
+            "fuzzy_find",
             "lsp",
             "webfetch",
             "question",

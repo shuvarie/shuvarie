@@ -25,7 +25,7 @@
 
 - **Summon your knights in millis** — never awaits.
 - **Bind any patron** — OpenAI, Anthropic, Gemini, Ollama, or another OpenAI-compatible plane. One grimoire (`connections.kdl`) holds every pact, and its secrets live nowhere else.
-- **Send a fully armed knight** — it reads and writes scrolls (files), forges patches, scrys with grep and glob, consults the LSP oracles for diagnostics, fetches tomes from the far webs, and lights the ritual circle (your shell) when the quest demands.
+- **Send a fully armed knight** — it reads and writes scrolls (files), forges patches, scrys with grep and glob, hunts a half-remembered path with a fuzzy find, consults the LSP oracles for diagnostics, fetches tomes from the far webs, and lights the ritual circle (your shell) when the quest demands.
 - **Rule by the code of chivalry** — every tool call passes the permission wards: allowed, denied, or brought before your seat. A denied incantation cuts the turn; a questionable one waits for your seal.
 - **Swear oaths (scenes)** — change the knight's oath mid-campaign: each scene is a named bundle of system prelude, injected hooks, and a tool roster, forged in KDL. Built-in oaths ride along: **Advisor** (advice and planning, read-only), **Reviewer** (code review without edits), and **Orchestrator** (agent orchestration: delegate subtasks to subagent workers — a planning bench for design-heavy topics, the execution workers for the doing — then verify and integrate) — reshaped fieldwise in KDL or shadowed by your own.
 - **Gather a party** — worker subagents ride out on their own errands with their own preambles and tools — scenes can also forge extra members (`description` + `toolset`) — or stand down by decree.

@@ -10,7 +10,7 @@ use shuvarie_llm::{Tool, ToolContext, ToolExecutionError, ToolOutput};
 
 use crate::permissions::{Access, PathKind};
 
-use super::arg_value;
+use super::{arg_value, display_path, is_hidden_path};
 
 const DEFAULT_MAX_RESULTS: usize = 200;
 
@@ -246,7 +246,7 @@ fn search(
                 }
                 None => {
                     let rel = file.relative_path(&picker);
-                    if is_hidden(&rel)
+                    if is_hidden_path(&rel)
                         || include_matcher
                             .as_ref()
                             .is_some_and(|matcher| !matcher.is_match(&rel))
@@ -284,29 +284,6 @@ fn search(
         lines.push_str(&format!("… (results truncated at {max})\n"));
     }
     Ok(lines)
-}
-
-/// Whether an fff-relative path lies under a dot entry.
-///
-/// fff's own walker only hides dot entries outside a git repository, so inside
-/// one it indexes `.env` and `.shuvarie/` as well -- which the tool must not
-/// read implicitly. A `path` naming a hidden entry still searches it: the root
-/// never counts as a hidden component of its own results.
-fn is_hidden(rel: &str) -> bool {
-    rel.split('/').any(|segment| segment.starts_with('.'))
-}
-
-fn display_path(rel: &str, display_root: &str) -> String {
-    if rel.is_empty() {
-        display_root.to_string()
-    } else if display_root == "." {
-        rel.to_string()
-    } else {
-        Path::new(display_root)
-            .join(rel)
-            .to_string_lossy()
-            .into_owned()
-    }
 }
 
 fn include_to_glob(include: &str) -> String {
