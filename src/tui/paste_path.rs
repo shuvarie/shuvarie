@@ -168,8 +168,8 @@ fn looks_like_path(path: &str) -> bool {
     (path.contains('/') || path.contains('\\')) && has_extension(path)
 }
 
-/// The same file-suffix heuristic the directive tokenizer uses: a final `.`
-/// followed by 1–8 alphanumeric characters, and not a URL.
+/// The file-suffix heuristic: a final `.` followed by 1–8 alphanumeric
+/// characters, and not a URL.
 fn has_extension(path: &str) -> bool {
     !path.contains("://")
         && path.rsplit_once('.').is_some_and(|(_, ext)| {
@@ -180,7 +180,6 @@ fn has_extension(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::directive;
 
     fn path(payload: &str) -> String {
         match classify(payload) {
@@ -254,20 +253,6 @@ mod tests {
     fn windows_paths_are_recognized() {
         assert_eq!(path("C:\\Users\\me\\shot.png"), "C:\\Users\\me\\shot.png");
         assert_eq!(path("C:/Users/me/shot.png"), "C:/Users/me/shot.png");
-    }
-
-    #[test]
-    fn decoded_paths_round_trip_through_the_directive_escape() {
-        // Whatever `classify` accepts must survive the composer's escaping, so
-        // the send-time tokenizer sees the same path back.
-        for payload in [
-            "/tmp/Screenshot 2026-05-27 at 13.37.31.png",
-            "C:\\Users\\me\\My Documents\\shot.png",
-            "~/My Pictures/a b.png",
-        ] {
-            let decoded = path(payload);
-            assert_eq!(directive::unescape(&directive::escape(&decoded)), decoded);
-        }
     }
 
     #[test]

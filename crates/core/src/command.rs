@@ -83,12 +83,12 @@ pub enum Command {
     /// queued behind a busy agent (steered) keeps its override.
     SendMessage {
         content: String,
-        /// The composer's `@path` attachment directives for this turn:
-        /// relative paths resolve against the workspace root (`@`-prefix
-        /// stripped), absolute paths are user intent. The core resolves them
-        /// (sniffs, bounds images, converts documents) before the turn
-        /// starts; any failure reports [`crate::Event::StreamError`] and
-        /// aborts the send without persisting anything.
+        /// The composer's pending attachment paths for this turn: relative
+        /// paths resolve against the workspace root, absolute paths are user
+        /// intent. The core resolves them (sniffs, bounds images, converts
+        /// documents) before the turn starts; any failure reports
+        /// [`crate::Event::StreamError`] and aborts the send without
+        /// persisting anything.
         attachments: Vec<String>,
         model: Option<String>,
     },
@@ -112,23 +112,38 @@ pub enum Command {
     LoadAttachmentMedia {
         hashes: Vec<String>,
     },
-    /// Preview the composer's pending `@path` directives for the attach
-    /// strip: per-path existence/size/kind metadata only — no reads or
-    /// conversion (the authoritative preparation runs at send time), so the
-    /// handler answers directly instead of using the blocking pool. Reply:
-    /// [`crate::Event::DirectivesProbed`], matched by `token`. Read-only.
-    ProbeDirectives {
+    /// Preview the composer's pending attachment paths for the attach strip:
+    /// per-path existence/size/kind metadata only — no reads or conversion
+    /// (the authoritative preparation runs at send time), so the handler
+    /// answers directly instead of using the blocking pool. Reply:
+    /// [`crate::Event::AttachmentsProbed`], matched by `token`. Read-only.
+    ProbeAttachments {
         token: u64,
         paths: Vec<String>,
     },
-    /// Directory entries for the composer's `@` mention completion (reply:
-    /// [`crate::Event::PathCompletions`], matched by `token`). `query` is the
-    /// partial path typed after `@` — an optional directory part plus a name
-    /// prefix, resolved against the workspace root (absolute too). The
-    /// handler answers directly: one `read_dir`, no blocking pool.
-    RequestPathCompletions {
+    /// Rank files for the composer's `/attach` fuzzy finder (reply:
+    /// [`crate::Event::AttachmentCandidates`], matched by `token`). `dir` is
+    /// the directory to search — the command's argument, resolved like an
+    /// attachment path (workspace-relative, absolute, or `~`-prefixed);
+    /// `None`/empty searches the workspace root. The core keeps one FFF index
+    /// per searched directory, so only the first request for a directory (or
+    /// one pointing elsewhere) pays for the tree walk; the rest re-rank it.
+    /// The walk runs on the blocking pool. Read-only.
+    SearchAttachments {
         token: u64,
+        dir: Option<String>,
         query: String,
+    },
+    /// Directory hints for the composer's attachment directory prompt (reply:
+    /// [`crate::Event::DirectoryCandidates`], matched by `token`). `path` is the
+    /// text being typed — an optional directory part plus a name prefix, in any
+    /// of the forms an attachment path takes (workspace-relative, absolute, or
+    /// `~`-prefixed) — and the reply completes each matching subdirectory in
+    /// that same form. The handler answers directly: one `read_dir`, no blocking
+    /// pool. Read-only.
+    ListDirectories {
+        token: u64,
+        path: String,
     },
     /// Read an image off the system clipboard for the composer's
     /// paste-from-clipboard keybinding: run the configured or auto-detected

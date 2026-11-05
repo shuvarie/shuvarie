@@ -409,7 +409,7 @@ pub struct Config {
 
     pub agent: AgentConfig,
 
-    /// `attachments { … }` — what composing `@path` attachments allows and
+    /// `attachments { … }` — what composing attachments allows and
     /// its external legacy-converter escape hatch (see [`AttachmentsConfig`]).
     pub attachments: AttachmentsConfig,
 
@@ -3060,7 +3060,7 @@ impl std::fmt::Display for ImageProtocol {
     }
 }
 
-/// `attachments { … }` — limits for the composer's `@path` attachments and
+/// `attachments { … }` — limits for the composer's attachments and
 /// the optional external converter for legacy Office formats.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentsConfig {

@@ -1,4 +1,4 @@
-//! Ingest: a turn's `@path` attachment paths become [`Prepared`] attachments.
+//! Ingest: a turn's attachment paths become [`Prepared`] attachments.
 //! Files are read whole, sniffed by magic bytes, bounded to provider limits,
 //! and (documents) converted to markdown; the legacy Office formats convert
 //! through the configured external converter. Runs on the blocking pool;
@@ -26,10 +26,10 @@ const MAX_DECODE_SIDE: u32 = 24_000;
 /// this are rejected outright.
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Resolve a turn's `@path` attachments on the blocking pool. All-or-nothing:
+/// Resolve a turn's attachments on the blocking pool. All-or-nothing:
 /// any failure reports a combined per-file error listing and aborts the turn
 /// before anything persists.
-pub async fn resolve_directives(
+pub async fn resolve_attachments(
     workspace_root: &Path,
     paths: Vec<String>,
     settings: AttachmentSettings,
@@ -494,10 +494,11 @@ mod tests {
     }
 
     #[test]
-    fn sigil_relative_and_absolute_paths_resolve() {
+    fn relative_and_absolute_paths_resolve() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("note.txt"), "text").unwrap();
-        let prepared = prep_sync(dir.path(), &["note.txt", "@note.txt", "./note.txt"]).unwrap();
+        let absolute = dir.path().join("note.txt").to_string_lossy().into_owned();
+        let prepared = prep_sync(dir.path(), &["note.txt", &absolute, "./note.txt"]).unwrap();
         assert_eq!(prepared.len(), 3);
         assert!(
             prepared

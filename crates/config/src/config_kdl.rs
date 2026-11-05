@@ -673,7 +673,7 @@ fn parse_agent(node: &KdlNode, input: &str) -> Result<AgentConfig> {
     Ok(config)
 }
 
-/// `attachments { … }` — what the composer's `@path` attachments allow:
+/// `attachments { … }` — what the composer's attachments allow:
 /// the per-message image count, the per-request image byte/edge budgets,
 /// and the optional external converter program for legacy Office formats.
 fn parse_attachments(node: &KdlNode, input: &str) -> Result<AttachmentsConfig> {

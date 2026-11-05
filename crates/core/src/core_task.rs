@@ -378,6 +378,12 @@ pub async fn run(
     // Bash-mode (`!`) runs, routed back to the TUI by id.
     let mut next_bash_id: u64 = 0;
 
+    // The `/attach` fuzzy finder's index: one cached FFF index per searched
+    // directory. The popup asks per keystroke, so the tree walk must happen
+    // once per directory rather than once per query, and moving the finder to
+    // another directory rebuilds it.
+    let mut attach_index: Option<crate::attachments::AttachmentIndex> = None;
+
     let mut clients: HashMap<String, ProviderClient> = HashMap::new();
     // Register the configured registries (built-in first, then the custom
     // `[registries]` ones) before anything reads the catalog.
@@ -890,7 +896,7 @@ pub async fn run(
                         model,
                     } => {
                         let attachments = match
-                            crate::attachments::resolve_directives(
+                            crate::attachments::resolve_attachments(
                                 &ctx.workspace_root,
                                 attachments,
                                 crate::attachments::AttachmentSettings::from(
@@ -1052,26 +1058,76 @@ pub async fn run(
                             .await
                             .ok();
                     }
-                    Command::ProbeDirectives { token, paths } => {
+                    Command::ProbeAttachments { token, paths } => {
                         let items = paths
                             .iter()
                             .map(|path| {
-                                crate::attachments::run_directive_probe(
+                                crate::attachments::probe_attachment(
                                     &ctx.workspace_root,
                                     path,
                                 )
                             })
                             .collect();
                         ctx.event_tx
-                            .send(Event::DirectivesProbed { token, items })
+                            .send(Event::AttachmentsProbed { token, items })
                             .await
                             .ok();
                     }
-                    Command::RequestPathCompletions { token, query } => {
-                        let candidates =
-                            crate::attachments::path_candidates(&ctx.workspace_root, &query);
+                    Command::SearchAttachments { token, dir, query } => {
+                        let base = crate::attachments::resolve_dir(
+                            &ctx.workspace_root,
+                            dir.as_deref(),
+                        );
+                        // One index per searched directory: reuse it while the
+                        // finder stays put, rebuild when it moves (or on the
+                        // first request).
+                        let reusable = attach_index
+                            .as_ref()
+                            .is_some_and(|index| index.base() == base);
+                        if !reusable {
+                            attach_index = None;
+                            let root = base.clone();
+                            let built = tokio::task::spawn_blocking(move || {
+                                crate::attachments::AttachmentIndex::build(&root)
+                            })
+                            .await
+                            .expect("the indexer cannot join-fail");
+                            match built {
+                                Ok(index) => attach_index = Some(index),
+                                Err(error) => {
+                                    ctx.event_tx
+                                        .send(Event::AttachmentCandidates {
+                                            token,
+                                            items: Vec::new(),
+                                            error: Some(error),
+                                        })
+                                        .await
+                                        .ok();
+                                    continue;
+                                }
+                            }
+                        }
+                        let items = attach_index.as_ref().map_or_else(Vec::new, |index| {
+                            index.candidates(
+                                &query,
+                                &ctx.workspace_root,
+                                crate::attachments::MAX_CANDIDATES,
+                            )
+                        });
                         ctx.event_tx
-                            .send(Event::PathCompletions { token, candidates })
+                            .send(Event::AttachmentCandidates {
+                                token,
+                                items,
+                                error: None,
+                            })
+                            .await
+                            .ok();
+                    }
+                    Command::ListDirectories { token, path } => {
+                        let items =
+                            crate::attachments::directory_candidates(&ctx.workspace_root, &path);
+                        ctx.event_tx
+                            .send(Event::DirectoryCandidates { token, items })
                             .await
                             .ok();
                     }

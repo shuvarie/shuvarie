@@ -8,10 +8,19 @@ The attachment feature spans the stack around one currency type: `shuvarie-llm`'
   `ConvertError` taxonomy (`NeedsOcr`/`Encrypted`/`Malformed`/`Unsupported`). Backends:
   delegated (`calamine`/`pdf-extract`/`rtf-parser`/`csv`) + hand-rolled zip+XML walkers
   (docx/pptx/odt/odp/epub).
-- `crates/core/src/attachments.rs`: ingest (`resolve_directives` — @path read, sniff,
+- `crates/core/src/attachments.rs`: ingest (`resolve_attachments` — path read, sniff,
   image downscale/re-encode, document conversion) and request shaping (`prepare_for_send`
   — capability gate, text-only degradation, newest-first image budget), limits from the
   `attachments { … }` config via `AttachmentSettings`.
+- `crates/core/src/attachments/picker.rs`: the `/attach` dialog's FFF index (one per
+  searched directory, cached by the core task) and the ranking query; the walk runs on the
+  blocking pool, each keystroke only re-ranks the in-memory snapshot. FFF's matcher drops
+  fuzzy text below two bytes, so one-character queries are filtered by a substring scan
+  here instead — the search starts at the first keystroke either way.
+- `crates/core/src/attachments/compose.rs`: the shallow compose-side helpers — the strip's
+  metadata-only probe and `directory_candidates`, the directory prompt's hints (one
+  `read_dir`, subdirectories only, completed in the form being typed so `~`/relative/
+  absolute input keeps its shape).
 - `crates/core/src/office_convert.rs`: the optional external converter (`office-converter`
   config) for legacy `.doc`/`.ppt` — shared by the composer attachments and the file tools
 - `crates/core/src/clipboard.rs`: the optional clipboard image reader (`clipboard-command`
@@ -21,7 +30,11 @@ The attachment feature spans the stack around one currency type: `shuvarie-llm`'
   cascades) + per-message `MessageAttachment` rows; session-file export/import carries base64 blobs.
 - `src/tui/session/media.rs`: decode-once `MediaStore` (LRU-capped) + halfblock lifting
   through ratatui-image into ordinary `BodyChunk` lines; `blocks/media.rs` renders the
-  per-turn attachment strip with hit regions; `viewer.rs` is the fullscreen gallery;
-  `session/mention.rs` the compose-time preview/completion.
-- `src/tui/{directive,paste_path}.rs`: the composer's `@path` directive escaping and the
-  drop-payload classifier; `session.rs` holds the structural pending-attachment list.
+  per-turn attachment strip with hit regions; `viewer.rs` is the fullscreen gallery.
+- `src/tui/attach.rs`: the centred `/attach [dir]` fuzzy-finder dialog (an `Overlay` whose
+  pick lands in the composer's pending strip). Its search root is navigable without
+  reopening the command — `→` re-roots onto the highlighted file's directory and `⌫` on an
+  empty query walks up to the directory the dialog opened on — and each move re-asks the
+  core for that tree's index. `paste_path.rs` is the drop-payload classifier; `session.rs`
+  holds the pending-attachment list — attachments are structural (picked, dropped, pasted,
+  or read off the clipboard), never derived from the buffer text.

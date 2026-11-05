@@ -87,6 +87,7 @@ tui-scrollbar = "0.2.8"
 tokio.workspace = true
 unicode-width.workspace = true
 uuid.workspace = true
+fff-search = "0.11.0"
 
 [features]
 default = []
