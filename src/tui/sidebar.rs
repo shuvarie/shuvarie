@@ -237,6 +237,12 @@ impl Sidebar {
         })
     }
 
+    /// The workspace directory this tab's core runs in (empty until
+    /// `SetWorkspace` lands): what the unstaged-files guard asks `git` about.
+    pub fn workspace_path(&self) -> &std::path::Path {
+        &self.workspace.path
+    }
+
     /// Whether a peak/off-peak schedule governs the active model: the render
     /// loop wakes for the countdown only while one does.
     pub fn has_peak_schedule(&self) -> bool {

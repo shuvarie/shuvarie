@@ -34,7 +34,12 @@ dirs.workspace = true
 flate2 = "1"
 frameplay = "0.3"
 futures-util.workspace = true
-gix = { version = "0.90", default-features = false, features = ["sha1"] }
+# `sha1` for the branch/`HEAD` lookups the sidebar and its watch already do;
+# `status` for the unstaged-files guard (`tui/git_status.rs`), which compares
+# index to worktree. Nothing else is wanted: the default feature set drags in
+# transports, credentials and mailmap for a library that is only ever pointed
+# at the repository the TUI is standing in.
+gix = { version = "0.90", default-features = false, features = ["sha1", "status"] }
 nucleo = "0.5"
 notify = "9.0.0-rc.7"
 image.workspace = true

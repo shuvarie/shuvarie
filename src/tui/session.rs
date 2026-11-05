@@ -16,6 +16,7 @@ use crate::tui::utils::{alt, alt_shift, ctrl, ctrl_shift};
 use self::mention::{MentionMenu, MentionMessage};
 use super::commands::{self, CommandAction, CommandRef};
 use super::components::{TextArea, TextAreaEffect, TextAreaMessage};
+use super::git_status;
 use super::guard::{SlashGuard, SlashGuardMessage};
 use super::permission::{PermissionEffect, PermissionMessage, PermissionUI};
 use super::question::{QuestionEffect, QuestionMessage, QuestionUI};
@@ -23,6 +24,7 @@ use super::sidebar::{Sidebar, SidebarMessage};
 use super::slash::{SlashMenu, SlashMessage};
 use super::spinner::SpinnerKind;
 use super::theme;
+use super::unstaged::{PendingSend, UnstagedGuard, UnstagedMessage};
 use shuvarie_core::Skill;
 
 pub mod bash;
@@ -145,6 +147,9 @@ pub enum SessionMessage {
     /// The slash-command guardrail prompt: `Enter` sends the held submit
     /// anyway, `Esc` aborts it and hands the text back to the composer.
     SlashGuard(SlashGuardMessage),
+    /// The unstaged-files guard prompt: `s` stages and sends, `c` sends anyway,
+    /// `Esc` aborts.
+    Unstaged(UnstagedMessage),
     /// The composer's `@` mention completion popup: navigation and
     /// accept/dismiss. Accepted candidates splice into the buffer's trailing
     /// mention token.
@@ -327,6 +332,9 @@ pub struct SessionScreen {
     /// The slash-command guardrail: a literal send held back for confirmation
     /// (see [`SlashGuard`]).
     slash_guard: SlashGuard,
+    /// The unstaged-files guard: a new turn held back while the workspace's
+    /// worktree has changes that are not staged (see [`UnstagedGuard`]).
+    unstaged: UnstagedGuard,
     /// The composer's `@` mention completion popup (trailing-mention
     /// candidates, directory listing cached per dir part).
     mention: MentionMenu,
@@ -380,6 +388,7 @@ impl SessionScreen {
             permission: PermissionUI::new(),
             slash: SlashMenu::new(),
             slash_guard: SlashGuard::new(),
+            unstaged: UnstagedGuard::new(),
             mention: MentionMenu::new(),
             chat: chat::Chat::new(),
             bash: bash::BashPopup::new(),
@@ -514,11 +523,10 @@ impl SessionScreen {
         };
         let attachments: Vec<String> = self.pending.iter().map(|a| a.path.clone()).collect();
         match command.invocation_content(args.as_deref()) {
-            Ok(content) => Some(send_message_effect(
-                content,
-                attachments,
-                command.model.clone(),
-            )),
+            // A menu launch starts a model turn like any other submit, so it
+            // answers the unstaged-files prompt too. There is no composer draft
+            // behind it, so an abort simply drops the send.
+            Ok(content) => self.send_turn(content, attachments, command.model.clone(), None),
             Err(error) => {
                 self.error = Some(format!("failed to read command {name}: {error}"));
                 None
@@ -557,6 +565,11 @@ impl SessionScreen {
         }
         if self.question.open {
             return self.question.map_event(key).map(SessionMessage::Question);
+        }
+        // The unstaged-files prompt is modal over the composer: it answers
+        // stage/send/abort and nothing else.
+        if self.unstaged.active() {
+            return self.unstaged.map_event(key).map(SessionMessage::Unstaged);
         }
         // The guardrail prompt replaces the composer while it is up, so it owns
         // Enter/Esc and swallows the rest (like the permission prompt).
@@ -758,10 +771,12 @@ impl SessionScreen {
     }
 
     /// Handle a composer submit: a bash-mode run, a builtin slash command, a
-    /// custom command, a skill invocation, or the literal send. `confirmed`
-    /// marks the guardrail's "send anyway", so the submit is not held a second
-    /// time.
-    fn submit_prompt(&mut self, content: String, confirmed: bool) -> Option<SessionEffect> {
+    /// custom command, a skill invocation, or the literal send.
+    /// `slash_confirmed` marks the slash guardrail's "send anyway", so the
+    /// submit is not held a second time. It deliberately says nothing about the
+    /// unstaged-files prompt: that one guards the worktree, and a submit that
+    /// has been confirmed past the *slash* guardrail still has to answer it.
+    fn submit_prompt(&mut self, content: String, slash_confirmed: bool) -> Option<SessionEffect> {
         // A submit consumes the buffer and its pending attachments; capture the
         // paths before taking them. A guardrail trip puts the chips back, so an
         // aborted send leaves the attach strip untouched.
@@ -789,9 +804,13 @@ impl SessionScreen {
         // skill parsing and then to a literal send.
         match self.expand_custom(&content) {
             Ok(Some((expanded, model))) => {
-                self.input.remember_sent(&content);
+                let effect = self.send_turn(expanded, attachments, model, Some(content));
+                if effect.is_none() {
+                    self.pending = chips;
+                    self.requested_directives = probed;
+                }
                 self.sync_slash();
-                return Some(send_message_effect(expanded, attachments, model));
+                return effect;
             }
             Ok(None) => {}
             Err(error) => {
@@ -806,7 +825,7 @@ impl SessionScreen {
                 // Guardrail: the submit opened with a trigger char yet matched
                 // no command, so it is probably a typo'd command rather than
                 // prose. Hold it for confirmation instead of sending it.
-                if !confirmed && commands::opens_with_trigger(&content) {
+                if !slash_confirmed && commands::opens_with_trigger(&content) {
                     self.slash_guard.hold(content);
                     self.pending = chips;
                     self.requested_directives = probed;
@@ -824,9 +843,118 @@ impl SessionScreen {
         // Display of the user prompt is event-driven: the core's `TurnStarted`
         // decides whether this begins a turn or gets steered behind a busy
         // agent.
-        self.input.remember_sent(&content);
+        let effect = self.send_turn(expanded, attachments, None, Some(content));
+        if effect.is_none() {
+            self.pending = chips;
+            self.requested_directives = probed;
+        }
         self.sync_slash();
-        Some(send_message_effect(expanded, attachments, None))
+        effect
+    }
+
+    /// Start a user turn, or hold it behind the unstaged-files prompt when the
+    /// workspace's worktree has changes that are not staged.
+    ///
+    /// Every model-bound prompt ends up here — a composer submit (literal, a
+    /// skill's expansion, a custom command typed or launched from the Ctrl+M
+    /// menu) — so no path can start a turn against a dirty worktree unaware.
+    /// `draft` is the composer text the send came from, for the prompt's abort
+    /// and for prompt history; `None` for a menu launch, which has neither.
+    fn send_turn(
+        &mut self,
+        content: String,
+        attachments: Vec<String>,
+        model: Option<String>,
+        draft: Option<String>,
+    ) -> Option<SessionEffect> {
+        let attachments = merged_attachments(&content, attachments);
+        if let Some(files) = self.unstaged_files() {
+            self.unstaged.hold(
+                PendingSend {
+                    content,
+                    attachments,
+                    model,
+                    draft,
+                },
+                files,
+            );
+            return None;
+        }
+        if let Some(draft) = &draft {
+            self.input.remember_sent(draft);
+        }
+        Some(SessionEffect::SendMessage {
+            content,
+            attachments,
+            model,
+        })
+    }
+
+    /// The worktree entries the unstaged-files prompt would warn about, or
+    /// `None` when there is nothing to warn about: no workspace, not a git
+    /// worktree, a clean worktree, a busy agent (the core steers those submits
+    /// instead of starting a turn), or the prompt already up.
+    fn unstaged_files(&self) -> Option<Vec<git_status::UnstagedFile>> {
+        if self.is_busy() || self.unstaged.active() {
+            return None;
+        }
+        let path = self.sidebar.workspace_path();
+        if path.as_os_str().is_empty() {
+            return None;
+        }
+        let files = git_status::unstaged(path);
+        (!files.is_empty()).then_some(files)
+    }
+
+    /// Resolve the unstaged-files prompt: run the chosen worktree action, then
+    /// dispatch the held turn exactly as it would have been sent, or drop it and
+    /// hand the draft back to the composer.
+    fn handle_unstaged(&mut self, msg: UnstagedMessage) -> Option<SessionEffect> {
+        let send = self.unstaged.take()?;
+        match msg {
+            UnstagedMessage::Abort => {
+                // Hand the draft back to the composer; its attachment chips
+                // never left the strip.
+                if let Some(draft) = send.draft {
+                    self.input.buffer.set(&draft);
+                }
+                self.sync_slash();
+                None
+            }
+            UnstagedMessage::Continue => Some(self.dispatch_turn(send)),
+            UnstagedMessage::Stage => {
+                let path = self.sidebar.workspace_path().to_path_buf();
+                match git_status::stage_all(&path) {
+                    Ok(()) => Some(self.dispatch_turn(send)),
+                    // The worktree is untouched, so keep the draft instead of
+                    // sending it, and report why in the footer.
+                    Err(error) => {
+                        if let Some(draft) = send.draft {
+                            self.input.buffer.set(&draft);
+                        }
+                        self.error = Some(error);
+                        self.sync_slash();
+                        None
+                    }
+                }
+            }
+        }
+    }
+
+    /// Send a turn the unstaged-files prompt held, now that it has its answer.
+    /// The prompt is the last thing between the submit and the core, so the
+    /// chips it carried leave the strip here.
+    fn dispatch_turn(&mut self, send: PendingSend) -> SessionEffect {
+        if let Some(draft) = &send.draft {
+            self.input.remember_sent(draft);
+        }
+        self.clear_pending();
+        self.sync_slash();
+        SessionEffect::SendMessage {
+            content: send.content,
+            attachments: send.attachments,
+            model: send.model,
+        }
     }
 
     /// The update body proper; `update` wraps it with the compose-side sync
@@ -959,6 +1087,7 @@ impl SessionScreen {
                 }
                 None
             }
+            SessionMessage::Unstaged(m) => self.handle_unstaged(m),
             SessionMessage::Mention(m) => {
                 match m {
                     MentionMessage::Next => self.mention.next(),
@@ -1690,7 +1819,13 @@ impl SessionScreen {
                 "clear"
             };
             let cut = input_selection.then_some(("Ctrl+X", "cut"));
-            let footer = if self.slash_guard.active() {
+            let footer = if self.unstaged.active() {
+                theme::help_line(&[
+                    ("s", "stage & send"),
+                    ("c", "send anyway"),
+                    ("Esc", "cancel"),
+                ])
+            } else if self.slash_guard.active() {
                 theme::help_line(&[("Enter", "send anyway"), ("Esc", "keep editing")])
             } else if !self.question.open && self.slash.active() {
                 theme::help_line(&[("Tab", "complete"), ("↑↓", "select"), ("Esc", "dismiss")])
@@ -1737,6 +1872,10 @@ impl SessionScreen {
                 frame.render_widget(Paragraph::new(footer).fg(theme::text_muted()), footer_area);
             }
         }
+
+        // The unstaged-files prompt is modal: painted last so it covers the
+        // composer and the history behind it.
+        self.unstaged.view(frame, area);
     }
 }
 
@@ -2084,27 +2223,19 @@ impl SessionScreen {
     }
 }
 
-/// The literal-send effect builder: the prompt text plus the composer's
-/// attachment paths — the explicit `attachments` captured at submit (typed
-/// directives and dropped/pasted files alike), merged with the `@` directives
-/// the *expanded* content still carries (a directive inside a compacted paste
-/// is invisible to the raw buffer's scan).
-fn send_message_effect(
-    content: String,
-    attachments: Vec<String>,
-    model: Option<String>,
-) -> SessionEffect {
+/// The turn's attachment paths — the composer's pending set captured at submit
+/// (typed directives and dropped/pasted files alike), merged with the `@`
+/// directives the *expanded* content still carries (a directive inside a
+/// compacted paste is invisible to the raw buffer's scan). Repeated paths
+/// dedupe.
+fn merged_attachments(content: &str, attachments: Vec<String>) -> Vec<String> {
     let mut attachments = attachments;
-    for path in at_directives(&content) {
+    for path in at_directives(content) {
         if !attachments.contains(&path) {
             attachments.push(path);
         }
     }
-    SessionEffect::SendMessage {
-        content,
-        attachments,
-        model,
-    }
+    attachments
 }
 
 /// Extract the composer's `@path` attachment directives from a composed
@@ -3354,6 +3485,271 @@ mod tests {
             Some(SessionEffect::SendMessage { content, .. })
                 if content == "hello agent"
         ));
+    }
+
+    /// A temp git worktree with one committed file, installed as the screen's
+    /// workspace (the directory the unstaged-files guard asks `git` about).
+    fn repo_screen() -> (tempfile::TempDir, SessionScreen) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "shuvarie"]);
+        git(&["config", "user.email", "shuvarie@example.invalid"]);
+        std::fs::write(path.join("tracked.txt"), "one\n").expect("write");
+        git(&["add", "--all"]);
+        git(&["commit", "-qm", "init"]);
+
+        let mut screen = SessionScreen::new();
+        screen.sidebar.update(SidebarMessage::SetWorkspace {
+            workspace: WorkspaceInfo {
+                path: path.to_path_buf(),
+                home: None,
+                branch: Some("main".into()),
+            },
+        });
+        (dir, screen)
+    }
+
+    #[test]
+    fn unstaged_files_hold_a_new_prompt_and_escape_hands_it_back() {
+        let (dir, mut screen) = repo_screen();
+        std::fs::write(dir.path().join("tracked.txt"), "two\n").expect("write");
+        screen.pending.push(PendingAttachment {
+            path: "notes.txt".into(),
+            origin: PendingOrigin::Dropped,
+            probe: None,
+        });
+
+        screen.input.buffer.set("hello agent");
+        assert!(
+            screen
+                .update(SessionMessage::Text(TextAreaMessage::Submit))
+                .is_none(),
+            "the submit is held, not sent"
+        );
+        assert!(screen.unstaged.active());
+        assert_eq!(
+            screen.input.buffer.value, "",
+            "the submit consumed the buffer"
+        );
+        assert_eq!(screen.pending.len(), 1, "the chips stay in the strip");
+
+        assert!(
+            screen
+                .update(SessionMessage::Unstaged(UnstagedMessage::Abort))
+                .is_none()
+        );
+        assert!(!screen.unstaged.active());
+        assert_eq!(
+            screen.input.buffer.value, "hello agent",
+            "aborting hands the text back to the composer"
+        );
+        assert_eq!(screen.pending.len(), 1, "and keeps the attachments");
+    }
+
+    #[test]
+    fn a_clean_worktree_sends_straight_through() {
+        let (_dir, mut screen) = repo_screen();
+        screen.input.buffer.set("hello agent");
+        assert!(matches!(
+            screen.update(SessionMessage::Text(TextAreaMessage::Submit)),
+            Some(SessionEffect::SendMessage { content, .. }) if content == "hello agent"
+        ));
+        assert!(!screen.unstaged.active());
+    }
+
+    #[test]
+    fn a_busy_agent_steers_instead_of_asking_about_the_worktree() {
+        let (dir, mut screen) = repo_screen();
+        std::fs::write(dir.path().join("tracked.txt"), "two\n").expect("write");
+        screen.update(SessionMessage::RetryScheduled {
+            reason: "overloaded".into(),
+            attempt: 1,
+            max_attempts: 3,
+            delay_ms: 1_000,
+        });
+        assert!(screen.is_busy());
+
+        screen.input.buffer.set("hello agent");
+        assert!(
+            matches!(
+                screen.update(SessionMessage::Text(TextAreaMessage::Submit)),
+                Some(SessionEffect::SendMessage { .. })
+            ),
+            "a steered submit leaves the worktree alone"
+        );
+        assert!(!screen.unstaged.active());
+    }
+
+    #[test]
+    fn continue_anyway_sends_and_leaves_the_worktree_dirty() {
+        let (dir, mut screen) = repo_screen();
+        std::fs::write(dir.path().join("tracked.txt"), "two\n").expect("write");
+        screen.input.buffer.set("hello agent");
+        screen.update(SessionMessage::Text(TextAreaMessage::Submit));
+
+        assert!(matches!(
+            screen.update(SessionMessage::Unstaged(UnstagedMessage::Continue)),
+            Some(SessionEffect::SendMessage { content, .. }) if content == "hello agent"
+        ));
+        assert_eq!(git_status::unstaged(dir.path()).len(), 1);
+    }
+
+    #[test]
+    fn slash_guard_send_anyway_still_warns_about_unstaged_files() {
+        let (dir, mut screen) = repo_screen();
+        std::fs::write(dir.path().join("tracked.txt"), "two\n").expect("write");
+
+        // A trigger-prefixed submit that matches no command: the slash
+        // guardrail takes it first.
+        screen.input.buffer.set("/nonexistent-command");
+        assert!(
+            screen
+                .update(SessionMessage::Text(TextAreaMessage::Submit))
+                .is_none()
+        );
+        assert!(screen.slash_guard.active());
+        assert!(!screen.unstaged.active());
+
+        // "Send anyway" satisfies the slash guardrail, not the worktree one: the
+        // prompt comes up, and only its own answer sends the held text.
+        assert!(
+            screen
+                .update(SessionMessage::SlashGuard(SlashGuardMessage::Send))
+                .is_none()
+        );
+        assert!(!screen.slash_guard.active());
+        assert!(
+            screen.unstaged.active(),
+            "the worktree warning still comes up"
+        );
+
+        assert!(matches!(
+            screen.update(SessionMessage::Unstaged(UnstagedMessage::Continue)),
+            Some(SessionEffect::SendMessage { content, .. })
+                if content == "/nonexistent-command"
+        ));
+    }
+
+    #[test]
+    fn a_menu_launched_custom_command_answers_the_unstaged_prompt() {
+        let (dir, mut screen) = repo_screen();
+        let (_command_dir, command) = custom_command_fixture(
+            "commit",
+            "---\nmodel: openai/gpt-test\n---\n\nCommit with {{arguments}} please\n",
+        );
+        screen.update(SessionMessage::SetCustomCommands {
+            commands: vec![command],
+        });
+        std::fs::write(dir.path().join("tracked.txt"), "two\n").expect("write");
+
+        // The Ctrl+M menu launches a model turn without a composer submit, so
+        // it has to answer the prompt on its own.
+        assert!(
+            screen
+                .update(SessionMessage::RunCustomCommand {
+                    name: "commit".into(),
+                })
+                .is_none()
+        );
+        assert!(screen.unstaged.active());
+
+        // The turn is held resolved: the template expanded once, and the
+        // command's model override is still riding it.
+        match screen.update(SessionMessage::Unstaged(UnstagedMessage::Stage)) {
+            Some(SessionEffect::SendMessage { content, model, .. }) => {
+                assert_eq!(content, "Commit with  please");
+                assert_eq!(model.as_deref(), Some("openai/gpt-test"));
+            }
+            other => panic!("expected the held custom command to send, got {other:?}"),
+        }
+        assert!(git_status::unstaged(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_typed_custom_command_keeps_its_model_override_across_the_prompt() {
+        let (dir, mut screen) = repo_screen();
+        let (_command_dir, command) = custom_command_fixture(
+            "commit",
+            "---\nmodel: openai/gpt-test\n---\n\nCommit with {{arguments}} please\n",
+        );
+        screen.update(SessionMessage::SetCustomCommands {
+            commands: vec![command],
+        });
+        std::fs::write(dir.path().join("tracked.txt"), "two\n").expect("write");
+
+        screen.input.buffer.set("/commit tidy the tests");
+        assert!(
+            screen
+                .update(SessionMessage::Text(TextAreaMessage::Submit))
+                .is_none()
+        );
+        assert!(screen.unstaged.active());
+
+        match screen.update(SessionMessage::Unstaged(UnstagedMessage::Continue)) {
+            Some(SessionEffect::SendMessage { content, model, .. }) => {
+                assert_eq!(content, "Commit with tidy the tests please");
+                assert_eq!(model.as_deref(), Some("openai/gpt-test"));
+            }
+            other => panic!("expected the held custom command to send, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn staging_clears_the_worktree_and_sends() {
+        let (dir, mut screen) = repo_screen();
+        std::fs::write(dir.path().join("tracked.txt"), "two\n").expect("write");
+        std::fs::write(dir.path().join("untracked.txt"), "new\n").expect("write");
+        screen.input.buffer.set("hello agent");
+        screen.update(SessionMessage::Text(TextAreaMessage::Submit));
+
+        assert!(matches!(
+            screen.update(SessionMessage::Unstaged(UnstagedMessage::Stage)),
+            Some(SessionEffect::SendMessage { content, .. }) if content == "hello agent"
+        ));
+        assert!(
+            git_status::unstaged(dir.path()).is_empty(),
+            "everything is staged before the turn starts"
+        );
+    }
+
+    #[test]
+    fn the_prompt_paints_the_warning_files_and_bindings() {
+        let (dir, mut screen) = repo_screen();
+        std::fs::write(dir.path().join("tracked.txt"), "two\n").expect("write");
+        screen.input.buffer.set("hello agent");
+        screen.update(SessionMessage::Text(TextAreaMessage::Submit));
+
+        let buf = draw(&screen, 80, 24);
+        assert!(
+            find_row(&buf, "Unstaged changes")
+                .1
+                .contains("Unstaged changes"),
+            "dialog title paints"
+        );
+        assert!(
+            find_row(&buf, "1 file is not staged")
+                .1
+                .contains("1 file is not staged"),
+            "the warning names the count"
+        );
+        assert!(find_row(&buf, "tracked.txt").1.contains("tracked.txt"));
+        let (_, footer) = find_row(&buf, "stage & send");
+        assert!(footer.contains("send anyway"), "bindings: {footer:?}");
+        assert!(!footer.contains("stash"), "bindings: {footer:?}");
     }
 
     fn custom_command_fixture(
