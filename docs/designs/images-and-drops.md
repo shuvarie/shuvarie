@@ -45,23 +45,6 @@ of three ways, none of them universal (and none guaranteed by any standard):
    feature matrix. Blocked by the same termina OSC filter. Out of scope; the
    clipboard is served by a subprocess instead (below).
 
-## The directive escaping rule
-
-A dropped path arrives as raw text and (today) becomes an `@path` directive in
-the composer. The tokenizer ends a directive at the first whitespace, and
-paths routinely contain spaces, so directives need an escaping rule. There is
-now exactly one canonical encoding, in `src/tui/directive.rs`:
-
-- a backslash before each whitespace character, and before each backslash:
-  `/tmp/Screenshot\ 2026-05-27\ at\ 13.37.31.png`.
-
-It is decoded by `at_directives` (send time) and by the `@` mention popup
-(live completion), and it also fixes a pre-existing hole: before this, a typed
-`@path with spaces` could not be a directive at all. Decoding is deliberately
-conservative outside the escape set — a backslash that escapes neither
-whitespace nor another backslash is kept literally, so hand-typed Windows
-paths (`C:\Users\me\shot.png`) survive.
-
 ## What is built
 
 - **Input trace (opt-in).** `SHUVARIE_TRACE_INPUT=1` (or a path) writes raw
@@ -80,10 +63,11 @@ paths (`C:\Users\me\shot.png`) survive.
   attaches that file rather than inserting its text — the same classifier cannot
   tell a copied path from a drop, and the drop is the case that matters.
 - **Structural pending attachments.** The composer holds a list of pending
-  attachments rather than deriving them from the buffer text each frame. Typed
-  `@path` directives still parse into the list (and remain in the prompt text);
-  a dropped path lives only in the list. The attach strip renders both, and
-  send carries every pending path.
+  attachments; the buffer text carries none. A path enters the list by being
+  picked in the `/attach` dialog (a centred fuzzy finder over the current
+  directory, or the one the command names), dropped, pasted, or read off the
+  clipboard. The attach strip renders every chip, and send carries every pending
+  path.
 - **Clipboard image paste.** A keybinding (`Ctrl+Shift+V`, or `Alt+Shift+V`)
   asks the core to read an image off the system clipboard: the configured
   `attachments { clipboard-command "…" }` program (or an auto-detected

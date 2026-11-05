@@ -5,6 +5,9 @@ pub enum CommandAction {
     OpenModelSelect,
     AddProvider,
     AddDecisionProvider,
+    /// Attach files to the next prompt through a fuzzy finder over the current
+    /// directory: `/attach [path]` searches `path` instead.
+    Attach,
     OpenSessionPicker,
     OpenTree,
     OpenTodos,
@@ -37,10 +40,11 @@ pub enum CommandAction {
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 29] = [
+    pub const ALL: [CommandAction; 30] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::AddDecisionProvider,
+        CommandAction::Attach,
         CommandAction::OpenSessionPicker,
         CommandAction::OpenTree,
         CommandAction::OpenTodos,
@@ -74,6 +78,7 @@ impl CommandAction {
             CommandAction::OpenModelSelect => "model",
             CommandAction::AddProvider => "provider",
             CommandAction::AddDecisionProvider => "decision-provider",
+            CommandAction::Attach => "attach",
             CommandAction::OpenSessionPicker => "sessions",
             CommandAction::OpenTree => "tree",
             CommandAction::OpenTodos => "todo",
@@ -108,7 +113,8 @@ impl CommandAction {
     pub fn takes_args(self) -> bool {
         matches!(
             self,
-            CommandAction::Compact
+            CommandAction::Attach
+                | CommandAction::Compact
                 | CommandAction::EditTitle
                 | CommandAction::Export
                 | CommandAction::NewTab
@@ -201,6 +207,11 @@ pub fn default_commands() -> Vec<CommandEntry> {
             "Decision provider",
             "Add or edit a decision-model connection",
             CommandAction::AddDecisionProvider,
+        ),
+        CommandEntry::builtin(
+            "Attach files",
+            "Fuzzy-find a file to attach; optional directory",
+            CommandAction::Attach,
         ),
         CommandEntry::builtin(
             "Switch session",

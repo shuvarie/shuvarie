@@ -3141,7 +3141,7 @@ async fn an_image_send_to_a_text_only_transport_reports_the_capability() {
 }
 
 #[tokio::test]
-async fn directive_probe_and_completions_reply_in_order() {
+async fn attachment_probe_and_finder_reply_in_order() {
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Event>(8);
 
@@ -3166,15 +3166,15 @@ async fn directive_probe_and_completions_reply_in_order() {
     std::fs::write(&report, b"{\\rtf1 hello}").unwrap();
     std::fs::create_dir(dir.path().join("src")).unwrap();
     cmd_tx
-        .send(Command::ProbeDirectives {
+        .send(Command::ProbeAttachments {
             token: 7,
             paths: vec![report.to_string_lossy().into_owned(), "nope.png".into()],
         })
         .await
         .unwrap();
     let event = event_rx.recv().await.expect("event");
-    let Event::DirectivesProbed { token, items } = event else {
-        panic!("expected DirectivesProbed, got {event:?}");
+    let Event::AttachmentsProbed { token, items } = event else {
+        panic!("expected AttachmentsProbed, got {event:?}");
     };
     assert_eq!(token, 7);
     let [document, missing] = items.as_slice() else {
@@ -3188,48 +3188,95 @@ async fn directive_probe_and_completions_reply_in_order() {
         "the missing path probes as an error chip"
     );
 
-    // Completions: absolute dir listing, token intact, dirs first.
-    let src = dir.path().join("src");
+    // The finder: a query ranks the directory's files, token intact. The temp
+    // dir sits outside the workspace, so hits come back as absolute paths.
+    let dir_arg = dir.path().to_string_lossy().into_owned();
     cmd_tx
-        .send(Command::RequestPathCompletions {
+        .send(Command::SearchAttachments {
             token: 3,
-            query: format!("{}/", src.to_string_lossy()),
+            dir: Some(dir_arg.clone()),
+            query: "report".into(),
         })
         .await
         .unwrap();
     let event = event_rx.recv().await.expect("event");
-    let Event::PathCompletions { token, candidates } = event else {
-        panic!("expected PathCompletions, got {event:?}");
+    let Event::AttachmentCandidates {
+        token,
+        items,
+        error,
+    } = event
+    else {
+        panic!("expected AttachmentCandidates, got {event:?}");
     };
     assert_eq!(token, 3);
-    assert!(
-        candidates.is_empty(),
-        "the empty dir lists nothing: {candidates:?}"
-    );
+    assert_eq!(error, None);
+    assert_eq!(items, vec![report.to_string_lossy().into_owned()]);
 
-    // Completions: the cwd-rooted listing (tests run at the package root)
-    // answers with its entries.
+    // The same directory answers again from the cached index — no new walk —
+    // and an empty query is a listing rather than no match.
     cmd_tx
-        .send(Command::RequestPathCompletions {
+        .send(Command::SearchAttachments {
             token: 4,
-            query: "".into(),
+            dir: Some(dir_arg.clone()),
+            query: String::new(),
         })
         .await
         .unwrap();
     let event = event_rx.recv().await.expect("event");
-    let Event::PathCompletions { token, candidates } = event else {
-        panic!("expected PathCompletions, got {event:?}");
+    let Event::AttachmentCandidates {
+        token,
+        items,
+        error,
+    } = event
+    else {
+        panic!("expected AttachmentCandidates, got {event:?}");
     };
     assert_eq!(token, 4);
-    assert!(
-        candidates
-            .iter()
-            .any(|c| c.name == "Cargo.toml" && !c.is_dir),
-        "the crate root lists its files: {candidates:?}"
-    );
-    assert!(
-        candidates.iter().any(|c| c.name == "src/" && c.is_dir),
-        "dirs carry the trailing slash: {candidates:?}"
+    assert_eq!(error, None);
+    assert_eq!(items, vec![report.to_string_lossy().into_owned()]);
+
+    // A directory that cannot be indexed reports the reason instead of items.
+    cmd_tx
+        .send(Command::SearchAttachments {
+            token: 5,
+            dir: Some(format!("{dir_arg}/nope")),
+            query: String::new(),
+        })
+        .await
+        .unwrap();
+    let event = event_rx.recv().await.expect("event");
+    let Event::AttachmentCandidates {
+        token,
+        items,
+        error,
+    } = event
+    else {
+        panic!("expected AttachmentCandidates, got {event:?}");
+    };
+    assert_eq!(token, 5);
+    assert!(items.is_empty(), "{items:?}");
+    let error = error.expect("a reason");
+    assert!(error.contains("not a directory"), "{error}");
+
+    // The directory prompt's hints: subdirectories of the typed path, completed
+    // in the form they were typed.
+    std::fs::create_dir(dir.path().join("docs")).unwrap();
+    std::fs::create_dir(dir.path().join("docs-old")).unwrap();
+    cmd_tx
+        .send(Command::ListDirectories {
+            token: 6,
+            path: format!("{dir_arg}/doc"),
+        })
+        .await
+        .unwrap();
+    let event = event_rx.recv().await.expect("event");
+    let Event::DirectoryCandidates { token, items } = event else {
+        panic!("expected DirectoryCandidates, got {event:?}");
+    };
+    assert_eq!(token, 6);
+    assert_eq!(
+        items,
+        vec![format!("{dir_arg}/docs"), format!("{dir_arg}/docs-old")]
     );
 
     drop(cmd_tx);

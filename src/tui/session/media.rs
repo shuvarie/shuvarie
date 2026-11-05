@@ -36,7 +36,7 @@ const MAX_MEDIA_BYTES: usize = 48 * 1024 * 1024;
 pub const CHIP_ROWS: u32 = 1;
 
 /// The attachment chip glyphs, shared by the pending strip, the media
-/// block, the mention popup, and the viewer.
+/// block, the attachment finder, and the viewer.
 pub(crate) const CHIP_ICON_DOC: &str = "▤";
 pub(crate) const CHIP_ICON_IMAGE: &str = "🖼";
 

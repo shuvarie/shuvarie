@@ -22,7 +22,7 @@ use std::time::{Duration, SystemTime};
 use shuvarie_llm::AttachmentKind;
 
 use crate::attachments::{
-    AttachmentSettings, ClipboardAttachment, DirectiveProbe, fit_image, image_media_type,
+    AttachmentProbe, AttachmentSettings, ClipboardAttachment, fit_image, image_media_type,
 };
 
 /// How long the clipboard reader may run before it is killed.
@@ -68,7 +68,7 @@ pub(crate) fn fetch_image(settings: &AttachmentSettings) -> Result<ClipboardAtta
         .map_err(|error| format!("clipboard image rejected: {error}"))?;
     let path = stage(&bytes, media_type)?;
     Ok(ClipboardAttachment {
-        probe: DirectiveProbe {
+        probe: AttachmentProbe {
             kind: Some(AttachmentKind::Image),
             size: Some(bytes.len() as u64),
             error: None,

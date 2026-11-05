@@ -9,11 +9,9 @@ use shuvarie_llm::{AttachmentKind, TokenUsage, format_size};
 use termina::event::{KeyCode, KeyEvent, KeyEventKind};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::tui::directive;
 use crate::tui::paste_path::{self, Payload};
 use crate::tui::utils::{alt, alt_shift, ctrl, ctrl_shift};
 
-use self::mention::{MentionMenu, MentionMessage};
 use super::commands::{self, CommandAction, CommandRef};
 use super::components::{TextArea, TextAreaEffect, TextAreaMessage};
 use super::guard::{SlashGuard, SlashGuardMessage};
@@ -30,7 +28,6 @@ pub mod blocks;
 pub mod chat;
 pub mod md_cache;
 pub mod media;
-pub mod mention;
 pub mod search;
 pub mod segment;
 pub mod tree;
@@ -145,16 +142,12 @@ pub enum SessionMessage {
     /// The slash-command guardrail prompt: `Enter` sends the held submit
     /// anyway, `Esc` aborts it and hands the text back to the composer.
     SlashGuard(SlashGuardMessage),
-    /// The composer's `@` mention completion popup: navigation and
-    /// accept/dismiss. Accepted candidates splice into the buffer's trailing
-    /// mention token.
-    Mention(MentionMessage),
-    /// Reply to [`SessionEffect::ProbeDirectives`]: the pending attachment
-    /// directives' previews, order-aligned with the requested paths. Stale
-    /// tokens (an older probe) are dropped.
-    DirectivesValidated {
+    /// Reply to [`SessionEffect::ProbeAttachments`]: the pending attachments'
+    /// previews, order-aligned with the requested paths. Stale tokens (an
+    /// older probe) are dropped.
+    AttachmentsProbed {
         token: u64,
-        items: Vec<shuvarie_core::attachments::DirectiveProbe>,
+        items: Vec<shuvarie_core::attachments::AttachmentProbe>,
     },
     /// A dropped or pasted file path: hold it as a pending attachment. The
     /// composer's paste routing produces this when a bracketed paste decodes to
@@ -167,17 +160,11 @@ pub enum SessionMessage {
     /// (the bytes are already staged, so no round trip is needed).
     ClipboardAttached {
         path: String,
-        probe: shuvarie_core::attachments::DirectiveProbe,
+        probe: shuvarie_core::attachments::AttachmentProbe,
     },
     /// Read an image off the system clipboard and attach it (Ctrl+Shift+V /
     /// Alt+Shift+V).
     AttachClipboard,
-    /// Reply to [`SessionEffect::PathCompletions`]: the `@` mention popup's
-    /// directory listing (the mention menu matches by its token and dir).
-    PathCompletions {
-        token: u64,
-        candidates: Vec<shuvarie_core::attachments::PathCandidate>,
-    },
     /// Open the media viewer over the session's images (the `/images` slash
     /// command, or a click on an image region): `sha` is the image to land
     /// on (`None` = the most recent).
@@ -327,9 +314,6 @@ pub struct SessionScreen {
     /// The slash-command guardrail: a literal send held back for confirmation
     /// (see [`SlashGuard`]).
     slash_guard: SlashGuard,
-    /// The composer's `@` mention completion popup (trailing-mention
-    /// candidates, directory listing cached per dir part).
-    mention: MentionMenu,
     pub chat: chat::Chat,
     /// Floating display-only window for the latest bash-mode run.
     pub bash: bash::BashPopup,
@@ -362,12 +346,12 @@ pub struct SessionScreen {
     /// The session's deduped per-model usage (first-use ordered), rebuilt on
     /// load and extended live; the `/assisted-by` popup reads it at open.
     pub models_used: Vec<shuvarie_core::ModelUsage>,
-    /// The composer's pending attachments (typed `@path` directives and
-    /// dropped/pasted paths) plus their probe round-trip: the pending token,
-    /// the path set the last issued probe carried, and the core requests
-    /// `sync_pending` queues (flushed by the app hop).
+    /// The composer's pending attachments (picked from the finder, dropped,
+    /// pasted, or read off the clipboard) plus their probe round-trip: the
+    /// pending token, the path set the last issued probe carried, and the core
+    /// requests `sync_compose` queues (flushed by the app hop).
     pending_token: u64,
-    requested_directives: Vec<String>,
+    requested_probes: Vec<String>,
     pending: Vec<PendingAttachment>,
     deferred_effects: Vec<SessionEffect>,
 }
@@ -380,7 +364,6 @@ impl SessionScreen {
             permission: PermissionUI::new(),
             slash: SlashMenu::new(),
             slash_guard: SlashGuard::new(),
-            mention: MentionMenu::new(),
             chat: chat::Chat::new(),
             bash: bash::BashPopup::new(),
             search: SearchPrompt::new(),
@@ -405,7 +388,7 @@ impl SessionScreen {
             copy_on_select: false,
             models_used: Vec::new(),
             pending_token: 0,
-            requested_directives: Vec::new(),
+            requested_probes: Vec::new(),
             pending: Vec::new(),
             deferred_effects: Vec::new(),
         }
@@ -534,6 +517,22 @@ impl SessionScreen {
         self.chat.set_search(self.search.needle());
     }
 
+    /// Hold a file the `/attach` dialog picked as a pending attachment. The
+    /// strip is the composer's own state, so the picker hands its choice back
+    /// here rather than keeping it; the probe for the new chip is queued for
+    /// the app hop to send.
+    pub fn attach_picked(&mut self, path: String) {
+        self.push_pending(path, PendingOrigin::Picked, None);
+        self.sync_compose();
+    }
+
+    /// The pending attachment paths, in strip order. (The app's picker checks
+    /// what its pick landed as.)
+    #[cfg(test)]
+    pub fn pending_paths(&self) -> Vec<String> {
+        self.pending.iter().map(|a| a.path.clone()).collect()
+    }
+
     /// Leave chat search mode and drop the live highlight (Escape, or the
     /// session changing underneath).
     fn close_search(&mut self) {
@@ -601,14 +600,6 @@ impl SessionScreen {
             && let Some(m) = self.slash.map_event(key)
         {
             return Some(SessionMessage::Slash(m));
-        }
-        // The `@` mention popup claims its navigation/accept keys the same
-        // way the slash menu does (never both — the slash trigger is the
-        // buffer's first char, mentions appear mid-text).
-        if self.mention.active()
-            && let Some(m) = self.mention.map_event(key)
-        {
-            return Some(SessionMessage::Mention(m));
         }
         if ctrl(key) {
             if let Some(m) = self.sidebar.map_event(key) {
@@ -753,7 +744,7 @@ impl SessionScreen {
     pub fn update(&mut self, msg: SessionMessage) -> Option<SessionEffect> {
         self.sync_slash();
         let effect = self.update_effect(msg);
-        self.sync_pending();
+        self.sync_compose();
         effect
     }
 
@@ -767,7 +758,7 @@ impl SessionScreen {
         // aborted send leaves the attach strip untouched.
         let attachments: Vec<String> = self.pending.iter().map(|a| a.path.clone()).collect();
         let chips = std::mem::take(&mut self.pending);
-        let probed = std::mem::take(&mut self.requested_directives);
+        let probed = std::mem::take(&mut self.requested_probes);
         if let Some(raw) = content.strip_prefix('!') {
             let command = raw.trim().to_string();
             self.sync_slash();
@@ -777,6 +768,14 @@ impl SessionScreen {
             return Some(SessionEffect::RunBash { command });
         }
         if let Some(cmd) = commands::parse_command(&content) {
+            if cmd.action == CommandAction::Attach {
+                // The dialog adds to the pending set, so a submit must hand the
+                // chips back rather than consume them.
+                self.pending = chips;
+                self.requested_probes = probed;
+                self.sync_slash();
+                return Some(SessionEffect::OpenAttachFinder { dir: cmd.args });
+            }
             self.sync_slash();
             return Some(SessionEffect::RunCommand {
                 action: CommandRef::Builtin(cmd.action),
@@ -809,7 +808,7 @@ impl SessionScreen {
                 if !confirmed && commands::opens_with_trigger(&content) {
                     self.slash_guard.hold(content);
                     self.pending = chips;
-                    self.requested_directives = probed;
+                    self.requested_probes = probed;
                     self.sync_slash();
                     return None;
                 }
@@ -932,7 +931,11 @@ impl SessionScreen {
                 SlashMessage::Run => {
                     if let Some(action) = self.slash.selected_action() {
                         self.input.buffer.clear();
-                        self.clear_pending();
+                        // `/attach` adds to the pending set, so a menu launch of
+                        // it must not drop the chips already attached.
+                        if action != CommandRef::Builtin(CommandAction::Attach) {
+                            self.clear_pending();
+                        }
                         self.sync_slash();
                         return self.run_command_ref(action);
                     }
@@ -959,27 +962,9 @@ impl SessionScreen {
                 }
                 None
             }
-            SessionMessage::Mention(m) => {
-                match m {
-                    MentionMessage::Next => self.mention.next(),
-                    MentionMessage::Prev => self.mention.prev(),
-                    MentionMessage::Accept => {
-                        if let Some(candidate) = self.mention.accept() {
-                            let (start, end) = self.mention.token_range();
-                            // The candidate is a real path; escape it so a space
-                            // in a name stays inside the directive token.
-                            let token = format!("@{}", directive::escape(&candidate));
-                            self.input.buffer.replace_range(start..end, &token);
-                            self.input.buffer.place_cursor(start + token.len());
-                        }
-                    }
-                    MentionMessage::Dismiss => self.mention.dismiss(),
-                }
-                None
-            }
-            SessionMessage::DirectivesValidated { token, items } => {
+            SessionMessage::AttachmentsProbed { token, items } => {
                 if token == self.pending_token {
-                    for (path, probe) in self.requested_directives.iter().zip(items) {
+                    for (path, probe) in self.requested_probes.iter().zip(items) {
                         if let Some(attachment) = self.pending.iter_mut().find(|a| &a.path == path)
                         {
                             attachment.probe = Some(probe);
@@ -988,16 +973,12 @@ impl SessionScreen {
                 }
                 None
             }
-            SessionMessage::PathCompletions { token, candidates } => {
-                self.mention.set_candidates(token, candidates);
-                None
-            }
             SessionMessage::Attach { path } => {
-                self.push_dropped(path, None);
+                self.push_pending(path, PendingOrigin::Dropped, None);
                 None
             }
             SessionMessage::ClipboardAttached { path, probe } => {
-                self.push_dropped(path, Some(probe));
+                self.push_pending(path, PendingOrigin::Dropped, Some(probe));
                 None
             }
             SessionMessage::AttachClipboard => Some(SessionEffect::AttachClipboard),
@@ -1583,11 +1564,6 @@ impl SessionScreen {
             let rect = self.slash.popup_rect(history_area, input_area);
             self.slash.view(frame, rect);
         }
-        if !self.question.open && self.mention.active() {
-            let rect = self.mention.popup_rect(history_area, input_area);
-            self.mention.view(frame, rect);
-        }
-
         // The bash popup floats over the chat content, directly above the
         // input area; painted last so it sits on top of everything else in
         // the content column.
@@ -1745,8 +1721,8 @@ pub enum SessionEffect {
     /// Send a prompt. `model` is the per-turn streaming override
     /// (`<provider_kind>/<model>` from a custom command's frontmatter);
     /// `None` streams on the active provider. `attachments` are the composer's
-    /// pending attachment paths: the typed `@path` directives the prompt carries
-    /// and any dropped/pasted files held only in the pending list.
+    /// pending attachment paths from the composer's attach strip (picked in the
+    /// finder, dropped, pasted, or read off the clipboard).
     SendMessage {
         content: String,
         attachments: Vec<String>,
@@ -1785,17 +1761,18 @@ pub enum SessionEffect {
     LoadMedia {
         hashes: Vec<String>,
     },
-    /// Preview the composer's pending `@path` directives for the attach
-    /// strip (reply: `Event::DirectivesProbed`, matched by `token`).
-    ProbeDirectives {
+    /// Preview the composer's pending attachments for the attach strip (reply:
+    /// `Event::AttachmentsProbed`, matched by `token`).
+    ProbeAttachments {
         token: u64,
         paths: Vec<String>,
     },
-    /// Directory entries for the `@` mention completion popup (reply:
-    /// `Event::PathCompletions`, matched in the mention menu).
-    PathCompletions {
-        token: u64,
-        query: String,
+    /// Open the attachment picker dialog over `dir` (the `/attach` argument;
+    /// `None` searches the workspace root). The app owns the dialog and the
+    /// ranking requests; the session only asks for it because a slash submit
+    /// reaches the app through an effect.
+    OpenAttachFinder {
+        dir: Option<String>,
     },
     /// Open the media viewer over the session's images: `items` are the
     /// viewer's gallery (image sha + name, display order) and `selected` is
@@ -1812,12 +1789,15 @@ pub enum SessionEffect {
     },
 }
 
-/// How a pending attachment entered the composer.
+/// How a pending attachment entered the composer: where it came from decides
+/// how the strip labels it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingOrigin {
-    /// Typed as an `@path` directive still present in the buffer.
-    Directive,
-    /// Dropped or pasted as a path; no buffer token mirrors it.
+    /// Picked in the `/attach` finder: the path is workspace-relative (or
+    /// absolute outside the workspace), so the whole path is the label.
+    Picked,
+    /// Dropped, pasted, or read off the clipboard: the path is often a long
+    /// absolute one, so the file name is the label.
     Dropped,
 }
 
@@ -1829,16 +1809,16 @@ struct PendingAttachment {
     /// The decoded filesystem path (no escaping, no `@`).
     path: String,
     origin: PendingOrigin,
-    probe: Option<shuvarie_core::attachments::DirectiveProbe>,
+    probe: Option<shuvarie_core::attachments::AttachmentProbe>,
 }
 
 impl PendingAttachment {
-    /// The chip's label: `@path` for a typed directive (so the strip echoes the
-    /// buffer), the file name for a dropped/pasted path (a staged clipboard
-    /// file's full path is noise).
+    /// The chip's label: the picked path as the finder showed it, the file name
+    /// for a dropped/pasted path (a staged clipboard file's full path is
+    /// noise).
     fn label(&self) -> String {
         match self.origin {
-            PendingOrigin::Directive => format!("@{}", self.path),
+            PendingOrigin::Picked => self.path.clone(),
             PendingOrigin::Dropped => file_name(&self.path),
         }
     }
@@ -1983,95 +1963,59 @@ impl SessionScreen {
         (!hashes.is_empty()).then_some(SessionEffect::LoadMedia { hashes })
     }
 
-    /// Sync the compose-side attachment surfaces to the buffer: the pending
-    /// attachments (the attach strip) and the `@` mention popup. Both answer
-    /// through effects queued into `deferred_effects` — the app hop drains them
-    /// via [`SessionScreen::take_deferred_effects`] so a message with its own
-    /// effect still gets them sent.
+    /// Sync the compose-side attachment surface: the pending attachments (the
+    /// attach strip). They answer through effects queued into
+    /// `deferred_effects` — the app hop drains them via
+    /// [`SessionScreen::take_deferred_effects`] so a message with its own effect
+    /// still gets them sent.
     ///
-    /// The pending list mirrors the buffer's `@path` directives (in text order)
-    /// followed by any dropped/pasted paths no token carries. A dropped
-    /// attachment lives only in this list; when the buffer's directive set and
-    /// the list's path set disagree with the last issued probe, the whole set
-    /// is re-probed (preserving the probes of surviving paths).
-    fn sync_pending(&mut self) {
-        let directives = at_directives(&self.input.buffer.value);
-        let mut desired: Vec<(String, PendingOrigin)> = directives
-            .iter()
-            .cloned()
-            .map(|path| (path, PendingOrigin::Directive))
-            .collect();
-        for attachment in &self.pending {
-            if attachment.origin == PendingOrigin::Dropped && !directives.contains(&attachment.path)
-            {
-                desired.push((attachment.path.clone(), PendingOrigin::Dropped));
-            }
-        }
-        let paths: Vec<String> = desired.iter().map(|(path, _)| path.clone()).collect();
-        let current: Vec<String> = self.pending.iter().map(|a| a.path.clone()).collect();
-        if paths != current {
-            let probes: Vec<Option<shuvarie_core::attachments::DirectiveProbe>> = paths
-                .iter()
-                .map(|path| {
-                    self.pending
-                        .iter()
-                        .find(|a| &a.path == path)
-                        .and_then(|a| a.probe.clone())
-                })
-                .collect();
-            self.pending = desired
-                .into_iter()
-                .zip(probes)
-                .map(|((path, origin), probe)| PendingAttachment {
-                    path,
-                    origin,
-                    probe,
-                })
-                .collect();
-        }
+    /// The pending list is authoritative: attachments enter it by being picked
+    /// in the finder, dropped, pasted, or read off the clipboard, and the buffer
+    /// text carries none. When the list's path set differs from the last issued
+    /// probe, the whole set is re-probed (preserving the probes of surviving
+    /// paths).
+    fn sync_compose(&mut self) {
+        let paths: Vec<String> = self.pending.iter().map(|a| a.path.clone()).collect();
         // Re-probe whenever the set differs from the last issued probe — a new
-        // directive, a drop, or a removal. A dropped attachment is pushed
-        // straight into `pending`, so the two path vectors can agree while the
-        // probe is still outstanding.
-        if paths != self.requested_directives {
+        // attachment or a removal. An attachment is pushed straight into
+        // `pending`, so the two path vectors can agree while the probe is still
+        // outstanding.
+        if paths != self.requested_probes {
             self.pending_token = self.pending_token.wrapping_add(1);
-            self.requested_directives = paths.clone();
+            self.requested_probes = paths.clone();
             if !paths.is_empty() {
-                self.deferred_effects.push(SessionEffect::ProbeDirectives {
+                self.deferred_effects.push(SessionEffect::ProbeAttachments {
                     token: self.pending_token,
                     paths,
                 });
             }
         }
-        if let Some((token, query)) = self.mention.sync(&self.input.buffer.value) {
-            self.deferred_effects
-                .push(SessionEffect::PathCompletions { token, query });
-        }
     }
 
     /// Drop every pending attachment. Called on a submit that consumes the
-    /// buffer (send, bash, a slash command) so a dropped attachment never bleeds
-    /// into the next prompt.
+    /// buffer (send, bash, a slash command) so an attachment never bleeds into
+    /// the next prompt.
     fn clear_pending(&mut self) {
         self.pending.clear();
-        self.requested_directives.clear();
+        self.requested_probes.clear();
     }
 
-    /// Hold a dropped or pasted path as a pending attachment, deduped by path (a
-    /// repeat drop of the same file is a no-op). `probe` preloads the
-    /// core-computed probe for a staged clipboard file; a dropped path without
-    /// one is probed by the next [`SessionScreen::sync_pending`].
-    fn push_dropped(
+    /// Hold a path as a pending attachment, deduped by path (a repeat drop of
+    /// the same file is a no-op). `probe` preloads the core-computed probe for a
+    /// staged clipboard file; anything else is probed by the next
+    /// [`SessionScreen::sync_compose`].
+    fn push_pending(
         &mut self,
         path: String,
-        probe: Option<shuvarie_core::attachments::DirectiveProbe>,
+        origin: PendingOrigin,
+        probe: Option<shuvarie_core::attachments::AttachmentProbe>,
     ) {
         if self.pending.iter().any(|a| a.path == path) {
             return;
         }
         self.pending.push(PendingAttachment {
             path,
-            origin: PendingOrigin::Dropped,
+            origin,
             probe,
         });
     }
@@ -2084,90 +2028,18 @@ impl SessionScreen {
     }
 }
 
-/// The literal-send effect builder: the prompt text plus the composer's
-/// attachment paths — the explicit `attachments` captured at submit (typed
-/// directives and dropped/pasted files alike), merged with the `@` directives
-/// the *expanded* content still carries (a directive inside a compacted paste
-/// is invisible to the raw buffer's scan).
+/// The literal-send effect builder: the expanded prompt text plus the
+/// composer's pending attachment paths.
 fn send_message_effect(
     content: String,
     attachments: Vec<String>,
     model: Option<String>,
 ) -> SessionEffect {
-    let mut attachments = attachments;
-    for path in at_directives(&content) {
-        if !attachments.contains(&path) {
-            attachments.push(path);
-        }
-    }
     SessionEffect::SendMessage {
         content,
         attachments,
         model,
     }
-}
-
-/// Extract the composer's `@path` attachment directives from a composed
-/// prompt: an `@` opening a token (line start or after whitespace) becomes an
-/// attachment path; the token stays in the prompt text so the model and the
-/// transcript keep seeing it. A path containing whitespace escapes it with a
-/// backslash per whitespace character ([`directive::escape`]); the decoded path
-/// is returned. Heuristics keep prose mentions (like "ping @bob") from aborting
-/// sends: a directive must carry a file-suffix-looking extension after a final
-/// `.` (1-8 alphanumeric characters), and must not contain `://` (a URL, not a
-/// path). Repeated paths dedupe.
-fn at_directives(content: &str) -> Vec<String> {
-    const TRAILING_PUNCTUATION: &[char] = &['.', ',', ':', ';', '!', '?', ')', ']', '"', '\''];
-    let mut directives = Vec::new();
-    for line in content.lines() {
-        let chars: Vec<char> = line.chars().collect();
-        let mut i = 0usize;
-        while i < chars.len() {
-            let boundary = i == 0 || chars[i - 1].is_whitespace();
-            if boundary && chars[i] == '@' {
-                let start = i + 1;
-                // The token ends at the first *unescaped* whitespace; a
-                // backslash-escaped whitespace is part of the path.
-                let mut end = start;
-                while end < chars.len() {
-                    if chars[end] == '\\' && end + 1 < chars.len() && chars[end + 1].is_whitespace()
-                    {
-                        end += 2;
-                        continue;
-                    }
-                    if chars[end].is_whitespace() {
-                        break;
-                    }
-                    end += 1;
-                }
-                if end > start {
-                    let raw: String = chars[start..end].iter().collect();
-                    let mut path = directive::unescape(&raw);
-                    while path
-                        .chars()
-                        .next_back()
-                        .is_some_and(|ch| TRAILING_PUNCTUATION.contains(&ch))
-                    {
-                        path.pop();
-                    }
-                    let looks_like_path = !path.starts_with("//")
-                        && !path.contains("://")
-                        && path.rsplit_once('.').is_some_and(|(_, ext)| {
-                            !ext.is_empty()
-                                && ext.len() <= 8
-                                && ext.chars().all(|ch| ch.is_ascii_alphanumeric())
-                        });
-                    if looks_like_path && !directives.contains(&path) {
-                        directives.push(path);
-                    }
-                }
-                i = end.max(start);
-            } else {
-                i += 1;
-            }
-        }
-    }
-    directives
 }
 
 #[cfg(test)]
@@ -3220,40 +3092,6 @@ mod tests {
     }
 
     #[test]
-    fn at_directives_extract_attachment_tokens() {
-        assert_eq!(at_directives("@plan.pdf"), vec!["plan.pdf"]);
-        assert_eq!(
-            at_directives("look at @notes.csv and @shot.png"),
-            vec!["notes.csv", "shot.png"]
-        );
-        assert_eq!(at_directives("check @plan.pdf."), vec!["plan.pdf"]);
-        assert_eq!(at_directives("@~/shots/a.webp"), vec!["~/shots/a.webp"]);
-        assert_eq!(
-            at_directives("same @a.txt twice @a.txt"),
-            vec!["a.txt"],
-            "repeated paths dedupe"
-        );
-    }
-
-    #[test]
-    fn at_directives_leave_prose_mentions_alone() {
-        assert!(
-            at_directives("ping @bob about it").is_empty(),
-            "no extension"
-        );
-        assert!(
-            at_directives("see https://x.com/a.png").is_empty(),
-            "not @-opened"
-        );
-        assert!(at_directives("@https://x.com/a.png").is_empty(), "a url");
-        assert!(at_directives("@").is_empty());
-        assert!(
-            at_directives("email me a@b").is_empty(),
-            "not at a boundary"
-        );
-    }
-
-    #[test]
     fn turn_started_steered_drops_first_queued_entry() {
         let mut screen = SessionScreen::new();
         screen.update(queued("one"));
@@ -4129,7 +3967,7 @@ mod tests {
 mod compose_tests {
     use super::tests::{content_row_text, draw};
     use super::*;
-    use shuvarie_core::attachments::{DirectiveProbe, PathCandidate};
+    use shuvarie_core::attachments::AttachmentProbe;
     use termina::event::KeyCode;
 
     fn type_text(screen: &mut SessionScreen, text: &str) {
@@ -4146,43 +3984,39 @@ mod compose_tests {
     }
 
     #[test]
-    fn typed_directives_request_probe_and_render_chips() {
+    fn a_pending_attachment_is_probed_and_renders_a_chip() {
         let mut screen = SessionScreen::new();
-        type_text(&mut screen, "look at @plan.pdf");
-        // The sync queued probe round-trips one per directive-set change:
-        // `plan.pd` then `plan.pdf` (the `p` of `plan.p`... has no extension
-        // yet). The last one carried the final set.
+        screen.update(SessionMessage::Attach {
+            path: "plan.pdf".into(),
+        });
+        // The strip's probe round-trips once for the new path set.
         let deferred = screen.take_deferred_effects();
-        let last = deferred.last().expect("a probe was queued");
-        let probe_token = match last {
-            SessionEffect::ProbeDirectives { token, paths } => {
+        let probe_token = match deferred.last() {
+            Some(SessionEffect::ProbeAttachments { token, paths }) => {
                 assert_eq!(paths, &["plan.pdf".to_string()]);
                 *token
             }
             other => panic!("expected the probe last: {other:?}"),
         };
-        // The attachment exists already, awaiting its probe.
         assert_eq!(screen.pending.len(), 1);
         assert!(screen.pending[0].probe.is_none());
-        assert_eq!(screen.pending[0].origin, PendingOrigin::Directive);
         // The reply fills the strip with chips.
-        screen.update(SessionMessage::DirectivesValidated {
+        screen.update(SessionMessage::AttachmentsProbed {
             token: probe_token,
-            items: vec![DirectiveProbe {
+            items: vec![AttachmentProbe {
                 kind: Some(shuvarie_llm::AttachmentKind::Document),
                 size: Some(4096),
                 error: None,
             }],
         });
-        assert_eq!(screen.pending.len(), 1);
         assert_eq!(
             screen.pending[0].probe.as_ref().unwrap().kind,
             Some(shuvarie_llm::AttachmentKind::Document)
         );
         // A stale reply (an older token) never clobbers it.
-        screen.update(SessionMessage::DirectivesValidated {
+        screen.update(SessionMessage::AttachmentsProbed {
             token: 0,
-            items: vec![DirectiveProbe {
+            items: vec![AttachmentProbe {
                 kind: None,
                 size: None,
                 error: Some("missing file".into()),
@@ -4192,12 +4026,22 @@ mod compose_tests {
         // The chip line renders above the input (its own row).
         let buf = draw(&screen, 100, 30);
         let chip_rows = (0..buf.area().height)
-            .filter(|y| content_row_text(&buf, *y).contains("@plan.pdf"))
+            .filter(|y| content_row_text(&buf, *y).contains("plan.pdf"))
             .count();
         assert!(chip_rows > 0, "the chip renders somewhere");
-        // Clearing the buffer detaches the directive chip.
-        screen.update(SessionMessage::Text(TextAreaMessage::Clear));
-        assert!(screen.pending.is_empty(), "an erased directive detaches");
+        // The composer text carries no attachments any more: an `@path` typed
+        // into the buffer is prose, and the pending set is untouched by it.
+        screen.take_deferred_effects();
+        type_text(&mut screen, "look at @plan.pdf");
+        assert_eq!(
+            screen.pending.len(),
+            1,
+            "an `@path` in the buffer attaches nothing"
+        );
+        assert!(
+            screen.take_deferred_effects().is_empty(),
+            "nothing new to probe"
+        );
     }
 
     #[test]
@@ -4216,7 +4060,7 @@ mod compose_tests {
         let deferred = screen.take_deferred_effects();
         assert!(matches!(
             deferred.last(),
-            Some(SessionEffect::ProbeDirectives { paths, .. })
+            Some(SessionEffect::ProbeAttachments { paths, .. })
                 if paths == &["/tmp/Screenshot 2026-05-27 at 13.37.31.png".to_string()]
         ));
         // The buffer text is untouched: a drop is not text.
@@ -4280,7 +4124,7 @@ mod compose_tests {
         // The core's staged image arrives as a pre-probed dropped attachment.
         screen.update(SessionMessage::ClipboardAttached {
             path: "/tmp/shuvarie-paste-1-2/clipboard.png".into(),
-            probe: DirectiveProbe {
+            probe: AttachmentProbe {
                 kind: Some(shuvarie_llm::AttachmentKind::Image),
                 size: Some(2048),
                 error: None,
@@ -4297,9 +4141,10 @@ mod compose_tests {
     }
 
     #[test]
-    fn send_carries_dropped_and_typed_attachments() {
+    fn send_carries_every_pending_attachment() {
         let mut screen = SessionScreen::new();
-        type_text(&mut screen, "hi @plan.pdf");
+        type_text(&mut screen, "hi");
+        screen.push_pending("docs/plan.pdf".into(), PendingOrigin::Picked, None);
         screen.update(SessionMessage::Attach {
             path: "/tmp/dropped shot.png".into(),
         });
@@ -4312,10 +4157,13 @@ mod compose_tests {
                 attachments,
                 ..
             } => {
-                assert_eq!(content, "hi @plan.pdf");
+                assert_eq!(content, "hi", "the prompt text carries no paths");
                 assert_eq!(
                     attachments,
-                    vec!["plan.pdf".to_string(), "/tmp/dropped shot.png".to_string()]
+                    vec![
+                        "docs/plan.pdf".to_string(),
+                        "/tmp/dropped shot.png".to_string()
+                    ]
                 );
             }
             other => panic!("expected a send: {other:?}"),
@@ -4324,107 +4172,52 @@ mod compose_tests {
     }
 
     #[test]
-    fn escaped_directives_are_decoded_at_send_time() {
-        // A typed directive with an escaped space is one token, decoded.
-        assert_eq!(
-            at_directives("look at @/tmp/a\\ b.png please"),
-            vec!["/tmp/a b.png"]
+    fn the_attach_command_opens_the_finder_and_keeps_the_pending_chips() {
+        let mut screen = SessionScreen::new();
+        screen.update(SessionMessage::Attach {
+            path: "plan.pdf".into(),
+        });
+        screen.take_deferred_effects();
+        type_text(&mut screen, "/attach docs");
+        // The command asks the app to open the picker over `docs`; the buffer
+        // is consumed and the pending chip survives (the picker adds to the
+        // strip, it never replaces it).
+        let effect = screen.update(SessionMessage::Text(TextAreaMessage::Submit));
+        assert!(
+            matches!(
+                &effect,
+                Some(SessionEffect::OpenAttachFinder { dir: Some(dir) }) if dir == "docs"
+            ),
+            "{effect:?}"
         );
-        // Undecoded, the space would have split the token.
-        assert_eq!(at_directives("look at @a\\ b.png"), vec!["a b.png"]);
+        assert!(screen.input.buffer.value.is_empty());
+        assert_eq!(screen.pending.len(), 1, "the chip is still attached");
+        assert!(
+            screen.take_deferred_effects().is_empty(),
+            "no probe is re-issued for an unchanged set"
+        );
     }
 
     #[test]
-    fn accepting_a_mention_with_spaces_splices_an_escaped_directive() {
+    fn a_finder_pick_becomes_a_probed_pending_attachment() {
         let mut screen = SessionScreen::new();
-        type_text(&mut screen, "@");
-        screen.update(SessionMessage::PathCompletions {
-            token: 0,
-            candidates: vec![PathCandidate {
-                name: "my shot.png".into(),
-                is_dir: false,
-            }],
-        });
-        screen.update(SessionMessage::Mention(MentionMessage::Accept));
-        assert_eq!(screen.input.buffer.value, "@my\\ shot.png");
-        // The escaped token round-trips through the send-time tokenizer.
-        assert_eq!(
-            at_directives(&screen.input.buffer.value),
-            vec!["my shot.png"]
-        );
+        // The app's picker hands its choice to the composer.
+        screen.attach_picked("docs/plan.pdf".into());
         assert_eq!(screen.pending.len(), 1);
-        assert_eq!(screen.pending[0].path, "my shot.png");
-    }
-
-    #[test]
-    fn mention_flow_requests_lists_and_accepts_a_completion() {
-        let mut screen = SessionScreen::new();
-        type_text(&mut screen, "@");
-        // The listing request fires for the root dir.
+        assert_eq!(screen.pending[0].path, "docs/plan.pdf");
+        assert_eq!(screen.pending[0].origin, PendingOrigin::Picked);
+        // The pick is probed for the strip, whose chip shows the picked path.
         let deferred = screen.take_deferred_effects();
         assert!(matches!(
             deferred.as_slice(),
-            [.., SessionEffect::PathCompletions { token: 0, query }]
-                if query.is_empty()
+            [SessionEffect::ProbeAttachments { paths, .. }]
+                if paths == &["docs/plan.pdf".to_string()]
         ));
-        // The listing reply opens the popup.
-        screen.update(SessionMessage::PathCompletions {
-            token: 0,
-            candidates: vec![
-                PathCandidate {
-                    name: "src/".into(),
-                    is_dir: true,
-                },
-                PathCandidate {
-                    name: "main.rs".into(),
-                    is_dir: false,
-                },
-            ],
-        });
-        assert!(screen.mention.active());
-        // Typing inside the same dir keeps candidates locally.
-        assert!(screen.take_deferred_effects().is_empty(), "same dir");
-        // Tab accepts the highlighted (first) candidate and splices it.
-        screen.update(SessionMessage::Mention(MentionMessage::Accept));
-        assert_eq!(screen.input.buffer.value, "@src/");
-        // Completing into a directory requests ITS listing next sync.
-        let deferred = screen.take_deferred_effects();
-        assert!(matches!(
-            deferred.as_slice(),
-            [SessionEffect::PathCompletions { token: 1, query }] if query == "src/"
-        ));
-    }
-
-    #[test]
-    fn map_event_claims_keys_while_the_mention_popup_is_open() {
-        let mut screen = SessionScreen::new();
-        type_text(&mut screen, "@");
-        screen.update(SessionMessage::PathCompletions {
-            token: 0,
-            candidates: vec![PathCandidate {
-                name: "main.rs".into(),
-                is_dir: false,
-            }],
-        });
-        assert!(screen.mention.active());
-        // Up/Down/Enter/Tab/Esc route to the popup, not the chat/input.
-        for code in [KeyCode::Up, KeyCode::Down, KeyCode::Enter, KeyCode::Tab] {
-            assert!(
-                matches!(key(&screen, code), Some(SessionMessage::Mention(_))),
-                "{code:?} goes to the mention popup"
-            );
-        }
-        assert!(matches!(
-            key(&screen, KeyCode::Escape),
-            Some(SessionMessage::Mention(_))
-        ));
-        // Escape dismissed: keys flow normally again.
-        screen.update(SessionMessage::Mention(MentionMessage::Dismiss));
-        assert!(matches!(
-            key(&screen, KeyCode::Up),
-            Some(SessionMessage::Chat(_))
-        ));
-        assert!(!screen.mention.active());
+        assert_eq!(screen.pending[0].label(), "docs/plan.pdf");
+        // A repeat pick of the same file is a no-op (no duplicate chip).
+        screen.attach_picked("docs/plan.pdf".into());
+        assert_eq!(screen.pending.len(), 1);
+        assert!(screen.take_deferred_effects().is_empty());
     }
 
     #[test]

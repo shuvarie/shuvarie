@@ -175,19 +175,29 @@ pub enum Event {
     AttachmentMedia {
         items: Vec<LoadedAttachment>,
     },
-    /// Reply to [`Command::ProbeDirectives`]: the attach strip's per-path
+    /// Reply to [`Command::ProbeAttachments`]: the attach strip's per-path
     /// preview, order-aligned with the requested paths. The composer drops
     /// stale replies (an older `token`) when the pending set changed again.
-    DirectivesProbed {
+    AttachmentsProbed {
         token: u64,
-        items: Vec<crate::attachments::DirectiveProbe>,
+        items: Vec<crate::attachments::AttachmentProbe>,
     },
-    /// Reply to [`Command::RequestPathCompletions`]: the matching directory
-    /// entries for the composer's `@` mention popup. Stale replies (an older
-    /// `token`) are dropped the same way.
-    PathCompletions {
+    /// Reply to [`Command::SearchAttachments`]: the files the `/attach` finder
+    /// ranks for the query, best match first and already in attachment form
+    /// (workspace-relative, or absolute outside the workspace). `error` carries
+    /// the reason the directory could not be indexed instead. Stale replies (an
+    /// older `token`) are dropped the same way as the probe's.
+    AttachmentCandidates {
         token: u64,
-        candidates: Vec<crate::attachments::PathCandidate>,
+        items: Vec<String>,
+        error: Option<String>,
+    },
+    /// Reply to [`Command::ListDirectories`]: the subdirectories matching the
+    /// typed path, already completed in the form being typed (`docs`,
+    /// `~/shots`, `/tmp/x`). Stale replies (an older `token`) drop.
+    DirectoryCandidates {
+        token: u64,
+        items: Vec<String>,
     },
     /// Reply to [`Command::AttachClipboard`]: an image read off the system
     /// clipboard and staged to a temp file, ready to enter the composer as a

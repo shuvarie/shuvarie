@@ -3,9 +3,9 @@
 //! Three concerns live here, one module each:
 //!
 //! - **Compose** ([`compose`]): the composer's preview surface — a metadata-
-//!   only probe of `@path` directives ([`DirectiveProbe`]) and the workspace
-//!   completion listing behind the `@` mention popup ([`path_candidates`]).
-//!   Deliberately shallow: no reads of file content.
+//!   only probe of the pending attachment paths ([`AttachmentProbe`]).
+//!   Deliberately shallow: no reads of file content. The `/attach` finder's
+//!   index lives beside it ([`picker`]): FFF ranks paths, nothing is read.
 //! - **Ingest** ([`ingest`]): a turn's attachment paths become [`Prepared`]
 //!   attachments — bytes sniffed by magic, images bounded to provider limits
 //!   (dimension cap + re-encode), documents converted to GFM markdown by
@@ -18,13 +18,14 @@
 //!   trim their oldest images rather than overflowing the provider's request
 //!   size. Persisted content preloads for the request too ([`collect_blobs`]).
 //!
-//! Attachment paths are user intent (typed in the composer), not model
-//! action, so they read any path like a user pasting content would; the
-//! model never originates an attachment, so it stays outside the read
-//! tools' sandbox by design.
+//! Attachment paths are user intent (picked in the composer's finder, dropped
+//! or pasted in), not model action, so they read any path like a user pasting
+//! content would; the model never originates an attachment, so it stays
+//! outside the read tools' sandbox by design.
 
 mod compose;
 mod ingest;
+mod picker;
 mod shape;
 
 use sha2::Digest;
@@ -32,10 +33,12 @@ use shuvarie_llm::Attachment;
 use std::path::{Path, PathBuf};
 
 pub use compose::{
-    ClipboardAttachment, DirectiveProbe, PathCandidate, path_candidates, run_directive_probe,
+    AttachmentProbe, ClipboardAttachment, MAX_DIRECTORY_HINTS, directory_candidates,
+    probe_attachment,
 };
-pub use ingest::resolve_directives;
+pub use ingest::resolve_attachments;
 pub(crate) use ingest::{DocumentFailure, document_convert, fit_image, image_media_type};
+pub use picker::{AttachmentIndex, MAX_CANDIDATES, resolve_dir};
 pub use shape::{
     FitReport, collect_blobs, prepare_for_send, resolve_stored_prepared, supports_images,
 };
@@ -114,19 +117,17 @@ impl Prepared {
     }
 }
 
-/// A relative directive resolves against the workspace root; an absolute
+/// A relative attachment path resolves against the workspace root; an absolute
 /// one is user intent. A leading `~` expands against the home directory
-/// first (`@~/screenshot.png`) — a non-expandable `~other` form stays
-/// literal and simply misses. A leading `@` is the composer's mention sigil
-/// and may slip through.
+/// first (`~/screenshot.png`) — a non-expandable `~other` form stays literal
+/// and simply misses.
 pub(super) fn normalize_path(workspace_root: &Path, path: &str) -> PathBuf {
     normalize_path_in(workspace_root, dirs::home_dir().as_deref(), path)
 }
 
 /// [`normalize_path`] with an explicit home directory for tilde expansion.
 pub(super) fn normalize_path_in(workspace_root: &Path, home: Option<&Path>, path: &str) -> PathBuf {
-    let path = path.trim().strip_prefix('@').unwrap_or(path.trim());
-    let path = crate::permissions::expand_home_in(path, home);
+    let path = crate::permissions::expand_home_in(path.trim(), home);
     let path = PathBuf::from(path);
     if path.is_absolute() {
         path

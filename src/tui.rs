@@ -27,6 +27,9 @@ pub mod add_decision_provider;
 pub mod add_provider;
 mod app;
 mod assisted_by;
+/// The `/attach` picker: a centred fuzzy finder over a directory, whose pick
+/// lands in the composer's pending attachment strip.
+mod attach;
 mod auth;
 /// The `/codemode` overlay: whether the scripting tool is offered, how it
 /// presents the roster, and the limits a script runs under.
@@ -36,9 +39,6 @@ mod commands;
 mod components;
 mod confirm_quit;
 mod context;
-/// The composer's `@path` directive token encoding (see
-/// `docs/designs/images-and-drops.md`).
-mod directive;
 mod escape;
 mod event;
 /// Filesystem watch on the workspace's git `HEAD` file: the sidebar branch

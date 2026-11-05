@@ -22,6 +22,9 @@ use super::add_provider::{
     AddProviderForm, AddProviderMessage, AddProviderOutcome, AddProviderStage, fullscreen_rect,
 };
 use super::assisted_by::{AssistedByEffect, AssistedByMessage, AssistedByPopup};
+use super::attach::{
+    AttachEffect, AttachFinder, AttachMessage, DirPrompt, DirPromptEffect, DirPromptMessage, Roots,
+};
 use super::auth::{AuthMessage, AuthPopup};
 use super::codemode::{CodemodeEditor, CodemodeEffect, CodemodeMessage, CodemodePrefs};
 use super::command_menu::{CommandMenu, CommandMenuMessage};
@@ -64,6 +67,12 @@ pub enum Overlay {
     /// generative LLM, so it has no Selune catalog entry, no transport list,
     /// and no OAuth — just one System One endpoint and a free-text model name.
     AddDecisionProvider,
+    /// The `/attach` picker: a centred fuzzy finder over one directory, whose
+    /// pick lands in the composer's pending attachment strip.
+    Attach,
+    /// The `/attach` picker's directory prompt (Ctrl+D): one line naming the
+    /// directory to search next.
+    AttachDir,
     ModelPicker,
     CommandMenu,
     ConfirmQuit,
@@ -246,6 +255,8 @@ pub enum AppMessage {
     Auth(AuthMessage),
     Warning(WarningMessage),
     PeakTable(PeakTableMessage),
+    Attach(AttachMessage),
+    AttachDir(DirPromptMessage),
     /// The render loop's spinner wake: refresh the animated spinner renders.
     SpinnerUpdate,
     /// The render loop's countdown wake: refresh the sidebar's peak/off-peak
@@ -349,6 +360,10 @@ pub struct App {
     pub todo_popup: TodoPopup,
     /// The `/peak-table` popup: the active model's peak/off-peak windows.
     pub peak_table: PeakTablePopup,
+    /// The `/attach` picker: a centred fuzzy finder over one directory.
+    pub attach: AttachFinder,
+    /// The picker's directory prompt (Ctrl+D).
+    pub attach_dir: DirPrompt,
     pub warning: WarningPopup,
     pub auth: AuthPopup,
     pub models: HashMap<String, Vec<Model>>,
@@ -715,6 +730,8 @@ impl App {
             codemode_prefs,
             todo_popup: TodoPopup::new(),
             peak_table: PeakTablePopup::new(),
+            attach: AttachFinder::new(),
+            attach_dir: DirPrompt::new(),
             media_view: MediaViewer::new(image_cell, image_protocol),
             screensaver: Screensaver::new(),
             theme_choices,
@@ -1167,6 +1184,12 @@ impl App {
                         .update(SessionPickerMessage::Resize { viewport_height: h });
                 }
             }
+            Overlay::Attach => {
+                if let Some(h) = attach_list_height(area) {
+                    self.attach
+                        .update(AttachMessage::Resize { viewport_height: h });
+                }
+            }
             Overlay::HistorySearch => {
                 if let Some(h) = history_search_list_height(area) {
                     self.history_search
@@ -1179,6 +1202,7 @@ impl App {
             Overlay::None
             | Overlay::Welcome
             | Overlay::AddDecisionProvider
+            | Overlay::AttachDir
             | Overlay::ConfirmQuit
             | Overlay::TitleEdit
             | Overlay::Tree
@@ -1402,6 +1426,12 @@ impl App {
                         }
                         Overlay::PeakTable => {
                             return self.peak_table.map_event(&key).map(AppMessage::PeakTable);
+                        }
+                        Overlay::Attach => {
+                            return self.attach.map_event(&key).map(AppMessage::Attach);
+                        }
+                        Overlay::AttachDir => {
+                            return self.attach_dir.map_event(&key).map(AppMessage::AttachDir);
                         }
                         Overlay::None => {}
                     }
@@ -1681,15 +1711,26 @@ impl App {
                     })
                     .collect(),
             )),
-            CoreEvent::DirectivesProbed { token, items } => {
-                Some(AppMessage::Session(SessionMessage::DirectivesValidated {
+            CoreEvent::AttachmentsProbed { token, items } => {
+                Some(AppMessage::Session(SessionMessage::AttachmentsProbed {
                     token,
                     items,
                 }))
             }
-            CoreEvent::PathCompletions { token, candidates } => {
-                let menu = SessionMessage::PathCompletions { token, candidates };
-                Some(AppMessage::Session(menu))
+            CoreEvent::AttachmentCandidates {
+                token,
+                items,
+                error,
+            } => Some(AppMessage::Attach(AttachMessage::Candidates {
+                token,
+                items,
+                error,
+            })),
+            CoreEvent::DirectoryCandidates { token, items } => {
+                Some(AppMessage::AttachDir(DirPromptMessage::Hints {
+                    token,
+                    items,
+                }))
             }
             CoreEvent::ClipboardImage { attachment } => {
                 Some(AppMessage::Session(SessionMessage::ClipboardAttached {
@@ -1863,6 +1904,11 @@ impl App {
             Overlay::HistorySearch => Some(AppMessage::HistorySearch(HistorySearchMessage::Paste(
                 text.to_string(),
             ))),
+            // The finder's query is text: a paste edits it.
+            Overlay::Attach => Some(AppMessage::Attach(AttachMessage::Paste(text.to_string()))),
+            Overlay::AttachDir => Some(AppMessage::AttachDir(DirPromptMessage::Paste(
+                text.to_string(),
+            ))),
             Overlay::AddProvider => self
                 .add_provider_form
                 .as_ref()
@@ -1983,8 +2029,8 @@ impl App {
                 }
                 // The message's own effect first (it may hop an app-effect —
                 // a clipboard write or a builtin command); the compose-side
-                // sync's queued core requests (attachment probe, mention
-                // completions) drain after — a session update on the very
+                // sync's queued core requests (attachment probe, attachment
+                // finder ranking) drain after — a session update on the very
                 // next message flushes any that collide with an app hop.
                 if let Some(app_effect) =
                     effect.and_then(|effect| self.handle_session_effect(effect))
@@ -2196,6 +2242,48 @@ impl App {
                         PeakTableEffect::Close => self.close_overlay(),
                     }
                 }
+            }
+            AppMessage::Attach(m) => {
+                let effect = self.attach.update(m);
+                match effect {
+                    Some(AttachEffect::Accept(path)) => {
+                        // The pick lands in the composer's strip; its probe is
+                        // queued there and drained right away, since this hop
+                        // bypasses `SessionMessage`.
+                        self.session.attach_picked(path);
+                        self.close_overlay();
+                        for deferred in self.session.take_deferred_effects() {
+                            if let Some(app_effect) = self.handle_session_effect(deferred) {
+                                return Some(app_effect);
+                            }
+                        }
+                    }
+                    Some(AttachEffect::EditDir) => self.open_attach_dir_prompt(),
+                    Some(AttachEffect::Close) => self.close_overlay(),
+                    None => {}
+                }
+                // Every edit may need the core to re-rank the index.
+                self.request_attach_candidates();
+            }
+            AppMessage::AttachDir(m) => {
+                if let Some(effect) = self.attach_dir.update(m) {
+                    match effect {
+                        DirPromptEffect::Submit { dir, hint } => {
+                            self.set_attach_root(&dir, hint.as_deref())
+                        }
+                        DirPromptEffect::Close => {
+                            // Back to the picker it was opened from.
+                            self.attach_dir.close();
+                            if self.attach.open {
+                                self.overlay = Overlay::Attach;
+                            } else {
+                                self.close_overlay();
+                            }
+                        }
+                    }
+                }
+                // Every edit may need the core to re-list the typed directory.
+                self.request_attach_dir_hints();
             }
             AppMessage::AddProvider(m) => {
                 if let Some(form) = &mut self.add_provider_form {
@@ -3074,6 +3162,84 @@ impl App {
         );
     }
 
+    /// Open the attachment finder over `dir` (the `/attach` argument; `None`
+    /// searches the workspace root) and ask the core to rank it right away, so
+    /// the dialog lists files without waiting for a keystroke.
+    fn open_attach_finder(&mut self, dir: Option<String>) {
+        let roots = self.attach_roots();
+        let root = roots.root_for(dir.as_deref());
+        self.attach.open(root, roots);
+        self.overlay = Overlay::Attach;
+        self.request_attach_candidates();
+    }
+
+    /// Open the picker's directory prompt, prefilled with its current root.
+    fn open_attach_dir_prompt(&mut self) {
+        let current = self.attach.root_label();
+        self.attach_dir
+            .open(&current, &self.attach_roots().workspace);
+        self.overlay = Overlay::AttachDir;
+        self.request_attach_dir_hints();
+    }
+
+    /// Send the directory prompt's outstanding hint request, if it owes one.
+    fn request_attach_dir_hints(&mut self) {
+        if let Some((token, path)) = self.attach_dir.hints_request() {
+            self.ctx
+                .send(shuvarie_core::Command::ListDirectories { token, path });
+        }
+    }
+
+    /// Re-root the picker at `arg` (what the directory prompt was given),
+    /// resolved like the `/attach` argument; `hint` is the highlighted
+    /// completion, used when the typed text is not itself a directory. A path
+    /// that resolves to nothing leaves the prompt open with the reason, so a
+    /// typo costs one edit rather than the whole trip through `Ctrl+D`.
+    fn set_attach_root(&mut self, arg: &str, hint: Option<&str>) {
+        let roots = self.attach_roots();
+        let typed = roots.root_for(Some(arg));
+        let dir = if typed.is_dir() {
+            typed
+        } else if let Some(hint) = hint {
+            roots.root_for(Some(hint))
+        } else {
+            typed
+        };
+        if !dir.is_dir() {
+            self.attach_dir
+                .reject(format!("not a directory: {}", dir.to_string_lossy()));
+            return;
+        }
+        self.attach_dir.close();
+        self.attach.set_root(dir);
+        self.overlay = Overlay::Attach;
+        self.request_attach_candidates();
+    }
+
+    /// The roots a search path is resolved against: the active tab's workspace
+    /// (the process directory when the tab has none yet) and the home
+    /// directory.
+    fn attach_roots(&self) -> Roots {
+        let workspace = self.active_root();
+        let workspace = if workspace.as_os_str().is_empty() {
+            std::env::current_dir().unwrap_or_default()
+        } else {
+            workspace
+        };
+        Roots {
+            workspace,
+            home: dirs::home_dir(),
+        }
+    }
+
+    /// Send the finder's outstanding ranking request, if it owes one.
+    fn request_attach_candidates(&mut self) {
+        if let Some((token, dir, query)) = self.attach.request() {
+            self.ctx
+                .send(shuvarie_core::Command::SearchAttachments { token, dir, query });
+        }
+    }
+
     /// Runs a built-in command action (from the Ctrl+M menu or the inline
     /// slash menu). Returns `Some(AppEffect)` when the action needs to
     /// escalate to the parent (quit).
@@ -3087,6 +3253,9 @@ impl App {
             }
             CommandAction::AddDecisionProvider => {
                 self.open_add_decision_provider();
+            }
+            CommandAction::Attach => {
+                self.open_attach_finder(args);
             }
             CommandAction::OpenSessionPicker => {
                 self.session_picker.open(self.session.session_id);
@@ -3298,8 +3467,8 @@ impl App {
 
     /// Route a session effect into the core (`ctx.send`) or the app
     /// (an `AppEffect`). Extracted from the `AppMessage::Session` arm so the
-    /// deferred compose-request effects (attachment probe, mention
-    /// completions) drain through the same routing.
+    /// deferred compose-request effects (attachment probe, attachment finder
+    /// ranking) drain through the same routing.
     fn handle_session_effect(&mut self, effect: SessionEffect) -> Option<AppEffect> {
         match effect {
             SessionEffect::SendMessage {
@@ -3319,14 +3488,13 @@ impl App {
                     .send(shuvarie_core::Command::LoadAttachmentMedia { hashes });
                 None
             }
-            SessionEffect::ProbeDirectives { token, paths } => {
+            SessionEffect::ProbeAttachments { token, paths } => {
                 self.ctx
-                    .send(shuvarie_core::Command::ProbeDirectives { token, paths });
+                    .send(shuvarie_core::Command::ProbeAttachments { token, paths });
                 None
             }
-            SessionEffect::PathCompletions { token, query } => {
-                self.ctx
-                    .send(shuvarie_core::Command::RequestPathCompletions { token, query });
+            SessionEffect::OpenAttachFinder { dir } => {
+                self.open_attach_finder(dir);
                 None
             }
             SessionEffect::AttachClipboard => {
@@ -3385,6 +3553,8 @@ impl App {
 
     fn close_overlay(&mut self) {
         self.overlay = Overlay::None;
+        self.attach.close();
+        self.attach_dir.close();
         self.command_menu.close();
         self.add_provider_form = None;
         self.add_decision_provider_form = None;
@@ -3562,6 +3732,8 @@ impl App {
         }
         self.model_picker.view(frame, area, stacked, false);
         self.session_picker.view(frame, area, stacked);
+        self.attach.view(frame, area, stacked);
+        self.attach_dir.view(frame, area, stacked);
         self.tree_popup.view(frame, area, stacked);
         self.scene_picker.view(frame, area, stacked);
         self.variant_picker.view(frame, area, stacked);
@@ -3687,6 +3859,11 @@ fn session_picker_list_height(area: Rect) -> Option<u16> {
     overlay_inner_list_height(area, 64, 36, 1)
 }
 
+fn attach_list_height(area: Rect) -> Option<u16> {
+    // Query row + hint bar.
+    overlay_inner_list_height(area, 64, 60, 2)
+}
+
 fn history_search_list_height(area: Rect) -> Option<u16> {
     // Query input + status line + hint bar.
     overlay_inner_list_height(area, 64, 40, 3)
@@ -3695,6 +3872,7 @@ fn history_search_list_height(area: Rect) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn app_with(connections: Connections) -> App {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
@@ -3727,6 +3905,18 @@ mod tests {
             WorkspaceInfo::default(),
         );
         (app, rx)
+    }
+
+    /// Drain every command the app has sent so far (the dialogs queue more than
+    /// one per edit: a hint request, then the re-ranking that follows it).
+    fn take_commands(
+        rx: &mut tokio::sync::mpsc::Receiver<shuvarie_core::Command>,
+    ) -> Vec<shuvarie_core::Command> {
+        let mut out = Vec::new();
+        while let Ok(cmd) = rx.try_recv() {
+            out.push(cmd);
+        }
+        out
     }
 
     fn active_session(app: &mut App) {
@@ -5146,6 +5336,212 @@ mod tests {
             ),
             "the viewer fetches the image's bytes"
         );
+    }
+
+    #[tokio::test]
+    async fn attach_command_opens_the_finder_and_asks_core_for_a_ranking() {
+        let (mut app, mut rx) = app_with_rx(connected());
+        active_session(&mut app);
+        // Argless (the Ctrl+M menu launch): the dialog opens centred over the
+        // workspace root — sent absolute, so the core indexes exactly that
+        // tree — and its first ranking request leaves immediately.
+        let workspace = app.attach_roots().workspace;
+        app.run_command(CommandAction::Attach, None);
+        assert!(matches!(app.overlay, Overlay::Attach));
+        assert!(app.attach.open);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            shuvarie_core::Command::SearchAttachments { token: 0, dir: Some(ref dir), ref query }
+                if Path::new(dir) == workspace && query.is_empty()
+        ));
+        // Its reply fills the list; Enter attaches the highlighted file to the
+        // composer's pending strip, closes the dialog, and probes the new chip.
+        app.update(AppMessage::Attach(AttachMessage::Candidates {
+            token: 0,
+            items: vec!["docs/plan.pdf".into()],
+            error: None,
+        }));
+        app.update(AppMessage::Attach(AttachMessage::Accept));
+        assert!(!app.attach.open);
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            shuvarie_core::Command::ProbeAttachments { paths, .. }
+                if paths == vec!["docs/plan.pdf".to_string()]
+        ));
+        // The chip is the composer's, and the prompt sends it.
+        assert_eq!(
+            app.session.pending_paths(),
+            vec!["docs/plan.pdf".to_string()]
+        );
+        // `/attach <dir>` searches that directory instead of the root.
+        app.run_command(CommandAction::Attach, Some("docs".into()));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            shuvarie_core::Command::SearchAttachments { dir: Some(ref dir), .. }
+                if Path::new(dir) == workspace.join("docs")
+        ));
+        // Escape closes without attaching anything.
+        app.update(AppMessage::Attach(AttachMessage::Close));
+        assert!(!app.attach.open);
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[tokio::test]
+    async fn typing_in_the_attach_dialog_reranks_through_the_core() {
+        let (mut app, mut rx) = app_with_rx(connected());
+        active_session(&mut app);
+        app.run_command(CommandAction::Attach, None);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            shuvarie_core::Command::SearchAttachments { token: 0, .. }
+        ));
+        // A keystroke is a new query: the dialog asks core to re-rank it, which
+        // is what makes the one-character query a real search.
+        app.update(AppMessage::Attach(AttachMessage::Input('z')));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            shuvarie_core::Command::SearchAttachments { token: 1, query, .. } if query == "z"
+        ));
+        // The answer is the list; no further request is owed for that query.
+        app.update(AppMessage::Attach(AttachMessage::Candidates {
+            token: 1,
+            items: vec!["zeta.md".into()],
+            error: None,
+        }));
+        assert!(rx.try_recv().is_err(), "the query is answered");
+        app.close_overlay();
+        assert!(!app.attach.open);
+    }
+
+    #[tokio::test]
+    async fn ctrl_d_opens_the_directory_prompt_and_reroots_the_picker() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, mut rx) = app_with_rx(connected());
+        active_session(&mut app);
+        app.run_command(CommandAction::Attach, None);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            shuvarie_core::Command::SearchAttachments { token: 0, .. }
+        ));
+        // Ctrl+D opens the prompt over the picker, prefilled with the current
+        // root, and the picker keeps its keys until the prompt is answered.
+        let ctrl_d =
+            termina::event::KeyEvent::new(KeyCode::Char('d'), termina::event::Modifiers::CONTROL);
+        let msg = app
+            .map_event(Event::Terminal(TermEvent::Key(ctrl_d)))
+            .expect("the dialog maps Ctrl+D");
+        assert!(matches!(msg, AppMessage::Attach(AttachMessage::EditDir)));
+        app.update(msg);
+        assert!(matches!(app.overlay, Overlay::AttachDir));
+        assert!(app.attach_dir.open);
+        assert_eq!(app.attach_dir.buffer.value, ".", "prefilled with the root");
+        // The prompt asks the core for hints on the text it opened with.
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            shuvarie_core::Command::ListDirectories { token: 0, ref path } if path == "."
+        ));
+        // Keys now edit the prompt, not the picker.
+        let key = termina::event::KeyEvent::new(KeyCode::Escape, termina::event::Modifiers::NONE);
+        assert!(matches!(
+            app.map_event(Event::Terminal(TermEvent::Key(key))),
+            Some(AppMessage::AttachDir(DirPromptMessage::Cancel))
+        ));
+        // Escape goes back to the still-open picker without re-ranking.
+        app.update(AppMessage::AttachDir(DirPromptMessage::Cancel));
+        assert!(matches!(app.overlay, Overlay::Attach));
+        assert!(!app.attach_dir.open);
+        assert!(rx.try_recv().is_err(), "the root did not change");
+        // A new directory is re-ranked straight away.
+        app.update(AppMessage::Attach(AttachMessage::EditDir));
+        app.attach_dir.buffer.set(&dir.path().to_string_lossy());
+        app.update(AppMessage::AttachDir(DirPromptMessage::Submit));
+        assert!(matches!(app.overlay, Overlay::Attach), "back to the picker");
+        assert!(!app.attach_dir.open);
+        // The reopened prompt asked for hints on its own prefill first; the
+        // re-ranking request follows it.
+        let sent = take_commands(&mut rx);
+        assert!(
+            sent.iter()
+                .any(|cmd| matches!(cmd, shuvarie_core::Command::ListDirectories { .. })),
+            "the prompt hints on open"
+        );
+        assert!(matches!(
+            sent.last(),
+            Some(shuvarie_core::Command::SearchAttachments { dir: Some(searched), query, .. })
+                if Path::new(searched) == dir.path() && query.is_empty()
+        ));
+        // A path that is not a directory keeps the prompt open with the reason.
+        app.update(AppMessage::Attach(AttachMessage::EditDir));
+        app.attach_dir.buffer.set("definitely-not-a-directory-xyz");
+        app.update(AppMessage::AttachDir(DirPromptMessage::Submit));
+        assert!(matches!(app.overlay, Overlay::AttachDir));
+        assert!(app.attach_dir.open);
+        assert!(
+            app.attach_dir
+                .error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("not a directory:")),
+            "{:?}",
+            app.attach_dir.error
+        );
+        // The refused text still asks for hints (typing always does), but the
+        // picker is never re-rooted onto a path that is not a directory.
+        let sent = take_commands(&mut rx);
+        assert!(
+            sent.iter()
+                .all(|cmd| matches!(cmd, shuvarie_core::Command::ListDirectories { .. })),
+            "{sent:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_directory_prompt_hints_and_completes_paths() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path();
+        std::fs::create_dir(root.join("docs")).unwrap();
+        std::fs::create_dir(root.join("docs-old")).unwrap();
+        let (mut app, mut rx) = app_with_rx(connected());
+        active_session(&mut app);
+        app.open_attach_finder(Some(root.to_string_lossy().into_owned()));
+        rx.try_recv().expect("the picker's ranking request");
+        app.update(AppMessage::Attach(AttachMessage::EditDir));
+        assert!(matches!(app.overlay, Overlay::AttachDir));
+        // The prompt's opening hint request is answered by the core.
+        rx.try_recv().expect("the prompt's hint request");
+        // Typing a partial path asks the core for its completions.
+        let typed = format!("{}/doc", root.to_string_lossy());
+        app.attach_dir.buffer.set(&typed);
+        app.update(AppMessage::AttachDir(DirPromptMessage::Next));
+        let token = match take_commands(&mut rx).pop() {
+            Some(shuvarie_core::Command::ListDirectories { token, path }) => {
+                assert_eq!(path, typed, "the typed text travels as-is");
+                token
+            }
+            other => panic!("expected a directory hint request: {other:?}"),
+        };
+        app.update(AppMessage::AttachDir(DirPromptMessage::Hints {
+            token,
+            items: vec![
+                format!("{}/docs", root.to_string_lossy()),
+                format!("{}/docs-old", root.to_string_lossy()),
+            ],
+        }));
+        // Tab completes the highlighted hint into the input line.
+        app.update(AppMessage::AttachDir(DirPromptMessage::AcceptHint));
+        assert_eq!(
+            app.attach_dir.buffer.value,
+            format!("{}/docs", root.to_string_lossy())
+        );
+        // Enter accepts it: the picker re-roots at the completed directory.
+        app.update(AppMessage::AttachDir(DirPromptMessage::Submit));
+        assert!(matches!(app.overlay, Overlay::Attach));
+        let sent = take_commands(&mut rx);
+        assert!(matches!(
+            sent.last(),
+            Some(shuvarie_core::Command::SearchAttachments { dir, .. })
+                if dir.as_deref() == Some(format!("{}/docs", root.to_string_lossy()).as_str())
+        ));
     }
 
     #[tokio::test]
