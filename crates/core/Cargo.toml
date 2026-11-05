@@ -11,21 +11,9 @@ categories.workspace = true
 
 [dependencies]
 dirs.workspace = true
-# The engine behind `glob`, `fuzzy_find`, `grep` and `lsp analyze`, which all
-# index a root with it: `glob` filters the index by a single glob,
-# `fuzzy_find` ranks it, `grep` greps it through a line-oriented sink with
-# per-file caps and a `regex::bytes` mode, and `lsp analyze` takes its file set
-# from it. Heavy for what it replaces -- `git2` (vendored libgit2) and
-# LMDB/`heed` arrive unconditionally -- but it is the point of those tools. Only
-# the pure-Rust walker is wanted; the `zlob` backend needs Zig at build time.
 fff-search.workspace = true
 futures-util.workspace = true
 unicode-normalization = "0.1"
-# fff keeps its own copy private (`index` is `pub(crate)`, and an uncompilable
-# glob silently matches nothing), so `glob` validates the pattern itself and
-# `grep` re-checks its `include` per hit, where fff's literal fallback would
-# otherwise drop the constraint. Same 0.4 line fff is built on, so this unifies
-# to the single version already in the graph.
 globset = "0.4"
 html-to-markdown-rs = { version = "3", default-features = false }
 image.workspace = true

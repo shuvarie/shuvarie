@@ -135,9 +135,6 @@ categories = [
 
 [workspace.dependencies]
 base64 = "0.23"
-# The clock selune's peak/off-peak schedules are expressed in (and the
-# `chrono_tz` timezones it re-exports). Kept direct only where schedule math
-# needs it; timestamps stay on `jiff`.
 chrono = "0.4"
 dirs = "7"
 fff-search = "0.11"
@@ -148,13 +145,6 @@ jiff = "0.2"
 kdl = "6.7"
 regex = "1"
 reqwest = "0.13"
-# The codemode scripting language. `serde` is the JSON bridge tools use to
-# cross between the host and a script; nothing else is wanted from it (no
-# `sync`, no `no_module` -- static modules are the call surface).
-# 1.27's `compact_str` feature is deliberately *not* on: it only swaps the type
-# behind `ImmutableString`/`Map` keys, and `smartstring` -- archived and
-# unmaintained (RUSTSEC-2026-0249) -- stays a hard dependency either way until
-# Rhai 2.0, so the swap buys nothing and changes the key type for no reason.
 rhai = { version = "1.27", features = ["serde"] }
 # Do NOT include `rig`. It has too many implicit dependencies: the facade
 # declares every vector-store and embedding integration as an optional
@@ -174,13 +164,6 @@ rig-reqwest = { version = "0.46", default-features = false }
 rmcp = { version = "3.4", default-features = false }
 selune = "0.5"
 serde = { version = "1", features = ["derive"] }
-# rig-core 0.46 stopped forcing these two features (it forced both through
-# 0.45). Without them JSON object keys sort by name -- including the schema
-# properties of every tool definition and the JSON text of tool results -- and
-# parsing a float can change its low bits, so the text a provider sent is not
-# the text replayed. Both are stated here to keep a request's bytes what they
-# were before the upgrade: `preserve_order` for a stable prompt prefix and the
-# provider's own key order, `float_roundtrip` for exact numbers.
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 sha2 = "0.11"
 shuvarie-codemode = { path = "crates/codemode", version = "0.5" }
