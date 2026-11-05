@@ -1,10 +1,39 @@
 # Changelog
 
-## [unreleased]
+## [0.6.0] - 2026-11-05
+
+### 🚀 Features
+
+- Add api key env var support
+- *(tree)* Add branch deletion
+- *(codemode)* Upgrade to rhai 1.27
+- *(tui)* Tabs (#107)
+- *(tui)* Add unstaged warning
+- [**breaking**] FFF-based agent search and TUI search (#108)
+- *(tui)* Add attachment management
+- *(tool)* Use FFF for glob
+- Replace nucleo with neo_frizbee for fuzzy match
 
 ### 📚 Documentation
 
 - Add ai usage generation notice
+
+### ⚡ Performance
+
+- Stabilize context (#105)
+
+### 🚜 Refactor
+
+- Lsp with fff
+- Rename `fuzzy_find` to `file_search`
+
+### 🎨 Styling
+
+- *(screensaver)* Add lightning effect
+
+### ⚙️ Miscellaneous Tasks
+
+- Remove comments
 ## [0.5.6] - 2026-10-30
 
 ### 🐛 Bug Fixes
