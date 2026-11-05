@@ -2883,7 +2883,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7518b930f6aeb75e871d32ce873c2ae46e35cef19b5a0b039d4337f651d897cd"
 dependencies = [
  "bstr",
- "hashbrown 0.16.1",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -7060,9 +7060,9 @@ checksum = "2ab42ca02749e120097e328d91d415325bdf43b1c72c4c8badf37375fe40a813"
 
 [[package]]
 name = "selune"
-version = "0.5.4"
+version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d939289cb51de63970761322fdc0a683516a8369e6bf47c8d4b29bdbee905f0e"
+checksum = "a615c2a8d7de81e6de46cfdd785e232f4f6dae2a07ab738073c2a92fa03fdc01"
 dependencies = [
  "chrono",
  "chrono-tz",
