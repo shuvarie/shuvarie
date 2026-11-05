@@ -90,7 +90,6 @@ tui-scrollbar = "0.2.8"
 tokio.workspace = true
 unicode-width.workspace = true
 uuid.workspace = true
-fff-search = "0.11.0"
 
 [features]
 default = []
@@ -141,6 +140,7 @@ base64 = "0.23"
 # needs it; timestamps stay on `jiff`.
 chrono = "0.4"
 dirs = "7"
+fff-search = "0.11"
 futures-util = { version = "0.3", default-features = false, features = ["std", "alloc"] }
 http = "1"
 image = "0.25"

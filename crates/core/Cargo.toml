@@ -18,7 +18,7 @@ dirs.workspace = true
 # from it. Heavy for what it replaces -- `git2` (vendored libgit2) and
 # LMDB/`heed` arrive unconditionally -- but it is the point of those tools. Only
 # the pure-Rust walker is wanted; the `zlob` backend needs Zig at build time.
-fff-search = "0.11"
+fff-search.workspace = true
 futures-util.workspace = true
 unicode-normalization = "0.1"
 # fff keeps its own copy private (`index` is `pub(crate)`, and an uncompilable

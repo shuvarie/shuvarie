@@ -7450,7 +7450,6 @@ dependencies = [
  "clap",
  "color-eyre",
  "dirs 7.0.0",
- "fff-search",
  "flate2",
  "frameplay",
  "futures-util",
