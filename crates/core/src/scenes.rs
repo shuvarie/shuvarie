@@ -65,7 +65,7 @@ const READ_ROSTER: [&str; 11] = [
     "list_dir",
     "grep",
     "glob",
-    "fuzzy_find",
+    "file_search",
     "skill",
     "lsp",
     "webfetch",
@@ -1085,7 +1085,7 @@ mod tests {
             "list_dir",
             "grep",
             "glob",
-            "fuzzy_find",
+            "file_search",
             "lsp",
             "webfetch",
             "question",
@@ -1121,7 +1121,7 @@ mod tests {
     fn reviewer_scene_allows_shell_but_no_edits() {
         let scene = resolve_builtin(REVIEWER_SCENE_NAME, None);
         let tools = scene.tools();
-        for tool in ["read_file", "grep", "glob", "fuzzy_find", "run_shell"] {
+        for tool in ["read_file", "grep", "glob", "file_search", "run_shell"] {
             assert!(tools.allows(tool), "Reviewer keeps {tool}");
         }
         for tool in ["write_file", "edit_file", "apply_patch", "delete_file"] {

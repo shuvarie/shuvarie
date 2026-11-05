@@ -4,7 +4,7 @@ mod delete_file;
 #[cfg(test)]
 mod e2e_tests;
 mod edit_file;
-mod fuzzy_find;
+mod file_search;
 mod glob;
 mod grep;
 mod list_dir;
@@ -37,7 +37,7 @@ use crate::shell::Shell;
 
 use decide::Decide;
 use edit_file::EditFile;
-use fuzzy_find::FuzzyFind;
+use file_search::FileSearch;
 use glob::Glob;
 use grep::Grep;
 use list_dir::ListDir;
@@ -329,8 +329,8 @@ pub fn all_tools(
     tools.extend(scene_tool("glob", scene, &access, true, |access| {
         Glob::new(access)
     }));
-    tools.extend(scene_tool("fuzzy_find", scene, &access, true, |access| {
-        FuzzyFind::new(access)
+    tools.extend(scene_tool("file_search", scene, &access, true, |access| {
+        FileSearch::new(access)
     }));
     if !skills.is_empty() {
         tools.extend(scene_tool(
@@ -455,8 +455,8 @@ pub fn read_tools(
     tools.extend(scene_tool("glob", scene, &access, true, |access| {
         Glob::new(access)
     }));
-    tools.extend(scene_tool("fuzzy_find", scene, &access, true, |access| {
-        FuzzyFind::new(access)
+    tools.extend(scene_tool("file_search", scene, &access, true, |access| {
+        FileSearch::new(access)
     }));
     if !skills.is_empty() {
         tools.extend(scene_tool(
@@ -617,7 +617,7 @@ mod tests {
             "list_dir",
             "grep",
             "glob",
-            "fuzzy_find",
+            "file_search",
             "lsp",
             "webfetch",
             "question",

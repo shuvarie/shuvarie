@@ -209,7 +209,7 @@ fn resolve(root: &Path, path: &str) -> Result<PathBuf, String> {
 /// The files `lsp analyze` opens: the target itself, or everything the fff
 /// index found under it, capped at [`ANALYZE_MAX_FILES`].
 ///
-/// The walk is the one `glob`, `grep` and `fuzzy_find` index with, so a
+/// The walk is the one `glob`, `grep` and `file_search` index with, so a
 /// repository's `.gitignore` keeps build output out of the budget and `.git/`
 /// and `node_modules/` are never descended into. The `ignore` walk this
 /// replaces kept hidden entries, walked `.git/objects` and spent most of the

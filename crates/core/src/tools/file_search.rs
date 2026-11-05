@@ -13,25 +13,25 @@ use super::{arg_value, display_path, is_hidden_path};
 
 const DEFAULT_MAX_RESULTS: usize = 20;
 
-pub(crate) struct FuzzyFind {
+pub(crate) struct FileSearch {
     access: Access,
 }
 
-impl FuzzyFind {
+impl FileSearch {
     pub(crate) fn new(access: Access) -> Self {
         Self { access }
     }
 }
 
-impl Tool for FuzzyFind {
-    const NAME: &'static str = "fuzzy_find";
+impl Tool for FileSearch {
+    const NAME: &'static str = "file_search";
 
     type Args = Value;
     type Output = ToolOutput;
     type Error = ToolExecutionError;
 
     fn description(&self) -> String {
-        "Fuzzy file finder (fff-search FFF engine): ranks the paths indexed under `path` by how well they match `query`, best match first, and prints them one per line. The match is fuzzy and typo-tolerant, and prefers hits in the file name over hits in parent directories, plus files touched by recent commits -- use it to locate a file whose exact path you do not know, where `glob` needs the pattern already. The query may also carry FFF's constraints: '*.rs' / 'type:rust' narrow by extension/type, 'src/' by path segment, '!test' excludes matches, and several words are matched independently. Honours .gitignore inside git repositories and skips hidden files/directories (unless `path` names one explicitly). Paths are prefixed with `path` as given, so they can be passed straight to `read_file`. Results are capped (default 20)."
+        "Fuzzy file search (fff-search FFF engine): ranks the paths indexed under `path` by how well they match `query`, best match first, and prints them one per line. The match is fuzzy and typo-tolerant, and prefers hits in the file name over hits in parent directories, plus files touched by recent commits -- use it to locate a file whose exact path you do not know, where `glob` needs the pattern already. The query may also carry FFF's constraints: '*.rs' / 'type:rust' narrow by extension/type, 'src/' by path segment, '!test' excludes matches, and several words are matched independently. Honours .gitignore inside git repositories and skips hidden files/directories (unless `path` names one explicitly). Paths are prefixed with `path` as given, so they can be passed straight to `read_file`. Results are capped (default 20)."
             .to_string()
     }
 
@@ -39,7 +39,7 @@ impl Tool for FuzzyFind {
         json!({
             "type": "object",
             "properties": {
-                "query": { "type": "string", "description": "Fuzzy pattern matched against file paths (e.g. 'fuzzyfind', 'fuzzy fnd', 'tools fuzzy'); may include constraints like '*.rs', 'type:rust', 'src/' or '!test'" },
+                "query": { "type": "string", "description": "Fuzzy pattern matched against file paths (e.g. 'filesearch', 'file srch', 'tools file'); may include constraints like '*.rs', 'type:rust', 'src/' or '!test'" },
                 "path": { "type": "string", "description": "Directory to search, relative to the workspace root (defaults to the workspace root)" },
                 "max_results": { "type": "integer", "minimum": 1, "description": "Maximum number of paths (default 20)" }
             },
@@ -68,12 +68,12 @@ impl Tool for FuzzyFind {
             let abs = access.resolve_read(&path)?;
             access.authorize_path(PathKind::Read, &abs, &path).await?;
             if abs.is_file() {
-                return Err(format!("fuzzy_find path must be a directory: {path}"));
+                return Err(format!("file_search path must be a directory: {path}"));
             }
 
             tokio::task::spawn_blocking(move || search(&abs, &path, &query, max))
                 .await
-                .map_err(|e| format!("fuzzy_find: {e}"))
+                .map_err(|e| format!("file_search: {e}"))
                 .and_then(|inner| inner)
                 .map(ToolOutput::text)
         }
@@ -122,10 +122,10 @@ fn search(root: &Path, display_root: &str, query: &str, max: usize) -> Result<St
         cache_budget: Some(ContentCacheBudget::with_max_files(0)),
         ..Default::default()
     })
-    .map_err(|e| format!("fuzzy_find: {e}"))?;
+    .map_err(|e| format!("file_search: {e}"))?;
     picker
         .collect_files()
-        .map_err(|e| format!("fuzzy_find: {e}"))?;
+        .map_err(|e| format!("file_search: {e}"))?;
 
     // fff paginates the ranked list; page through it until enough hits survive
     // the hidden filter, since the filter is applied after ranking and dropping
@@ -187,7 +187,7 @@ mod tests {
     use crate::test_util::{new_ctx, tempdir};
 
     async fn find(args: Value) -> Result<String, String> {
-        FuzzyFind::new(crate::test_util::access())
+        FileSearch::new(crate::test_util::access())
             .call(&mut new_ctx(), args)
             .await
             .map(|out| out.as_text().unwrap().to_string())
@@ -195,20 +195,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fuzzy_find_locates_a_file_from_a_typo() {
+    async fn file_search_locates_a_file_from_a_typo() {
         let (dir, _guard) = tempdir();
         std::fs::create_dir_all("crates/core/src/tools").unwrap();
-        std::fs::write("crates/core/src/tools/fuzzy_find.rs", "").unwrap();
+        std::fs::write("crates/core/src/tools/file_search.rs", "").unwrap();
         std::fs::write("crates/core/src/main.rs", "").unwrap();
         std::fs::write("README.md", "").unwrap();
-        let out = find(json!({ "query": "fuzzyfind" })).await.unwrap();
+        let out = find(json!({ "query": "filesearch" })).await.unwrap();
         let first = out.lines().next().unwrap();
-        assert_eq!(first, "crates/core/src/tools/fuzzy_find.rs", "{out}");
+        assert_eq!(first, "crates/core/src/tools/file_search.rs", "{out}");
         drop(dir);
     }
 
     #[tokio::test]
-    async fn fuzzy_find_prefers_the_filename_over_a_parent_directory() {
+    async fn file_search_prefers_the_filename_over_a_parent_directory() {
         let (dir, _guard) = tempdir();
         std::fs::create_dir_all("render").unwrap();
         std::fs::write("render/chat.rs", "").unwrap();
@@ -221,7 +221,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fuzzy_find_honors_a_glob_constraint() {
+    async fn file_search_honors_a_glob_constraint() {
         let (dir, _guard) = tempdir();
         std::fs::write("notes.rs", "").unwrap();
         std::fs::write("notes.txt", "").unwrap();
@@ -232,7 +232,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fuzzy_find_prefixes_hits_with_the_search_root() {
+    async fn file_search_prefixes_hits_with_the_search_root() {
         let (dir, _guard) = tempdir();
         std::fs::create_dir_all("crates/core").unwrap();
         std::fs::write("crates/core/search.rs", "").unwrap();
@@ -248,7 +248,7 @@ mod tests {
     /// fff indexes dot entries inside a git repository; the tool's own filter
     /// must not hand `.env` or `.shuvarie/` back to the model.
     #[tokio::test]
-    async fn fuzzy_find_skips_hidden_inside_a_repository() {
+    async fn file_search_skips_hidden_inside_a_repository() {
         let (dir, _guard) = tempdir();
         std::fs::create_dir(".git").unwrap();
         std::fs::write(".env", "").unwrap();
@@ -263,7 +263,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fuzzy_find_caps_results_and_says_so() {
+    async fn file_search_caps_results_and_says_so() {
         let (dir, _guard) = tempdir();
         for i in 0..5 {
             std::fs::write(format!("match_{i}.txt"), "").unwrap();
@@ -281,7 +281,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fuzzy_find_answers_the_same_way_twice() {
+    async fn file_search_answers_the_same_way_twice() {
         let (dir, _guard) = tempdir();
         for i in 0..5 {
             std::fs::write(format!("same_{i}.txt"), "").unwrap();
@@ -293,7 +293,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fuzzy_find_reports_no_matches() {
+    async fn file_search_reports_no_matches() {
         let (dir, _guard) = tempdir();
         std::fs::write("notes.txt", "").unwrap();
         let out = find(json!({ "query": "zzzzzzzz" })).await.unwrap();
@@ -304,7 +304,7 @@ mod tests {
     /// fff would answer a single character with every file ranked by recency,
     /// which is not the question a fuzzy search asks.
     #[tokio::test]
-    async fn fuzzy_find_rejects_a_one_character_query() {
+    async fn file_search_rejects_a_one_character_query() {
         let (dir, _guard) = tempdir();
         std::fs::write("a.txt", "").unwrap();
         let err = find(json!({ "query": "a" })).await.unwrap_err();
@@ -313,7 +313,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fuzzy_find_rejects_file_path() {
+    async fn file_search_rejects_file_path() {
         let (dir, _guard) = tempdir();
         std::fs::write("a.txt", "").unwrap();
         let err = find(json!({ "query": "a.txt", "path": "a.txt" }))

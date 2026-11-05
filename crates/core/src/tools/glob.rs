@@ -31,7 +31,7 @@ impl Tool for Glob {
     type Error = ToolExecutionError;
 
     fn description(&self) -> String {
-        "Fast file pattern matching tool that works with any codebase size. Matches file paths against a single glob (fff-search engine): `*.rs` also reaches nested files, `src/**/*.ts` narrows to a subtree, and `?`, `[abc]` and `{a,b}` work as usual. Honours .gitignore inside git repositories and skips hidden files/directories (unless `path` names one explicitly). Returns file paths -- never directories -- prefixed with `path` as given, sorted, and capped at 100; use it when you already know the pattern, where `fuzzy_find` handles a half-remembered name."
+        "Fast file pattern matching tool that works with any codebase size. Matches file paths against a single glob (fff-search engine): `*.rs` also reaches nested files, `src/**/*.ts` narrows to a subtree, and `?`, `[abc]` and `{a,b}` work as usual. Honours .gitignore inside git repositories and skips hidden files/directories (unless `path` names one explicitly). Returns file paths -- never directories -- prefixed with `path` as given, sorted, and capped at 100; use it when you already know the pattern, where `file_search` handles a half-remembered name."
             .to_string()
     }
 
@@ -78,7 +78,7 @@ impl Tool for Glob {
 
 /// One glob call, driven by a fresh fff index of the search root.
 ///
-/// Like `grep` and `fuzzy_find`, every call builds its own picker:
+/// Like `grep` and `file_search`, every call builds its own picker:
 /// [`FilePicker::collect_files`] is the synchronous scan (no background
 /// watcher, no frecency database) and the picker is dropped with the call, so a
 /// file created or deleted between two calls is seen by the second one.
