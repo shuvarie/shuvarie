@@ -15,6 +15,9 @@
 //!
 //! The caption belongs to the page, not to the scene: it says what a key press
 //! does next, and the two pages that show this scene promise different things.
+//! The wordmark's box and the caption's row together are the block the text owns
+//! ([`text_block`]), which is what a caller painting over the finished page keeps
+//! out of.
 //!
 //! The rook is the artwork from the `shuvarie-artwork` repository, embedded in
 //! the binary as the pixel grid itself and painted as half blocks in the theme's
@@ -401,6 +404,17 @@ fn rook_rect(area: Rect) -> Option<Rect> {
         width,
         height,
     ))
+}
+
+/// The block the page's *text* owns: the wordmark's box and the caption's row
+/// under it, clipped to the viewport. [`paint`] rewrites it every frame; it is
+/// reported so that whatever is painted over the finished page — the
+/// screensaver's storm — can keep out of it and leave the title and the one line
+/// that says how to get out of the scene alone.
+pub fn text_block(area: Rect) -> Rect {
+    let wordmark = wordmark_rect(area);
+    let height = (wordmark.height + 1).min(area.bottom().saturating_sub(wordmark.y));
+    Rect::new(wordmark.x, wordmark.y, wordmark.width, height)
 }
 
 /// Whether the artwork inks the pixel `column` art columns across and `art_row`

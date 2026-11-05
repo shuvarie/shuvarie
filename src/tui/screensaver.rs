@@ -7,6 +7,12 @@
 //! the scene here is dismissed. Ctrl+C keeps its app-wide meaning and asks to
 //! quit, as it does on every page of onboarding.
 //!
+//! Onboarding's title is the quiet version of the scene; the screensaver's is the
+//! storm (`lightning`): every few seconds the sky glimmers and a bolt cracks down
+//! through it. The storm is painted over the finished page rather than into it, and
+//! its glimmer is a slight lift of the page's backgrounds, so the page onboarding
+//! shares stays the quiet one.
+//!
 //! Like onboarding it paints an opaque fullscreen page: `App::view` skips the
 //! session rather than painting it under the rain, so a long chat does not
 //! repaint sixty times a minute behind a scene nobody is reading. The one
@@ -27,6 +33,8 @@ use ratatui::layout::Rect;
 use termina::event::{KeyCode, KeyEvent, KeyEventKind, Modifiers};
 
 use super::welcome::art;
+
+mod lightning;
 
 /// What a key press does here — the one thing this page can promise. It is not
 /// onboarding's caption: that one pages on to the provider form, and this one
@@ -77,8 +85,15 @@ impl Screensaver {
     /// draw past its end.
     #[cfg(test)]
     pub(crate) fn settle(&mut self) {
+        self.rewind(art::ENTRANCE);
+    }
+
+    /// Back-dates the scene's clock to `age`, so a test can draw any one frame of
+    /// it — the storm's strikes land seconds in, and there is no waiting them out.
+    #[cfg(test)]
+    pub(crate) fn rewind(&mut self, age: Duration) {
         if self.open {
-            self.opened_at = Some(Instant::now() - art::ENTRANCE);
+            self.opened_at = Some(Instant::now() - age);
         }
     }
 
@@ -111,9 +126,18 @@ impl Screensaver {
     }
 
     /// The wall-clock delay until the scene's next frame — the render loop's
-    /// wake. `None` while it is down: the rain is all that moves here.
+    /// wake. `None` while it is down: nothing here moves without the scene up.
     pub fn animation_wake(&self) -> Option<Duration> {
-        self.open.then(|| art::next_wake(self.age())).flatten()
+        if !self.open {
+            return None;
+        }
+        let age = self.age();
+        // Whichever of the page's two clocks is sooner: the rain's next frame, or
+        // the storm's next stroke.
+        match (art::next_wake(age), lightning::next_wake(age)) {
+            (Some(rain), Some(storm)) => Some(rain.min(storm)),
+            (rain, storm) => rain.or(storm),
+        }
     }
 
     /// Any key press dismisses the scene. Ctrl+C is the exception: it asks to
@@ -145,8 +169,16 @@ impl Screensaver {
     /// Paints the scene fullscreen. A closed screensaver draws nothing at all,
     /// so a stray call cannot cover the session.
     pub fn view(&self, frame: &mut Frame<'_>, area: Rect) {
-        if self.open {
-            art::view(frame, area, self.age(), CAPTION);
+        if !self.open {
+            return;
+        }
+        let age = self.age();
+        art::view(frame, area, age, CAPTION);
+        // The storm plays over the page the scene has arrived on and never over the
+        // sweep still carrying it in: light ahead of the entrance's edge would be
+        // painted onto the session before the page had covered it.
+        if age >= art::ENTRANCE {
+            lightning::view(frame, area, age);
         }
     }
 }
@@ -269,6 +301,15 @@ mod tests {
         terminal.backend().buffer().clone()
     }
 
+    /// Whether the bolt is on the page: the channel's own glyphs, which nothing else
+    /// in the scene paints — the rain's arrows are `\`, the rook half blocks, and the
+    /// wordmark its pixels.
+    fn bolt_on(buf: &Buffer) -> bool {
+        buf.area
+            .positions()
+            .any(|pos| matches!(buf[pos].symbol(), "│" | "╱" | "╲"))
+    }
+
     /// Whether the entrance has reached `(x, y)`. Ahead of its edge the page has
     /// not painted at all, so the screen underneath still stands there.
     fn reached(buf: &Buffer, x: u16, y: u16) -> bool {
@@ -371,6 +412,42 @@ mod tests {
         assert!(
             !screensaver.sweeping_in(),
             "a scene that has arrived stands on its own page"
+        );
+    }
+
+    /// The storm plays over the page the screensaver settles on, on the same clock
+    /// the page reports: the screensaver hands the age to the scene's drawing and to
+    /// the storm's, so a strike lights and cracks over the page the scene arrived on
+    /// rather than over the screen it swept away.
+    #[test]
+    fn the_storm_throws_its_bolt_over_the_page_the_scene_settles_on() {
+        let _guard = crate::tui::theme::lock_for_tests();
+        let mut screensaver = raised();
+
+        // The storm's clock is the page's own age, so a strike lands where the
+        // storm's schedule puts it in that age — a good while past the entrance's
+        // end, which is what leaves the sweep unstruck.
+        screensaver.rewind(lightning::strike_at(0));
+        let struck = draw(&screensaver, 80, 24);
+        assert!(
+            bolt_on(&struck),
+            "a strike throws its bolt over the settled page"
+        );
+        assert_ne!(
+            struck[(0, 0)].style().bg,
+            Some(crate::tui::theme::bg()),
+            "and lifts the sky it cracks through"
+        );
+
+        // Between strikes the page is the scene's own, with nothing of the storm on
+        // it at all.
+        screensaver.rewind(lightning::strike_at(1) - Duration::from_millis(500));
+        let quiet = draw(&screensaver, 80, 24);
+        assert!(!bolt_on(&quiet), "a quiet sky leaves the page alone");
+        assert_eq!(
+            quiet[(0, 0)].style().bg,
+            Some(crate::tui::theme::bg()),
+            "with the plate exactly as the scene drew it"
         );
     }
 }

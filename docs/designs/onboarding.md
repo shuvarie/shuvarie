@@ -56,6 +56,9 @@ a configured provider.
   page's own ink, which is exactly the screen the screensaver is sweeping away. The two clocks — the
   rain's frame and the age the page reports — both arrive as arguments: `art` reads no clock of its
   own beyond the rain's, and the page that owns the lifespan keeps it.
+  The block the page's *text* owns — the wordmark's box and the caption's row under it — is what
+  `text_block` reports, so whatever is painted over the finished page (the screensaver's storm) keeps
+  out of it instead of eating the title.
 - `src/tui/app.rs`: `welcome.open` is the single "onboarding is running" flag. `App::view` skips
   every session widget while it is set, `welcome_overlay(stage)` maps the stage onto the overlay
   that routes that page's keys, pastes, and registry events (`Welcome` for the interstitial pages,
@@ -82,7 +85,9 @@ a configured provider.
   driven, so the title animates without any render-loop state. The scene's wake is the sooner of its
   rain and its entrance (`art::next_wake`), and the entrance's frames are the faster of the two — a
   gradient crossing the page in the eleven steps the rain's twelve frames a second would give it reads
-  as dropped frames rather than as animation.
+  as dropped frames rather than as animation. The screensaver's wake is the sooner of that and the
+  storm's (`lightning::next_wake`): a stroke's frame while a strike is burning, and otherwise the next
+  strike, which is further off than the rain's own frame, so a quiet storm costs the loop nothing.
 
 ## `/screensaver`: the same scene over a live session
 
@@ -115,3 +120,32 @@ wants to watch the rain. It shares the drawing and none of the flow.
 - The caption belongs to the page, not the scene: `art::view` takes it as a parameter, so the title
   page can promise the provider form and the screensaver can promise the session back. `welcome.rs`
   owns `CONTINUE_CAPTION`, shared by both of its interstitial pages.
+
+### The storm
+
+Onboarding's title is the quiet version of the scene; the screensaver's is the storm.
+
+- `src/tui/screensaver/lightning.rs`: a bolt cracking down the sky every few seconds. It paints *over*
+  the finished page rather than into it, which is what leaves the page onboarding shares the quiet one.
+  A strike does two things, and neither rewrites the page: a **slight** wash lifts every cell's
+  background a little way toward the page's own ink (`theme::mix`, `WASH`), so the rain, the rook and
+  the wordmark keep their colours and read as silhouettes against a sky that has only just stirred
+  rather than against a glare that repaints them — `the_flash_is_slight_and_leaves_the_pages_ink_alone`
+  caps the lift at a quarter of the plate-to-ink span per channel — and the bolt writes the channel's
+  glyphs in the page's own ink (`a_strike_writes_only_the_channel_over_the_page`). No cell's symbol or
+  foreground is touched by the wash, and no cell's plate by the bolt. The bolt keeps out of
+  `art::text_block`, so a strike breaks around the title instead of eating it.
+- It is a pure function of one clock, the age the screensaver reports for the page, the way the scene
+  is of its two: raising the scene again restarts the storm with it, and nothing is kept from frame to
+  frame. A strike lands in a slot of `STRIKE_PERIOD_MS`, held back by a jitter taken from the slot's
+  hash — irregular to watch, while the slots keep two strikes from ever overlapping, so one bolt is on
+  the page at a time. Within its slot a strike flickers rather than fades: `STROKE` gives its brightness
+  frame by frame at thirty frames a second — the return stroke, the sky dimming while the channel
+  discharges, a weaker second stroke, then the afterglow decaying — and the bolt is on the page only on
+  the frames at or above `BOLT` (`a_strike_flickers_rather_than_fading`). The bolt is drawn from the
+  strike's seed rather than stored — a channel that enters on the top row, walks down a row at a time,
+  steps a column now and then and forks once on its way down.
+- `Screensaver::view` paints the storm only past `art::ENTRANCE`. The entrance is carrying the page in
+  over the session, and light ahead of its edge would be painted onto the screen it is wiping away; the
+  storm's own schedule leaves the opening strike until well after the page has arrived, so the scene
+  comes up in the rain and is struck a beat later.

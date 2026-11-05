@@ -94,6 +94,21 @@ fn blend(a: Rgb, b: Rgb, t: f32) -> Rgb {
     (mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2))
 }
 
+/// Blends two colors of the active palette, `t` of the way from `from` to `to`,
+/// with `t` clamped to the ends of that range. For the effects that *tint* what is
+/// already on the page rather than pick a tone off it — the screensaver's lightning
+/// wash lifting the plate toward the page's own ink.
+///
+/// A pair that is not both RGB resolves to one color or the other: a palette is
+/// always painted as RGB, so this only catches a caller that reached past the
+/// palette accessors.
+pub fn mix(from: Color, to: Color, t: f32) -> Color {
+    let (Color::Rgb(fr, fg, fb), Color::Rgb(tr, tg, tb)) = (from, to) else {
+        return if t < 0.5 { from } else { to };
+    };
+    paint(blend((fr, fg, fb), (tr, tg, tb), t.clamp(0.0, 1.0)))
+}
+
 /// The chat search-match highlight: a golden tint blended between the
 /// selection background and the warning accent, distinct from both so
 /// matches never read as a mouse selection.
