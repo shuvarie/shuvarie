@@ -8,6 +8,9 @@ pub enum CommandAction {
     /// Attach files to the next prompt through a fuzzy finder over the current
     /// directory: `/attach [path]` searches `path` instead.
     Attach,
+    /// Manage the composer's pending attachments in one dialog: add through the
+    /// same finder, reorder, and remove.
+    ManageAttachments,
     OpenSessionPicker,
     OpenTree,
     OpenTodos,
@@ -40,11 +43,12 @@ pub enum CommandAction {
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 30] = [
+    pub const ALL: [CommandAction; 31] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::AddDecisionProvider,
         CommandAction::Attach,
+        CommandAction::ManageAttachments,
         CommandAction::OpenSessionPicker,
         CommandAction::OpenTree,
         CommandAction::OpenTodos,
@@ -79,6 +83,7 @@ impl CommandAction {
             CommandAction::AddProvider => "provider",
             CommandAction::AddDecisionProvider => "decision-provider",
             CommandAction::Attach => "attach",
+            CommandAction::ManageAttachments => "manage-attachments",
             CommandAction::OpenSessionPicker => "sessions",
             CommandAction::OpenTree => "tree",
             CommandAction::OpenTodos => "todo",
@@ -212,6 +217,11 @@ pub fn default_commands() -> Vec<CommandEntry> {
             "Attach files",
             "Fuzzy-find a file to attach; optional directory",
             CommandAction::Attach,
+        ),
+        CommandEntry::builtin(
+            "Manage attachments",
+            "Add, reorder, or remove pending attachments",
+            CommandAction::ManageAttachments,
         ),
         CommandEntry::builtin(
             "Switch session",
@@ -614,6 +624,16 @@ mod tests {
                 args: None
             })
         );
+        // The hyphenated alias, and no arguments: the dialog works on the strip
+        // rather than a named directory like `/attach`.
+        assert_eq!(
+            parse_command("/manage-attachments"),
+            Some(ParsedCommand {
+                action: CommandAction::ManageAttachments,
+                args: None
+            })
+        );
+        assert_eq!(parse_command("/manage-attachments docs"), None);
     }
 
     /// Every built-in is reachable from the Ctrl+M menu and the inline slash

@@ -38,3 +38,8 @@ The attachment feature spans the stack around one currency type: `shuvarie-llm`'
   core for that tree's index. `paste_path.rs` is the drop-payload classifier; `session.rs`
   holds the pending-attachment list — attachments are structural (picked, dropped, pasted,
   or read off the clipboard), never derived from the buffer text.
+- `src/tui/manage_attachments.rs`: the `/manage-attachments` dialog, the same strip as one
+  list to add to (Ctrl+A hands off to `attach.rs`, stacked over the dialog and returning to
+  it with the pick appended), reorder (`Ctrl+↑↓`, which is send order), and remove (Delete).
+  It owns only the cursor — the rows are `session.rs`'s pending attachments, so probes land
+  on the chips it paints and every edit is already on the strip when it closes.

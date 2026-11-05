@@ -33,6 +33,9 @@ use super::components::TextAreaMessage;
 use super::confirm_quit::{ConfirmQuit, ConfirmQuitEffect, ConfirmQuitMessage};
 use super::context::UpdateCtx;
 use super::history_search::{HistorySearch, HistorySearchEffect, HistorySearchMessage};
+use super::manage_attachments::{
+    ManageAttachments, ManageAttachmentsEffect, ManageAttachmentsMessage,
+};
 use super::model_picker::{ModelPicker, ModelPickerEffect, ModelPickerMessage};
 use super::notify;
 use super::peak_table::{PeakTableEffect, PeakTableMessage, PeakTablePopup};
@@ -73,6 +76,9 @@ pub enum Overlay {
     /// The `/attach` picker's directory prompt (Ctrl+D): one line naming the
     /// directory to search next.
     AttachDir,
+    /// The `/manage-attachments` dialog: the composer's pending attachments,
+    /// added to, reordered, and removed from in one place.
+    ManageAttachments,
     ModelPicker,
     CommandMenu,
     ConfirmQuit,
@@ -257,6 +263,7 @@ pub enum AppMessage {
     PeakTable(PeakTableMessage),
     Attach(AttachMessage),
     AttachDir(DirPromptMessage),
+    ManageAttachments(ManageAttachmentsMessage),
     /// The render loop's spinner wake: refresh the animated spinner renders.
     SpinnerUpdate,
     /// The render loop's countdown wake: refresh the sidebar's peak/off-peak
@@ -364,6 +371,8 @@ pub struct App {
     pub attach: AttachFinder,
     /// The picker's directory prompt (Ctrl+D).
     pub attach_dir: DirPrompt,
+    /// The `/manage-attachments` dialog: the strip as a reorderable list.
+    pub manage_attachments: ManageAttachments,
     pub warning: WarningPopup,
     pub auth: AuthPopup,
     pub models: HashMap<String, Vec<Model>>,
@@ -732,6 +741,7 @@ impl App {
             peak_table: PeakTablePopup::new(),
             attach: AttachFinder::new(),
             attach_dir: DirPrompt::new(),
+            manage_attachments: ManageAttachments::new(),
             media_view: MediaViewer::new(image_cell, image_protocol),
             screensaver: Screensaver::new(),
             theme_choices,
@@ -1190,6 +1200,13 @@ impl App {
                         .update(AttachMessage::Resize { viewport_height: h });
                 }
             }
+            Overlay::ManageAttachments => {
+                if let Some(h) = manage_attachments_list_height(area) {
+                    let len = self.session.pending_attachments().len();
+                    self.manage_attachments
+                        .update(ManageAttachmentsMessage::Resize { viewport_height: h }, len);
+                }
+            }
             Overlay::HistorySearch => {
                 if let Some(h) = history_search_list_height(area) {
                     self.history_search
@@ -1432,6 +1449,12 @@ impl App {
                         }
                         Overlay::AttachDir => {
                             return self.attach_dir.map_event(&key).map(AppMessage::AttachDir);
+                        }
+                        Overlay::ManageAttachments => {
+                            return self
+                                .manage_attachments
+                                .map_event(&key)
+                                .map(AppMessage::ManageAttachments);
                         }
                         Overlay::None => {}
                     }
@@ -1929,7 +1952,8 @@ impl App {
             | Overlay::MediaViewer
             | Overlay::Screensaver
             | Overlay::Todos
-            | Overlay::PeakTable => None,
+            | Overlay::PeakTable
+            | Overlay::ManageAttachments => None,
             Overlay::ModelPicker => {
                 let flat = super::components::flatten_newlines(text);
                 let mut msg = None;
@@ -2251,19 +2275,40 @@ impl App {
                         // queued there and drained right away, since this hop
                         // bypasses `SessionMessage`.
                         self.session.attach_picked(path);
-                        self.close_overlay();
-                        for deferred in self.session.take_deferred_effects() {
-                            if let Some(app_effect) = self.handle_session_effect(deferred) {
-                                return Some(app_effect);
-                            }
+                        self.close_attach_finder();
+                        if let Some(app_effect) = self.drain_session_effects() {
+                            return Some(app_effect);
                         }
                     }
                     Some(AttachEffect::EditDir) => self.open_attach_dir_prompt(),
-                    Some(AttachEffect::Close) => self.close_overlay(),
+                    Some(AttachEffect::Close) => self.close_attach_finder(),
                     None => {}
                 }
                 // Every edit may need the core to re-rank the index.
                 self.request_attach_candidates();
+            }
+            AppMessage::ManageAttachments(m) => {
+                // The strip lives on the session, so the dialog reads its length
+                // per message instead of caching a copy that could go stale.
+                let len = self.session.pending_attachments().len();
+                if let Some(effect) = self.manage_attachments.update(m, len) {
+                    match effect {
+                        ManageAttachmentsEffect::Add => self.open_attach_finder(None),
+                        ManageAttachmentsEffect::Remove(index) => {
+                            self.session.remove_attachment(index);
+                            if let Some(app_effect) = self.drain_session_effects() {
+                                return Some(app_effect);
+                            }
+                        }
+                        ManageAttachmentsEffect::Move { from, to } => {
+                            self.session.move_attachment(from, to);
+                            if let Some(app_effect) = self.drain_session_effects() {
+                                return Some(app_effect);
+                            }
+                        }
+                        ManageAttachmentsEffect::Close => self.close_overlay(),
+                    }
+                }
             }
             AppMessage::AttachDir(m) => {
                 if let Some(effect) = self.attach_dir.update(m) {
@@ -3173,6 +3218,28 @@ impl App {
         self.request_attach_candidates();
     }
 
+    /// Leave the finder for whatever opened it: the `/manage-attachments` dialog
+    /// it was stacked over (its pick joins that list), or the composer.
+    fn close_attach_finder(&mut self) {
+        self.attach.close();
+        if self.manage_attachments.open {
+            self.overlay = Overlay::ManageAttachments;
+        } else {
+            self.close_overlay();
+        }
+    }
+
+    /// Send the core requests the session queued while the app edited it
+    /// directly (the strip's probes). An app hop that calls a session method
+    /// bypasses `SessionMessage`, so nothing else would flush them.
+    fn drain_session_effects(&mut self) -> Option<AppEffect> {
+        let mut first = None;
+        for deferred in self.session.take_deferred_effects() {
+            first = first.or(self.handle_session_effect(deferred));
+        }
+        first
+    }
+
     /// Open the picker's directory prompt, prefilled with its current root.
     fn open_attach_dir_prompt(&mut self) {
         let current = self.attach.root_label();
@@ -3256,6 +3323,10 @@ impl App {
             }
             CommandAction::Attach => {
                 self.open_attach_finder(args);
+            }
+            CommandAction::ManageAttachments => {
+                self.manage_attachments.open();
+                self.overlay = Overlay::ManageAttachments;
             }
             CommandAction::OpenSessionPicker => {
                 self.session_picker.open(self.session.session_id);
@@ -3555,6 +3626,7 @@ impl App {
         self.overlay = Overlay::None;
         self.attach.close();
         self.attach_dir.close();
+        self.manage_attachments.close();
         self.command_menu.close();
         self.add_provider_form = None;
         self.add_decision_provider_form = None;
@@ -3732,6 +3804,14 @@ impl App {
         }
         self.model_picker.view(frame, area, stacked, false);
         self.session_picker.view(frame, area, stacked);
+        // The manage dialog paints under the finder it can open, so its border
+        // dims while that picker is stacked over it.
+        self.manage_attachments.view(
+            frame,
+            area,
+            stacked || self.attach.open,
+            self.session.pending_attachments(),
+        );
         self.attach.view(frame, area, stacked);
         self.attach_dir.view(frame, area, stacked);
         self.tree_popup.view(frame, area, stacked);
@@ -3862,6 +3942,11 @@ fn session_picker_list_height(area: Rect) -> Option<u16> {
 fn attach_list_height(area: Rect) -> Option<u16> {
     // Query row + hint bar.
     overlay_inner_list_height(area, 64, 60, 2)
+}
+
+fn manage_attachments_list_height(area: Rect) -> Option<u16> {
+    // Hint bar.
+    overlay_inner_list_height(area, 70, 60, 1)
 }
 
 fn history_search_list_height(area: Rect) -> Option<u16> {
@@ -5542,6 +5627,150 @@ mod tests {
             Some(shuvarie_core::Command::SearchAttachments { dir, .. })
                 if dir.as_deref() == Some(format!("{}/docs", root.to_string_lossy()).as_str())
         ));
+    }
+
+    #[tokio::test]
+    async fn manage_attachments_adds_reorders_and_removes_strip_rows() {
+        let (mut app, mut rx) = app_with_rx(connected());
+        active_session(&mut app);
+        for path in ["docs/plan.pdf", "shots/ui.png"] {
+            app.update(AppMessage::Session(SessionMessage::Attach {
+                path: path.into(),
+            }));
+        }
+        take_commands(&mut rx);
+        // `/manage-attachments` opens a dialog over the strip rather than a
+        // picker: nothing is sent, and the chips stay where they are.
+        app.run_command(CommandAction::ManageAttachments, None);
+        assert!(matches!(app.overlay, Overlay::ManageAttachments));
+        assert!(app.manage_attachments.open);
+        assert_eq!(
+            app.session.pending_paths(),
+            vec!["docs/plan.pdf".to_string(), "shots/ui.png".to_string()]
+        );
+        assert!(take_commands(&mut rx).is_empty());
+        // Ctrl+A is `/attach` from inside the dialog: the same finder, stacked
+        // over a dialog that stays open underneath.
+        let ctrl_a =
+            termina::event::KeyEvent::new(KeyCode::Char('a'), termina::event::Modifiers::CONTROL);
+        let msg = app
+            .map_event(Event::Terminal(TermEvent::Key(ctrl_a)))
+            .expect("the dialog maps Ctrl+A");
+        assert!(matches!(
+            msg,
+            AppMessage::ManageAttachments(ManageAttachmentsMessage::Add)
+        ));
+        app.update(msg);
+        assert!(matches!(app.overlay, Overlay::Attach));
+        assert!(
+            app.manage_attachments.open,
+            "the dialog survives the detour"
+        );
+        assert!(matches!(
+            take_commands(&mut rx).last(),
+            Some(shuvarie_core::Command::SearchAttachments { .. })
+        ));
+        // The pick appends to the strip and returns to the dialog, which probes
+        // the longer set.
+        app.update(AppMessage::Attach(AttachMessage::Candidates {
+            token: 0,
+            items: vec!["notes.md".into()],
+            error: None,
+        }));
+        app.update(AppMessage::Attach(AttachMessage::Accept));
+        assert!(matches!(app.overlay, Overlay::ManageAttachments));
+        assert!(!app.attach.open);
+        assert_eq!(
+            app.session.pending_paths(),
+            vec![
+                "docs/plan.pdf".to_string(),
+                "shots/ui.png".to_string(),
+                "notes.md".to_string()
+            ]
+        );
+        assert!(matches!(
+            take_commands(&mut rx).last(),
+            Some(shuvarie_core::Command::ProbeAttachments { paths, .. }) if paths.len() == 3
+        ));
+        // Escape from the finder steps back to the dialog too, without adding.
+        app.update(AppMessage::ManageAttachments(ManageAttachmentsMessage::Add));
+        assert!(matches!(app.overlay, Overlay::Attach));
+        app.update(AppMessage::Attach(AttachMessage::Close));
+        assert!(matches!(app.overlay, Overlay::ManageAttachments));
+        assert_eq!(app.session.pending_paths().len(), 3);
+        // Ctrl+Up moves the highlighted row up, and the cursor rides with it.
+        app.update(AppMessage::ManageAttachments(
+            ManageAttachmentsMessage::Next,
+        ));
+        let ctrl_up =
+            termina::event::KeyEvent::new(KeyCode::Up, termina::event::Modifiers::CONTROL);
+        let msg = app
+            .map_event(Event::Terminal(TermEvent::Key(ctrl_up)))
+            .expect("the dialog maps Ctrl+Up");
+        app.update(msg);
+        assert_eq!(
+            app.session.pending_paths(),
+            vec![
+                "shots/ui.png".to_string(),
+                "docs/plan.pdf".to_string(),
+                "notes.md".to_string()
+            ]
+        );
+        assert!(matches!(
+            take_commands(&mut rx).last(),
+            Some(shuvarie_core::Command::ProbeAttachments { paths, .. })
+                if paths.first().is_some_and(|path| path == "shots/ui.png")
+        ));
+        // Delete drops the highlighted row.
+        app.update(AppMessage::ManageAttachments(
+            ManageAttachmentsMessage::Remove,
+        ));
+        assert_eq!(
+            app.session.pending_paths(),
+            vec!["docs/plan.pdf".to_string(), "notes.md".to_string()]
+        );
+        take_commands(&mut rx);
+        // Closing leaves the edited strip behind for the next prompt.
+        app.update(AppMessage::ManageAttachments(
+            ManageAttachmentsMessage::Close,
+        ));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(!app.manage_attachments.open);
+        assert_eq!(
+            app.session.pending_paths(),
+            vec!["docs/plan.pdf".to_string(), "notes.md".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_manage_dialog_paints_the_strip_over_the_composer() {
+        let mut app = app_with(connected());
+        active_session(&mut app);
+        app.update(AppMessage::Session(SessionMessage::Attach {
+            path: "docs/plan.pdf".into(),
+        }));
+        app.run_command(CommandAction::ManageAttachments, None);
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| app.view(frame, frame.area()))
+            .unwrap();
+        let screen: String = (0..30)
+            .map(|y| {
+                (0..100)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(screen.contains("Attachments (1)"), "{screen}");
+        // The row is the composer's own chip, painted by the composer's strip
+        // (a dropped path is labelled by its file name).
+        assert!(screen.contains("plan.pdf"), "{screen}");
+        assert!(screen.contains("Ctrl+A"), "{screen}");
+        assert!(screen.contains("remove"), "{screen}");
     }
 
     #[tokio::test]

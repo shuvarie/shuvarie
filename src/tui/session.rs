@@ -534,6 +534,40 @@ impl SessionScreen {
         self.sync_compose();
     }
 
+    /// The pending attachments in strip order, for the surface that paints or
+    /// edits them (`/manage-attachments`).
+    pub fn pending_attachments(&self) -> &[PendingAttachment] {
+        &self.pending
+    }
+
+    /// Drop the pending attachment at `index` (`/manage-attachments`'s remove).
+    /// The remaining set is re-probed under a fresh token, so a probe still in
+    /// flight for the old set cannot land on the wrong chip. `false` when
+    /// `index` is out of range.
+    pub fn remove_attachment(&mut self, index: usize) -> bool {
+        if index >= self.pending.len() {
+            return false;
+        }
+        self.pending.remove(index);
+        self.sync_compose();
+        true
+    }
+
+    /// Move the pending attachment at `from` to position `to`, shifting the rows
+    /// between (`/manage-attachments`'s reorder). The strip's order is the send
+    /// order, so the move is the whole point. The token bump
+    /// [`SessionScreen::sync_compose`] makes for the new order drops replies to
+    /// the probe of the old one.
+    pub fn move_attachment(&mut self, from: usize, to: usize) -> bool {
+        if from >= self.pending.len() || to >= self.pending.len() || from == to {
+            return false;
+        }
+        let attachment = self.pending.remove(from);
+        self.pending.insert(to, attachment);
+        self.sync_compose();
+        true
+    }
+
     /// The pending attachment paths, in strip order. (The app's picker checks
     /// what its pick landed as.)
     #[cfg(test)]
@@ -790,6 +824,13 @@ impl SessionScreen {
                 self.requested_probes = probed;
                 self.sync_slash();
                 return Some(SessionEffect::OpenAttachFinder { dir: cmd.args });
+            }
+            if cmd.action == CommandAction::ManageAttachments {
+                // Likewise a dialog over the strip rather than a send: hand the
+                // chips back instead of consuming them, and dispatch the action
+                // the way a menu launch would.
+                self.pending = chips;
+                self.requested_probes = probed;
             }
             self.sync_slash();
             return Some(SessionEffect::RunCommand {
@@ -1054,9 +1095,15 @@ impl SessionScreen {
                 SlashMessage::Run => {
                     if let Some(action) = self.slash.selected_action() {
                         self.input.buffer.clear();
-                        // `/attach` adds to the pending set, so a menu launch of
-                        // it must not drop the chips already attached.
-                        if action != CommandRef::Builtin(CommandAction::Attach) {
+                        // `/attach` adds to the pending set and
+                        // `/manage-attachments` edits it, so a menu launch of
+                        // either must not drop the chips already attached.
+                        if !matches!(
+                            action,
+                            CommandRef::Builtin(
+                                CommandAction::Attach | CommandAction::ManageAttachments
+                            )
+                        ) {
                             self.clear_pending();
                         }
                         self.sync_slash();
@@ -1939,7 +1986,7 @@ enum PendingOrigin {
 /// shallow probe (metadata only; send time does the real work). `probe` is
 /// `None` between an attachment's appearance and the core's reply.
 #[derive(Debug, Clone)]
-struct PendingAttachment {
+pub(crate) struct PendingAttachment {
     /// The decoded filesystem path (no escaping, no `@`).
     path: String,
     origin: PendingOrigin,
@@ -1947,6 +1994,17 @@ struct PendingAttachment {
 }
 
 impl PendingAttachment {
+    /// A picked chip with no probe yet: the seam the popup tests use to paint a
+    /// list without round-tripping probes through the core.
+    #[cfg(test)]
+    pub(crate) fn from_path(path: &str) -> Self {
+        Self {
+            path: path.to_string(),
+            origin: PendingOrigin::Picked,
+            probe: None,
+        }
+    }
+
     /// The chip's label: the picked path as the finder showed it, the file name
     /// for a dropped/pasted path (a staged clipboard file's full path is
     /// noise).
@@ -1957,7 +2015,9 @@ impl PendingAttachment {
         }
     }
 
-    fn line(&self) -> Line<'static> {
+    /// The chip's line, shared by the composer strip and the
+    /// `/manage-attachments` list so both read the same way.
+    pub(crate) fn line(&self) -> Line<'static> {
         let Some(probe) = &self.probe else {
             return Line::from(vec![
                 Span::raw("·").fg(theme::text_dim()),
@@ -4616,6 +4676,97 @@ mod compose_tests {
         // A repeat pick of the same file is a no-op (no duplicate chip).
         screen.attach_picked("docs/plan.pdf".into());
         assert_eq!(screen.pending.len(), 1);
+        assert!(screen.take_deferred_effects().is_empty());
+    }
+
+    #[test]
+    fn the_manage_command_opens_the_dialog_and_keeps_the_pending_chips() {
+        let mut screen = SessionScreen::new();
+        screen.attach_picked("docs/plan.pdf".into());
+        screen.take_deferred_effects();
+        type_text(&mut screen, "/manage-attachments");
+        // The dialog edits the strip rather than sending a turn, so the submit
+        // must hand the chips back and dispatch the builtin like a menu launch.
+        let effect = screen.update(SessionMessage::Text(TextAreaMessage::Submit));
+        assert!(
+            matches!(
+                effect,
+                Some(SessionEffect::RunCommand {
+                    action: CommandRef::Builtin(CommandAction::ManageAttachments),
+                    args: None
+                })
+            ),
+            "{effect:?}"
+        );
+        assert_eq!(screen.pending.len(), 1, "the chip is still attached");
+        assert!(
+            screen.take_deferred_effects().is_empty(),
+            "no probe is re-issued for an unchanged set"
+        );
+        // A launch from the inline menu follows the same rule.
+        type_text(&mut screen, "/manage-attachments");
+        assert!(screen.slash.active(), "the menu is open on the alias");
+        let launch = screen.update(SessionMessage::Slash(SlashMessage::Run));
+        assert!(
+            matches!(
+                launch,
+                Some(SessionEffect::RunCommand {
+                    action: CommandRef::Builtin(CommandAction::ManageAttachments),
+                    args: None
+                })
+            ),
+            "{launch:?}"
+        );
+        assert_eq!(screen.pending.len(), 1, "the menu launch keeps the chip");
+    }
+
+    #[test]
+    fn the_strip_can_be_reordered_and_trimmed_in_place() {
+        let mut screen = SessionScreen::new();
+        for path in ["a.md", "b.md", "c.md"] {
+            screen.attach_picked(path.into());
+        }
+        screen.take_deferred_effects();
+        // A reorder is a send-order change: the new order is what the prompt
+        // will carry, and the set is re-probed under a fresh token so a reply
+        // to the old order can never land on the wrong chip.
+        assert!(screen.move_attachment(2, 0));
+        assert_eq!(
+            screen.pending_paths(),
+            vec!["c.md".to_string(), "a.md".to_string(), "b.md".to_string()]
+        );
+        assert!(matches!(
+            screen.take_deferred_effects().as_slice(),
+            [SessionEffect::ProbeAttachments { paths, .. }]
+                if paths == &["c.md".to_string(), "a.md".to_string(), "b.md".to_string()]
+        ));
+        // Removing a row re-probes the rest, and out-of-range edits are no-ops.
+        assert!(screen.remove_attachment(1));
+        assert_eq!(
+            screen.pending_paths(),
+            vec!["c.md".to_string(), "b.md".to_string()]
+        );
+        assert!(matches!(
+            screen.take_deferred_effects().as_slice(),
+            [SessionEffect::ProbeAttachments { paths, .. }]
+                if paths == &["c.md".to_string(), "b.md".to_string()]
+        ));
+        assert!(!screen.remove_attachment(2));
+        assert!(!screen.move_attachment(1, 1));
+        assert!(!screen.move_attachment(0, 5));
+        assert_eq!(
+            screen.pending_paths(),
+            vec!["c.md".to_string(), "b.md".to_string()]
+        );
+        // The last two removals re-probe the surviving path once, then leave an
+        // empty strip that asks the core for nothing at all.
+        assert!(screen.remove_attachment(0));
+        assert!(matches!(
+            screen.take_deferred_effects().as_slice(),
+            [SessionEffect::ProbeAttachments { paths, .. }] if paths == &["b.md".to_string()]
+        ));
+        assert!(screen.remove_attachment(0));
+        assert!(screen.pending_attachments().is_empty());
         assert!(screen.take_deferred_effects().is_empty());
     }
 

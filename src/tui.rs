@@ -55,6 +55,9 @@ mod history_search;
 /// drops.
 mod input_trace;
 mod list;
+/// The `/manage-attachments` dialog: the composer's pending attachments as one
+/// list to add to, reorder, and remove from.
+mod manage_attachments;
 mod model_picker;
 mod notify;
 /// Classify a paste payload as ordinary text or a dropped file path.
