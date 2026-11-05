@@ -41,6 +41,9 @@ mod confirm_quit;
 mod context;
 mod escape;
 mod event;
+/// The worktree reads and writes behind the unstaged-files guard (`git
+/// status`, `git add`).
+mod git_status;
 /// Filesystem watch on the workspace's git `HEAD` file: the sidebar branch
 /// label refreshes on checkouts made outside the TUI.
 mod git_watch;
@@ -78,6 +81,9 @@ mod theme_picker;
 mod title;
 mod todo;
 pub mod trust;
+/// The unstaged-files guard prompt: a new turn submitted from a dirty worktree
+/// is held for stage/send-anyway/abort.
+mod unstaged;
 mod utils;
 mod variant;
 mod viewer;
