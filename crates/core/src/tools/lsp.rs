@@ -1,11 +1,14 @@
 use std::path::{Path, PathBuf};
 
+use fff_search::{ContentCacheBudget, FFFMode, FilePickerOptions, file_picker::FilePicker};
 use serde_json::{Value, json};
 use shuvarie_llm::{Tool, ToolContext, ToolExecutionError, ToolOutput};
 
 use crate::lsp_manager::SharedManager;
 
 use crate::permissions::Access;
+
+use super::is_hidden_path;
 
 pub(crate) struct Lsp {
     lsp: SharedManager,
@@ -135,23 +138,9 @@ async fn analyze_paths(
 ) -> Result<ToolOutput, String> {
     let target = path.unwrap_or(".");
     let abs = resolve(root, target)?;
-    let mut files: Vec<PathBuf> = Vec::new();
-    if abs.is_dir() {
-        let mut walk = ignore::WalkBuilder::new(&abs)
-            .hidden(false)
-            .git_ignore(true)
-            .build();
-        for entry in walk.by_ref().flatten() {
-            if files.len() >= ANALYZE_MAX_FILES {
-                break;
-            }
-            if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                files.push(entry.into_path());
-            }
-        }
-    } else {
-        files.push(abs);
-    }
+    let files = tokio::task::spawn_blocking(move || analyze_targets(abs))
+        .await
+        .map_err(|e| format!("lsp: {e}"))??;
     if files.is_empty() {
         return Ok(ToolOutput::text("no files to analyze"));
     }
@@ -215,4 +204,102 @@ fn resolve(root: &Path, path: &str) -> Result<PathBuf, String> {
         return Err(format!("{path} resolves outside the workspace"));
     }
     Ok(canonical)
+}
+
+/// The files `lsp analyze` opens: the target itself, or everything the fff
+/// index found under it, capped at [`ANALYZE_MAX_FILES`].
+///
+/// The walk is the one `glob`, `grep` and `fuzzy_find` index with, so a
+/// repository's `.gitignore` keeps build output out of the budget and `.git/`
+/// and `node_modules/` are never descended into. The `ignore` walk this
+/// replaces kept hidden entries, walked `.git/objects` and spent most of the
+/// cap on object files; and because the cap trims the set before the manager
+/// filters by server, which files got analyzed followed directory order. The
+/// sort makes the kept files a stable prefix instead.
+fn analyze_targets(abs: PathBuf) -> Result<Vec<PathBuf>, String> {
+    if !abs.is_dir() {
+        return Ok(vec![abs]);
+    }
+    let mut picker = FilePicker::new(FilePickerOptions {
+        base_path: abs.to_string_lossy().into_owned(),
+        mode: FFFMode::Ai,
+        // Nothing here outlives the call, so a watcher would only burn threads.
+        watch: false,
+        // Discovery reads paths, never contents.
+        cache_budget: Some(ContentCacheBudget::with_max_files(0)),
+        ..Default::default()
+    })
+    .map_err(|e| format!("lsp: {e}"))?;
+    picker.collect_files().map_err(|e| format!("lsp: {e}"))?;
+
+    let mut targets: Vec<(String, PathBuf)> = Vec::new();
+    for file in picker.get_files() {
+        let rel = file.relative_path(&picker);
+        // fff indexes dot entries inside a git repository; no server is wanted
+        // for `.env` or `.git/` metadata.
+        if is_hidden_path(&rel) {
+            continue;
+        }
+        targets.push((rel, file.absolute_path(&picker, picker.base_path())));
+    }
+    targets.sort();
+    targets.truncate(ANALYZE_MAX_FILES);
+    Ok(targets.into_iter().map(|(_, path)| path).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::tempdir;
+
+    #[test]
+    fn analyze_targets_skips_hidden_and_ignored_files() {
+        let (dir, _guard) = tempdir();
+        // fff only reads .gitignore inside a repository, so the rule needs a
+        // `.git` next to it -- the same one that makes `.git/` internals
+        // indexable and therefore something to filter.
+        std::fs::create_dir(".git").unwrap();
+        std::fs::write(".git/config", "").unwrap();
+        std::fs::write(".gitignore", "target/\n*.log\n").unwrap();
+        std::fs::create_dir("target").unwrap();
+        std::fs::write("target/out.bin", "").unwrap();
+        std::fs::write("debug.log", "").unwrap();
+        std::fs::create_dir("src").unwrap();
+        std::fs::write("src/main.rs", "").unwrap();
+        std::fs::write("src/lib.rs", "").unwrap();
+
+        let root = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let targets = analyze_targets(root.clone()).unwrap();
+        let rel: Vec<String> = targets
+            .iter()
+            .map(|path| {
+                path.strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(rel, vec!["src/lib.rs", "src/main.rs"], "{rel:?}");
+        drop(dir);
+    }
+
+    /// The cap trims before the manager filters by server, so which files
+    /// survive it has to be the sorted prefix rather than scan order.
+    #[test]
+    fn analyze_targets_caps_to_a_sorted_prefix() {
+        let (dir, _guard) = tempdir();
+        for i in 0..(ANALYZE_MAX_FILES + 10) {
+            std::fs::write(format!("f{i:03}.txt", i = i), "").unwrap();
+        }
+        let root = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let targets = analyze_targets(root.clone()).unwrap();
+        assert_eq!(targets.len(), ANALYZE_MAX_FILES);
+        let names: Vec<String> = targets
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.first().unwrap(), "f000.txt");
+        assert_eq!(names.last().unwrap(), "f049.txt");
+        drop(dir);
+    }
 }
