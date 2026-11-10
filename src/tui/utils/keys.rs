@@ -25,7 +25,6 @@ pub fn alt(key: &KeyEvent) -> bool {
 /// Map ctrl+alt key
 ///
 /// Match nice: -1
-#[allow(dead_code)]
 #[inline]
 pub fn ctrl_alt(key: &KeyEvent) -> bool {
     key.modifiers.contains(Modifiers::CONTROL | Modifiers::ALT)

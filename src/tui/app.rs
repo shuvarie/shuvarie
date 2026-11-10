@@ -13,7 +13,7 @@ use termina::{Event as TermEvent, PlatformTerminal};
 use tokio::sync::mpsc::Sender;
 
 use crate::tui::event::Event;
-use crate::tui::utils::{alt, ctrl};
+use crate::tui::utils::{alt, ctrl, ctrl_alt};
 
 use super::add_decision_provider::{
     AddDecisionProviderForm, AddDecisionProviderMessage, AddDecisionProviderOutcome,
@@ -128,6 +128,12 @@ pub enum AppMessage {
     /// Show the tab at this position in the strip (`Alt+1` … `Alt+9`).
     GotoTab {
         position: usize,
+    },
+    /// Move to the next (`Ctrl+Alt+Right`) or previous (`Ctrl+Alt+Left`) scene
+    /// in the configured set, wrapping at either end of it. Scenes that cannot
+    /// be entered mid-session are stepped over rather than refused.
+    CycleScene {
+        forward: bool,
     },
     AddProvider(AddProviderMessage),
     AddDecisionProvider(AddDecisionProviderMessage),
@@ -1490,6 +1496,16 @@ impl App {
                             KeyCode::Char('t') | KeyCode::Char('T') if ctrl(&key) => {
                                 return Some(AppMessage::CycleModelVariant);
                             }
+                            // Scenes take the other half of the tab chords:
+                            // `Ctrl+Alt+←/→` walk the configured scene set,
+                            // always reachable (the composer keeps plain
+                            // `Ctrl+←/→` for words either way).
+                            KeyCode::Left if ctrl_alt(&key) => {
+                                return Some(AppMessage::CycleScene { forward: false });
+                            }
+                            KeyCode::Right if ctrl_alt(&key) => {
+                                return Some(AppMessage::CycleScene { forward: true });
+                            }
                             // Tabs: never reached with a single tab, so the
                             // composer keeps every chord it had before tabs
                             // existed.
@@ -1999,6 +2015,7 @@ impl App {
                 }
             }
             AppMessage::GotoTab { position } => self.switch_to_position(position),
+            AppMessage::CycleScene { forward } => self.cycle_scene(forward),
             AppMessage::TabOpened { root, cmd_tx } => {
                 let id = self.open_tab(root, cmd_tx);
                 self.opened_tab = Some(id);
@@ -2123,7 +2140,7 @@ impl App {
                     match effect {
                         scene::SceneEffect::Switch { name } => {
                             self.close_overlay();
-                            self.ctx.send(shuvarie_core::Command::SwitchScene { name });
+                            self.request_scene(name);
                         }
                         scene::SceneEffect::Close => self.close_overlay(),
                     }
@@ -3068,6 +3085,49 @@ impl App {
         }
     }
 
+    /// Asks the active tab's core to switch scenes (`None` = the built-in
+    /// Default). The core re-validates — a turn in flight, a missing interlude
+    /// — and answers with `SceneChanged` (or `SceneError`), which is what moves
+    /// the sidebar's scene line.
+    fn request_scene(&self, name: Option<String>) {
+        self.ctx.send(shuvarie_core::Command::SwitchScene { name });
+    }
+
+    /// Walks to the neighbouring scene in the configured set, wrapping at
+    /// either end, and asks the core to switch to it.
+    ///
+    /// Scenes without an interlude cannot be entered once the session has
+    /// messages, so a mid-session cycle steps over them instead of landing on a
+    /// switch the core would refuse; a one-scene set (or none at all) is a
+    /// no-op. The set and the current scene carry identity, so a configured
+    /// scene named like the built-in Default stays distinct.
+    fn cycle_scene(&mut self, forward: bool) {
+        let len = self.scene_entries.len();
+        if len < 2 {
+            return;
+        }
+        let mid_session = self.session.has_messages();
+        let current = self
+            .scene_entries
+            .iter()
+            .position(|entry| entry.id == self.current_scene);
+        // With no current row to stand on, start just outside the strip so the
+        // forward walk begins at the first scene and the backward walk at the
+        // last one.
+        let start = current.unwrap_or(if forward { len - 1 } else { 0 });
+        let step = if forward { 1 } else { len - 1 };
+        let next = (1..len)
+            .map(|offset| (start + offset * step) % len)
+            .find(|idx| {
+                let entry = &self.scene_entries[*idx];
+                !mid_session || entry.switchable
+            });
+        if let Some(idx) = next {
+            let name = self.scene_entries[idx].id.clone();
+            self.request_scene(name);
+        }
+    }
+
     /// Records the session's current scene (`None` = built-in Default) and
     /// updates the sidebar's scene line.
     fn set_scene(&mut self, name: Option<String>) {
@@ -3353,7 +3413,7 @@ impl App {
                     } else {
                         None
                     };
-                    self.ctx.send(shuvarie_core::Command::SwitchScene { name });
+                    self.request_scene(name);
                 } else {
                     self.scene_picker.open(
                         self.scene_entries.clone(),
@@ -6784,5 +6844,118 @@ mod tests {
             ))),
             Some(AppMessage::Session(SessionMessage::Text(_)))
         ));
+    }
+
+    /// One row of a configured scene set; `None` is the built-in Default.
+    fn scene_entry(id: Option<&str>, switchable: bool) -> shuvarie_core::scenes::SceneListEntry {
+        let name = id.unwrap_or(shuvarie_core::scenes::DEFAULT_SCENE_NAME);
+        shuvarie_core::scenes::SceneListEntry {
+            id: id.map(str::to_string),
+            name: name.to_string(),
+            description: None,
+            switchable,
+        }
+    }
+
+    fn ctrl_alt_key(code: KeyCode) -> Event {
+        Event::Terminal(TermEvent::Key(termina::event::KeyEvent::new(
+            code,
+            Modifiers::CONTROL | Modifiers::ALT,
+        )))
+    }
+
+    /// `Ctrl+Alt+←/→` walks the configured set, wrapping at either end, and
+    /// asks the core to switch (the core, not the app, is the authority).
+    #[test]
+    fn ctrl_alt_arrows_cycle_scenes_and_wrap() {
+        let (mut app, mut rx) = app_with_rx(connected());
+        app.welcome.close();
+        app.overlay = Overlay::None;
+        app.update(AppMessage::ScenesLoaded {
+            scenes: vec![
+                scene_entry(None, true),
+                scene_entry(Some("Plan"), true),
+                scene_entry(Some("Review"), true),
+            ],
+            default: None,
+            warnings: Vec::new(),
+        });
+        assert_eq!(app.current_scene, None, "the built-in scene is current");
+
+        // Route a chord the way the render loop does, then report the scene it
+        // asked for (`None` = the built-in Default).
+        let mut cycle = |app: &mut App, code| {
+            let msg = app.map_event(ctrl_alt_key(code)).expect("the chord maps");
+            app.update(msg);
+            match rx.try_recv().expect("a switch is sent") {
+                shuvarie_core::Command::SwitchScene { name } => name,
+                other => panic!("unexpected command: {other:?}"),
+            }
+        };
+
+        assert_eq!(cycle(&mut app, KeyCode::Right).as_deref(), Some("Plan"));
+        // Backward from the built-in scene wraps to the last one.
+        assert_eq!(cycle(&mut app, KeyCode::Left).as_deref(), Some("Review"));
+
+        // Forward from the last one wraps to the built-in Default, which the
+        // core names with `None`.
+        app.set_scene(Some("Review".into()));
+        assert_eq!(cycle(&mut app, KeyCode::Right), None);
+        app.set_scene(Some("Plan".into()));
+        assert_eq!(cycle(&mut app, KeyCode::Left), None);
+
+        // A set with one scene has nowhere to go, and the key is not typed.
+        app.update(AppMessage::ScenesLoaded {
+            scenes: vec![scene_entry(Some("Plan"), true)],
+            default: None,
+            warnings: Vec::new(),
+        });
+        assert!(matches!(
+            app.map_event(ctrl_alt_key(KeyCode::Right)),
+            Some(AppMessage::CycleScene { forward: true })
+        ));
+        let msg = app
+            .map_event(ctrl_alt_key(KeyCode::Right))
+            .expect("the chord maps");
+        app.update(msg);
+        assert!(rx.try_recv().is_err(), "no scene is asked for");
+    }
+
+    /// The cycle steps over a scene that cannot be entered anymore: an
+    /// interlude-less scene in a session that already has messages.
+    #[test]
+    fn a_mid_session_cycle_skips_start_only_scenes() {
+        let (mut app, mut rx) = app_with_rx(connected());
+        app.welcome.close();
+        app.overlay = Overlay::None;
+        app.update(AppMessage::ScenesLoaded {
+            scenes: vec![
+                scene_entry(None, true),
+                scene_entry(Some("Draft"), false),
+                scene_entry(Some("Review"), true),
+            ],
+            default: None,
+            warnings: Vec::new(),
+        });
+        assert!(
+            !app.session.has_messages(),
+            "a fresh session may enter any scene"
+        );
+        app.session.update(SessionMessage::TurnStarted {
+            content: "hello".into(),
+            attachments: Vec::new(),
+            steered: false,
+        });
+
+        let msg = app
+            .map_event(ctrl_alt_key(KeyCode::Right))
+            .expect("the chord maps");
+        app.update(msg);
+        match rx.try_recv().expect("a switch is sent") {
+            shuvarie_core::Command::SwitchScene { name } => {
+                assert_eq!(name.as_deref(), Some("Review"), "Draft is stepped over");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 }

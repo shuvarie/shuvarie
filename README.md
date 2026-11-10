@@ -27,7 +27,7 @@
 - **Bind any patron** — OpenAI, Anthropic, Gemini, Ollama, or another OpenAI-compatible plane. One grimoire (`connections.kdl`) holds every pact, and its secrets live nowhere else.
 - **Send a fully armed knight** — it reads and writes scrolls (files), forges patches, scrys with grep and glob, hunts a half-remembered path with a fuzzy find, consults the LSP oracles for diagnostics, fetches tomes from the far webs, and lights the ritual circle (your shell) when the quest demands.
 - **Rule by the code of chivalry** — every tool call passes the permission wards: allowed, denied, or brought before your seat. A denied incantation cuts the turn; a questionable one waits for your seal.
-- **Swear oaths (scenes)** — change the knight's oath mid-campaign: each scene is a named bundle of system prelude, injected hooks, and a tool roster, forged in KDL. Built-in oaths ride along: **Advisor** (advice and planning, read-only), **Reviewer** (code review without edits), and **Orchestrator** (agent orchestration: delegate subtasks to subagent workers — a planning bench for design-heavy topics, the execution workers for the doing — then verify and integrate) — reshaped fieldwise in KDL or shadowed by your own.
+- **Swear oaths (scenes)** — change the knight's oath mid-campaign: each scene is a named bundle of system prelude, injected hooks, and a tool roster, forged in KDL. `Ctrl+Alt+←`/`Ctrl+Alt+→` ride through the configured oaths (wrapping at either end, stepping over the start-only ones once the quest is under way), `/scene` opens the list to pick one. Built-in oaths ride along: **Advisor** (advice and planning, read-only), **Reviewer** (code review without edits), and **Orchestrator** (agent orchestration: delegate subtasks to subagent workers — a planning bench for design-heavy topics, the execution workers for the doing — then verify and integrate) — reshaped fieldwise in KDL or shadowed by your own.
 - **Gather a party** — worker subagents ride out on their own errands with their own preambles and tools — scenes can also forge extra members (`description` + `toolset`) — or stand down by decree.
 - **Ride several quests at once (tabs)** — each tab is its own knight in its own keep: `/newtab ~/another-project` summons a second agent there, and the first rides on undisturbed while you talk to the second. `Alt+←`/`Alt+→` between them, `Alt+1…9` leaps straight to one, `/closetab` sends one home.
 - **Walk the threads of fate** — every turn is a branch in a living tree: `/tree` to walk it, fork it, strike it from the tale; `/undo` and `/replay` to ride the roads not taken. No file is ever reverted — only fate re-chosen.
@@ -89,7 +89,7 @@ A pact can keep its secret out of the scroll instead: write `api-key-env "ANTHRO
 > *Words of command the knight obeys:*
 
 - `!command` — speak to your local spirits; no word of it reaches the patron
-- `/scene [name]` — swear another oath
+- `/scene [name]` — swear another oath; `Ctrl+Alt+←`/`Ctrl+Alt+→` walk the configured scenes without the list
 - `/tree` — gaze upon the threads of fate; walk them, fork them, strike them from the tale
 - `/undo`, `/replay` — turn back the wheel and ride the road again
 - `/export [path]` — have this quest's chronicle scribed to JSON
