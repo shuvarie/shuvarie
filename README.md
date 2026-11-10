@@ -1,6 +1,6 @@
 ### <p align="center">⚔️⚜️ シュヴァリエ ⚜️⚔️
 
-# <p align="center">Shuvarie
+# <p align="center"><img src="./docs/favicon.svg" alt="Shuvarie logo" width="30px" height="30px"> Shuvarie
 
 *Haiku:*
 > *白き騎士*<br>
