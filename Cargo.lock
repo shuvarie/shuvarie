@@ -231,9 +231,9 @@ dependencies = [
 
 [[package]]
 name = "ar_archive_writer"
-version = "0.5.3"
+version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73cd58deff2140a0a8eae87e417bd01db68a33e148aa93d1e8cd837e55e312b6"
+checksum = "523e5e187fff36fcb8d1d19ccf0ca4ca43ec3d158316057f66dc6f72716bc5ec"
 dependencies = [
  "object 0.39.1",
 ]
@@ -7187,9 +7187,9 @@ checksum = "2ab42ca02749e120097e328d91d415325bdf43b1c72c4c8badf37375fe40a813"
 
 [[package]]
 name = "selune"
-version = "0.5.5"
+version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a615c2a8d7de81e6de46cfdd785e232f4f6dae2a07ab738073c2a92fa03fdc01"
+checksum = "c48a7805fc9a1635e0b8aed7498d8a9b10e219a3b136c2d4e43b25d2854dc9bc"
 dependencies = [
  "chrono",
  "chrono-tz",
