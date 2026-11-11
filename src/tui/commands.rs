@@ -15,6 +15,8 @@ pub enum CommandAction {
     OpenTree,
     OpenTodos,
     Images,
+    /// Dismiss the error the hint bar is showing (`/clearerr`).
+    ClearError,
     OpenScenePicker,
     OpenVariantPicker,
     OpenThemePicker,
@@ -43,7 +45,7 @@ pub enum CommandAction {
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 31] = [
+    pub const ALL: [CommandAction; 32] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
         CommandAction::AddDecisionProvider,
@@ -53,6 +55,7 @@ impl CommandAction {
         CommandAction::OpenTree,
         CommandAction::OpenTodos,
         CommandAction::Images,
+        CommandAction::ClearError,
         CommandAction::OpenScenePicker,
         CommandAction::OpenVariantPicker,
         CommandAction::OpenThemePicker,
@@ -88,6 +91,7 @@ impl CommandAction {
             CommandAction::OpenTree => "tree",
             CommandAction::OpenTodos => "todo",
             CommandAction::Images => "images",
+            CommandAction::ClearError => "clearerr",
             CommandAction::OpenScenePicker => "scene",
             CommandAction::OpenVariantPicker => "variant",
             CommandAction::OpenThemePicker => "theme",
@@ -342,6 +346,11 @@ pub fn default_commands() -> Vec<CommandEntry> {
             "View images",
             "Browse the session's attached images in a gallery",
             CommandAction::Images,
+        ),
+        CommandEntry::builtin(
+            "Clear error",
+            "Dismiss the error shown in the hint bar",
+            CommandAction::ClearError,
         ),
         CommandEntry::builtin(
             "Screensaver",
@@ -634,6 +643,16 @@ mod tests {
             })
         );
         assert_eq!(parse_command("/manage-attachments docs"), None);
+        // The hint bar's error is dismissed by a bare command: there is nothing
+        // to pass it.
+        assert_eq!(
+            parse_command("/clearerr"),
+            Some(ParsedCommand {
+                action: CommandAction::ClearError,
+                args: None
+            })
+        );
+        assert_eq!(parse_command("/clearerr now"), None);
     }
 
     /// Every built-in is reachable from the Ctrl+M menu and the inline slash

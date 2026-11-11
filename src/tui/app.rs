@@ -3568,6 +3568,12 @@ impl App {
                     .update(SessionMessage::OpenMediaViewer { sha: None });
                 return effect.and_then(|effect| self.handle_session_effect(effect));
             }
+            CommandAction::ClearError => {
+                // The hint bar shows the session's error in place of its key
+                // hints until it is dismissed: this is that dismissal, so the
+                // footer goes back to the hints.
+                self.session.update(SessionMessage::ClearError);
+            }
             CommandAction::Screensaver => {
                 // Onboarding owns the whole screen and paints nothing beside
                 // its own page, so the scene would never reach the terminal.
@@ -5480,6 +5486,65 @@ mod tests {
                 shuvarie_core::Command::LoadAttachmentMedia { .. }
             ),
             "the viewer fetches the image's bytes"
+        );
+    }
+
+    /// The hint bar shows the session's error in place of its key hints;
+    /// `/clearerr` is the way back to the hints, and it drops nothing else.
+    #[test]
+    fn the_clearerr_command_dismisses_the_hint_bar_error() {
+        let (mut app, _rx) = app_with_rx(connected());
+        active_session(&mut app);
+        app.session.update(SessionMessage::ShowError {
+            error: "ERR-MARKER".into(),
+        });
+        app.session.update(SessionMessage::ShowStatus {
+            status: "STATUS-MARKER".into(),
+        });
+
+        let painted = |app: &App| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+            terminal
+                .draw(|frame| app.view(frame, frame.area()))
+                .unwrap();
+            (0..30)
+                .map(|y| {
+                    (0..120)
+                        .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let screen = painted(&app);
+        assert!(screen.contains("ERR-MARKER"), "{screen}");
+        assert!(
+            !screen.contains("Ctrl+M"),
+            "the error replaces the key hints: {screen}"
+        );
+
+        // Typed like any other slash command.
+        for ch in "/clearerr".chars() {
+            app.update(AppMessage::Session(SessionMessage::Text(
+                TextAreaMessage::Input(ch),
+            )));
+        }
+        app.update(AppMessage::Session(SessionMessage::Text(
+            TextAreaMessage::Submit,
+        )));
+
+        assert!(app.session.error.is_none(), "the error is dismissed");
+        let screen = painted(&app);
+        assert!(!screen.contains("ERR-MARKER"), "{screen}");
+        assert!(
+            screen.contains("Ctrl+M"),
+            "the key hints are back: {screen}"
+        );
+        assert!(
+            screen.contains("STATUS-MARKER"),
+            "the status row is left alone: {screen}"
         );
     }
 
