@@ -33,6 +33,16 @@ pub struct ClipboardAttachment {
     pub probe: AttachmentProbe,
 }
 
+/// Whether `path` names an attachment at all: an existing regular file after
+/// workspace/tilde resolution (symlinks followed). The paste router's accept
+/// step — a pasted *path* that is a directory, is missing, or dangles is not an
+/// attachment, so the payload stays ordinary text instead of becoming a chip
+/// that immediately reports an error.
+pub fn is_attachable_file(workspace_root: &Path, path: &str) -> bool {
+    let resolved = normalize_path(workspace_root, path);
+    std::fs::metadata(&resolved).is_ok_and(|metadata| metadata.is_file())
+}
+
 /// Preview one attachment path: exists/size/kind from filesystem metadata plus
 /// an extension-based kind guess. Deliberately shallow.
 pub fn probe_attachment(workspace_root: &Path, path: &str) -> AttachmentProbe {
@@ -200,6 +210,42 @@ mod tests {
         assert_eq!(
             normalize_path_in(dir.path(), Some(dir.path()), "~/docs/plan.pdf"),
             dir.path().join("docs/plan.pdf")
+        );
+    }
+
+    #[test]
+    fn attachable_files_are_regular_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("shot.png"), b"x").unwrap();
+        std::fs::create_dir(root.join("shots")).unwrap();
+        assert!(is_attachable_file(root, "shot.png"), "a real file");
+        assert!(
+            is_attachable_file(root, root.join("shot.png").to_string_lossy().as_ref()),
+            "an absolute path resolves without the workspace root"
+        );
+        assert!(
+            !is_attachable_file(root, "shots"),
+            "a directory is a path, not a file"
+        );
+        assert!(!is_attachable_file(root, "nope.png"), "a missing path");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attachable_files_follow_symlinks_but_reject_dangling_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("shot.png"), b"x").unwrap();
+        std::os::unix::fs::symlink(root.join("shot.png"), root.join("link.png")).unwrap();
+        std::os::unix::fs::symlink(root.join("gone.png"), root.join("dangling.png")).unwrap();
+        assert!(
+            is_attachable_file(root, "link.png"),
+            "a symlink to a file resolves"
+        );
+        assert!(
+            !is_attachable_file(root, "dangling.png"),
+            "a broken symlink is not a file"
         );
     }
 

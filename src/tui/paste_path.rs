@@ -1,20 +1,27 @@
-//! Classify a bracketed-paste payload as ordinary text or as a dropped file
-//! path.
+//! Classify a bracketed-paste payload as ordinary text or as a file-drop
+//! candidate.
 //!
 //! Dragging a file onto a terminal mostly types its path into the program as
 //! one bracketed-paste payload — but the encoding is the terminal's choice
 //! (quoted, backslash-escaped, percent-encoded, or a `file://` URI; see
 //! `docs/designs/images-and-drops.md`). [`classify`] decodes the common forms
-//! and accepts the payload as a path only when it is a single line with a
-//! path shape, so pasting prose (or a lone word) stays text.
+//! and calls the payload path-shaped only when it is a single line with a path
+//! shape, so pasting prose (or a lone word) stays text.
+//!
+//! Shape is as far as this module goes. Whether the payload actually names a
+//! *file* is the accept step, and it needs the filesystem, so the session
+//! screen's `update` takes it (`shuvarie_core::attachments::is_attachable_file`).
+//! A pasted directory path or one that is no longer there therefore pastes as
+//! plain text rather than becoming an attachment chip that reports an error.
 
 /// What a paste payload turned out to be.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Payload {
     /// Ordinary text: paste it into the composer as-is.
     Text,
-    /// A dropped file path, decoded (no quotes, escapes, or `file://`; spaces
-    /// literal).
+    /// A decoded file-drop *candidate*: no quotes, escapes, or `file://`;
+    /// spaces literal. The shape looks like a path — the accept step still has
+    /// to confirm it names a file.
     Path(String),
 }
 
@@ -245,7 +252,9 @@ mod tests {
     }
 
     #[test]
-    fn directory_paths_are_not_attachments() {
+    fn directory_shaped_payloads_are_never_a_candidate() {
+        // A trailing separator is a directory by definition: no accept step
+        // needed to know it is not a file.
         assert_eq!(classify("/tmp/shots/"), Payload::Text);
     }
 

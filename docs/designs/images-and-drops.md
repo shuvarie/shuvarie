@@ -53,15 +53,22 @@ of three ways, none of them universal (and none guaranteed by any standard):
   *their* terminal actually sends on a drop before trusting the fallback. If a
   drop arrives as a burst of key events rather than one paste, the trace shows
   it.
-- **Dropped-path paste → attachment.** `src/tui/paste_path.rs` classifies a
-  paste payload: a single-line, path-shaped payload (absolute, `~/`, `./`,
-  `../`, a Windows drive, or a separator plus a file-suffix-looking extension),
-  after decoding `file://` URIs, surrounding quotes, backslash escapes, and
-  percent-encoding, becomes a structural pending attachment. Anything else —
-  prose, multi-line text — is ordinary text and pastes as before.
-  Consequence worth knowing: pasting a *lone* path (copied from a terminal, say)
-  attaches that file rather than inserting its text — the same classifier cannot
-  tell a copied path from a drop, and the drop is the case that matters.
+- **Dropped-file paste → attachment.** `src/tui/paste_path.rs` decodes a paste
+  payload (`file://` URIs, surrounding quotes, backslash escapes, and
+  percent-encoding) and calls it path-shaped when it is a single line with a
+  path shape (absolute, `~/`, `./`, `../`, a Windows drive, or a separator plus
+  a file-suffix-looking extension). Shape alone never attaches: the accept step
+  stats the decoded path
+  (`shuvarie_core::attachments::is_attachable_file`) and only an existing
+  regular file becomes a structural pending attachment — a pasted directory
+  path (`/tmp/shots`) or one that is no longer there pastes as ordinary text
+  instead of landing an error chip. Anything else — prose, multi-line text — is
+  ordinary text as before. The stat runs in `SessionScreen::update`, the app's
+  side-effect seam, not in the paste router.
+  Consequence worth knowing: pasting a *lone file* path (copied from a
+  terminal, say) attaches that file rather than inserting its text — the same
+  classifier cannot tell a copied path from a drop, and the drop is the case
+  that matters.
 - **Structural pending attachments.** The composer holds a list of pending
   attachments; the buffer text carries none. A path enters the list by being
   picked in the `/attach` dialog (a centred fuzzy finder over the current
@@ -81,7 +88,8 @@ of three ways, none of them universal (and none guaranteed by any standard):
   drop there may deliver nothing. Clipboard paste is the workaround.
 - **OSC 5522 is unsupported** (same filter).
 - **A drop of multiple files** (or a multi-word unquoted payload) is treated as
-  one path; the probe reports the miss as an error chip.
+  one path; the paste's stat finds no such file, so the payload stays text and
+  the user sees the paths rather than an error chip.
 - **Over SSH** the clipboard lives on the laptop, not the host running
   shuvarie; the user must supply a ferry command via `clipboard-command`.
 - **Clipboard staging** writes a temp file (`$TMPDIR/shuvarie-paste-*/

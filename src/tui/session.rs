@@ -154,9 +154,19 @@ pub enum SessionMessage {
         token: u64,
         items: Vec<shuvarie_core::attachments::AttachmentProbe>,
     },
-    /// A dropped or pasted file path: hold it as a pending attachment. The
-    /// composer's paste routing produces this when a bracketed paste decodes to
-    /// a path shape (see [`crate::tui::paste_path`]).
+    /// A bracketed paste that decodes to a file-drop candidate: the payload as
+    /// pasted (`text`), and the path it decoded to (`path`). The composer's
+    /// paste router only checks the *shape* — deciding whether this really is a
+    /// file needs the filesystem, so the accept step lives here (see
+    /// [`crate::tui::paste_path`]).
+    PastedPath {
+        text: String,
+        path: String,
+    },
+    /// A dropped or pasted file path: hold it as a pending attachment. This is
+    /// the accept step's target: [`SessionMessage::PastedPath`] lands here once
+    /// it has confirmed the payload names a file. (The attach finder's picks
+    /// enter through `attach_picked` instead.)
     Attach {
         path: String,
     },
@@ -722,8 +732,9 @@ impl SessionScreen {
     /// question popup captures the paste for its custom-answer field; search
     /// mode captures it for the needle; the bash popup and slash menu leave
     /// the paste to the input area. In the input area a paste that decodes to a
-    /// single-line file path — a dropped file — becomes a pending attachment
-    /// instead of pasting its path as text.
+    /// single-line path shape — a dropped file, most likely — is handed to
+    /// [`SessionMessage::PastedPath`], which attaches it only if it names a real
+    /// file and pastes it as text otherwise.
     pub fn map_paste(&self, text: &str) -> Option<SessionMessage> {
         if self.permission.open {
             return None;
@@ -751,7 +762,10 @@ impl SessionScreen {
             )));
         }
         match paste_path::classify(text) {
-            Payload::Path(path) => Some(SessionMessage::Attach { path }),
+            Payload::Path(path) => Some(SessionMessage::PastedPath {
+                text: text.to_string(),
+                path,
+            }),
             Payload::Text => Some(SessionMessage::Text(TextAreaMessage::Paste(
                 text.to_string(),
             ))),
@@ -1142,6 +1156,19 @@ impl SessionScreen {
                         }
                     }
                 }
+                None
+            }
+            SessionMessage::PastedPath { text, path } => {
+                // Only a real file becomes an attachment. The shape check
+                // cannot tell a dropped file from a pasted directory path
+                // (`/tmp/shots`) or one that is no longer there, and the
+                // filesystem is the only authority on that — so a payload that
+                // names no file was ordinary text all along.
+                let root = std::env::current_dir().unwrap_or_default();
+                if shuvarie_core::attachments::is_attachable_file(&root, &path) {
+                    return self.update_effect(SessionMessage::Attach { path });
+                }
+                self.input.update(TextAreaMessage::Paste(text));
                 None
             }
             SessionMessage::Attach { path } => {
@@ -4504,31 +4531,76 @@ mod compose_tests {
     }
 
     #[test]
-    fn a_pasted_path_becomes_a_dropped_attachment_and_is_probed() {
+    fn a_pasted_file_path_becomes_a_dropped_attachment_and_is_probed() {
+        let dir = tempfile::tempdir().unwrap();
+        let shot = dir.path().join("Screenshot 2026-05-27 at 13.37.31.png");
+        std::fs::write(&shot, b"\x89PNG\r\n\x1a\n").unwrap();
+        let shot = shot.to_string_lossy().to_string();
         let mut screen = SessionScreen::new();
-        // A bracketed paste that decodes to a dropped screenshot path.
-        let message = screen.map_paste("/tmp/Screenshot\\ 2026-05-27\\ at\\ 13.37.31.png");
-        let Some(SessionMessage::Attach { path }) = message else {
+        // A bracketed paste that decodes to a dropped screenshot path (the
+        // backslash escapes are what most terminals wrap the spaces in).
+        let payload = shot.replace(' ', "\\ ");
+        let Some(SessionMessage::PastedPath { text, path }) = screen.map_paste(&payload) else {
             panic!("the drop decodes to a path");
         };
-        assert_eq!(path, "/tmp/Screenshot 2026-05-27 at 13.37.31.png");
-        screen.update(SessionMessage::Attach { path });
+        assert_eq!(path, shot);
+        assert_eq!(
+            text, payload,
+            "the raw payload rides along for the fallback"
+        );
+        screen.update(SessionMessage::PastedPath { text, path });
         assert_eq!(screen.pending.len(), 1);
         assert_eq!(screen.pending[0].origin, PendingOrigin::Dropped);
+        // The chip is the file name, not the whole temp path.
+        assert_eq!(
+            screen.pending[0].label(),
+            "Screenshot 2026-05-27 at 13.37.31.png"
+        );
         // The structural attach still queues a probe for the strip.
         let deferred = screen.take_deferred_effects();
         assert!(matches!(
             deferred.last(),
-            Some(SessionEffect::ProbeAttachments { paths, .. })
-                if paths == &["/tmp/Screenshot 2026-05-27 at 13.37.31.png".to_string()]
+            Some(SessionEffect::ProbeAttachments { paths, .. }) if paths == &[shot]
         ));
         // The buffer text is untouched: a drop is not text.
         assert!(screen.input.buffer.value.is_empty());
-        // A second drop of the same path is a no-op.
-        screen.update(SessionMessage::Attach {
-            path: "/tmp/Screenshot 2026-05-27 at 13.37.31.png".into(),
+        // A second drop of the same file is a no-op.
+        let again = dir
+            .path()
+            .join("Screenshot 2026-05-27 at 13.37.31.png")
+            .to_string_lossy()
+            .to_string();
+        screen.update(SessionMessage::PastedPath {
+            text: again.clone(),
+            path: again,
         });
-        assert_eq!(screen.pending.len(), 1);
+        assert_eq!(screen.pending.len(), 1, "deduped by path");
+        assert!(screen.input.buffer.value.is_empty(), "still not text");
+    }
+
+    #[test]
+    fn a_pasted_path_that_is_not_a_file_pastes_as_text() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("shots")).unwrap();
+        let payloads = [
+            // Path-shaped, but a directory: a path, not a file.
+            dir.path().join("shots").to_string_lossy().to_string(),
+            // Path-shaped, but nothing is there.
+            dir.path().join("gone.png").to_string_lossy().to_string(),
+        ];
+        for payload in payloads {
+            let mut screen = SessionScreen::new();
+            let Some(SessionMessage::PastedPath { text, path }) = screen.map_paste(&payload) else {
+                panic!("{payload} is path-shaped");
+            };
+            screen.update(SessionMessage::PastedPath { text, path });
+            assert!(screen.pending.is_empty(), "no chip for {payload}");
+            assert!(
+                screen.take_deferred_effects().is_empty(),
+                "nothing to probe for {payload}"
+            );
+            assert_eq!(screen.input.buffer.value, payload, "the payload was text");
+        }
     }
 
     #[test]

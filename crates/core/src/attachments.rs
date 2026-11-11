@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 
 pub use compose::{
     AttachmentProbe, ClipboardAttachment, MAX_DIRECTORY_HINTS, directory_candidates,
-    probe_attachment,
+    is_attachable_file, probe_attachment,
 };
 pub use ingest::resolve_attachments;
 pub(crate) use ingest::{DocumentFailure, document_convert, fit_image, image_media_type};

@@ -35,7 +35,9 @@ The attachment feature spans the stack around one currency type: `shuvarie-llm`'
   pick lands in the composer's pending strip). Its search root is navigable without
   reopening the command — `→` re-roots onto the highlighted file's directory and `⌫` on an
   empty query walks up to the directory the dialog opened on — and each move re-asks the
-  core for that tree's index. `paste_path.rs` is the drop-payload classifier; `session.rs`
+  core for that tree's index. `paste_path.rs` is the drop-payload classifier (shape
+  only: a paste becomes an attachment when the path names an existing regular file, a
+  check `session.rs`'s `update` takes before the chip is pushed); `session.rs`
   holds the pending-attachment list — attachments are structural (picked, dropped, pasted,
   or read off the clipboard), never derived from the buffer text.
 - `src/tui/manage_attachments.rs`: the `/manage-attachments` dialog, the same strip as one
