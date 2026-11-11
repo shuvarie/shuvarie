@@ -19,11 +19,12 @@ pub enum SlashGuardMessage {
     Edit,
 }
 
-/// The slash-command guardrail: a submit that opens with a trigger char
-/// (`/`, `:`) yet resolves to no builtin, custom, or skill command is more
-/// likely a typo'd command than prose, so it is held here instead of being
-/// sent. The prompt replaces the composer: `Enter` sends the text anyway,
-/// `Esc` aborts the send and puts the text back to keep editing.
+/// The slash-command guardrail: a submit that opens with the skill trigger
+/// (`:`) yet resolves to no builtin, custom, or skill command is more likely a
+/// typo'd invocation than prose, so it is held here instead of being sent. (A
+/// leading `/` is never held — an absolute path opens with it.) The prompt
+/// replaces the composer: `Enter` sends the text anyway, `Esc` aborts the send
+/// and puts the text back to keep editing.
 pub struct SlashGuard {
     /// The held submit's text; `None` while the prompt is closed.
     held: Option<String>,
@@ -92,7 +93,7 @@ impl SlashGuard {
         let mut lines = vec![
             Line::from(vec![
                 Span::raw("▸ ").fg(theme::warning()),
-                Span::raw("This might be an invalid slash command")
+                Span::raw("This might be an invalid command")
                     .fg(theme::warning())
                     .bold(),
             ]),
@@ -172,7 +173,7 @@ mod tests {
     #[test]
     fn prompt_lists_the_held_text_and_the_bindings() {
         let mut guard = SlashGuard::new();
-        guard.hold("/nonexistent-command".into());
+        guard.hold(":nonexistent-command".into());
         let lines = guard.build_lines(40, usize::MAX);
         let rendered: Vec<String> = lines
             .iter()
@@ -181,9 +182,9 @@ mod tests {
         assert_eq!(
             rendered,
             vec![
-                "▸ This might be an invalid slash command".to_string(),
+                "▸ This might be an invalid command".to_string(),
                 String::new(),
-                "/nonexistent-command".to_string(),
+                ":nonexistent-command".to_string(),
                 "Enter send anyway    Esc keep editing".to_string(),
             ]
         );

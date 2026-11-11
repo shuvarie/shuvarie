@@ -876,10 +876,11 @@ impl SessionScreen {
         let expanded = match self.expand_skill(&content) {
             Ok(Some(expanded)) => expanded,
             Ok(None) => {
-                // Guardrail: the submit opened with a trigger char yet matched
-                // no command, so it is probably a typo'd command rather than
-                // prose. Hold it for confirmation instead of sending it.
-                if !slash_confirmed && commands::opens_with_trigger(&content) {
+                // Guardrail: the submit opened with the skill trigger yet matched
+                // no command, so it is probably a typo'd invocation rather than
+                // prose. Hold it for confirmation instead of sending it. (A
+                // leading `/` is not held: an absolute path opens with it.)
+                if !slash_confirmed && commands::holds_for_confirmation(&content) {
                     self.slash_guard.hold(content);
                     self.pending = chips;
                     self.requested_probes = probed;
@@ -3541,9 +3542,9 @@ mod tests {
         let (dir, mut screen) = repo_screen();
         std::fs::write(dir.path().join("tracked.txt"), "two\n").expect("write");
 
-        // A trigger-prefixed submit that matches no command: the slash
-        // guardrail takes it first.
-        screen.input.buffer.set("/nonexistent-command");
+        // A colon-prefixed submit that matches no command: the slash guardrail
+        // takes it first.
+        screen.input.buffer.set(":nonexistent-command");
         assert!(
             screen
                 .update(SessionMessage::Text(TextAreaMessage::Submit))
@@ -3568,7 +3569,7 @@ mod tests {
         assert!(matches!(
             screen.update(SessionMessage::Unstaged(UnstagedMessage::Continue)),
             Some(SessionEffect::SendMessage { content, .. })
-                if content == "/nonexistent-command"
+                if content == ":nonexistent-command"
         ));
     }
 
@@ -3757,23 +3758,42 @@ mod tests {
     }
 
     #[test]
-    fn unknown_slash_name_is_held_by_the_guardrail() {
+    fn unknown_colon_command_is_held_by_the_guardrail() {
         let mut screen = SessionScreen::new();
-        screen.input.buffer.set("/nonexistent-command");
+        screen.input.buffer.set(":nonexistent-command");
         assert!(
             screen
                 .update(SessionMessage::Text(TextAreaMessage::Submit))
                 .is_none(),
-            "an unmatched command is held instead of sent"
+            "an unmatched colon command is held instead of sent"
         );
         assert!(screen.slash_guard.active());
         assert!(screen.input.buffer.value.is_empty());
         assert!(matches!(
             screen.update(SessionMessage::SlashGuard(SlashGuardMessage::Send)),
             Some(SessionEffect::SendMessage { content, .. })
-                if content == "/nonexistent-command"
+                if content == ":nonexistent-command"
         ));
         assert!(!screen.slash_guard.active());
+    }
+
+    #[test]
+    fn an_absolute_path_prompt_sends_without_confirmation() {
+        // Only the beginning is checked, and a leading `/` never holds: a prompt
+        // that opens with an absolute path is prose even when its first word
+        // would have been a plausible command name.
+        for content in ["/tmp/shots is stale", "/tmp/shots", "/home/me/notes.md"] {
+            let mut screen = SessionScreen::new();
+            screen.input.buffer.set(content);
+            assert!(
+                matches!(
+                    screen.update(SessionMessage::Text(TextAreaMessage::Submit)),
+                    Some(SessionEffect::SendMessage { content: sent, .. }) if sent == content
+                ),
+                "{content} sends straight through"
+            );
+            assert!(!screen.slash_guard.active(), "{content} was not held");
+        }
     }
 
     #[test]
@@ -3817,7 +3837,7 @@ mod tests {
     #[test]
     fn guardrail_prompt_owns_enter_and_escape() {
         let mut screen = SessionScreen::new();
-        screen.input.buffer.set("/nope");
+        screen.input.buffer.set(":nope");
         screen.update(SessionMessage::Text(TextAreaMessage::Submit));
         assert!(matches!(
             screen.map_event(&KeyEvent::new(KeyCode::Enter, Modifiers::empty())),
@@ -3842,11 +3862,11 @@ mod tests {
             path: "notes.md".into(),
         });
         assert_eq!(screen.pending.len(), 1);
-        screen.input.buffer.set("/maybe");
+        screen.input.buffer.set(":maybe");
         screen.update(SessionMessage::Text(TextAreaMessage::Submit));
         assert!(screen.slash_guard.active());
         screen.update(SessionMessage::SlashGuard(SlashGuardMessage::Edit));
-        assert_eq!(screen.input.buffer.value, "/maybe");
+        assert_eq!(screen.input.buffer.value, ":maybe");
         assert_eq!(
             screen
                 .pending
@@ -3861,13 +3881,13 @@ mod tests {
     #[test]
     fn guardrail_prompt_renders_in_the_input_area() {
         let mut screen = SessionScreen::new();
-        screen.input.buffer.set("/nope");
+        screen.input.buffer.set(":nope");
         screen.update(SessionMessage::Text(TextAreaMessage::Submit));
         let buf = draw(&screen, 100, 24);
-        let (_, title) = find_row(&buf, "invalid slash command");
-        assert!(title.contains("This might be an invalid slash command"));
-        let (_, preview) = find_row(&buf, "/nope");
-        assert!(preview.contains("/nope"), "held text: {preview:?}");
+        let (_, title) = find_row(&buf, "invalid command");
+        assert!(title.contains("This might be an invalid command"));
+        let (_, preview) = find_row(&buf, ":nope");
+        assert!(preview.contains(":nope"), "held text: {preview:?}");
         let (_, footer) = find_row(&buf, "send anyway");
         assert!(footer.contains("Enter send anyway"), "footer: {footer:?}");
     }

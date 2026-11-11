@@ -381,17 +381,17 @@ pub fn unescape(text: &str) -> &str {
     }
 }
 
-/// Whether `text` opens with a trigger char (`/`, `:`) that is not escaped by
-/// a doubled prefix: the shape of an attempted command invocation (a builtin,
-/// a custom command, or a skill). Leading whitespace is trimmed away, mirroring
-/// [`parse_command`]; an escaped prefix (`//`, `::`) is literal text, not an
-/// attempt.
-pub fn opens_with_trigger(text: &str) -> bool {
+/// Whether a submit should be held for confirmation by the slash guardrail: it
+/// opens with the skill trigger (`:`) that is not escaped by a doubled prefix,
+/// yet resolved to no builtin, custom, or skill command.
+///
+/// Only the beginning of the text is inspected, and a leading `/` never holds: a
+/// prompt often opens with an absolute filesystem path (`/tmp/shots is stale`),
+/// and no shape test tells such a path from a mistyped command, so
+/// slash-leading text always sends as prose.
+pub fn holds_for_confirmation(text: &str) -> bool {
     let text = text.trim();
-    match text.chars().next() {
-        Some(first) => TRIGGER_CHARS.contains(&first) && !is_escaped(text),
-        None => false,
-    }
+    text.starts_with(':') && !is_escaped(text)
 }
 
 /// A parsed `<trigger><alias> [args]` submission.
@@ -537,19 +537,25 @@ mod tests {
     }
 
     #[test]
-    fn opens_with_trigger_detects_unescaped_prefixes() {
-        assert!(opens_with_trigger("/model"));
-        assert!(opens_with_trigger(":model"));
-        assert!(opens_with_trigger("/"));
-        assert!(opens_with_trigger("  /model"), "leading space is trimmed");
+    fn only_a_leading_colon_holds_a_submit() {
+        assert!(holds_for_confirmation(":model"));
         assert!(
-            !opens_with_trigger("//model"),
+            holds_for_confirmation("  :model"),
+            "leading space is trimmed"
+        );
+        assert!(
+            !holds_for_confirmation("/model"),
+            "a leading slash is a path, not a command attempt"
+        );
+        assert!(!holds_for_confirmation("/tmp/shots is stale"));
+        assert!(!holds_for_confirmation("/"));
+        assert!(
+            !holds_for_confirmation("::model"),
             "the doubled prefix escapes it"
         );
-        assert!(!opens_with_trigger("::model"));
-        assert!(!opens_with_trigger("hello /model"));
-        assert!(!opens_with_trigger(""));
-        assert!(!opens_with_trigger("!ls"));
+        assert!(!holds_for_confirmation("hello :model"));
+        assert!(!holds_for_confirmation(""));
+        assert!(!holds_for_confirmation("!ls"));
     }
 
     #[test]
