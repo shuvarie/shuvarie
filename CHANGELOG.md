@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.1] - 2026-11-11
+
+### 🚀 Features
+
+- *(scene)* Add cycle scene
+
+### 🎨 Styling
+
+- Add logo
+
+### ⚙️ Miscellaneous Tasks
+
+- *(release)* Remove cargo publish
 ## [0.6.0] - 2026-11-05
 
 ### 🚀 Features
