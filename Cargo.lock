@@ -7190,9 +7190,9 @@ checksum = "2ab42ca02749e120097e328d91d415325bdf43b1c72c4c8badf37375fe40a813"
 
 [[package]]
 name = "selune"
-version = "0.5.7"
+version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74b04374d9bc314ab0fe442a18d746714c04704f1a30727974436df4624a5ee4"
+checksum = "d2268d0ac479e2b589e18098ae2c04b11ea1ce332db114d4eb35986adec63ab3"
 dependencies = [
  "chrono",
  "chrono-tz",
