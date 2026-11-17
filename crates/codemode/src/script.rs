@@ -318,7 +318,14 @@ pub async fn run(
     // Requests go one way, replies the other; the script thread blocks on the
     // reply, which is what makes a synchronous-looking call possible at all.
     let (requests, incoming) = tokio::sync::mpsc::unbounded_channel::<CallRequest>();
-    tokio::spawn(serve_calls(incoming, invoker));
+    // The serving task belongs to the run, so the run says when it is over rather
+    // than waiting for every sender to drop. A sender lives inside the host object
+    // the interpreter holds, and a reference to *that* surviving in the interpreter
+    // -- a closure's globals, an exception's traceback -- would otherwise leave a
+    // task (with the whole roster in it) alive for the life of the process.
+    let (served, served_done) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(serve_calls(incoming, invoker, served_done));
+    let mut served = Finished(Some(served));
 
     // The deadline lives on this side, as one task that flips the same signal the
     // caller does; the script's watchdog is what turns the signal into an
@@ -350,6 +357,7 @@ pub async fn run(
         });
 
     if spawned.is_err() {
+        served.finish();
         return ScriptOutcome::failed(
             ScriptError {
                 kind: ErrorKind::Stopped,
@@ -367,10 +375,12 @@ pub async fn run(
     match outcome.await {
         Ok(outcome) => {
             drop(guard);
+            served.finish();
             outcome
         }
         Err(_) => {
             drop(guard);
+            served.finish();
             ScriptOutcome::failed(
                 ScriptError {
                     kind: ErrorKind::Stopped,
@@ -381,6 +391,24 @@ pub async fn run(
                 started.elapsed(),
             )
         }
+    }
+}
+
+/// Tells the call-serving task that the run is over, wherever `run` returns from —
+/// including the caller dropping the future.
+struct Finished(Option<tokio::sync::oneshot::Sender<()>>);
+
+impl Finished {
+    fn finish(&mut self) {
+        if let Some(told) = self.0.take() {
+            let _ = told.send(());
+        }
+    }
+}
+
+impl Drop for Finished {
+    fn drop(&mut self) {
+        self.finish();
     }
 }
 
@@ -405,8 +433,21 @@ struct CallRequest {
 /// One task per call: the script thread is blocked on its reply, so calls are
 /// sequential in practice -- but this is the shape a fan-out needs, and it
 /// keeps a slow tool from delaying the accept loop.
-async fn serve_calls(mut requests: UnboundedReceiver<CallRequest>, invoker: Arc<dyn ToolInvoker>) {
-    while let Some(request) = requests.recv().await {
+async fn serve_calls(
+    mut requests: UnboundedReceiver<CallRequest>,
+    invoker: Arc<dyn ToolInvoker>,
+    mut finished: tokio::sync::oneshot::Receiver<()>,
+) {
+    loop {
+        let request = tokio::select! {
+            // The run is over. Whatever still holds a sender is a leftover in the
+            // interpreter, not a script waiting for an answer.
+            _ = &mut finished => break,
+            request = requests.recv() => match request {
+                Some(request) => request,
+                None => break,
+            },
+        };
         let invoker = Arc::clone(&invoker);
         tokio::spawn(async move {
             let result = invoker

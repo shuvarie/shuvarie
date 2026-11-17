@@ -153,13 +153,29 @@ subprocess-with-a-restricted-build mode listed under the known limitations.
 ## Limits and the result
 
 Limits: `max-operations` (the trace hook), `timeout-ms` (a timer that sets the stop
-signal, plus the watchdog that turns that signal into an interrupt — which is also
-how a turn abort unwinds a script blocked on a tool), `max-tool-calls` (counted
-before the call, so the call that hit the limit is still in the trace), and
+signal, plus the watchdog that turns that signal into an interrupt), `max-tool-calls`
+(counted before the call, so the call that hit the limit is still in the trace), and
 `max-output-chars`. Python's own runaway guards are deliberately unused:
 `sys.setrecursionlimit` is process-wide, and a real memory cap is the OS's job. A
 cancellation must always answer the reply channel, or the script thread blocks
 forever — the bridge guarantees a reply by construction.
+
+**A blocked script has to be stoppable, and that is a separate mechanism.**
+`PyThreadState_SetAsyncExc` interrupts *bytecode*, so a thread parked in
+`time.sleep` ignores both the budget and an interrupt — and a script that waits is
+not exotic: a poll interval or a retry backoff is the first thing a model writes.
+Such a script does not fail, it *hangs*: the tool call stays pending, so the turn
+stays running and the next message is steered into a queue behind it. So the
+runtime owns `time.sleep`, sleeping in `_POLL` slices and checking the stop signal
+between them (a thread that is not running a script keeps the real one), and it owns
+`input()`, which raises instead of reading — a script has nobody to answer it, and
+`sys.stdin` is the terminal whose keys the interface is decoding.
+
+The same reasoning is why `timeout-ms` has a default. The shipped default was *no*
+budget, on the theory that a script is the user's own work; a script is arbitrary
+code, and one that never returns does not end the turn at all. Two minutes is
+generous for orchestration and short enough that a hang is a mistake rather than a
+restart; `timeout-ms 0` states "no budget" explicitly.
 
 The result is one block, in the shape the references converge on: a completed or
 failed header with wall time, the script's value (`text()` items and the return
@@ -214,7 +230,8 @@ codemode {
                      //   an embedded interpreter that cannot find its stdlib.
                      //   Applied before the first script, so it needs a restart.
   inline-budget 3000 // estimated tokens of inlined declarations
-  timeout-ms 0       // 0 = unset
+  timeout-ms 120000  // wall clock for one script, its tool calls included.
+                     //   Omitted = the default two minutes; `0` = no budget.
   max-operations 0
   max-tool-calls 0
   store #true

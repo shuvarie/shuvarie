@@ -670,12 +670,20 @@ mod tests {
 
     #[test]
     fn a_budget_of_zero_reads_as_unset() {
-        let editor = CodemodeEditor::new();
+        let mut editor = CodemodeEditor::new();
+        // The shipped default is a real budget; `0` is the file explicitly asking
+        // for none, which reads as "none" here.
+        editor.prefs.timeout_ms = 0;
         assert_eq!(editor.value(Row::Timeout), "none");
         assert_eq!(editor.value(Row::MaxOperations), "unlimited");
         assert_eq!(editor.value(Row::MaxToolCalls), "unlimited");
         // A fresh editor shows the shipped defaults: offered, and the roster
         // split that pays for itself.
         assert_eq!(editor.value(Row::Enabled), "on");
+        assert_eq!(
+            CodemodeEditor::new().value(Row::Timeout),
+            "120000 ms",
+            "a script is bounded unless the file says otherwise"
+        );
     }
 }

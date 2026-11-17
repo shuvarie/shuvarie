@@ -176,11 +176,18 @@ load("count")
 
 ## Limits
 
-Three limits are configurable, and the defaults are none: a wall-clock budget, a
-line budget (`max-operations`), and a cap on nested tool calls. A script that
+Three limits are configurable. A wall-clock budget is always in force (two minutes
+unless the file says otherwise, its tool calls included); a line budget
+(`max-operations`) and a cap on nested tool calls are off by default. A script that
 exceeds one is stopped and the result says which -- a `try`/`except` of your own
-does not get to continue past it. Loops over tool output are the usual way to
-find them, so bound the loop when the data could be unbounded.
+does not get to continue past it, because the run itself is what ends. Loops over
+tool output are the usual way to find them, so bound the loop when the data could
+be unbounded.
+
+Waiting counts. `time.sleep` is interrupted rather than slept through, `input()`
+raises (a script has nobody to answer it), and a nested call is a real call that
+can take as long as the tool does. So prefer one call that returns what you need to
+a loop that polls a tool repeatedly.
 
 ```python
 paths = [path for path in tools.glob(pattern="src/**/*.rs").split(chr(10)) if path]

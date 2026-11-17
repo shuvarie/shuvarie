@@ -862,6 +862,18 @@ pub const TOOL_DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// The default inline budget of the `codemode` catalog, in estimated tokens.
 pub const CODEMODE_DEFAULT_INLINE_BUDGET: usize = 3000;
 
+/// The wall-clock budget a script gets when `timeout-ms` says nothing.
+///
+/// The shipped default used to be *no* budget, on the theory that a script is the
+/// user's own work and should be left alone. A script is arbitrary code, though,
+/// and one that waits — a poll interval, a lock, a nested call that never returns —
+/// does not end the turn at all: the tool call stays pending, the interface stays
+/// "running", and the next message is queued behind it. Generous enough for a
+/// script that shells out and reads a few dozen files, small enough that a hang is
+/// a minute's mistake rather than a restart. `timeout-ms 0` states "no budget"
+/// explicitly, for a script that really does take that long.
+pub const CODEMODE_DEFAULT_TIMEOUT_MS: u64 = 120_000;
+
 /// How `codemode` presents the roster to the model.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CodemodeMode {
@@ -976,8 +988,9 @@ pub struct CodemodeConfig {
     /// still callable and listed by name, reachable through `describe_tool`.
     pub inline_budget: usize,
 
-    /// `timeout-ms`: wall-clock budget for one script. `0` is none, which
-    /// leaves only `max-operations` between a script and a runaway loop.
+    /// `timeout-ms`: wall-clock budget for one script, including the calls it
+    /// makes. Absent is [`CODEMODE_DEFAULT_TIMEOUT_MS`]; `0` is no budget at all,
+    /// which leaves only `max-operations` between a script and a runaway loop.
     pub timeout_ms: u64,
 
     /// `max-operations`: the script's own lines per run, counted by a trace hook.
@@ -1002,7 +1015,7 @@ impl Default for CodemodeConfig {
             mode: CodemodeMode::default(),
             python: None,
             inline_budget: CODEMODE_DEFAULT_INLINE_BUDGET,
-            timeout_ms: 0,
+            timeout_ms: CODEMODE_DEFAULT_TIMEOUT_MS,
             max_operations: 0,
             max_tool_calls: 0,
             store: true,

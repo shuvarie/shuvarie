@@ -400,6 +400,115 @@ async fn the_timeout_stops_a_runaway_script() {
     assert!(error.message.contains("budget"), "{}", error.message);
 }
 
+/// A script does not only run away in a loop: it can block. `time.sleep` is the
+/// plainest way (a poll interval, a retry backoff), and a blocked script that the
+/// budget cannot stop is a turn that never ends — the tool call stays pending, so
+/// the interface stays "running" and the next message is steered into a queue.
+#[tokio::test]
+async fn the_timeout_stops_a_script_that_is_asleep() {
+    let limits = Limits {
+        timeout: Some(Duration::from_millis(100)),
+        ..Limits::default()
+    };
+    let started = std::time::Instant::now();
+    let (outcome, _) = execute_with("import time\ntime.sleep(30)", limits, stub(), catalog()).await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(error(&outcome).kind, ErrorKind::Stopped);
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the budget did not stop a sleeping script: it took {elapsed:?}"
+    );
+}
+
+/// Cancelling a run has to reach a blocked script too, or an interrupted turn sits
+/// on a tool call that nobody is waiting for.
+#[tokio::test]
+async fn a_cancel_stops_a_script_that_is_asleep() {
+    let stop = Stop::new();
+    let handle = tokio::spawn(run(
+        ScriptRequest {
+            script: "import time\ntime.sleep(30)".to_string(),
+            catalog: catalog(),
+            store: None,
+            limits: Limits::default(),
+        },
+        stub(),
+        stop.clone(),
+    ));
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    stop.cancel();
+
+    let outcome = handle.await.unwrap();
+    assert_eq!(error(&outcome).kind, ErrorKind::Stopped);
+    assert!(
+        outcome.elapsed < Duration::from_secs(5),
+        "{:?}",
+        outcome.elapsed
+    );
+}
+
+/// `time.sleep` and `input` are replaced process-wide, so the replacement must
+/// answer to the run that owns the *calling thread* rather than to the run that
+/// installed it. Two scripts at once is the case that tells them apart: one run's
+/// budget expiring used to trip the other run, which came back as an error about an
+/// exception class it could not even name.
+#[tokio::test]
+async fn a_budget_expiring_in_one_run_does_not_trip_another() {
+    let stopping = tokio::spawn(run(
+        ScriptRequest {
+            script: "import time\ntime.sleep(30)".to_string(),
+            catalog: catalog(),
+            store: None,
+            limits: Limits {
+                timeout: Some(Duration::from_millis(100)),
+                ..Limits::default()
+            },
+        },
+        stub(),
+        Stop::new(),
+    ));
+    // Long enough to outlive the other run's budget: while it waits, that budget
+    // expires, and this run must not notice.
+    let patient = tokio::spawn(run(
+        ScriptRequest {
+            script: "import time\ntime.sleep(1)\n\"done\"".to_string(),
+            catalog: catalog(),
+            store: None,
+            limits: Limits::default(),
+        },
+        stub(),
+        Stop::new(),
+    ));
+
+    let (stopping, patient) = (stopping.await.unwrap(), patient.await.unwrap());
+    assert_eq!(error(&stopping).kind, ErrorKind::Stopped);
+    assert_eq!(value(&patient), json!("done"), "{:?}", patient.result);
+}
+
+/// A script has nobody to answer `input()`, and `sys.stdin` is the terminal whose
+/// keys the interface is decoding: reading it would both hang the turn and swallow
+/// what the user types.
+#[tokio::test]
+async fn input_raises_rather_than_reading_the_terminal() {
+    let limits = Limits {
+        timeout: Some(Duration::from_millis(500)),
+        ..Limits::default()
+    };
+    let started = std::time::Instant::now();
+    let (outcome, _) = execute_with("input(\"name? \")", limits, stub(), catalog()).await;
+
+    let error = error(&outcome);
+    assert_eq!(error.kind, ErrorKind::Eval);
+    assert!(
+        error.message.contains("not interactive"),
+        "{}",
+        error.message
+    );
+    assert!(started.elapsed() < Duration::from_secs(1), "it blocked");
+}
+
 #[tokio::test]
 async fn the_tool_call_limit_stops_the_script_even_when_the_script_catches_it() {
     let limits = Limits {

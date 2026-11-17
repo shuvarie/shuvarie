@@ -12,6 +12,7 @@ without `unsafe`).
 """
 
 import ast
+import builtins
 import ctypes
 import json
 import sys
@@ -25,6 +26,11 @@ FILENAME = "<codemode>"
 
 _POLL = 0.02
 """How often the watchdog asks the host whether the run should stop."""
+
+_REAL_SLEEP = time.sleep
+_REAL_INPUT = builtins.input
+_REGISTRY = threading.Lock()
+"""The registry is built once, and two runs can be the first to ask for it."""
 
 _NOTHING = object()
 """The script produced no value at all, as distinct from a value of `None`."""
@@ -253,7 +259,8 @@ class _Stream:
         self.encoding = "utf-8"
 
     def _sink(self):
-        return self._registry["sinks"].get(threading.get_ident())
+        entry = self._registry["threads"].get(threading.get_ident())
+        return None if entry is None else entry["log"]
 
     def _buffer(self):
         if not hasattr(self._local, "buffer"):
@@ -289,14 +296,76 @@ class _Stream:
 
 
 def _streams():
-    """The console proxy and the table of which thread writes where."""
-    registry = getattr(sys, "_shuvarie_console", None)
-    if registry is None:
-        registry = {"sinks": {}, "out": sys.stdout, "err": sys.stderr}
-        sys.stdout = _Stream(registry, "out")
-        sys.stderr = _Stream(registry, "err")
-        sys._shuvarie_console = registry
-    return registry
+    """The console proxy and the table of which thread belongs to which run.
+
+    Process-wide, but never run-specific: an entry is looked up by thread, and
+    holds that run's own host, stop exception and sink. The guards below are
+    installed once, so they must not close over one run's globals -- a second run
+    would then ask the first run's host whether to stop and raise the first run's
+    exception class, which the second run's `except` cannot catch.
+    """
+    with _REGISTRY:
+        registry = getattr(sys, "_shuvarie_console", None)
+        if registry is None:
+            registry = {"threads": {}, "out": sys.stdout, "err": sys.stderr}
+            sys.stdout = _Stream(registry, "out")
+            sys.stderr = _Stream(registry, "err")
+            sys._shuvarie_console = registry
+            _install_guards()
+        return registry
+
+
+def _stop_now(entry):
+    """Raise this run's `_Stop` if its host has asked the run to end."""
+    reason = entry["host"].stop_reason()
+    if reason is not None:
+        raise entry["stop"](reason)
+
+
+def _sleep(seconds=0.0):
+    """`time.sleep`, except that a stop is delivered while it waits.
+
+    `PyThreadState_SetAsyncExc` interrupts *bytecode*: it does nothing to a thread
+    parked in `time.sleep`, which is how a script that waits (a poll interval, a
+    retry backoff, a `while time.time() < deadline` loop) becomes a turn that never
+    ends -- the tool call stays pending, so the interface stays running and the next
+    message is queued behind it. Sleeping in slices instead, and checking the host
+    between them, is what makes the budget and an interrupt work on a blocked
+    script. Threads that are not running a script keep the real one.
+    """
+    entry = _streams()["threads"].get(threading.get_ident())
+    if entry is None:
+        return _REAL_SLEEP(seconds)
+    try:
+        remaining = float(seconds)
+    except (TypeError, ValueError):
+        return _REAL_SLEEP(seconds)
+    while remaining > 0:
+        _stop_now(entry)
+        slice_ = _POLL if remaining > _POLL else remaining
+        _REAL_SLEEP(slice_)
+        remaining -= slice_
+    _stop_now(entry)
+
+
+def _input(*args, **kwargs):
+    """`input()` is not a script's to call: there is nobody to answer, and `sys.stdin`
+    is the terminal the interface is reading its keys from."""
+    if threading.get_ident() not in _streams()["threads"]:
+        return _REAL_INPUT(*args, **kwargs)
+    raise RuntimeError(
+        "a codemode script is not interactive: `input()` has nobody to answer it "
+        "and would read the interface's own keys. Take the value from a tool instead."
+    )
+
+
+def _install_guards():
+    """Replace the two blocking builtins with thread-dispatched versions."""
+    if getattr(sys, "_shuvarie_guards", False):
+        return
+    sys._shuvarie_guards = True
+    time.sleep = _sleep
+    builtins.input = _input
 
 
 def _watch(script_thread, done):
@@ -319,7 +388,9 @@ def _watch(script_thread, done):
         if set_async(ctypes.c_ulong(script_thread), _Stop) == 0:
             # No such thread: it finished between the check and the call.
             break
-        time.sleep(_POLL)
+        # The runtime's own waiting is never a script's: `time.sleep` is guarded
+        # now, and this thread is not the one the guards answer.
+        _REAL_SLEEP(_POLL)
 
 
 def _counter(limit):
@@ -369,6 +440,10 @@ def _describe(failure):
     One frame is worth reporting -- the innermost one the script wrote -- and the
     position belongs to the runner's envelope rather than to the message.
     """
+    if isinstance(failure, _Stop):
+        # Raised between bytecodes, so it can land in the runtime as easily as in
+        # the script; the host has the reason and says so itself.
+        return "the script was stopped", None, None
     if isinstance(failure, SyntaxError):
         return f"SyntaxError: {failure.msg}", failure.lineno, failure.offset
 
@@ -431,6 +506,22 @@ def start(script, manifest_json, options_json):
     produced never has to cross as a Python object: everything is JSON at this
     boundary, which is what keeps the conversion rules in one place.
     """
+    # This run's answer, and nothing shared: two runs are two modules, and the only
+    # thing between them is the process-wide console registry.
+    holder = []
+    registry = _streams()
+    try:
+        return _run(script, manifest_json, options_json, registry, holder)
+    except BaseException as failure:
+        # An interrupt is delivered *between bytecodes*, so it can land in this
+        # function's own tail as easily as in the script -- and an answer that was
+        # already decided is the one that has to come back. The watchdog is joined
+        # by the time this runs, so nothing can be raised twice.
+        return holder[0] if holder else _failed("stopped", failure)
+
+
+def _run(script, manifest_json, options_json, registry, holder):
+    """`start` with the setup, the script, and the cleanup in one place."""
     manifest = json.loads(manifest_json)
     options = json.loads(options_json)
     limit = options.get("max_operations") or 0
@@ -443,9 +534,11 @@ def start(script, manifest_json, options_json):
     globals_dict = {"__name__": "__main__"}
     globals_dict.update(_globals(manifest))
 
-    # This thread's console output goes to the result, not to the terminal.
-    sinks = _streams()["sinks"]
-    sinks[threading.get_ident()] = _HOST.log
+    # This thread's console output goes to the result, not to the terminal, and
+    # this thread's guards answer to this run -- so the whole record is registered
+    # rather than just the sink.
+    threads = registry["threads"]
+    threads[threading.get_ident()] = {"host": _HOST, "stop": _Stop, "log": _HOST.log}
     done = threading.Event()
     # This thread's own id, read here rather than in the watchdog: the watchdog
     # can only interrupt a thread it can name, and naming itself is the one answer
@@ -460,21 +553,36 @@ def start(script, manifest_json, options_json):
     if limit:
         sys.settrace(_counter(limit))
     try:
-        return _execute(script, globals_dict)
+        # Recorded before the cleanup, because the cleanup is where an interrupt
+        # can still land: the answer is decided at this line or not at all.
+        holder.append(_execute(script, globals_dict))
     finally:
-        sys.settrace(None)
-        # Flush what a `print(end="")` left half-written before the thread stops
-        # counting as a script's.
-        for stream in (sys.stdout, sys.stderr):
-            try:
-                stream.flush()
-            except Exception:
-                pass
-        sinks.pop(threading.get_ident(), None)
-        done.set()
-        # `join` would hold the GIL the watchdog needs to notice `done`, so wait
-        # by sleeping, which lets it run.
+        # Each step stands alone: a stop delivered mid-cleanup must not skip the
+        # ones that matter (this thread stops being a script's, the watchdog is
+        # told to finish) -- and every step here is the runtime's own, so it uses
+        # the real sleep and never the guarded one.
+        _guard(lambda: threads.pop(threading.get_ident(), None))
+        _guard(done.set)
+        _guard(sys.stdout.flush)
+        _guard(sys.stderr.flush)
+        # `join` would hold the GIL the watchdog needs to notice `done`, so wait by
+        # sleeping, which lets it run. Once this returns, nothing can be raised.
         for _ in range(100):
             if not watchdog.is_alive():
                 break
-            time.sleep(0.005)
+            _guard(lambda: _REAL_SLEEP(0.005))
+        _guard(lambda: sys.settrace(None))
+        # The guards stay installed process-wide, so this module -- and its globals,
+        # which hold `_HOST` -- outlives the run. Dropping the host here is what
+        # keeps one script from pinning its run (and, with it, the whole tool roster)
+        # for the life of the process.
+        _guard(lambda: globals().pop("_HOST", None))
+    return holder[0]
+
+
+def _guard(step):
+    """Run one piece of the runtime's own bookkeeping, whatever happens."""
+    try:
+        step()
+    except BaseException:
+        pass

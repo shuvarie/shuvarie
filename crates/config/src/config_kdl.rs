@@ -1165,9 +1165,9 @@ fn parse_registry_headers(node: &KdlNode, input: &str) -> Result<Vec<(String, St
 }
 
 /// `codemode { disabled #true; mode "declare-builtin"; python "…"; inline-budget
-/// 3000; timeout-ms 0; max-operations 0; max-tool-calls 0; store #true;
+/// 3000; timeout-ms 120000; max-operations 0; max-tool-calls 0; store #true;
 /// tools { … } }` — one tool that runs a Python script, where the script calls the
-/// other tools.
+/// other tools. `timeout-ms 0` is no budget; absent is the default two minutes.
 /// The tool is offered unless `disabled` says otherwise: `disabled #true` turns
 /// it off, `disabled #false` (or no node) leaves it on, and `disabled "auto"`
 /// narrows it to the turns that have a configured tool to script. `mode` is
