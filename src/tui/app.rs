@@ -1805,12 +1805,13 @@ impl App {
             }
             CoreEvent::RetryScheduled {
                 reason,
+                message,
                 attempt,
                 max_attempts,
                 delay_ms,
-                ..
             } => Some(AppMessage::Session(SessionMessage::RetryScheduled {
                 reason,
+                message,
                 attempt,
                 max_attempts,
                 delay_ms,
@@ -4633,6 +4634,7 @@ mod tests {
         active_session(&mut app);
         app.update(AppMessage::Session(SessionMessage::RetryScheduled {
             reason: "connection reset".into(),
+            message: "connection reset by peer".into(),
             attempt: 1,
             max_attempts: 3,
             delay_ms: 500,

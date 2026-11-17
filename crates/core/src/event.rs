@@ -247,10 +247,11 @@ pub enum Event {
         session: crate::Session,
     },
     /// The turn failed with a retryable error; the core task will re-send
-    /// the turn after `delay_ms`. `reason` is a short status-row label (the
-    /// connection-failure kind, or the generic `Turn error`). `attempt` is
-    /// the upcoming retry number (1-based) out of `max_attempts` (from
-    /// `[retry].max-retries`).
+    /// the turn after `delay_ms`. `message` is the failure's own text, which
+    /// the TUI shows in its retry row; `reason` is a short kind label (the
+    /// connection-failure kind, or the generic `Turn error`) that run mode
+    /// prints. `attempt` is the upcoming retry number (1-based) out of
+    /// `max_attempts` (from `[retry].max-retries`).
     RetryScheduled {
         reason: String,
         message: String,

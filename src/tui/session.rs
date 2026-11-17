@@ -203,9 +203,12 @@ pub enum SessionMessage {
     /// highlight needle; `SearchMessage::Exit` closes the mode.
     Search(SearchMessage),
     /// A retryable connection failure; the core task re-sends the turn after
-    /// `delay_ms`. Shows a red countdown in the status row.
+    /// `delay_ms`. Shows a red countdown in the status row, led by the failure's
+    /// own text (`message`) — the short `reason` label only stands in when the
+    /// provider reported nothing.
     RetryScheduled {
         reason: String,
+        message: String,
         attempt: usize,
         max_attempts: usize,
         delay_ms: u64,
@@ -291,13 +294,39 @@ enum BusyKind {
 }
 
 /// A scheduled turn retry, rendered as a red countdown in the status
-/// row (`<reason>. Retry in <seconds>s [<attempt>/<cap>]`).
+/// row (`<message>. Retry in <seconds>s [<attempt>/<cap>]`). `message` is the
+/// failed turn's own error text — collapsed to one display line so a multi-line
+/// provider body cannot break the row — because a rate-limit rejection and a
+/// dropped socket read very differently; the core's short `reason` only stands
+/// in when the provider reported nothing.
 #[derive(Debug, Clone)]
 pub(crate) struct RetryWait {
-    pub(crate) reason: String,
+    pub(crate) message: String,
     pub(crate) attempt: usize,
     pub(crate) max_attempts: usize,
     pub(crate) deadline: std::time::Instant,
+}
+
+impl RetryWait {
+    /// The row state for one scheduled retry. `message` is the failed turn's own
+    /// error text, flattened to the single line the status row has room for;
+    /// the core's short `reason` label stands in when the provider reported
+    /// nothing at all.
+    fn new(
+        reason: String,
+        message: &str,
+        attempt: usize,
+        max_attempts: usize,
+        deadline: std::time::Instant,
+    ) -> Self {
+        let message = single_line(message);
+        Self {
+            message: if message.is_empty() { reason } else { message },
+            attempt,
+            max_attempts,
+            deadline,
+        }
+    }
 }
 
 /// In-progress todo rows shown in the strip under the title bar; further
@@ -1332,6 +1361,7 @@ impl SessionScreen {
             }
             SessionMessage::RetryScheduled {
                 reason,
+                message,
                 attempt,
                 max_attempts,
                 delay_ms,
@@ -1341,13 +1371,13 @@ impl SessionScreen {
                 // turn drops their blocks. The partial text and reasoning stay
                 // — they are the reply the retry continues.
                 self.chat.update(ChatMessage::AttemptCut);
-                self.retry = Some(RetryWait {
+                self.retry = Some(RetryWait::new(
                     reason,
+                    &message,
                     attempt,
                     max_attempts,
-                    deadline: std::time::Instant::now()
-                        + std::time::Duration::from_millis(delay_ms),
-                });
+                    std::time::Instant::now() + std::time::Duration::from_millis(delay_ms),
+                ));
                 self.busy_kind = BusyKind::Waiting;
                 self.status = None;
                 None
@@ -1813,13 +1843,22 @@ impl SessionScreen {
                 .deadline
                 .saturating_duration_since(std::time::Instant::now());
             let secs = (remaining.as_secs_f64()).ceil().max(1.0) as u64;
+            let lead = if retry.message.is_empty() { "" } else { ". " };
             let text = format!(
-                "{}. Retry in {}s [{}/{}]",
-                retry.reason, secs, retry.attempt, retry.max_attempts
+                "{lead}Retry in {secs}s [{}/{}]",
+                retry.attempt, retry.max_attempts
             );
+            // The countdown is the row's actionable half, so it keeps its whole
+            // width; the failure's own text — a provider error body can run far
+            // past the row — takes what the spinner and countdown leave and is
+            // elided past it.
+            let spinner = super::spinner::wait_spinner();
+            let reserved = spinner.width() + 1 + UnicodeWidthStr::width(text.as_str());
+            let budget = usize::from(status_area.width).saturating_sub(reserved);
             let spans = vec![
-                super::spinner::wait_spinner(),
+                spinner,
                 Span::raw(" "),
+                elided_span(&retry.message, budget, theme::error()),
                 Span::raw(text).fg(theme::error()),
             ];
             frame.render_widget(Paragraph::new(Line::from(spans)), status_area);
@@ -2169,6 +2208,13 @@ fn elided_span(text: &str, max_width: usize, color: Color) -> Span<'static> {
     }
     out.push('…');
     Span::raw(out).fg(color)
+}
+
+/// `text` flattened to a single display line: every run of whitespace — the
+/// newlines and tabs a provider's multi-line error body carries included —
+/// becomes one space, and the ends are trimmed.
+fn single_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 impl Default for SessionScreen {
@@ -2824,13 +2870,18 @@ mod tests {
     }
 
     fn retry_screen(seconds: u64, attempt: usize) -> SessionScreen {
+        retry_screen_with("connection reset by peer (os error 104)", seconds, attempt)
+    }
+
+    fn retry_screen_with(message: &str, seconds: u64, attempt: usize) -> SessionScreen {
         let mut screen = SessionScreen::new();
-        screen.retry = Some(RetryWait {
-            reason: "Connection reset".into(),
+        screen.retry = Some(RetryWait::new(
+            "Connection reset".into(),
+            message,
             attempt,
-            max_attempts: 10,
-            deadline: std::time::Instant::now() + std::time::Duration::from_secs(seconds),
-        });
+            10,
+            std::time::Instant::now() + std::time::Duration::from_secs(seconds),
+        ));
         screen
     }
 
@@ -2846,7 +2897,7 @@ mod tests {
         let buf = draw(&retry_screen(3, 1), 100, 24);
         let (y, text) = find_row(&buf, "Retry in");
         assert!(
-            text.contains("Connection reset. Retry in 3s [1/10]"),
+            text.contains("connection reset by peer (os error 104). Retry in 3s [1/10]"),
             "row {y}: {text:?}"
         );
     }
@@ -2862,7 +2913,7 @@ mod tests {
     fn retry_countdown_is_red() {
         let buf = draw(&retry_screen(3, 1), 100, 24);
         let (y, text) = find_row(&buf, "Retry in");
-        let col = text.find("Connection reset").unwrap() as u16;
+        let col = text.find("connection reset").unwrap() as u16;
         assert_eq!(
             buf[(col, y)].fg,
             theme::error(),
@@ -2875,16 +2926,83 @@ mod tests {
         let mut screen = SessionScreen::new();
         screen.update(SessionMessage::RetryScheduled {
             reason: "Connection timed out".into(),
+            message: "error sending request: operation timed out".into(),
             attempt: 3,
             max_attempts: 10,
             delay_ms: 10_000,
         });
         let retry = screen.retry.as_ref().expect("retry state");
-        assert_eq!(retry.reason, "Connection timed out");
+        assert_eq!(retry.message, "error sending request: operation timed out");
         assert_eq!(retry.attempt, 3);
         assert_eq!(retry.max_attempts, 10);
         assert!(screen.is_busy());
         assert_eq!(screen.busy_kind, BusyKind::Waiting);
+    }
+
+    /// The retry row leads with the turn's own error text, not the core's
+    /// generic `Turn error` label: a 429 body and a dropped socket need to read
+    /// differently to be worth anything.
+    #[test]
+    fn retry_row_shows_the_turn_error_not_the_kind_label() {
+        let mut screen = SessionScreen::new();
+        screen.update(SessionMessage::RetryScheduled {
+            reason: "Turn error".into(),
+            message: "429 rate limit exceeded".into(),
+            attempt: 1,
+            max_attempts: 3,
+            delay_ms: 2_000,
+        });
+        let buf = draw(&screen, 100, 24);
+        let (_, text) = find_row(&buf, "Retry in");
+        assert!(
+            text.contains("429 rate limit exceeded. Retry in 2s [1/3]"),
+            "the row carries the failure: {text:?}"
+        );
+        assert!(
+            !text.contains("Turn error"),
+            "the fixed label never stands in for a real message: {text:?}"
+        );
+    }
+
+    /// A provider that reports nothing leaves the short kind label in the row,
+    /// with no dangling separator in front of the countdown.
+    #[test]
+    fn a_blank_failure_message_falls_back_to_the_kind_label() {
+        let mut screen = SessionScreen::new();
+        screen.update(SessionMessage::RetryScheduled {
+            reason: "Connection reset".into(),
+            message: "  \n\t ".into(),
+            attempt: 2,
+            max_attempts: 10,
+            delay_ms: 4_000,
+        });
+        let buf = draw(&screen, 100, 24);
+        let (_, text) = find_row(&buf, "Retry in");
+        assert!(
+            text.contains("Connection reset. Retry in 4s [2/10]"),
+            "fallback: {text:?}"
+        );
+    }
+
+    /// A multi-line provider body collapses onto the single status row, and a
+    /// body longer than the row is elided without eating the countdown.
+    #[test]
+    fn a_long_failure_message_elides_before_the_countdown() {
+        let message = format!(
+            "500 Internal Server Error\n{{\"error\":{{\"message\":\"{}\"}}}}",
+            "upstream failed ".repeat(20)
+        );
+        let buf = draw(&retry_screen_with(&message, 3, 1), 100, 24);
+        let (_, text) = find_row(&buf, "Retry in");
+        assert!(
+            text.contains("500 Internal Server Error {"),
+            "one line: {text:?}"
+        );
+        assert!(text.contains('…'), "elided: {text:?}");
+        assert!(
+            text.trim_end().ends_with("Retry in 3s [1/10]"),
+            "the countdown stays whole: {text:?}"
+        );
     }
 
     #[test]
@@ -2967,6 +3085,7 @@ mod tests {
         let mut screen = SessionScreen::new();
         screen.update(SessionMessage::RetryScheduled {
             reason: "Connection reset".into(),
+            message: "connection reset by peer".into(),
             attempt: 1,
             max_attempts: 10,
             delay_ms: 3_000,
@@ -2984,6 +3103,7 @@ mod tests {
         let mut screen = SessionScreen::new();
         screen.update(SessionMessage::RetryScheduled {
             reason: "Connection reset".into(),
+            message: "connection reset by peer".into(),
             attempt: 1,
             max_attempts: 10,
             delay_ms: 3_000,
@@ -2993,6 +3113,7 @@ mod tests {
 
         screen.update(SessionMessage::RetryScheduled {
             reason: "Connection reset".into(),
+            message: "connection reset by peer".into(),
             attempt: 2,
             max_attempts: 10,
             delay_ms: 5_000,
@@ -3506,6 +3627,7 @@ mod tests {
         std::fs::write(dir.path().join("tracked.txt"), "two\n").expect("write");
         screen.update(SessionMessage::RetryScheduled {
             reason: "overloaded".into(),
+            message: "503 Service Unavailable: overloaded".into(),
             attempt: 1,
             max_attempts: 3,
             delay_ms: 1_000,
