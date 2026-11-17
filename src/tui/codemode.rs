@@ -1,5 +1,5 @@
-//! The `/codemode` overlay: whether the scripting tool is offered, how it
-//! presents the roster, and the limits a script runs under.
+//! The `/codemode` overlay: whether the scripting tool is offered, what runs the
+//! scripts, how it presents the roster, and the limits a script runs under.
 //!
 //! The three switches here are the ones a user changes while working (offer it,
 //! hide the tools it can run, keep state between scripts). The budgets are shown
@@ -24,10 +24,31 @@ use crate::tui::utils::ctrl;
 
 use shuvarie_core::{CodemodeConfig, CodemodeEnabled, CodemodeMode};
 
+/// How many characters a row's value may take: the popup body is 49 columns on an
+/// 80-column terminal, and the label column and the cursor take the rest.
+const VALUE_WIDTH: usize = 23;
+
+/// Whether there is an interpreter to run scripts with, in the form the overlay
+/// renders. Borrowed from the process-wide probe, which is why this is `Copy`: the
+/// overlay reports the interpreter rather than choosing one (`codemode { python
+/// "…" }` does, and it takes a restart).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PythonState {
+    /// Scripts can run: the version, and where its standard library lives.
+    Ready {
+        version: &'static str,
+        prefix: &'static str,
+    },
+    /// They cannot, and this is why. Nothing else in the overlay can take effect.
+    Missing(&'static str),
+}
+
 /// The settings the overlay edits and reports, in the shape the core needs to
 /// write them back. The budgets ride along so the overlay can show them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CodemodePrefs {
+    /// What runs the scripts. Not a switch: the choice is a path in the config.
+    pub python: PythonState,
     pub enabled: CodemodeEnabled,
     pub mode: CodemodeMode,
     pub store: bool,
@@ -42,7 +63,22 @@ pub struct CodemodePrefs {
 
 impl CodemodePrefs {
     pub fn from_config(config: &CodemodeConfig) -> Self {
+        let availability = shuvarie_codemode::python::initialize(
+            config.python.as_deref().map(std::path::Path::new),
+        );
+        let python = match availability.interpreter() {
+            Some(interpreter) => PythonState::Ready {
+                version: interpreter.version.as_str(),
+                prefix: interpreter.prefix.as_str(),
+            },
+            None => PythonState::Missing(
+                availability
+                    .reason()
+                    .unwrap_or("no Python interpreter is available"),
+            ),
+        };
         Self {
+            python,
             enabled: config.enabled,
             mode: config.mode,
             store: config.store,
@@ -64,6 +100,7 @@ impl Default for CodemodePrefs {
 /// one answer to "what would a script run under?".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Row {
+    Interpreter,
     Enabled,
     Mode,
     Store,
@@ -74,7 +111,8 @@ enum Row {
 }
 
 impl Row {
-    const ALL: [Row; 7] = [
+    const ALL: [Row; 8] = [
+        Row::Interpreter,
         Row::Enabled,
         Row::Mode,
         Row::Store,
@@ -86,6 +124,7 @@ impl Row {
 
     fn label(self) -> &'static str {
         match self {
+            Row::Interpreter => "Interpreter",
             Row::Enabled => "Offered",
             Row::Mode => "Roster",
             Row::Store => "Keep state",
@@ -194,6 +233,9 @@ impl CodemodeEditor {
 
     fn flip(&mut self) {
         match self.selected_row() {
+            // Shown, not edited: the interpreter is chosen once per process, by a
+            // path in the config file.
+            Row::Interpreter => {}
             Row::Enabled => self.prefs.enabled = self.prefs.enabled.next(),
             Row::Mode => self.prefs.mode = self.prefs.mode.next(),
             Row::Store => self.prefs.store = !self.prefs.store,
@@ -234,10 +276,17 @@ impl CodemodeEditor {
     /// values themselves stay short enough for the label column, so the sentence
     /// that explains them lives here instead of widening the row past the popup.
     fn note(&self) -> &'static str {
+        if let PythonState::Missing(reason) = self.prefs.python {
+            return reason;
+        }
         if self.prefs.enabled == CodemodeEnabled::Off {
             return "Off: the tool is not offered, and no script can run.";
         }
         match self.selected_row() {
+            Row::Interpreter => {
+                "What runs the scripts. `python \"…\"` in `shuvarie.kdl` picks another \
+                 installation, which takes a restart."
+            }
             Row::Enabled => match self.prefs.enabled {
                 CodemodeEnabled::On => "Offered on every turn; `disabled #true` turns it off.",
                 CodemodeEnabled::Auto => {
@@ -292,6 +341,19 @@ impl CodemodeEditor {
     fn value(&self, row: Row) -> String {
         let on_off = |flag: bool| if flag { "on" } else { "off" }.to_string();
         match row {
+            Row::Interpreter => match self.prefs.python {
+                PythonState::Ready {
+                    version,
+                    prefix: "",
+                } => {
+                    format!("Python {version}")
+                }
+                // Cut, not wrapped: an installation prefix can be as long as a path.
+                PythonState::Ready { version, prefix } => {
+                    shuvarie_codemode::text::truncate(&format!("{version} ({prefix})"), VALUE_WIDTH)
+                }
+                PythonState::Missing(_) => "not found".to_string(),
+            },
             Row::Enabled => self.prefs.enabled.label().to_string(),
             Row::Store => on_off(self.prefs.store),
             Row::Mode => match self.prefs.mode {
@@ -337,6 +399,12 @@ mod tests {
     #[test]
     fn flipping_the_first_row_reports_the_new_settings() {
         let mut editor = opened();
+        // The first row is the interpreter, which is read-only; the first *switch*
+        // is `Enabled`.
+        editor.selected = Row::ALL
+            .iter()
+            .position(|row| *row == Row::Enabled)
+            .unwrap();
         let effect = editor.update(CodemodeMessage::Toggle).unwrap();
         let CodemodeEffect::Changed(prefs) = effect else {
             panic!("expected a change");
@@ -352,6 +420,10 @@ mod tests {
     #[test]
     fn the_enabled_row_cycles_through_auto_on_and_off() {
         let mut editor = opened();
+        editor.selected = Row::ALL
+            .iter()
+            .position(|row| *row == Row::Enabled)
+            .unwrap();
         assert_eq!(editor.prefs.enabled, CodemodeEnabled::On);
 
         let mut seen = Vec::new();
@@ -458,7 +530,7 @@ mod tests {
             for row in Row::ALL {
                 let value = editor.value(row);
                 assert!(
-                    value.chars().count() <= 23,
+                    value.chars().count() <= VALUE_WIDTH,
                     "`{value}` ({} chars) would be clipped in the {row:?} row",
                     value.chars().count()
                 );
@@ -481,7 +553,10 @@ mod tests {
     fn the_note_explains_what_auto_waits_for() {
         let mut editor = opened();
         editor.prefs.enabled = CodemodeEnabled::Auto;
-        editor.selected = 0;
+        editor.selected = Row::ALL
+            .iter()
+            .position(|row| *row == Row::Enabled)
+            .unwrap();
         assert!(
             editor.note().contains("MCP server"),
             "auto's condition: {}",
@@ -494,15 +569,18 @@ mod tests {
     #[test]
     fn the_budget_rows_do_not_react_to_enter() {
         let mut editor = opened();
-        for _ in 0..3 {
-            editor.update(CodemodeMessage::Next);
-        }
+        // Walk to the first budget row, wherever it sits in the list.
+        editor.selected = Row::ALL
+            .iter()
+            .position(|row| *row == Row::InlineBudget)
+            .unwrap();
         assert_eq!(editor.selected_row(), Row::InlineBudget);
         assert!(editor.update(CodemodeMessage::Toggle).is_none());
 
-        for _ in 0..3 {
-            editor.update(CodemodeMessage::Next);
-        }
+        editor.selected = Row::ALL
+            .iter()
+            .position(|row| *row == Row::MaxToolCalls)
+            .unwrap();
         assert_eq!(editor.selected_row(), Row::MaxToolCalls);
         assert!(editor.update(CodemodeMessage::Toggle).is_none());
     }
@@ -518,7 +596,8 @@ mod tests {
         for _ in 0..20 {
             editor.update(CodemodeMessage::Prev);
         }
-        assert_eq!(editor.selected_row(), Row::Enabled);
+        // Walking up stops at the first row, which is the interpreter readout.
+        assert_eq!(editor.selected_row(), Row::Interpreter);
     }
 
     #[test]
@@ -575,6 +654,9 @@ mod tests {
         assert_eq!(
             prefs,
             CodemodePrefs {
+                // Whatever interpreter this machine has: the probe is read back
+                // rather than written down, so the test says nothing about it.
+                python: prefs.python,
                 enabled: CodemodeEnabled::On,
                 mode: CodemodeMode::Only,
                 store: false,

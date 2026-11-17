@@ -1,6 +1,6 @@
 //! Docs as code: every fenced snippet in the dialect card is executed here.
 //!
-//! The card is how the model learns Rhai, so a snippet that stops parsing is a
+//! The card is how the model learns this surface, so a snippet that stops running is a
 //! broken feature, not a typo -- and the traps are described in prose precisely
 //! because they are the mistakes a reader would otherwise make. The rule that
 //! makes this test possible: fenced snippets run, inline code spans do not, so
@@ -16,12 +16,12 @@ use shuvarie_codemode::{
     Catalog, Limits, ScriptRequest, Stop, ToolCall, ToolEntry, ToolInvoker, run,
 };
 
-/// Every ```` ```rhai ```` block in a document, in order.
+/// Every ```` ```python ```` block in a document, in order.
 fn snippets(document: &str) -> Vec<String> {
     let mut found = Vec::new();
     let mut lines = document.lines().peekable();
     while let Some(line) = lines.next() {
-        if line.trim() != "```rhai" {
+        if line.trim() != "```python" {
             continue;
         }
         let mut snippet = String::new();
@@ -111,7 +111,7 @@ async fn execute(snippet: &str) -> Result<(), String> {
 async fn the_dialect_card_has_executable_snippets() {
     let snippets = snippets(doc::CARD);
     assert!(
-        snippets.len() >= 4,
+        snippets.len() >= 3,
         "the card should keep its worked examples: found {}",
         snippets.len()
     );

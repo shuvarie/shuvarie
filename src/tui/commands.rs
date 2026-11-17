@@ -279,7 +279,7 @@ pub fn default_commands() -> Vec<CommandEntry> {
         ),
         CommandEntry::builtin(
             "Codemode",
-            "Offer the Rhai scripting tool, and how it presents the roster",
+            "Offer the Python scripting tool, and how it presents the roster",
             CommandAction::OpenCodemode,
         ),
         CommandEntry::builtin(

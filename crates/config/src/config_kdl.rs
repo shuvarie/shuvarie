@@ -1164,9 +1164,10 @@ fn parse_registry_headers(node: &KdlNode, input: &str) -> Result<Vec<(String, St
     Ok(headers)
 }
 
-/// `codemode { disabled #true; mode "declare-builtin"; inline-budget 3000;
-/// timeout-ms 0; max-operations 0; max-tool-calls 0; store #true; tools { … } }`
-/// — one tool that runs a Rhai script, where the script calls the other tools.
+/// `codemode { disabled #true; mode "declare-builtin"; python "…"; inline-budget
+/// 3000; timeout-ms 0; max-operations 0; max-tool-calls 0; store #true;
+/// tools { … } }` — one tool that runs a Python script, where the script calls the
+/// other tools.
 /// The tool is offered unless `disabled` says otherwise: `disabled #true` turns
 /// it off, `disabled #false` (or no node) leaves it on, and `disabled "auto"`
 /// narrows it to the turns that have a configured tool to script. `mode` is
@@ -1174,6 +1175,7 @@ fn parse_registry_headers(node: &KdlNode, input: &str) -> Result<Vec<(String, St
 fn parse_codemode(node: &KdlNode, input: &str) -> Result<CodemodeConfig> {
     let mut enabled = None;
     let mut mode = None;
+    let mut python = None;
     let mut inline_budget = None;
     let mut timeout_ms = None;
     let mut max_operations = None;
@@ -1190,6 +1192,7 @@ fn parse_codemode(node: &KdlNode, input: &str) -> Result<CodemodeConfig> {
                 scalar_codemode_disabled(input, child),
             )?,
             "mode" => set_once(input, child, &mut mode, scalar_string(input, child))?,
+            "python" => set_once(input, child, &mut python, scalar_string(input, child))?,
             "inline-budget" => {
                 set_once(input, child, &mut inline_budget, scalar_usize(input, child))?
             }
@@ -1216,8 +1219,8 @@ fn parse_codemode(node: &KdlNode, input: &str) -> Result<CodemodeConfig> {
                     child,
                     format!(
                         "unknown node `{other}` in `codemode` (expected `disabled`, `mode`, \
-                         `inline-budget`, `timeout-ms`, `max-operations`, `max-tool-calls`, \
-                         `store`, or `tools`)"
+                         `python`, `inline-budget`, `timeout-ms`, `max-operations`, \
+                         `max-tool-calls`, `store`, or `tools`)"
                     ),
                     None,
                 ));
@@ -1248,6 +1251,7 @@ fn parse_codemode(node: &KdlNode, input: &str) -> Result<CodemodeConfig> {
     Ok(CodemodeConfig {
         enabled: enabled.unwrap_or(defaults.enabled),
         mode,
+        python,
         inline_budget: inline_budget.unwrap_or(defaults.inline_budget),
         timeout_ms: timeout_ms.unwrap_or(defaults.timeout_ms),
         max_operations: max_operations.unwrap_or(defaults.max_operations),
@@ -4603,6 +4607,9 @@ fn codemode_node(cfg: &CodemodeConfig) -> Option<KdlNode> {
     }
     if cfg.mode != defaults.mode {
         children.push(value_node("mode", cfg.mode.as_str()));
+    }
+    if cfg.python.is_some() {
+        children.push(value_node("python", cfg.python.clone().unwrap_or_default()));
     }
     if cfg.inline_budget != defaults.inline_budget {
         children.push(int_node("inline-budget", cfg.inline_budget as i128));

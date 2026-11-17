@@ -1,113 +1,88 @@
-//! Teaching the model Rhai.
+//! Teaching the model *this* Python, not Python.
 //!
-//! The model is fluent in JavaScript and not in Rhai, so the language has to be
-//! taught twice: a card that always travels in the tool's description (here),
-//! and a fuller reference it can load on demand (the `codemode` skill). Both
-//! are code: every fenced snippet in them is executed against a stub roster by
-//! `tests/`, so a snippet that stops parsing fails the build. Snippets that
-//! exist to show a *mistake* are inline code spans instead, which the test
-//! skips -- a rule worth keeping, because teaching a footgun means writing
-//! something that must not run.
+//! The language needs no introduction the way Rhai did -- but the surface does:
+//! which names are global, how a tool is called, and where a tool stops being an
+//! ordinary function. So the card that always travels in the tool's description
+//! says exactly that, and the fuller reference (the `codemode` skill) says the
+//! rest. Both are code: every fenced snippet in them is executed against a stub
+//! roster by `tests/doc.rs`, so a snippet that stops running fails the build.
+//! Snippets that exist to show a *mistake* are inline code spans instead, which
+//! the test skips -- a rule worth keeping, because teaching a footgun means
+//! writing something that must not run.
 
 /// What codemode is for, in the tool's own words.
 pub const INTRO: &str = "\
-Run a Rhai script that calls the tools below. Intermediate results stay in the \
+Run a Python script that calls the tools below. Intermediate results stay in the \
 script, so several dependent calls cost one round trip and one summary — filter, \
 reduce, and page through data before returning it. The script's value is its \
-last expression (or a top-level `return`); use `text(value)` to emit more than \
-one thing.";
+last expression; `text(value)` emits another, so a script can report several \
+things, and `exit(value)` ends it early with one.";
 
-/// The dialect card: the essentials, the globals, and the traps.
+/// The dialect card: the calling convention, the globals, and the traps.
 pub const CARD: &str = r#"## Calling tools
 
-One map argument, one output. A tool returns its output text, or a map/array
-when the tool returned structured content.
+A tool is a plain function: keyword arguments named after its schema's
+properties, one JSON-shaped value back (its text, or a dict when the tool
+returned structure).
 
-```rhai
-let src = tools::read_file(#{ path: "src/main.rs" });
-let hits = tools::grep(#{ pattern: "fn main", path: "src" });
-let lines = hits.split("\n").filter(|line| line.starts_with("src/"));
-`main.rs is ${src.len} characters; ${lines.len} lines matched`
+```python
+src = tools.read_file(path="src/main.rs")
+hits = tools.grep(pattern="fn main", path="src")
+lines = [line for line in hits.split("\n") if line.startswith("src/")]
+text(f"{len(src)} characters of main.rs; {len(lines)} hits")
 ```
 
-The last expression is the script's value; `text(v)` emits another, so a script
-can report several things, and `return v` ends early.
-
-## Rhai essentials
-
-`let x = 1;` (mutable), `const X = 1;`, `if c { a } else { b }` as an
-expression, `for item in array { }`, `while c { }`, `break`, `continue`,
-`fn name(a, b) { }`, closures `|x| x * 2`, maps `#{ key: value, "odd key": 1 }`,
-arrays `[1, 2, 3]`, `switch x { 1 => "one", _ => "other" }`,
-`try { } catch (err) { }`, and strings with backtick interpolation.
-Methods: `.len()` (maps), `.len` (arrays), `.push(v)`, `.get("k")`,
-`.keys()`, `.values()`, `.map(|v| ...)`, `.filter(|v| ...)`,
-`.split(",")`, `.trim()`, `.contains("s")`, `.to_string()`,
-`.parse_int(10)`, `.starts_with("s")`.
-
-```rhai
-let paths = tools::glob(#{ pattern: "src/**/*.rs" });
-let files = paths.split("\n").filter(|line| line.ends_with(".rs"));
-`${files.len} files, first is ${files[0]}`
-```
+A property whose name is not an identifier takes the dict form:
+`tools.mcp_call(**{"repo-name": "x"})`, or `tools.mcp_call({"repo-name": "x"})`.
 
 ## Globals
 
-- `text(value)` — emit a value into the result.
-- `console.log/info/warn/error(...)` — captured, shown in the result.
-- `store(key, value)` / `load(key)` — JSON state surviving between scripts.
-- `exit(value)` — end the script now, with a value.
+- `tools.<name>(...)` -- the roster. An MCP server's tools are
+  `mcp.<server>.<name>(...)`.
+- `text(value)` -- emit a value into the result, beside the script's own.
+- `console.log/info/warn/error(...)` and `print` -- captured, shown in the result.
+- `store(key, value)` / `load(key)` -- JSON state surviving between scripts.
+- `ALL_TOOLS` -- every callable name, as a list of strings.
+- `search_tools(query, limit=10, namespace=None)` -- ranks the roster and answers
+  `{"matched": int, "tools": [{"name": ..., "description": ...}]}`; `matched`
+  counts every hit, so a list that had to stop says so.
+- `describe_tool(name)` -- one tool with its parameter descriptions;
+  `describe_namespace("mcp.server")` -- a whole namespace. An unknown name raises
+  `LookupError` naming the near-misses.
 
-## Finding a tool
-
-The roster above is only what fit: the rest is callable by name. `ALL_TOOLS`
-lists every callable name; `search_tools(query)` ranks the roster and answers
-`#{ matched: int, tools: [ #{ name, description } ] }` (`matched` counts all
-matches, so a cut list is visible); `describe_tool(name)` spells one out with
-its parameter descriptions; `describe_namespace(name)` lists a whole namespace
-(`mcp::server`). An unknown name is an error naming the near-misses.
-
-```rhai
-let found = search_tools("file", #{ limit: 5 });
-if found.matched == 0 {
-    `nothing matched; ${ALL_TOOLS.len} tools are available`
-} else {
-    let hit = found.tools[0];
-    `${hit.name} — ${hit.description}`
-}
+```python
+found = search_tools("file", limit=5)
+if not found["matched"]:
+    f"nothing matched; {len(ALL_TOOLS)} tools are available"
+else:
+    describe_tool(found["tools"][0]["name"])
 ```
 
-## Traps
+## What is different from ordinary Python
 
-- **Some methods return nothing.** `.trim()`/`.replace()` change the string in
-  place and hand back `()`; bind first.
+- **A tool call is a boundary.** Each one is a real call with its own permissions,
+  its own limits, and its own record in the result's trace -- and it is the only
+  way out of the script.
+- **A failing tool raises `ToolError`** (a `RuntimeError`) carrying the tool's own
+  message. Catch it, or the script ends there.
+
+```python
+try:
+    text(tools.read_file(path="missing.txt"))
+except ToolError as failure:
+    text(f"could not read it: {failure}")
+```
+
+- **No filesystem, network, or `input()`.** `open`, `os`, `subprocess` and
+  `requests` are not how a script reaches anything: the tools are. `input()`
+  blocks forever, because the script is not interactive.
+- **`print` is captured**, not shown live: it lands in the result's
+  `<console_output>`, the same place `console.log` goes.
 - **A capped `glob` looks exact.** It stops at 100 paths (`grep` at 200) and
-  appends a note — but the note is a line a path filter drops, so a truncated
-  tally reads as exactly 100. Filter paths, and check `out.contains("truncated")`
-  before trusting a count. One pattern over many directories hits the cap
-  sooner than per-directory queries.
-- On a map a missing key is `()` and `.len` is a key lookup, so write `m.len()`
-  and check `hit.contains("tool")`. Arrays and strings take the property. A map
-  is not iterable and its entries do not destructure: `for k in m.keys() { }`.
-- **A closure cannot read the variable it is iterating.** `m.keys().map(|k|
-  m[k])` is a data-race error; bind first (`let ks = m.keys();`) or use `for`.
-- `/` on integers is integer division: `7 / 2 == 3`.
-- No ternary, no truthiness: `if () { }` is a syntax error. Use `if c { a } else
-  { b }`, and compare explicitly.
-- `try`/`catch` is a statement whose value is `()`, so assign the fallback to a
-  variable declared before it:
+  appends a note -- but the note is a line a path filter drops, so a truncated
+  tally reads as exactly 100. Filter paths, and check `"truncated" in output`
+  before trusting a count. One pattern over many directories hits the cap sooner
+  than per-directory queries.
 
-```rhai
-let out = "unset";
-try { out = tools::read_file(#{ path: "maybe.txt" }); } catch (err) { out = `missing: ${err}`; }
-out
-```
-
-- A map literal's keys are **literals**, never expressions: `#{ `${d}/f`: 1 }`
-  will not parse, and `#{ k: 1 }` is the key `"k"` even when `k` is a
-  variable. Assign instead: `m[`${d}/f`] = 1`, or `m.set(k, 1)`.
-- `_` is not a binding: `let _ = x;` and `catch (_)` do not parse.
-- A wrong operator is a no-op, not an error: `"a" - "b"` is `"a"`.
-
-For the fuller reference — values and types, the methods that exist, error
-handling, and worked patterns — load the `codemode` skill."#;
+For the fuller reference -- the tool roster's shape, values and types, error
+handling, and worked patterns -- load the `codemode` skill."#;

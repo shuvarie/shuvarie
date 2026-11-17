@@ -431,7 +431,7 @@ pub struct Config {
 
     pub tools: ToolsConfig,
 
-    /// `codemode { … }` — one tool that runs a Rhai script, where the script
+    /// `codemode { … }` — one tool that runs a Python script, where the script
     /// calls the other tools. Intermediate results stay in the script, so
     /// several dependent calls cost one round trip and one summary.
     ///
@@ -439,7 +439,9 @@ pub struct Config {
     /// own tools callable and puts the configured ones (stdio `tool` entries and
     /// MCP servers) behind a script. `codemode { disabled #true }` turns it off
     /// and `disabled "auto"` narrows it to the turns that have a configured
-    /// source — see [`CodemodeConfig::is_enabled`].
+    /// source — see [`CodemodeConfig::is_enabled`]. It is also off, whatever the
+    /// file says, when no Python interpreter can be started: a tool whose every
+    /// call would fail is worse than an absent one.
     pub codemode: CodemodeConfig,
 
     /// `decisions { … }` — named, reusable questions for decision models,
@@ -962,6 +964,14 @@ pub struct CodemodeConfig {
     /// `mode "declared" | "declare-builtin" | "only"`.
     pub mode: CodemodeMode,
 
+    /// `python "<path>"`: the Python installation to run scripts with, given as
+    /// its prefix or as the `python3` binary inside it. Absent means the
+    /// interpreter this build was made against, which is what a machine with
+    /// Python installed wants: the setting is a rescue for an embedded interpreter
+    /// that cannot find its own standard library. It has to be in effect before
+    /// the first script runs, so a change takes a restart.
+    pub python: Option<String>,
+
     /// Estimated tokens of inlined tool declarations. Whatever does not fit is
     /// still callable and listed by name, reachable through `describe_tool`.
     pub inline_budget: usize,
@@ -970,7 +980,8 @@ pub struct CodemodeConfig {
     /// leaves only `max-operations` between a script and a runaway loop.
     pub timeout_ms: u64,
 
-    /// `max-operations`: Rhai operations per script. `0` is unlimited.
+    /// `max-operations`: the script's own lines per run, counted by a trace hook.
+    /// `0` is unlimited, and also means no trace hook at all.
     pub max_operations: u64,
 
     /// `max-tool-calls`: nested calls per script. `0` is unlimited.
@@ -989,6 +1000,7 @@ impl Default for CodemodeConfig {
         Self {
             enabled: CodemodeEnabled::default(),
             mode: CodemodeMode::default(),
+            python: None,
             inline_budget: CODEMODE_DEFAULT_INLINE_BUDGET,
             timeout_ms: 0,
             max_operations: 0,

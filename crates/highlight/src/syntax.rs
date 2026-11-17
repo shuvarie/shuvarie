@@ -166,9 +166,10 @@ fn syntect_theme() -> SyntectTheme {
 }
 
 fn syntax_set() -> &'static SyntaxSet {
-    // The default set plus the one grammar syntect does not ship: Rhai, which is
-    // what a codemode script is written in.
-    crate::rhai::syntax_set()
+    // syntect ships the curated Sublime package list, and Python is in it -- which
+    // is one of the things embedding Python bought: a codemode script highlights
+    // with the same grammar everything else Python does.
+    crate::builtin::syntax_set()
 }
 
 fn highlight_line<'a>(

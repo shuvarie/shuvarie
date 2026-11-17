@@ -83,7 +83,7 @@ impl Skills {
             self.skills.push(Skill {
                 name: skill::NAME.to_string(),
                 description: skill::DESCRIPTION.to_string(),
-                tags: vec!["codemode".to_string(), "rhai".to_string()],
+                tags: vec!["codemode".to_string(), "python".to_string()],
                 category: Some("Built-in".to_string()),
                 path: PathBuf::new(),
                 global: false,
@@ -1087,7 +1087,7 @@ mod tests {
             section.contains("<location>built in</location>"),
             "{section}"
         );
-        assert!(section.contains("Writing Rhai scripts"), "{section}");
+        assert!(section.contains("Writing Python scripts"), "{section}");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Rendering the catalog into the tool's description.
 //!
-//! The description *is* the interface: the model reads a Rhai signature per
+//! The description *is* the interface: the model reads a Python signature per
 //! tool and calls it, so the signature has to be faithful to the schema and
 //! short enough to pay for itself. Declarations are inlined up to a budget of
 //! estimated tokens; whatever does not fit stays callable and reachable by name.
@@ -43,12 +43,13 @@ pub fn estimated_tokens(text: &str) -> usize {
     text.chars().count().div_ceil(4)
 }
 
-/// `tools::read_file(path: String, offset?: int, limit?: int) -> Dynamic`
+/// `tools.read_file(path: str, offset: int = None, limit: int = None) -> Any`
 ///
-/// The parameters are the tool's JSON Schema properties, in schema order, with
-/// `?` on everything the schema does not require. The return is always
-/// `Dynamic`: a tool's output is its text, or a map when it returned
-/// structured content, and only the tool knows which.
+/// The parameters are the tool's JSON Schema properties, sorted by name, with
+/// the required ones first -- Python will not parse a defaulted parameter ahead
+/// of a plain one -- and `= None` on the rest. The return is always `Any`: a
+/// tool's output is its text, or a dict when it returned structured content, and
+/// only the tool knows which.
 pub fn signature(spec: &ToolSpec) -> String {
     let properties = spec.schema.get("properties").and_then(Value::as_object);
     let required: Vec<&str> = spec
@@ -58,30 +59,36 @@ pub fn signature(spec: &ToolSpec) -> String {
         .map(|names| names.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
 
-    let mut parameters = Vec::new();
+    let mut plain = Vec::new();
+    let mut defaulted = Vec::new();
     // Sorted, not in schema order: the parameters are a set, and a stable order
     // keeps the description (and its golden test) independent of how
     // `serde_json` was built for this particular target.
     let mut properties: Vec<(&String, &Value)> = properties.into_iter().flatten().collect();
     properties.sort_by_key(|(name, _)| name.as_str());
     for (name, schema) in properties {
-        let optional = if required.contains(&name.as_str()) {
-            ""
+        let mut kind = type_of(schema);
+        if required.contains(&name.as_str()) {
+            plain.push(format!("{}: {kind}", argument_key(name)));
         } else {
-            "?"
-        };
-        parameters.push(format!(
-            "{}{optional}: {}",
-            argument_key(name),
-            type_of(schema)
-        ));
+            // `Any` already admits `None`, and a union that names it must not name
+            // it twice; everything else has to say so, or the `= None` below reads
+            // as a lie.
+            let admits_none = kind == "Any" || kind.split(" | ").any(|part| part == "None");
+            if !admits_none {
+                kind.push_str(" | None");
+            }
+            defaulted.push(format!("{}: {kind} = None", argument_key(name)));
+        }
     }
 
-    format!("{}({}) -> Dynamic", spec.qualified(), parameters.join(", "))
+    let parameters: Vec<String> = plain.into_iter().chain(defaulted).collect();
+    format!("{}({}) -> Any", spec.qualified(), parameters.join(", "))
 }
 
-/// A map key in the signature: bare when it is an identifier, quoted otherwise
-/// (a script writes it either way, and MCP argument names are not ours).
+/// A keyword name in the signature: bare when it is an identifier, quoted
+/// otherwise. A quoted one cannot be a keyword argument, so the card teaches the
+/// dict form a script then has to use (`search(**{"repo-name": "x"})`).
 fn argument_key(name: &str) -> String {
     let identifier = !name.is_empty()
         && !name.starts_with(|ch: char| ch.is_ascii_digit())
@@ -119,38 +126,36 @@ pub fn type_of(schema: &Value) -> String {
     }
 
     let named = |name: &str| match name {
-        "string" => Some("String".to_string()),
+        "string" => Some("str".to_string()),
         "integer" => Some("int".to_string()),
         "number" => Some("float".to_string()),
         "boolean" => Some("bool".to_string()),
-        // `null` has no Rhai value: it is `()`, which is also what a missing
-        // map key reads as.
-        "null" => Some("()".to_string()),
-        "object" => Some("Map".to_string()),
+        "null" => Some("None".to_string()),
+        "object" => Some("dict".to_string()),
         "array" => Some(match schema.get("items") {
-            Some(items) => format!("Array<{}>", type_of(items)),
-            None => "Array<Dynamic>".to_string(),
+            Some(items) => format!("list[{}]", type_of(items)),
+            None => "list".to_string(),
         }),
         _ => None,
     };
 
     match schema.get("type") {
-        Some(Value::String(name)) => named(name).unwrap_or_else(|| "Dynamic".to_string()),
+        Some(Value::String(name)) => named(name).unwrap_or_else(|| "Any".to_string()),
         // `"type": ["string", "null"]` is a nullable argument; the union says so.
         Some(Value::Array(names)) => {
             let mut parts: Vec<String> = names
                 .iter()
                 .filter_map(Value::as_str)
-                .map(|name| named(name).unwrap_or_else(|| "Dynamic".to_string()))
+                .map(|name| named(name).unwrap_or_else(|| "Any".to_string()))
                 .collect();
             parts.dedup();
             match parts.len() {
-                0 => "Dynamic".to_string(),
+                0 => "Any".to_string(),
                 _ => parts.join(" | "),
             }
         }
         // No type at all: the schema leaves it to the tool, and so do we.
-        _ => "Dynamic".to_string(),
+        _ => "Any".to_string(),
     }
 }
 
@@ -169,7 +174,7 @@ pub fn brief(description: &str, max_chars: usize) -> String {
         .map(str::trim)
         .find(|line| !line.is_empty())
         .unwrap_or_default();
-    crate::convert::truncate(first, max_chars)
+    crate::text::truncate(first, max_chars)
 }
 
 /// The `codemode` tool's description for one turn's catalog: the dialect card,
@@ -178,7 +183,7 @@ pub fn brief(description: &str, max_chars: usize) -> String {
 /// `script_only` holds the roster names the model's own tool list does not
 /// offer, so a tool reachable only from a script says so. Without the mark the
 /// model has to infer the split by diffing the catalog against its function
-/// schemas — whose names differ (`mcp__dev__x` vs `mcp::dev::x`) — and in `only`
+/// schemas — whose names differ (`mcp__dev__x` vs `mcp.dev.x`) — and in `only`
 /// mode there is nothing to diff against.
 pub fn describe(
     catalog: &Catalog,
@@ -286,7 +291,7 @@ fn name_listing(deferred: &[&ToolSpec], budget: usize) -> String {
 fn namespace_summary(deferred: &[&ToolSpec]) -> String {
     let mut counts: Vec<(String, usize)> = Vec::new();
     for spec in deferred {
-        let namespace = spec.namespace.join("::");
+        let namespace = spec.namespace.join(".");
         match counts.last_mut() {
             Some((name, count)) if *name == namespace => *count += 1,
             _ => counts.push((namespace, 1)),
@@ -328,17 +333,15 @@ mod tests {
                     "required": ["path"],
                 }),
             )),
-            "tools::read_file(limit?: int, offset?: int, path: String) -> Dynamic"
+            "tools.read_file(path: str, limit: int | None = None, offset: int | None = None) \
+             -> Any"
         );
 
         // No arguments at all, and a schema that describes none.
-        assert_eq!(
-            signature(&spec("todos", json!({}))),
-            "tools::todos() -> Dynamic"
-        );
+        assert_eq!(signature(&spec("todos", json!({}))), "tools.todos() -> Any");
         assert_eq!(
             signature(&spec("todos", json!({ "type": "object" }))),
-            "tools::todos() -> Dynamic"
+            "tools.todos() -> Any"
         );
     }
 
@@ -363,10 +366,11 @@ mod tests {
         });
         assert_eq!(
             signature(&spec("search", schema)),
-            "tools::search(anything?: Dynamic, bare?: Array<Dynamic>, either?: String | int, \
-             force?: bool, level?: 1 | 2 | 3, mode?: \"fast\" | \"thorough\", nothing?: (), \
-             nullable?: String | (), options?: Map, paths?: Array<String>, query?: String, \
-             ratio?: float) -> Dynamic"
+            "tools.search(anything: Any = None, bare: list | None = None, either: str | int | None = \
+             None, force: bool | None = None, level: 1 | 2 | 3 | None = None, mode: \"fast\" | \
+             \"thorough\" | None = None, nothing: None = None, nullable: str | None = None, \
+             options: dict | None = None, paths: list[str] | None = None, query: str | None = \
+             None, ratio: float | None = None) -> Any"
         );
     }
 
@@ -378,7 +382,7 @@ mod tests {
         });
         assert_eq!(
             signature(&spec("search", schema)),
-            "tools::search(\"2fa\"?: bool, \"repo-name\"?: String) -> Dynamic"
+            "tools.search(\"2fa\": bool | None = None, \"repo-name\": str | None = None) -> Any"
         );
     }
 
@@ -394,7 +398,7 @@ mod tests {
         let rendered = describe(&catalog, &RenderOptions::default(), &BTreeSet::new());
         assert!(
             rendered.contains(
-                "mcp::dev_radius::resolve_library_id(name?: String) -> Dynamic\n    \
+                "mcp.dev_radius.resolve_library_id(name: str | None = None) -> Any\n    \
                  Resolve a package to an id. (tool name \"resolve-library-id\")"
             ),
             "{rendered}"
@@ -419,12 +423,11 @@ mod tests {
         let rendered = describe(&catalog, &RenderOptions::default(), &script_only);
 
         assert!(
-            rendered
-                .contains("mcp::dev_radius::search() -> Dynamic\n    An MCP search. (script only)"),
+            rendered.contains("mcp.dev_radius.search() -> Any\n    An MCP search. (script only)"),
             "{rendered}"
         );
         assert!(
-            rendered.contains("tools::read_file() -> Dynamic\n    Read a file.\n"),
+            rendered.contains("tools.read_file() -> Any\n    Read a file.\n"),
             "a directly callable tool is not marked: {rendered}"
         );
         assert!(rendered.contains("not on your own roster"), "{rendered}");
@@ -463,10 +466,10 @@ mod tests {
         );
 
         assert!(
-            rendered.contains("Script only (1): mcp::dev_radius::search"),
+            rendered.contains("Script only (1): mcp.dev_radius.search"),
             "{rendered}"
         );
-        assert!(rendered.contains("tools::read_file\n"), "{rendered}");
+        assert!(rendered.contains("tools.read_file\n"), "{rendered}");
     }
 
     /// The description is the tool's contract with the model, so its exact
@@ -489,8 +492,8 @@ mod tests {
         let rendered = describe(&catalog, &RenderOptions::default(), &BTreeSet::new());
         let expected = format!(
             "{}\n\n{}\n\n# Tools (2)\n\n\
-             tools::grep() -> Dynamic\n    Search file contents.\n\
-             tools::read_file(offset?: int, path: String) -> Dynamic\n    \
+             tools.grep() -> Any\n    Search file contents.\n\
+             tools.read_file(path: str, offset: int | None = None) -> Any\n    \
              Read a file from disk. Supports an offset and a limit.\n",
             doc::INTRO,
             doc::CARD
@@ -514,7 +517,7 @@ mod tests {
         // The names of everything deferred are still there, and the total stays
         // near the budget rather than carrying 200 signatures.
         assert!(rendered.contains("# Also callable"));
-        assert!(rendered.contains("tools::tool_199"));
+        assert!(rendered.contains("tools.tool_199"));
         // The budget is for the *declarations*; the prose and the listing of
         // names are the fixed costs on top, so they are counted rather than
         // allowed for. A regression that inlined every signature could not hide
@@ -564,8 +567,8 @@ mod tests {
         );
         // The last server has nothing inlined, so all of its tools are behind
         // the count.
-        assert!(rendered.contains("mcp::server_39 (40)"), "{rendered}");
-        assert!(!rendered.contains("mcp::server_39::tool_0,"));
+        assert!(rendered.contains("mcp.server_39 (40)"), "{rendered}");
+        assert!(!rendered.contains("mcp.server_39.tool_0,"));
         assert!(rendered.contains("search_tools(query)"));
     }
 
@@ -578,7 +581,7 @@ mod tests {
         );
         assert!(rendered.contains("# Tools (0)"));
         assert!(rendered.contains("describe_tool"));
-        assert!(rendered.contains("Rhai"));
+        assert!(rendered.contains("Python"));
     }
 
     #[test]

@@ -507,6 +507,41 @@ fn codemode_mode_is_parsed_from_a_hand_written_file() {
     assert_eq!(config.codemode.mode, CodemodeMode::DeclareBuiltin);
 }
 
+/// `python "<path>"` is the interpreter to run scripts with, and it survives a
+/// save: a rescue hatch that a later save dropped would be a trap.
+#[test]
+fn codemode_python_is_parsed_and_round_trips() {
+    let config = parse_config(
+        r#"
+        codemode {
+            python "/opt/python/bin/python3"
+        }
+        "#,
+    )
+    .expect("parse");
+    assert_eq!(
+        config.codemode.python.as_deref(),
+        Some("/opt/python/bin/python3")
+    );
+
+    let parsed = round_trip(&config);
+    assert_eq!(parsed.codemode.python, config.codemode.python);
+    assert_eq!(parsed, config);
+
+    // Absent is the default: the interpreter the build found.
+    let absent = parse_config("codemode { mode \"only\" }").expect("parse");
+    assert_eq!(absent.codemode.python, None);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.kdl");
+    Config::default().save_to(&path).expect("save");
+    assert!(
+        !std::fs::read_to_string(&path)
+            .expect("read")
+            .contains("python"),
+        "the default writes nothing"
+    );
+}
+
 /// `disabled` takes the polarity a reader expects: `#true` turns the tool off.
 #[test]
 fn codemode_disabled_is_parsed_from_a_hand_written_file() {

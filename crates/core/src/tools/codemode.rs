@@ -1,4 +1,4 @@
-//! `codemode`: one tool that runs a Rhai script, and the script calls the
+//! `codemode`: one tool that runs a Python script, and the script calls the
 //! other tools.
 //!
 //! The reason to do this at all is context: a script's intermediate results
@@ -83,7 +83,7 @@ impl Wiring {
 /// the tool added.
 ///
 /// `mcp` is the per-server roster those tools were built from, used to give an
-/// MCP tool its namespace (`mcp::dev_radius::search`) rather than the composite
+/// MCP tool its namespace (`mcp.dev_radius.search`) rather than the composite
 /// name it dispatches by, and `stdio` is the configured `tool` entries — the two
 /// sources [`Mode::DeclareBuiltin`] hides behind scripts.
 pub fn install(
@@ -238,7 +238,7 @@ impl Tool for CodeMode {
             "properties": {
                 "script": {
                     "type": "string",
-                    "description": "The Rhai script to run. Its last expression is the result; \
+                    "description": "The Python script to run. Its last expression is the result; \
                                     use `text(v)` to report more than one value.",
                 },
             },
@@ -259,7 +259,7 @@ impl Tool for CodeMode {
         // The call authorizes like any gated tool, and each nested call
         // authorizes inside its own tool, so a script cannot reach anything the
         // model could not have.
-        let detail = shuvarie_codemode::convert::truncate(
+        let detail = shuvarie_codemode::text::truncate(
             script
                 .lines()
                 .find(|line| !line.trim().is_empty())
@@ -422,8 +422,8 @@ mod tests {
         );
         let codemode = tools.last().expect("the tool was added");
         let script = r#"
-            let a = tools::read_file(#{ path: "a.rs" });
-            let b = tools::grep(#{ path: "b.rs" });
+            a = tools.read_file(path="a.rs")
+            b = tools.grep(path="b.rs")
             text(a + "|" + b)
         "#;
 
@@ -437,8 +437,8 @@ mod tests {
         // The value the script returned comes first, then the run's report.
         assert!(text.contains("read_file ran|grep ran"), "{text}");
         assert!(text.contains("Tool calls (2)"), "{text}");
-        assert!(text.contains("tools::read_file"), "{text}");
-        assert!(text.contains("tools::grep"), "{text}");
+        assert!(text.contains("tools.read_file"), "{text}");
+        assert!(text.contains("tools.grep"), "{text}");
     }
 
     /// A one-server MCP roster carrying one tool, keyed by the composite name
@@ -477,7 +477,7 @@ mod tests {
                 .iter()
                 .map(|spec| spec.qualified())
                 .collect::<Vec<_>>(),
-            ["tools::grep", "tools::read_file"]
+            ["tools.grep", "tools.read_file"]
         );
     }
 
@@ -491,7 +491,7 @@ mod tests {
         let catalog = catalog_for(&tools, &servers);
         assert_eq!(
             catalog.tools()[0].qualified(),
-            "mcp::dev_radius::resolve_library_id"
+            "mcp.dev_radius.resolve_library_id"
         );
         // ... while dispatch stays on the roster's composite name.
         assert_eq!(
@@ -529,7 +529,7 @@ mod tests {
                 .unwrap()
                 .definition()
                 .description
-                .contains("tools::read_file"),
+                .contains("tools.read_file"),
             "the description carries the catalog"
         );
         assert!(
@@ -565,7 +565,7 @@ mod tests {
         let description = tools.last().unwrap().definition().description.clone();
         assert!(
             description.contains(
-                "tools::read_file(path?: String) -> Dynamic\n    Read a file. (script only)"
+                "tools.read_file(path: str | None = None) -> Any\n    Read a file. (script only)"
             ),
             "{description}"
         );
@@ -602,17 +602,17 @@ mod tests {
         // names the catalog prints, marked as script-only so the model does not
         // have to infer which tools it cannot call itself.
         let description = tools.last().unwrap().definition().description.clone();
-        assert!(description.contains("tools::read_file"), "{description}");
+        assert!(description.contains("tools.read_file"), "{description}");
         assert!(
             description.contains(
-                "tools::fetch_json(path?: String) -> Dynamic\n    \
+                "tools.fetch_json(path: str | None = None) -> Any\n    \
                  A configured tool. (tool name \"fetch-json\") (script only)"
             ),
             "{description}"
         );
         assert!(
             description.contains(
-                "mcp::dev_radius::resolve_library_id(path?: String) -> Dynamic\n    \
+                "mcp.dev_radius.resolve_library_id(path: str | None = None) -> Any\n    \
                  An MCP tool. (tool name \"resolve-library-id\") (script only)"
             ),
             "{description}"
@@ -696,6 +696,6 @@ mod tests {
             &access(),
         );
         let description = tools.last().unwrap().definition().description.clone();
-        assert!(!description.contains("tools::codemode"), "{description}");
+        assert!(!description.contains("tools.codemode"), "{description}");
     }
 }

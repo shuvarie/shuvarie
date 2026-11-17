@@ -2069,7 +2069,7 @@ and proceed.";
 /// Appended to the system preamble when the turn offers the `codemode` tool:
 /// which work belongs in a script, and which does not.
 const CODEMODE_NOTE: &str = "\
-The `codemode` tool runs a Rhai script in which the other tools are callable (`tools::read_file(…)`), \
+The `codemode` tool runs a Python script in which the other tools are callable (`tools.read_file(…)`), \
 and its description carries the catalog of what a script can reach, marking the tools that are not \
 on your own roster `script only`. Use it for complex, multi-step work — dependent calls chained \
 together, one call fanned out over many items, or a large result filtered down before it reaches \
@@ -2793,6 +2793,13 @@ impl CoreCtx {
         // `auto` only offers the tool when this turn has configured sources for
         // it to orchestrate; `on`/`off` ignore the roster.
         if !config.is_enabled(has_configured_tools) {
+            return None;
+        }
+        // No interpreter, no tool. A `codemode` whose every call failed on the
+        // same import would spend a turn to say so, and the model would have no
+        // way to tell it apart from its own mistake. The `/codemode` overlay
+        // reports the reason; the file cannot talk its way past this.
+        if shuvarie_codemode::python::availability().reason().is_some() {
             return None;
         }
         Some(crate::tools::codemode::Wiring {

@@ -1,7 +1,7 @@
 //! The catalog: which tools a script may call, and under which name.
 //!
 //! The host knows a tool by its roster name (for an MCP tool, the composite
-//! `server__tool` name it dispatches on). A script calls it by a Rhai
+//! `server__tool` name it dispatches on). A script calls it by a Python
 //! identifier inside a namespace, so the catalog is where the two meet: it
 //! mangles names into callability, resolves collisions deterministically, and
 //! prints the callable name so the model never has to derive it.
@@ -10,80 +10,37 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
-/// The namespace the roster's own tools live in: `tools::read_file(...)`.
+/// The namespace the roster's own tools live in: `tools.read_file(...)`.
 pub const TOOLS_NS: &str = "tools";
 /// The namespace MCP servers nest under, one segment per server:
-/// `mcp::dev_radius::search(...)`.
+/// `mcp.dev_radius.search(...)`.
 pub const MCP_NS: &str = "mcp";
 
-/// Words Rhai's parser will not accept as a call, even namespace-qualified --
-/// verified against the parser by
-/// `catalog::tests::reserved_names_really_are_uncallable`, which also keeps the
-/// list free of names that merely look like keywords (`type` and `each` are
-/// callable, so mangling them would only cost readability).
+/// Python's keywords: words no attribute access can name, so `tools.class` is a
+/// syntax error rather than a call. Verified against the interpreter's own
+/// `keyword.kwlist` by `tests/script.rs`, which is what keeps this list from
+/// drifting -- Python gains keywords (`match` and `case` in 3.10, for one), and a
+/// missing one here is a tool the model cannot call.
+///
+/// Nothing else belongs here: `type`, `match` and `case` are soft keywords and
+/// are perfectly callable as attribute names, so mangling them would only cost
+/// readability.
 const RESERVED: &[&str] = &[
-    "as",
-    "async",
-    "await",
-    "break",
-    "call",
-    "case",
-    "catch",
-    "const",
-    "continue",
-    "curry",
-    "default",
-    "do",
-    "else",
-    "eval",
-    "export",
-    "false",
-    "fn",
-    "for",
-    "go",
-    "if",
-    "import",
-    "in",
-    "is",
-    "let",
-    "loop",
-    "match",
-    "module",
-    "new",
-    "nil",
-    "null",
-    "package",
-    "private",
-    "protected",
-    "public",
-    "return",
-    "shared",
-    "spawn",
-    "static",
-    "super",
-    "switch",
-    "sync",
-    "this",
-    "thread",
-    "throw",
-    "true",
-    "try",
-    "until",
-    "use",
-    "var",
-    "void",
-    "while",
-    "with",
-    "yield",
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue",
+    "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import",
+    "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while",
+    "with", "yield",
 ];
 
 /// The name a script calls a tool (or a namespace) by.
 ///
-/// The rules, in order: every character outside Rhai's identifier set becomes
-/// `_`; a name that begins with a digit, is a [`RESERVED`] word, or has no
-/// letters at all gets a `_` prefix or a `tool` fallback. Every rule exists
-/// because the alternative is a call that silently does something else -- a
-/// `-` in a name parses as subtraction, and a keyword fails to parse at all.
+/// The rules, in order: every character outside Python's ASCII identifier set
+/// becomes `_`; a name that begins with a digit, is a [`RESERVED`] word, or has
+/// no letters at all gets a `_` prefix or a `tool` fallback; and a dunder keeps a
+/// trailing `_` so it stops being one. Every rule exists because the alternative
+/// is a call that silently does something else -- a `-` in a name is subtraction,
+/// a keyword fails to parse, and `tools.__class__` would reach the namespace
+/// object instead of the tool.
 pub fn callable_name(name: &str) -> String {
     let mut out: String = name
         .chars()
@@ -107,6 +64,11 @@ pub fn callable_name(name: &str) -> String {
     if RESERVED.contains(&out.as_str()) {
         out.insert(0, '_');
     }
+    // `__class__` and friends are looked up by Python itself, so an attribute with
+    // that shape is never the tool's.
+    if out.len() > 4 && out.starts_with("__") && out.ends_with("__") {
+        out.push('_');
+    }
     out
 }
 
@@ -125,7 +87,7 @@ pub struct ToolEntry {
 }
 
 impl ToolEntry {
-    /// A tool of the roster: `tools::<name>`.
+    /// A tool of the roster: `tools.<name>`.
     pub fn roster(name: impl Into<String>, description: impl Into<String>, schema: Value) -> Self {
         let name = name.into();
         Self {
@@ -137,7 +99,7 @@ impl ToolEntry {
         }
     }
 
-    /// An MCP server's tool: `mcp::<server>::<name>`, dispatched by the roster's
+    /// An MCP server's tool: `mcp.<server>.<name>`, dispatched by the roster's
     /// composite name.
     pub fn mcp(
         server: impl Into<String>,
@@ -174,7 +136,7 @@ pub struct ToolSpec {
 impl ToolSpec {
     /// The name a script writes, and the name the catalog prints.
     pub fn qualified(&self) -> String {
-        format!("{}::{}", self.namespace.join("::"), self.callable)
+        format!("{}.{}", self.namespace.join("."), self.callable)
     }
 
     /// Whether the callable name differs from the tool's own name.
@@ -238,7 +200,7 @@ impl Catalog {
         self.tools.len()
     }
 
-    /// The tool a script's `namespace::callable` refers to.
+    /// The tool a script's `namespace.callable` refers to.
     pub fn find(&self, namespace: &[&str], callable: &str) -> Option<&ToolSpec> {
         self.tools.iter().find(|spec| {
             spec.callable == callable
@@ -279,7 +241,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn names_outside_rhai_identifiers_are_rewritten() {
+    fn names_outside_python_identifiers_are_rewritten() {
         // MCP tools are the realistic source of these.
         assert_eq!(callable_name("resolve-library-id"), "resolve_library_id");
         assert_eq!(callable_name("search.docs"), "search_docs");
@@ -293,8 +255,9 @@ mod tests {
 
     #[test]
     fn reserved_words_and_odd_names_get_a_usable_prefix() {
-        assert_eq!(callable_name("call"), "_call");
-        assert_eq!(callable_name("switch"), "_switch");
+        assert_eq!(callable_name("class"), "_class");
+        assert_eq!(callable_name("lambda"), "_lambda");
+        assert_eq!(callable_name("True"), "_True");
         assert_eq!(callable_name("in"), "_in");
         // A leading digit is not an identifier.
         assert_eq!(callable_name("2fa"), "_2fa");
@@ -305,7 +268,11 @@ mod tests {
         // A word that merely looks like a keyword is callable, so it is left
         // alone: mangling it would only cost readability.
         assert_eq!(callable_name("type"), "type");
-        assert_eq!(callable_name("each"), "each");
+        assert_eq!(callable_name("match"), "match");
+        // A dunder is looked up by Python itself rather than by the script, so
+        // `tools.__class__` has to stop being one.
+        assert_eq!(callable_name("__class__"), "__class___");
+        assert_eq!(callable_name("__init__"), "__init___");
     }
 
     #[test]
@@ -333,7 +300,7 @@ mod tests {
         let callables: Vec<String> = catalog.tools().iter().map(ToolSpec::qualified).collect();
         assert_eq!(
             callables,
-            ["mcp::dev_radius::read_file", "mcp::dev_radius::read_file_2",],
+            ["mcp.dev_radius.read_file", "mcp.dev_radius.read_file_2",],
             "a colliding name gets a suffix rather than overwriting a tool"
         );
 
@@ -372,44 +339,10 @@ mod tests {
         ]);
 
         assert_eq!(catalog.len(), 2);
-        assert_eq!(catalog.tools()[1].qualified(), "tools::read_file");
+        assert_eq!(catalog.tools()[1].qualified(), "tools.read_file");
         assert!(!catalog.tools()[1].renamed());
         assert_eq!(catalog.tools()[1].host_name, "read_file");
-        assert_eq!(catalog.tools()[0].qualified(), "mcp::dev_radius::search");
+        assert_eq!(catalog.tools()[0].qualified(), "mcp.dev_radius.search");
         assert_eq!(catalog.namespaces().len(), 2);
-    }
-
-    /// The only names the mangling may rewrite are the ones the parser actually
-    /// rejects, in both directions: every [`RESERVED`] word must be uncallable,
-    /// and a word that is callable must not be listed.
-    #[test]
-    fn reserved_names_really_are_uncallable() {
-        use rhai::{EvalAltResult, Module};
-
-        for name in RESERVED {
-            let mut module = Module::new();
-            module.set_native_fn(*name, || Ok::<_, Box<EvalAltResult>>(()));
-            let mut engine = rhai::Engine::new();
-            engine.register_static_module("t", module.into());
-
-            assert!(
-                engine.compile(format!("t::{name}()")).is_err(),
-                "'{name}' is listed as reserved but is callable -- remove it, so the \
-                 rule stays the exact set rather than a guess"
-            );
-        }
-
-        // The mangled form of every reserved word must itself be callable.
-        for name in RESERVED {
-            let mangled = callable_name(name);
-            let mut module = Module::new();
-            module.set_native_fn(mangled.clone(), || Ok::<_, Box<EvalAltResult>>(()));
-            let mut engine = rhai::Engine::new();
-            engine.register_static_module("t", module.into());
-            assert!(
-                engine.compile(format!("t::{mangled}()")).is_ok(),
-                "'{name}' mangled into '{mangled}', which still does not parse"
-            );
-        }
     }
 }

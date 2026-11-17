@@ -8,8 +8,8 @@
 
 use serde_json::Value;
 
-use crate::convert::truncate;
 use crate::script::{CallTrace, ErrorKind, ScriptOutcome, humantime};
+use crate::text::truncate;
 
 /// Render one run as the text the `codemode` tool returns, cut to fit.
 pub fn block(outcome: &ScriptOutcome, max_chars: usize) -> String {
@@ -144,7 +144,7 @@ mod tests {
         CallTrace {
             qualified: qualified.to_string(),
             host_name: qualified.to_string(),
-            args: "#{ path: \"src/main.rs\" }".to_string(),
+            args: r#"{"path": "src/main.rs"}"#.to_string(),
             duration: Duration::from_millis(12),
             error: error.map(str::to_string),
         }
@@ -214,8 +214,8 @@ mod tests {
         let mut outcome = completed(Vec::new(), Some(Value::String("done".to_string())));
         outcome.logs = vec!["log: looking".to_string()];
         outcome.calls = vec![
-            call("tools::read_file", None),
-            call("tools::grep", Some("denied by the user")),
+            call("tools.read_file", None),
+            call("tools.grep", Some("denied by the user")),
         ];
         outcome.elapsed = Duration::from_millis(2_450);
 
@@ -224,8 +224,8 @@ mod tests {
             "Script completed in 2.5s (2 tool calls).\ndone\n\n\
              <console_output>\nlog: looking\n</console_output>\n\n\
              Tool calls (2):\n  \
-             1. tools::read_file — 12ms — ok\n     #{ path: \"src/main.rs\" }\n  \
-             2. tools::grep — 12ms — failed: denied by the user\n     #{ path: \"src/main.rs\" }\n"
+             1. tools.read_file — 12ms — ok\n     {\"path\": \"src/main.rs\"}\n  \
+             2. tools.grep — 12ms — failed: denied by the user\n     {\"path\": \"src/main.rs\"}\n"
         );
     }
 

@@ -853,7 +853,7 @@ fn push_codemode_script(body: &mut BodyBuilder, tool: &ToolBlock) {
         total.min(COLLAPSED_CODE_LINES)
     };
     let head: String = script.lines().take(shown).collect::<Vec<_>>().join("\n");
-    let mut lines = shuvarie_highlight::syntax::highlight_code("rhai", &head);
+    let mut lines = shuvarie_highlight::syntax::highlight_code("python", &head);
     let remaining = total - shown;
     if remaining > 0 {
         lines.push(Line::from(
@@ -2416,13 +2416,13 @@ mod tests {
         assert_eq!(block.view(80, &env).chunk_rows(1, 80), 3);
     }
 
-    /// Highlighting is the point of the listing: without a `rhai` grammar every
+    /// Highlighting is the point of the listing: without a `python` grammar every
     /// row renders in one color, which looks the same as plain text.
     #[test]
     fn codemode_paints_the_script_with_syntax_colors() {
         let diags = BTreeMap::new();
         let env = test_env(&diags);
-        let script = "// count the files\nlet files = tools::glob(#{ pattern: \"src/**/*.rs\" });\nfiles.len";
+        let script = "# count the files\nfiles = tools.glob(pattern=\"src/**/*.rs\")\nlen(files)";
         let block = finished_block(
             "codemode",
             &serde_json::json!({ "script": script }).to_string(),

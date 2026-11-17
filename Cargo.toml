@@ -70,6 +70,10 @@ serde = { workspace = true }
 serde_json.workspace = true
 sha2 = "0.11"
 shuvarie-core.workspace = true
+# The TUI reads the interpreter probe (the `/codemode` overlay reports it) and
+# `main` starts it before any worker thread exists, so the crate is named here
+# rather than reached through `shuvarie-core`.
+shuvarie-codemode.workspace = true
 shuvarie-db.workspace = true
 shuvarie-highlight.workspace = true
 shuvarie-llm.workspace = true
@@ -145,7 +149,13 @@ jiff = "0.2"
 kdl = "6.7"
 regex = "1"
 reqwest = "0.13"
-rhai = { version = "1.27", features = ["serde"] }
+# The Python binding `shuvarie-codemode` runs scripts with. Not `pyo3` the
+# extension-module toolkit: this embeds an interpreter, so the `extension-module`
+# feature must stay off. `abi3-py310` links the version-less stable-ABI library
+# (`libpython3.so`) instead of `libpython3.14.so`, so the built binary is not
+# pinned to the exact minor version of the machine that built it, and the floor
+# is 3.10 (the scripts use `match`-era typing and `X | None`).
+pyo3 = { version = "0.30", features = ["auto-initialize", "abi3-py310"] }
 # Do NOT include `rig`. It has too many implicit dependencies: the facade
 # declares every vector-store and embedding integration as an optional
 # dependency, and Cargo.lock records the whole resolve graph whether or not a

@@ -1,8 +1,7 @@
+mod builtin;
 pub mod code;
 pub mod diff;
 pub mod md;
-/// A Rhai syntax definition for syntect, which does not ship one.
-pub mod rhai;
 pub mod syntax;
 pub mod table;
 pub mod theme;

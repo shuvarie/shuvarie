@@ -39,7 +39,7 @@ pub const DEFAULT_NAMESPACE_LIMIT: usize = 25;
 /// `describe_tool`'s job, and keeping the two apart keeps a wide search cheap.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Hit {
-    /// The name a script calls, `tools::read_file`.
+    /// The name a script calls, `tools.read_file`.
     pub name: String,
     /// The tool's first line, trimmed to a readable length.
     pub description: String,
@@ -127,7 +127,7 @@ fn words_match(query: &str, qualified: &str, description: &str) -> bool {
 /// means -- the last of which is the part a signature cannot carry and the part
 /// that decides whether the call is written correctly.
 ///
-/// The name may be qualified (`tools::read_file`) or bare (`read_file`), because
+/// The name may be qualified (`tools.read_file`) or bare (`read_file`), because
 /// a model that has just read a description has the bare name and should not
 /// have to guess the namespace. An unknown name is an error naming the
 /// near-misses: a script that stops here can be fixed in one step, whereas a
@@ -139,15 +139,18 @@ pub fn describe_tool(catalog: &Catalog, name: &str) -> Result<String, String> {
         out.push_str(&format!(" (tool name \"{}\")", spec.name));
     }
     out.push('\n');
-    out.push_str(&crate::convert::truncate(
+    out.push_str(&crate::text::truncate(
         spec.description.trim(),
         FULL_DESCRIPTION_CHARS,
     ));
 
     let parameters = parameters(spec);
     for (name, required, description) in parameters {
-        let marker = if required { "" } else { "?" };
-        out.push_str(&format!("\n\n{name}{marker}: {description}"));
+        // The signature already says which ones have defaults; this says it again
+        // in words, because a parameter a script may omit is worth knowing before
+        // the call rather than after it.
+        let marker = if required { "required" } else { "optional" };
+        out.push_str(&format!("\n\n{name} ({marker}): {description}"));
     }
     Ok(out)
 }
@@ -327,7 +330,7 @@ pub fn namespaces(catalog: &Catalog) -> Vec<String> {
     catalog
         .namespaces()
         .into_iter()
-        .map(|namespace| namespace.join("::"))
+        .map(|namespace| namespace.join("."))
         .collect()
 }
 
@@ -340,7 +343,7 @@ pub fn all_tools(catalog: &Catalog) -> Vec<String> {
 fn namespace_segments(namespace: &str) -> Vec<String> {
     namespace
         .trim()
-        .split("::")
+        .split(".")
         .map(str::trim)
         .filter(|segment| !segment.is_empty())
         .map(str::to_string)
@@ -348,7 +351,7 @@ fn namespace_segments(namespace: &str) -> Vec<String> {
 }
 
 /// Whether `namespace` is `wanted` or a descendant of it, so filtering by
-/// `mcp` catches `mcp::dev_radius` too.
+/// `mcp` catches `mcp.dev_radius` too.
 fn starts_with(namespace: &[String], wanted: &[String]) -> bool {
     namespace.len() >= wanted.len() && namespace.iter().zip(wanted).all(|(a, b)| a == b)
 }
@@ -389,13 +392,13 @@ mod tests {
     fn an_exact_name_outranks_a_mention_in_prose() {
         let (hits, matched) = search(&catalog(), "dev_radius", None, 10);
         assert_eq!(matched, 1);
-        assert_eq!(hits[0].name, "mcp::dev_radius::search");
+        assert_eq!(hits[0].name, "mcp.dev_radius.search");
     }
 
     #[test]
     fn a_bare_name_finds_the_namespaced_tool() {
         let (hits, _) = search(&catalog(), "read_file", None, 10);
-        assert_eq!(hits[0].name, "tools::read_file");
+        assert_eq!(hits[0].name, "tools.read_file");
         assert_eq!(hits[0].description, "Read a file.");
     }
 
@@ -411,7 +414,7 @@ mod tests {
     fn a_namespace_filter_narrows_and_its_children_still_match() {
         let (hits, _) = search(&catalog(), "", Some("mcp"), 10);
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].name, "mcp::dev_radius::search");
+        assert_eq!(hits[0].name, "mcp.dev_radius.search");
 
         let (hits, _) = search(&catalog(), "", Some("tools"), 10);
         assert_eq!(hits.len(), 3);
@@ -421,12 +424,12 @@ mod tests {
     fn a_multi_word_query_has_to_match_every_word() {
         let (hits, _) = search(&catalog(), "search contents", None, 10);
         assert_eq!(hits.len(), 1, "{hits:?}");
-        assert_eq!(hits[0].name, "tools::grep");
+        assert_eq!(hits[0].name, "tools.grep");
 
         // "search" alone matches two, but no tool has both words.
         let (hits, _) = search(&catalog(), "search docs", None, 10);
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].name, "mcp::dev_radius::search");
+        assert_eq!(hits[0].name, "mcp.dev_radius.search");
     }
 
     #[test]
@@ -443,11 +446,11 @@ mod tests {
         let text = describe_tool(&catalog(), "read_file").unwrap();
         assert_eq!(
             text,
-            "tools::read_file(offset?: int, path: String) -> Dynamic\n\
+            "tools.read_file(path: str, offset: int | None = None) -> Any\n\
              Read a file.\n\n\
              It is long.\n\n\
-             offset?: int\n\n\
-             path: The file to read."
+             offset (optional): int\n\n\
+             path (required): The file to read."
         );
         // While the search result keeps only the first line, so a wide search
         // stays cheap.
@@ -458,8 +461,8 @@ mod tests {
     #[test]
     fn describe_tool_takes_a_qualified_name_too() {
         assert_eq!(
-            describe_tool(&catalog(), "tools::grep").unwrap(),
-            "tools::grep() -> Dynamic\nSearch file contents."
+            describe_tool(&catalog(), "tools.grep").unwrap(),
+            "tools.grep() -> Any\nSearch file contents."
         );
     }
 
@@ -467,7 +470,7 @@ mod tests {
     fn describe_tool_explains_a_name_it_does_not_know() {
         let error = describe_tool(&catalog(), "read_fil").unwrap_err();
         assert!(error.contains("did you mean"), "{error}");
-        assert!(error.contains("tools::read_file"), "{error}");
+        assert!(error.contains("tools.read_file"), "{error}");
 
         let error = describe_tool(&catalog(), "nonexistent").unwrap_err();
         assert!(error.contains("ALL_TOOLS"), "{error}");
@@ -482,15 +485,15 @@ mod tests {
         ]);
         let error = describe_tool(&catalog, "search").unwrap_err();
         assert!(error.contains("ambiguous"), "{error}");
-        assert!(error.contains("tools::search"), "{error}");
-        assert!(error.contains("mcp::docs::search"), "{error}");
+        assert!(error.contains("tools.search"), "{error}");
+        assert!(error.contains("mcp.docs.search"), "{error}");
     }
 
     #[test]
     fn describe_namespace_lists_its_tools_and_counts_the_rest() {
         let text = describe_namespace(&catalog(), "tools", 2).unwrap();
         assert!(text.starts_with("tools (3 tools)"), "{text}");
-        assert!(text.contains("tools::grep()"), "{text}");
+        assert!(text.contains("tools.grep()"), "{text}");
         assert!(text.contains("… and 1 more"), "{text}");
         assert!(text.contains("search_tools"), "{text}");
 
@@ -511,10 +514,10 @@ mod tests {
         assert_eq!(
             all_tools(&catalog()),
             [
-                "mcp::dev_radius::search",
-                "tools::glob",
-                "tools::grep",
-                "tools::read_file"
+                "mcp.dev_radius.search",
+                "tools.glob",
+                "tools.grep",
+                "tools.read_file"
             ]
         );
     }

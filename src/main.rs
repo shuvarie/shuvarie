@@ -72,6 +72,16 @@ async fn main() -> color_eyre::Result<()> {
         return Ok(());
     };
 
+    // The scripting interpreter is chosen once per process, and
+    // `codemode { python "…" }` can only take effect on one that has not started
+    // yet. Doing it here -- on the main thread, before a worker exists -- is what
+    // keeps the environment it sets from racing the first script, which is also
+    // why it happens before the core is spawned rather than inside the turn that
+    // first needs it.
+    shuvarie_codemode::python::initialize(
+        config.codemode.python.as_deref().map(std::path::Path::new),
+    );
+
     // The process-wide inputs are settled, so the core is spawned through the
     // same path a later tab takes: the store choice (`db { global-store }`), the
     // permission rules, and the config chain are resolved against a workspace
