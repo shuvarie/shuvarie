@@ -362,6 +362,14 @@ jobs:
         env:
           CFLAGS_x86_64_pc_windows_gnullvm: "-Wno-error=date-time"
           CFLAGS_aarch64_pc_windows_gnullvm: "-Wno-error=date-time"
+          # rustc's windows-gnullvm sysroot ships only an empty libunwind stub
+          # (the real unwinder comes from the C toolchain), and zig's driver
+          # adds `-lunwind` itself only when a C++ TU takes part in the link.
+          # A Rust-only link - the binary, and turso_sdk_kit's cdylib - must
+          # therefore ask for it, or `_Unwind_Resume`, `_GCC_specific_handler`
+          # and the rest of the personality/panic entry points go undefined.
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_RUSTFLAGS: "-C link-arg=-lunwind"
+          CARGO_TARGET_AARCH64_PC_WINDOWS_GNULLVM_RUSTFLAGS: "-C link-arg=-lunwind"
         run: cargo zigbuild --locked --release --target ${{ matrix.target }} --bin shuvarie
 
       - name: Stage files
