@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.6.3] - 2026-11-18
+
+### 🚀 Features
+
+- *(session)* Add turn error message
+
+### ⚙️ Miscellaneous Tasks
+
+- *(release)* Add libunwind for windows build
+## [0.6.2] - 2026-11-11
+
+### 🚀 Features
+
+- *(command)* Add `/clearerr`
+
+### 🐛 Bug Fixes
+
+- *(attachment)* Allow pasted invalid paths as plain text
+- *(slash)* Detect only leading slash
 ## [0.6.1] - 2026-11-11
 
 ### 🚀 Features
