@@ -60,12 +60,11 @@ pub const ORCHESTRATOR_SCENE_DESCRIPTION: &str =
 /// The inspection tool roster kept in the read-only builtin scenes. It is
 /// the `read` worker toolset plus the scene-independent bookkeeping tools
 /// (`question`, `todo`); write, edit, and command tools stay disabled.
-const READ_ROSTER: [&str; 11] = [
+const READ_ROSTER: [&str; 10] = [
     "read_file",
     "list_dir",
     "grep",
     "glob",
-    "file_search",
     "skill",
     "lsp",
     "webfetch",
@@ -1085,7 +1084,6 @@ mod tests {
             "list_dir",
             "grep",
             "glob",
-            "file_search",
             "lsp",
             "webfetch",
             "question",
@@ -1121,7 +1119,7 @@ mod tests {
     fn reviewer_scene_allows_shell_but_no_edits() {
         let scene = resolve_builtin(REVIEWER_SCENE_NAME, None);
         let tools = scene.tools();
-        for tool in ["read_file", "grep", "glob", "file_search", "run_shell"] {
+        for tool in ["read_file", "grep", "glob", "run_shell"] {
             assert!(tools.allows(tool), "Reviewer keeps {tool}");
         }
         for tool in ["write_file", "edit_file", "apply_patch", "delete_file"] {
