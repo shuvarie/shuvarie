@@ -2222,6 +2222,77 @@ impl ThemeColors {
         }
     }
 
+    /// The built-in Sha-Chi dark palette: the ink-and-cinnabar look of
+    /// *Phantom Blade Zero* — near-black ink with a cold green-grey cast, rain,
+    /// and cinnabar red as the one loud color. Blue is the other borrowed
+    /// accent: the blue spider lilies carry success, while the parry blue and
+    /// the gold of Mó Yuan's mask tint only the code roles.
+    pub const fn sha_chi_dark() -> Self {
+        Self {
+            bg: (14, 16, 17),
+            surface: (21, 24, 25),
+            surface_focused: (30, 34, 35),
+            overlay: (25, 28, 29),
+            accent: (218, 74, 56),
+            accent_bg: (53, 27, 24),
+            selection: (58, 30, 26),
+            text: (228, 225, 215),
+            text_dim: (152, 154, 148),
+            text_muted: (105, 108, 104),
+            prompt_bg: (38, 24, 23),
+            running_bg: (30, 34, 35),
+            success_bg: (22, 32, 52),
+            warning_bg: (44, 34, 20),
+            error_bg: (52, 22, 21),
+            diff_add_bg: (26, 44, 37),
+            diff_add_emph_bg: (40, 68, 55),
+            diff_del_bg: (56, 25, 24),
+            diff_del_emph_bg: (86, 34, 32),
+            success: (110, 156, 240),
+            warning: (214, 164, 84),
+            error: (236, 106, 96),
+            code_keyword: (228, 98, 76),
+            code_string: (132, 186, 140),
+            code_type: (118, 170, 220),
+            code_function: (206, 168, 92),
+        }
+    }
+
+    /// The built-in Sha-Chi light palette: the same ink-and-cinnabar scheme
+    /// washed onto Xuan paper — warm unpainted white, charcoal ink, cinnabar
+    /// red deepened so it still holds its own on a pale ground, and the blue
+    /// lily of the dark palette darkened for the same reason.
+    pub const fn sha_chi_light() -> Self {
+        Self {
+            bg: (240, 235, 225),
+            surface: (233, 227, 215),
+            surface_focused: (223, 216, 202),
+            overlay: (247, 244, 236),
+            accent: (150, 34, 26),
+            accent_bg: (244, 222, 214),
+            selection: (232, 208, 199),
+            text: (32, 34, 34),
+            text_dim: (94, 98, 96),
+            text_muted: (132, 134, 128),
+            prompt_bg: (234, 226, 213),
+            running_bg: (228, 232, 230),
+            success_bg: (214, 228, 244),
+            warning_bg: (246, 232, 203),
+            error_bg: (245, 213, 207),
+            diff_add_bg: (214, 234, 216),
+            diff_add_emph_bg: (186, 219, 190),
+            diff_del_bg: (246, 216, 210),
+            diff_del_emph_bg: (239, 186, 177),
+            success: (40, 84, 164),
+            warning: (158, 98, 18),
+            error: (196, 60, 66),
+            code_keyword: (166, 42, 32),
+            code_string: (70, 110, 58),
+            code_type: (40, 92, 140),
+            code_function: (146, 100, 16),
+        }
+    }
+
     /// Overwrites every role the theme defines.
     fn apply(&mut self, colors: &BTreeMap<String, Rgb>) {
         for (role, value) in colors {
@@ -2260,8 +2331,8 @@ impl ThemeColors {
 
 /// `themes { … }` — the named themes: per-theme palette overrides over the
 /// built-in Faerun colors. The built-in themes (Faerun, Tokyo Night,
-/// Kanagawa, Ayu, One) are code, not config; this section only defines
-/// named themes on top of (or shadowing) them per name and variant.
+/// Kanagawa, Ayu, One, Sha-Chi) are code, not config; this section only
+/// defines named themes on top of (or shadowing) them per name and variant.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ThemesConfig {
     /// The defined themes, keyed by name and optional variant name.
@@ -2440,6 +2511,28 @@ impl ThemeDef {
                 "One",
                 def(ThemeColors::one_light(), Some("light"), ThemeVariant::Light),
             ),
+            // Sha-Chi: the ink-and-cinnabar look of Phantom Blade Zero, dark
+            // by default with the light one washed onto paper.
+            (
+                "Sha-Chi",
+                def(ThemeColors::sha_chi_dark(), None, ThemeVariant::Dark),
+            ),
+            (
+                "Sha-Chi",
+                def(
+                    ThemeColors::sha_chi_dark(),
+                    Some("dark"),
+                    ThemeVariant::Dark,
+                ),
+            ),
+            (
+                "Sha-Chi",
+                def(
+                    ThemeColors::sha_chi_light(),
+                    Some("light"),
+                    ThemeVariant::Light,
+                ),
+            ),
         ]
     }
 }
@@ -2534,10 +2627,10 @@ impl ThemeSet {
     /// whose `mode` match win — the base definition first, then alphabetical
     /// variants — and with no match the base definition, else the first
     /// remaining one, is used so a defined theme still wins over the
-    /// built-in. Built-in themes (Faerun, Tokyo Night, Kanagawa, Ayu, One)
-    /// resolve against their built-in palettes; user definitions shadow
-    /// built-ins per name and variant. Unknown names and unknown explicit
-    /// variants warn and fall back to the built-in Faerun.
+    /// built-in. Built-in themes (Faerun, Tokyo Night, Kanagawa, Ayu, One,
+    /// Sha-Chi) resolve against their built-in palettes; user definitions
+    /// shadow built-ins per name and variant. Unknown names and unknown
+    /// explicit variants warn and fall back to the built-in Faerun.
     pub fn resolve(&self, pref: Option<&str>, detected: ThemeVariant) -> ResolvedTheme {
         let mut colors = builtin_colors(detected);
         let mut warnings = self.warnings.clone();
@@ -2583,7 +2676,7 @@ impl ThemeSet {
 
     /// Every definition of the theme with the given name: the merged user
     /// definitions plus the unshadowed built-ins of every built-in family
-    /// with that name (Faerun, Tokyo Night, Kanagawa, Ayu, One), base
+    /// with that name (Faerun, Tokyo Night, Kanagawa, Ayu, One, Sha-Chi), base
     /// definition first, then alphabetical variants.
     fn candidates(&self, name: &str) -> Vec<ThemeDef> {
         let mut defs: Vec<ThemeDef> = self
@@ -2895,9 +2988,9 @@ pub struct UiPrefs {
 
     /// The theme the TUI paints with: `theme "name"` selects a theme defined
     /// by `themes { … }`, a `themes.d` drop-in, or one of the built-ins
-    /// (Faerun, Tokyo Night, Kanagawa, Ayu, One). `None` keeps the default:
-    /// the built-in Faerun theme by the terminal's mode; an unknown name
-    /// warns and keeps Faerun.
+    /// (Faerun, Tokyo Night, Kanagawa, Ayu, One, Sha-Chi). `None` keeps the
+    /// default: the built-in Faerun theme by the terminal's mode; an unknown
+    /// name warns and keeps Faerun.
     pub theme: Option<String>,
 
     /// How a new session's title is drafted. Defaults to deriving it from
@@ -7860,6 +7953,14 @@ Now we're in Plan mode: plan first, no edits.
             set.resolve(Some("One"), ThemeVariant::Dark).colors,
             ThemeColors::one_dark()
         );
+        assert_eq!(
+            set.resolve(Some("Sha-Chi"), ThemeVariant::Dark).colors,
+            ThemeColors::sha_chi_dark()
+        );
+        assert_eq!(
+            set.resolve(Some("Sha-Chi"), ThemeVariant::Light).colors,
+            ThemeColors::sha_chi_light()
+        );
         // Explicit variants ignore the detected mode.
         assert_eq!(
             set.resolve(Some("Tokyo Night:storm"), ThemeVariant::Light)
@@ -7878,6 +7979,16 @@ Now we're in Plan mode: plan first, no edits.
         assert_eq!(
             set.resolve(Some("One:light"), ThemeVariant::Dark).colors,
             ThemeColors::one_light()
+        );
+        assert_eq!(
+            set.resolve(Some("Sha-Chi:dark"), ThemeVariant::Light)
+                .colors,
+            ThemeColors::sha_chi_dark()
+        );
+        assert_eq!(
+            set.resolve(Some("Sha-Chi:light"), ThemeVariant::Dark)
+                .colors,
+            ThemeColors::sha_chi_light()
         );
         assert_eq!(
             set.resolve(Some("Faerun:light"), ThemeVariant::Dark).colors,
@@ -7920,11 +8031,15 @@ Now we're in Plan mode: plan first, no edits.
                 Some("One"),
                 Some("One:dark"),
                 Some("One:light"),
+                Some("Sha-Chi"),
+                Some("Sha-Chi:dark"),
+                Some("Sha-Chi:light"),
             ]
         );
         assert_eq!(choices[0].colors, ThemeColors::faerun());
         assert_eq!(choices[3].colors, ThemeColors::tokyo_night_night());
         assert_eq!(choices[9].colors, ThemeColors::kanagawa_lotus());
+        assert_eq!(choices[18].colors, ThemeColors::sha_chi_light());
     }
 
     #[test]
