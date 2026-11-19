@@ -3894,6 +3894,22 @@ impl App {
         self.todo_popup.view(frame, area, stacked);
         self.peak_table.view(frame, area, stacked);
         self.view_popups(frame, area, stacked);
+
+        // A terminal on the other side of light and dark from the theme would
+        // show through every cell the page leaves to it — a light theme's
+        // panels floating on a dark screen. The sheet goes over what is still
+        // the terminal's once everything has painted: the widgets' own
+        // backgrounds are already down, and the cells they hand back to the
+        // terminal (the tail of a wide symbol, a cleared popup) join the page.
+        if let Some(cover) = theme::session_cover() {
+            let buf = frame.buffer_mut();
+            for pos in area.positions() {
+                let cell = &mut buf[pos];
+                if cell.bg == Color::Reset {
+                    cell.set_bg(cover);
+                }
+            }
+        }
     }
 
     /// Paints the tab strip: each tab's number, label, and busy mark, with the
@@ -5228,6 +5244,63 @@ mod tests {
         assert!(
             !settled.contains("SESSION-MARKER"),
             "and the session is gone once the page has landed: {settled}"
+        );
+    }
+
+    /// A terminal on the other side of light and dark from the theme would show
+    /// through every cell the page leaves unpainted, so what is left of the
+    /// terminal once the page has painted takes the cover: with the two
+    /// disagreeing nothing on screen is left to the terminal, and with them
+    /// agreeing nothing is covered.
+    #[test]
+    fn the_session_page_is_covered_when_the_terminal_and_the_theme_disagree() {
+        let mut app = app_with(connected());
+        active_session(&mut app);
+
+        // What the view painted, read off the frame's own buffer (the backend's
+        // lacks the tail of every wide symbol: the diff skips those cells).
+        let painted = |app: &App| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+            let mut painted = None;
+            terminal
+                .draw(|frame| {
+                    app.view(frame, frame.area());
+                    painted = Some(frame.buffer_mut().clone());
+                })
+                .unwrap();
+            painted.expect("the frame painted")
+        };
+        let unpainted = |buffer: &Buffer| {
+            buffer
+                .content()
+                .iter()
+                .filter(|cell| cell.bg == Color::Reset)
+                .count()
+        };
+
+        let covered = {
+            let _page = theme::TestPage::new(shuvarie_core::ThemeColors::faerun(), (255, 255, 255));
+            assert!(
+                theme::session_cover().is_some(),
+                "the dark page under a light terminal takes a cover"
+            );
+            unpainted(&painted(&app))
+        };
+        assert_eq!(covered, 0, "the cover reaches every cell of the page");
+
+        let uncovered = {
+            let _page = theme::TestPage::new(shuvarie_core::ThemeColors::faerun(), (12, 12, 14));
+            assert_eq!(
+                theme::session_cover(),
+                None,
+                "an agreeing terminal needs no cover"
+            );
+            unpainted(&painted(&app))
+        };
+        assert!(
+            uncovered > 0,
+            "and the page's gaps stay the terminal's: {uncovered}"
         );
     }
 

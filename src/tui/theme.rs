@@ -4,7 +4,9 @@
 //! palettes through it and restores the previous one on cancel). Swapping
 //! here also re-syncs the markdown/code renderer palette
 //! ([`shuvarie_highlight::theme`]), so chat rendering follows every preview,
-//! apply, and restore.
+//! apply, and restore. What the startup probe learned about the terminal's own
+//! background lives here too, so the session page can cover it when the
+//! terminal and the theme disagree about light and dark ([`session_cover`]).
 
 use std::io::Write;
 use std::sync::RwLock;
@@ -22,6 +24,11 @@ use shuvarie_core::{ResolvedTheme, Rgb, ThemeColors, ThemeVariant};
 use super::escape;
 
 static ACTIVE: RwLock<ThemeColors> = RwLock::new(ThemeColors::faerun());
+
+/// The terminal's own background as the startup probe found it
+/// ([`detect_variant`] records it): the session page's cover is mixed against
+/// it.
+static TERMINAL: RwLock<TerminalBackground> = RwLock::new(TerminalBackground::DARK);
 
 /// Installs the resolved theme for this run: every palette access below
 /// paints its colors from then on. Without a call the built-in Faerun
@@ -56,6 +63,65 @@ pub(crate) fn lock_for_tests() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// A palette and terminal background installed for one test, both handed back
+/// when the page drops. The palette is process-wide, so this also holds the
+/// palette test lock: a test painting against one known page cannot have
+/// another test's palette swap land mid-frame.
+#[cfg(test)]
+pub(crate) struct TestPage {
+    /// The palette installed before the page.
+    previous_theme: ThemeColors,
+
+    /// The terminal background installed before the page.
+    previous_terminal: TerminalBackground,
+
+    /// Held until the page is dropped, so the palette stays put.
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl TestPage {
+    /// A page painted with `theme` on a terminal that reported `background`.
+    pub(crate) fn new(theme: ThemeColors, background: Rgb) -> Self {
+        Self::install(theme, TerminalBackground::reported(background))
+    }
+
+    /// A page painted with `theme` on a terminal that never answered the query,
+    /// which detection assumes to be `variant`.
+    pub(crate) fn guessed(theme: ThemeColors, variant: ThemeVariant) -> Self {
+        Self::install(
+            theme,
+            TerminalBackground {
+                variant,
+                reported: None,
+            },
+        )
+    }
+
+    fn install(theme: ThemeColors, terminal: TerminalBackground) -> Self {
+        let lock = lock_for_tests();
+        let previous_terminal = std::mem::replace(
+            &mut *TERMINAL.write().expect("terminal background lock"),
+            terminal,
+        );
+        let previous_theme = current();
+        set(theme);
+        Self {
+            previous_theme,
+            previous_terminal,
+            _lock: lock,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestPage {
+    fn drop(&mut self) {
+        set(self.previous_theme);
+        *TERMINAL.write().expect("terminal background lock") = self.previous_terminal;
+    }
+}
+
 fn paint(color: Rgb) -> Color {
     Color::Rgb(color.0, color.1, color.2)
 }
@@ -63,6 +129,29 @@ fn paint(color: Rgb) -> Color {
 #[allow(dead_code)]
 pub fn bg() -> Color {
     paint(active().bg)
+}
+
+/// How much of the terminal's own background shows through the session page's
+/// cover; the sheet's remaining share is the theme's page color.
+const COVER_TRANSLUCENCY: f32 = 0.15;
+
+/// The wash over the session page's own background when the terminal and the
+/// active theme disagree about light and dark — a light cover over a dark
+/// terminal under a light theme, a dark one over a light terminal under a dark
+/// theme — or `None` when they agree, where the terminal's background already
+/// belongs to the page.
+///
+/// An SGR color carries no alpha, so the sheet cannot be translucent over the
+/// screen itself: it is the theme's page color mixed against the terminal's
+/// own background by [`COVER_TRANSLUCENCY`], which over a uniform terminal
+/// background is what a translucent sheet would look like, and keeps the
+/// terminal's tone showing faintly through the page instead of repainting it
+/// flat.
+pub fn session_cover() -> Option<Color> {
+    let terminal = *TERMINAL.read().expect("terminal background lock");
+    let bg = active().bg;
+    (luminance_variant(bg.0, bg.1, bg.2) != terminal.variant)
+        .then(|| paint(blend(terminal.color(), bg, 1.0 - COVER_TRANSLUCENCY)))
 }
 
 pub fn surface() -> Color {
@@ -274,28 +363,74 @@ pub fn title_bar(
 /// detection gives up and assumes a dark terminal.
 const DETECT_TIMEOUT: Duration = Duration::from_millis(250);
 
+/// What the run knows about the terminal's own background: the mode it falls
+/// in, and the color it reported when it answered the query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalBackground {
+    /// The mode the background falls in, by relative luminance.
+    variant: ThemeVariant,
+
+    /// The color the terminal reported; `None` when detection had to guess,
+    /// leaving [`Self::color`] to answer the mode's nominal background.
+    reported: Option<Rgb>,
+}
+
+impl TerminalBackground {
+    /// What detection assumes when the terminal never says: a dark one, whose
+    /// background is taken to be the dark page's.
+    const DARK: Self = Self {
+        variant: ThemeVariant::Dark,
+        reported: None,
+    };
+
+    /// A terminal that answered the query with `rgb`.
+    fn reported(rgb: Rgb) -> Self {
+        Self {
+            variant: luminance_variant(rgb.0, rgb.1, rgb.2),
+            reported: Some(rgb),
+        }
+    }
+
+    /// The terminal's background color: the reported one, else the nominal
+    /// page color of the detected mode.
+    fn color(self) -> Rgb {
+        self.reported.unwrap_or(match self.variant {
+            ThemeVariant::Dark => ThemeColors::faerun().bg,
+            ThemeVariant::Light => ThemeColors::faerun_light().bg,
+        })
+    }
+}
+
 /// Asks the terminal for its background color (OSC 11) and maps the answer to
-/// a theme variant by relative luminance. Keystrokes typed during the wait are
-/// retained by the reader and delivered to the TUI afterwards. Dark is the
-/// default when the write fails, the terminal never answers within the
-/// timeout, or the answer carries no color.
+/// a theme variant by relative luminance, recording the background for the run
+/// ([`session_cover`] mixes the session page against it). Keystrokes typed
+/// during the wait are retained by the reader and delivered to the TUI
+/// afterwards. Dark is the default when the write fails, the terminal never
+/// answers within the timeout, or the answer carries no color.
 pub fn detect_variant(term: &mut PlatformTerminal, reader: &EventReader) -> ThemeVariant {
+    let background = detect_background(term, reader);
+    *TERMINAL.write().expect("terminal background lock") = background;
+    background.variant
+}
+
+/// The detection itself: what the terminal reported, or the dark guess.
+fn detect_background(term: &mut PlatformTerminal, reader: &EventReader) -> TerminalBackground {
     if write!(term, "{}", escape::query_background_color())
         .and_then(|()| term.flush())
         .is_err()
     {
-        return ThemeVariant::Dark;
+        return TerminalBackground::DARK;
     }
     if let Ok(true) = reader.poll(Some(DETECT_TIMEOUT), background_answer)
         && let Ok(Event::Osc(Osc::ChangeDynamicColors(_, colors))) = reader.read(background_answer)
     {
         for color in colors {
             if let ColorOrQuery::Color(rgb) = color {
-                return luminance_variant(rgb.red, rgb.green, rgb.blue);
+                return TerminalBackground::reported((rgb.red, rgb.green, rgb.blue));
             }
         }
     }
-    ThemeVariant::Dark
+    TerminalBackground::DARK
 }
 
 /// Matches the OSC 11 answer: a background color report carrying an RGB value.
@@ -335,6 +470,29 @@ fn relative_luminance(red: u8, green: u8, blue: u8) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cover's channels, which every test expects as RGB.
+    fn channels(cover: Option<Color>) -> Rgb {
+        match cover {
+            Some(Color::Rgb(red, green, blue)) => (red, green, blue),
+            other => panic!("expected an RGB cover, got {other:?}"),
+        }
+    }
+
+    /// Asserts each channel is within one step of `expected`: the blend rounds.
+    fn assert_close(actual: Rgb, expected: Rgb) {
+        let pairs = [
+            (actual.0, expected.0),
+            (actual.1, expected.1),
+            (actual.2, expected.2),
+        ];
+        for (actual, expected) in pairs {
+            assert!(
+                actual.abs_diff(expected) <= 1,
+                "{actual} is not within one step of {expected}"
+            );
+        }
+    }
 
     #[test]
     fn luminance_detects_light_and_dark_backgrounds() {
@@ -377,5 +535,49 @@ mod tests {
             shuvarie_highlight::theme::Palette::from_theme(&previous),
             "restoring restores the renderer palette too"
         );
+    }
+
+    #[test]
+    fn session_cover_lifts_a_dark_terminal_under_a_light_theme() {
+        let _page = TestPage::new(ThemeColors::faerun_light(), (12, 12, 14));
+        // The light theme's page color, 15% of the terminal's dark tone still
+        // showing through: neither endpoint, and light in its own right.
+        let cover = channels(session_cover());
+        assert_close(cover, (212, 208, 201));
+        assert_eq!(
+            luminance_variant(cover.0, cover.1, cover.2),
+            ThemeVariant::Light
+        );
+    }
+
+    #[test]
+    fn session_cover_darkens_a_light_terminal_under_a_dark_theme() {
+        let _page = TestPage::new(ThemeColors::faerun(), (255, 255, 255));
+        let cover = channels(session_cover());
+        assert_close(cover, (54, 54, 57));
+        assert_eq!(
+            luminance_variant(cover.0, cover.1, cover.2),
+            ThemeVariant::Dark
+        );
+    }
+
+    #[test]
+    fn session_cover_is_absent_under_a_matching_dark_page() {
+        let _page = TestPage::new(ThemeColors::faerun(), (12, 12, 14));
+        assert_eq!(session_cover(), None);
+    }
+
+    #[test]
+    fn session_cover_is_absent_under_a_matching_light_page() {
+        let _page = TestPage::new(ThemeColors::faerun_light(), (255, 255, 255));
+        assert_eq!(session_cover(), None);
+    }
+
+    #[test]
+    fn session_cover_falls_back_to_the_nominal_terminal_background() {
+        // Detection gave up, so the terminal counts as dark and its background
+        // as the dark page's.
+        let _page = TestPage::guessed(ThemeColors::faerun_light(), ThemeVariant::Dark);
+        assert_close(channels(session_cover()), (213, 209, 202));
     }
 }
