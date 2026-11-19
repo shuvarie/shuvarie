@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.6] - 2026-11-19
+
+### 🚀 Features
+
+- *(tool)* Remove `file_search` tool as favoring `glob`
+
+### 🎨 Styling
+
+- *(theme)* Add "Sha-Chi"
+- Add background cover for light/dark theme differing to the terminal
 ## [0.6.3] - 2026-11-18
 
 ### 🚀 Features
