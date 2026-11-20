@@ -250,7 +250,7 @@ mod tests {
     fn walking_previews_and_select_sends_the_pref() {
         let mut picker = ThemePicker::new();
         picker.open(&choices(), Some("Kanagawa:wave"));
-        assert_eq!(picker.selected, 7, "Kanagawa:wave is the 8th row");
+        assert_eq!(picker.selected, 8, "Kanagawa:wave is the 9th row");
         let effect = picker.update(ThemePickerMessage::Next).expect("preview");
         assert!(
             matches!(
@@ -264,7 +264,7 @@ mod tests {
             ),
             "the next row down is Kanagawa dragon"
         );
-        assert_eq!(picker.selected, 8);
+        assert_eq!(picker.selected, 9);
         let effect = picker.update(ThemePickerMessage::Select).expect("effect");
         match effect {
             ThemePickerEffect::Select { pref } => {

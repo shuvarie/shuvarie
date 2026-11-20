@@ -2421,6 +2421,10 @@ impl ThemeDef {
             ),
             (
                 "Faerun",
+                def(ThemeColors::faerun(), Some("dark"), ThemeVariant::Dark),
+            ),
+            (
+                "Faerun",
                 def(
                     ThemeColors::faerun_light(),
                     Some("light"),
@@ -2697,16 +2701,20 @@ impl ThemeSet {
         defs
     }
 
-    /// Every selectable theme for the picker: the unset default leads (the
-    /// built-in Faerun palette by the detected terminal mode), then the
-    /// built-in themes in family order — each family's own row resolving by
-    /// mode, then one row per explicit variant — then the user-defined
-    /// themes alphabetically, base definition first, then variants. User
+    /// Every selectable theme for the picker: the unset default leads as the
+    /// Faerun row (the built-in Faerun palette by the detected terminal mode),
+    /// then the built-in themes in family order — each family's own row
+    /// resolving by mode, then one row per explicit variant (Faerun's own
+    /// dark and light rows included) — then the user-defined themes
+    /// alphabetically, base definition first, then variants. User
     /// definitions shadow built-ins per name and variant, through [`Self::resolve`].
     pub fn choices(&self, detected: ThemeVariant) -> Vec<ThemeChoice> {
+        // The unset default leads, labelled as the Faerun family: it is the
+        // palette by the detected terminal mode, exactly what the other
+        // families' own rows do, so it doubles as Faerun's family row.
         let mut choices = vec![ThemeChoice {
             pref: None,
-            label: "Faerun (auto)".to_string(),
+            label: "Faerun".to_string(),
             variant: None,
             colors: builtin_colors(detected),
         }];
@@ -7991,6 +7999,10 @@ Now we're in Plan mode: plan first, no edits.
             ThemeColors::sha_chi_light()
         );
         assert_eq!(
+            set.resolve(Some("Faerun:dark"), ThemeVariant::Light).colors,
+            ThemeColors::faerun()
+        );
+        assert_eq!(
             set.resolve(Some("Faerun:light"), ThemeVariant::Dark).colors,
             ThemeColors::faerun_light()
         );
@@ -8016,6 +8028,7 @@ Now we're in Plan mode: plan first, no edits.
             prefs,
             vec![
                 None,
+                Some("Faerun:dark"),
                 Some("Faerun:light"),
                 Some("Tokyo Night"),
                 Some("Tokyo Night:night"),
@@ -8037,9 +8050,17 @@ Now we're in Plan mode: plan first, no edits.
             ]
         );
         assert_eq!(choices[0].colors, ThemeColors::faerun());
-        assert_eq!(choices[3].colors, ThemeColors::tokyo_night_night());
-        assert_eq!(choices[9].colors, ThemeColors::kanagawa_lotus());
-        assert_eq!(choices[18].colors, ThemeColors::sha_chi_light());
+        assert_eq!(choices[0].label, "Faerun");
+        assert_eq!(
+            choices[1].label, "Faerun",
+            "Faerun dark is Faerun's own row"
+        );
+        assert_eq!(choices[1].variant.as_deref(), Some("dark"));
+        assert_eq!(choices[1].colors, ThemeColors::faerun());
+        assert_eq!(choices[2].colors, ThemeColors::faerun_light());
+        assert_eq!(choices[4].colors, ThemeColors::tokyo_night_night());
+        assert_eq!(choices[10].colors, ThemeColors::kanagawa_lotus());
+        assert_eq!(choices[19].colors, ThemeColors::sha_chi_light());
     }
 
     #[test]
@@ -8443,8 +8464,10 @@ Now we're in Plan mode: plan first, no edits.
         assert_eq!(builtins[0].0, "Faerun");
         assert_eq!(builtins[0].1.variant, None);
         assert_eq!(builtins[0].1.mode, ThemeVariant::Dark);
-        assert_eq!(builtins[1].1.variant.as_deref(), Some("light"));
-        assert_eq!(builtins[1].1.mode, ThemeVariant::Light);
+        assert_eq!(builtins[1].1.variant.as_deref(), Some("dark"));
+        assert_eq!(builtins[1].1.mode, ThemeVariant::Dark);
+        assert_eq!(builtins[2].1.variant.as_deref(), Some("light"));
+        assert_eq!(builtins[2].1.mode, ThemeVariant::Light);
     }
 
     #[test]

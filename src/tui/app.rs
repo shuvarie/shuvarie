@@ -6290,7 +6290,9 @@ mod tests {
 
         // Walking previews the highlighted palette live — both the global
         // palette and the sidebar's cached lines (which only rebuild on
-        // messages) flip.
+        // messages) flip. Two rows down skips the default row and Faerun's own
+        // dark row — the same Faerun-dark palette — and lands on the light one.
+        app.update(AppMessage::Theme(ThemePickerMessage::Next));
         app.update(AppMessage::Theme(ThemePickerMessage::Next));
         assert_ne!(app.theme_backup, Some(theme::current()), "preview repaints");
         assert_ne!(fg_bgs(&app), before, "the sidebar repaints during preview");
@@ -6311,6 +6313,7 @@ mod tests {
         app.welcome.close();
         app.run_command(CommandAction::OpenThemePicker, None);
         assert!(app.theme_picker.open);
+        app.update(AppMessage::Theme(ThemePickerMessage::Next));
         app.update(AppMessage::Theme(ThemePickerMessage::Next));
         let previewed = theme::current();
         app.update(AppMessage::Theme(ThemePickerMessage::Select));
