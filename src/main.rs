@@ -36,6 +36,9 @@ async fn main() -> color_eyre::Result<()> {
             return cli::export_session(&dest, args.session, args.config.as_ref()).await;
         }
         Some(cli::CliSubcommand::Update) => return update::run().await,
+        Some(cli::CliSubcommand::Mcp(mcp)) => {
+            return cli::run_mcp(mcp, args.config.as_ref());
+        }
         None => None,
     };
 

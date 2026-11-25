@@ -9,6 +9,11 @@ use shuvarie_core::{Category, PermissionAnswer, TrustGrants};
 use std::path::PathBuf;
 use uuid::Uuid;
 
+mod mcp;
+
+pub use self::mcp::run as run_mcp;
+pub use self::mcp::*;
+
 const STYLES: Styles = Styles::styled()
     .header(AnsiColor::BrightGreen.on_default().bold())
     .usage(Style::new().bold())
@@ -53,6 +58,8 @@ pub enum CliSubcommand {
     Update,
     /// Run a prompt without launching the TUI
     Run(RunArgs),
+    /// Manage the MCP servers a config file declares
+    Mcp(McpArgs),
 }
 
 /// Arguments for the headless `run` subcommand.

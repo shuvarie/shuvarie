@@ -1148,10 +1148,102 @@ pub struct McpConfig {
     pub http: BTreeMap<String, McpHttpConfig>,
 }
 
+/// Which transport reaches a configured MCP server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpTransport {
+    /// Spawned as a child process (`stdio name="…"`).
+    Stdio,
+    /// Reached over streamable HTTP (`http name="…"`).
+    Http,
+}
+
+impl McpTransport {
+    /// The name this transport is written under in the config file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stdio => "stdio",
+            Self::Http => "http",
+        }
+    }
+}
+
 impl McpConfig {
     pub fn is_empty(&self) -> bool {
         self.stdio.is_empty() && self.http.is_empty()
     }
+
+    /// How many servers are configured, across both transports.
+    pub fn len(&self) -> usize {
+        self.stdio.len() + self.http.len()
+    }
+
+    /// Whether a server called `name` is configured on either transport.
+    pub fn contains(&self, name: &str) -> bool {
+        self.transport_of(name).is_some()
+    }
+
+    /// The transport a server called `name` uses, if one is configured.
+    pub fn transport_of(&self, name: &str) -> Option<McpTransport> {
+        if self.stdio.contains_key(name) {
+            Some(McpTransport::Stdio)
+        } else if self.http.contains_key(name) {
+            Some(McpTransport::Http)
+        } else {
+            None
+        }
+    }
+
+    /// Adds (or replaces) a `stdio` server, returning the entry it replaced.
+    /// Replacing an `http` server takes [`Self::remove`] first: the two maps
+    /// share one name space, so a name may only exist once.
+    pub fn insert_stdio(
+        &mut self,
+        name: impl Into<String>,
+        server: McpStdioConfig,
+    ) -> Option<McpStdioConfig> {
+        self.stdio.insert(name.into(), server)
+    }
+
+    /// Removes the server called `name` from either transport, reporting which
+    /// one it came from (`None` when no such server is configured).
+    pub fn remove(&mut self, name: &str) -> Option<McpTransport> {
+        if self.stdio.remove(name).is_some() {
+            Some(McpTransport::Stdio)
+        } else if self.http.remove(name).is_some() {
+            Some(McpTransport::Http)
+        } else {
+            None
+        }
+    }
+
+    /// Every configured server as `(name, transport)`, sorted by name.
+    pub fn servers(&self) -> Vec<(&str, McpTransport)> {
+        let mut servers: Vec<(&str, McpTransport)> = self
+            .stdio
+            .keys()
+            .map(|name| (name.as_str(), McpTransport::Stdio))
+            .chain(
+                self.http
+                    .keys()
+                    .map(|name| (name.as_str(), McpTransport::Http)),
+            )
+            .collect();
+        servers.sort_by_key(|(name, _)| *name);
+        servers
+    }
+}
+
+/// Whether `name` is a valid MCP server name (`[A-Za-z0-9_-]+`). The generated
+/// tool names are `mcp__<server>__<tool>`, so the charset stays identifier-safe
+/// for every provider.
+pub fn valid_mcp_server_name(name: &str) -> bool {
+    config_kdl::valid_name(name)
+}
+
+/// Whether `name` is a valid environment variable name
+/// (`[A-Za-z_][A-Za-z0-9_]*`), as `envs { env "NAME" "…" }` requires.
+pub fn valid_env_var_name(name: &str) -> bool {
+    config_kdl::valid_env_name(name)
 }
 
 /// An MCP server spawned as a child process (the `stdio` transport).
@@ -5900,6 +5992,91 @@ mod tests {
         let text = config_kdl::to_kdl(&parsed).unwrap();
         let reparsed = config_kdl::from_kdl(&text).unwrap();
         assert_eq!(parsed, reparsed);
+    }
+
+    /// A minimal `stdio` server entry for the mutation tests below.
+    fn stdio_server(command: &str) -> McpStdioConfig {
+        McpStdioConfig {
+            command: command.to_string(),
+            args: Vec::new(),
+            envs: EnvsConfig::default(),
+        }
+    }
+
+    /// A minimal `http` server entry for the mutation tests below.
+    fn http_server(url: &str) -> McpHttpConfig {
+        McpHttpConfig {
+            url: url.to_string(),
+            headers: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn mcp_servers_lists_both_transports_by_name() {
+        let mut mcp = McpConfig::default();
+        assert!(mcp.is_empty());
+        assert_eq!(mcp.len(), 0);
+        assert_eq!(mcp.servers(), Vec::new());
+
+        mcp.insert_stdio("zulu", stdio_server("zulu-mcp"));
+        mcp.http
+            .insert("alpha".to_string(), http_server("https://example.test/mcp"));
+
+        assert_eq!(mcp.len(), 2);
+        assert!(!mcp.is_empty());
+        assert_eq!(
+            mcp.servers(),
+            vec![("alpha", McpTransport::Http), ("zulu", McpTransport::Stdio),]
+        );
+        assert_eq!(mcp.transport_of("alpha"), Some(McpTransport::Http));
+        assert_eq!(mcp.transport_of("zulu"), Some(McpTransport::Stdio));
+        assert_eq!(mcp.transport_of("nope"), None);
+        assert!(mcp.contains("alpha"));
+        assert!(!mcp.contains("nope"));
+        assert_eq!(McpTransport::Http.as_str(), "http");
+        assert_eq!(McpTransport::Stdio.as_str(), "stdio");
+    }
+
+    #[test]
+    fn mcp_insert_stdio_replaces_the_same_name() {
+        let mut mcp = McpConfig::default();
+        assert_eq!(mcp.insert_stdio("srv", stdio_server("one")), None);
+        let replaced = mcp.insert_stdio("srv", stdio_server("two"));
+        assert_eq!(replaced.map(|server| server.command), Some("one".into()));
+        assert_eq!(mcp.stdio["srv"].command, "two");
+        assert_eq!(mcp.len(), 1);
+    }
+
+    #[test]
+    fn mcp_remove_reports_the_transport_and_clears_the_name() {
+        let mut mcp = McpConfig::default();
+        mcp.stdio
+            .insert("child".to_string(), stdio_server("child-mcp"));
+        mcp.http.insert(
+            "remote".to_string(),
+            http_server("https://example.test/mcp"),
+        );
+
+        assert_eq!(mcp.remove("child"), Some(McpTransport::Stdio));
+        assert_eq!(mcp.remove("remote"), Some(McpTransport::Http));
+        assert_eq!(mcp.remove("remote"), None);
+        assert!(mcp.is_empty());
+    }
+
+    #[test]
+    fn mcp_server_and_env_names_are_validated() {
+        for name in ["github", "server_1", "a-b", "MCP"] {
+            assert!(valid_mcp_server_name(name), "{name} should be valid");
+        }
+        for name in ["", "bad name", "slash/x", "dot.name"] {
+            assert!(!valid_mcp_server_name(name), "{name} should be invalid");
+        }
+        for name in ["GITHUB_TOKEN", "_x", "a1"] {
+            assert!(valid_env_var_name(name), "{name} should be valid");
+        }
+        for name in ["", "1X", "$VAR", "A-B"] {
+            assert!(!valid_env_var_name(name), "{name} should be invalid");
+        }
     }
 
     #[test]

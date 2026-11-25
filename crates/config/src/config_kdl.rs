@@ -1646,7 +1646,7 @@ fn name_prop(input: &str, node: &KdlNode, what: &str) -> Result<String> {
 
 /// The identifier charset shared by tool names, MCP server names, and param
 /// names: the composite `mcp__<server>__<tool>` form must stay provider-safe.
-fn valid_name(name: &str) -> bool {
+pub(crate) fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name
             .bytes()
@@ -1654,7 +1654,7 @@ fn valid_name(name: &str) -> bool {
 }
 
 /// A `NAME` usable as an environment variable: `[A-Za-z_][A-Za-z0-9_]*`.
-fn valid_env_name(name: &str) -> bool {
+pub(crate) fn valid_env_name(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
         Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
