@@ -42,7 +42,7 @@ futures-util.workspace = true
 gix = { version = "0.91", default-features = false, features = ["sha1", "status"] }
 # The fuzzy matcher behind every popup's query row (`tui/search.rs`).
 frizbee.workspace = true
-notify = "=9.0.0-rc.8"
+notify = "9.0"
 image.workspace = true
 # The global allocator (`main.rs`). `optional` here so that nothing but the
 # `mimalloc` feature pulls it into a non-musl build; musl gets it through the
