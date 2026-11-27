@@ -39,6 +39,9 @@ async fn main() -> color_eyre::Result<()> {
         Some(cli::CliSubcommand::Mcp(mcp)) => {
             return cli::run_mcp(mcp, args.config.as_ref());
         }
+        Some(cli::CliSubcommand::Provider(provider)) => {
+            return cli::run_provider(provider, args.config.as_ref());
+        }
         None => None,
     };
 

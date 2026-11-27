@@ -147,6 +147,10 @@ pub enum AddProviderOutcome {
     None,
     Cancel,
     FetchRegistries(Vec<String>),
+    /// The select stage's scan row: the app reads the environment for the
+    /// providers whose key variable is set and offers them as one batch. The
+    /// form stays up, so the offer can be declined back onto it.
+    ScanEnv,
     Submit {
         kind: String,
         catalog: Option<String>,
@@ -221,11 +225,20 @@ const TRANSPORTS: [(shuvarie_llm::ProviderKind, &str); 30] = [
 
 /// One select-stage row: a registry's group header (rendered live from the
 /// manager so badges track fetch state), one of its providers, or the pinned
-/// custom-provider row that always ends the list.
+/// action rows that always end the list (scan the environment, add a custom
+/// provider).
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SelectRow {
-    Header { registry: String },
-    Provider { registry: String, index: usize },
+    Header {
+        registry: String,
+    },
+    Provider {
+        registry: String,
+        index: usize,
+    },
+    /// Offer the providers whose API-key variable the environment holds: the
+    /// pact then names the variable instead of storing a secret.
+    Scan,
     Custom,
 }
 
@@ -354,6 +367,7 @@ impl AddProviderForm {
                 index,
             }));
         }
+        rows.push(SelectRow::Scan);
         rows.push(SelectRow::Custom);
         self.rows = rows;
         self.selected = self.first_selectable();
@@ -670,11 +684,17 @@ impl AddProviderForm {
                     self.stage = AddProviderStage::Details;
                     AddProviderOutcome::None
                 }
-                _ => {
+                AddProviderStage::Select => {
+                    // The scan row is an action, not an origin: it never opens the
+                    // details form.
+                    if matches!(self.rows.get(self.selected), Some(SelectRow::Scan)) {
+                        return AddProviderOutcome::ScanEnv;
+                    }
                     let origin = self.selected_provider().cloned();
                     self.open_details(origin.as_ref());
                     AddProviderOutcome::None
                 }
+                AddProviderStage::Details => AddProviderOutcome::None,
             },
             AddProviderMessage::OpenCustom => {
                 self.open_details(None);
@@ -1094,6 +1114,13 @@ impl AddProviderForm {
                     SelectRow::Custom => {
                         render_list_item("Add custom provider…".to_string(), is_selected)
                     }
+                    SelectRow::Scan => {
+                        let line = Line::from(vec![
+                            Span::raw("Scan environment for keys…").fg(theme::text()),
+                            Span::raw("  no secret is copied").fg(theme::text_muted()),
+                        ]);
+                        render_list_item_line(line, is_selected)
+                    }
                 };
                 items.push(item);
             }
@@ -1367,7 +1394,7 @@ mod tests {
 
     /// The grouped select-stage list flattened for assertions: group header
     /// rows as `HEADER:<registry>`, a provider row's provider name, and the
-    /// pinned custom row as `custom`.
+    /// pinned action rows as `scan` and `custom`.
     fn list_strings(form: &AddProviderForm) -> Vec<String> {
         form.rows
             .iter()
@@ -1384,6 +1411,7 @@ mod tests {
                         .name
                         .clone()
                 }
+                SelectRow::Scan => "scan".to_string(),
                 SelectRow::Custom => "custom".to_string(),
             })
             .collect()
@@ -1463,7 +1491,7 @@ mod tests {
         let form = form();
         assert_eq!(
             list_strings(&form),
-            vec!["HEADER:Selune", "OpenAI", "Ollama", "custom"]
+            vec!["HEADER:Selune", "OpenAI", "Ollama", "scan", "custom"]
         );
         assert_eq!(form.selected, 1, "selection starts past the header");
     }
@@ -1479,6 +1507,7 @@ mod tests {
                 "Ollama",
                 "HEADER:acme",
                 "Acme X",
+                "scan",
                 "custom"
             ]
         );
@@ -1555,14 +1584,20 @@ mod tests {
         form.update(AddProviderMessage::Search(SearchMessage::Input('p')));
         assert_eq!(
             list_strings(&form),
-            vec!["HEADER:Selune", "OpenAI", "custom"],
+            vec!["HEADER:Selune", "OpenAI", "scan", "custom"],
             "only OpenAI fuzzy-matches 'p'"
         );
         form.update(AddProviderMessage::Next);
         assert_eq!(
             form.selected,
+            form.rows.len() - 2,
+            "the scan row follows the last provider"
+        );
+        form.update(AddProviderMessage::Next);
+        assert_eq!(
+            form.selected,
             form.rows.len() - 1,
-            "custom row after a Next"
+            "the custom row ends the list, search or not"
         );
     }
 
@@ -1572,7 +1607,7 @@ mod tests {
         form.update(AddProviderMessage::Search(SearchMessage::Input('p')));
         assert_eq!(
             list_strings(&form),
-            vec!["HEADER:Selune", "OpenAI", "custom"],
+            vec!["HEADER:Selune", "OpenAI", "scan", "custom"],
             "the acme group matches nothing"
         );
 
@@ -1580,7 +1615,7 @@ mod tests {
         form.update(AddProviderMessage::Search(SearchMessage::Input('x')));
         assert_eq!(
             list_strings(&form),
-            vec!["HEADER:acme", "Acme X", "custom"],
+            vec!["HEADER:acme", "Acme X", "scan", "custom"],
             "only the acme group matches 'x'"
         );
     }
@@ -1590,7 +1625,7 @@ mod tests {
         let registries = RegistryManager::from_config(&shuvarie_core::RegistriesConfig::default())
             .with_state_providers(shuvarie_core::catalog::SELUNE_REGISTRY, vec![]);
         let form = AddProviderForm::with_registries(registries, &[], &[]);
-        assert_eq!(list_strings(&form), vec!["HEADER:Selune", "custom"]);
+        assert_eq!(list_strings(&form), vec!["HEADER:Selune", "scan", "custom"]);
         assert_eq!(form.selected, 1, "the custom row is selectable");
     }
 
@@ -1620,6 +1655,56 @@ mod tests {
         assert!(form.origin.is_none());
     }
 
+    /// The scan row sits above the custom row and asks the app to read the
+    /// environment instead of opening the details form.
+    #[test]
+    fn the_scan_row_asks_the_app_to_scan_the_environment() {
+        let mut form = form();
+        form.selected = form
+            .rows
+            .iter()
+            .position(|row| *row == SelectRow::Scan)
+            .expect("the scan row is pinned to every list");
+        assert_eq!(
+            form.update(AddProviderMessage::Select),
+            AddProviderOutcome::ScanEnv
+        );
+        assert_eq!(
+            form.stage,
+            AddProviderStage::Select,
+            "the scan leaves the list up until the app has something to offer"
+        );
+
+        // Filtering never hides the action rows, so the scan is reachable while
+        // searching too.
+        form.update(AddProviderMessage::Search(SearchMessage::Input('z')));
+        assert_eq!(list_strings(&form), vec!["scan", "custom"]);
+    }
+
+    #[test]
+    fn the_select_dialog_paints_the_action_rows() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let form = form();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| form.view(frame, frame.area(), false, false))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..buffer.area().height)
+            .map(|y| {
+                (0..buffer.area().width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("Scan environment for keys…"), "{text}");
+        assert!(text.contains("Add custom provider…"), "{text}");
+    }
+
     #[test]
     fn ctrl_i_opens_custom_directly() {
         let mut form = form();
@@ -1635,7 +1720,7 @@ mod tests {
     #[test]
     fn ctrl_o_is_hidden_when_nothing_can_go_online() {
         let form = AddProviderForm::with_registries(RegistryManager::new(Vec::new()), &[], &[]);
-        assert_eq!(form.rows.len(), 1, "just the custom row");
+        assert_eq!(form.rows.len(), 2, "just the two action rows");
         assert!(!form.registries.can_toggle());
         assert_eq!(
             form.map_event(&key(KeyCode::Char('o'), Modifiers::CONTROL)),
@@ -2092,7 +2177,7 @@ mod tests {
         );
         assert_eq!(
             list_strings(&form),
-            vec!["HEADER:Selune", "RemoteOnly", "custom"],
+            vec!["HEADER:Selune", "RemoteOnly", "scan", "custom"],
             "snapshot shows the remote registry"
         );
     }
@@ -2113,7 +2198,7 @@ mod tests {
         );
         assert_eq!(
             list_strings(&form),
-            vec!["HEADER:Selune", "OpenAI", "Ollama", "custom"],
+            vec!["HEADER:Selune", "OpenAI", "Ollama", "scan", "custom"],
             "offline snapshot untouched"
         );
     }
@@ -2134,7 +2219,7 @@ mod tests {
         );
         assert_eq!(
             list_strings(&form),
-            vec!["HEADER:Selune", "OpenAI", "Ollama", "custom"],
+            vec!["HEADER:Selune", "OpenAI", "Ollama", "scan", "custom"],
             "list keeps the offline snapshot"
         );
     }
