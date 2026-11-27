@@ -2081,6 +2081,11 @@ impl App {
                         ProviderScanEffect::Confirm { detected } => {
                             self.register_detected_providers(detected)
                         }
+                        // The provider dialog can open this offer, and it keeps
+                        // the page it was opened from when the offer is declined.
+                        ProviderScanEffect::Cancel if self.add_provider_form.is_some() => {
+                            self.overlay = Overlay::AddProvider;
+                        }
                         ProviderScanEffect::Cancel => self.close_overlay(),
                     }
                 }
@@ -2393,6 +2398,12 @@ impl App {
                                 self.ctx
                                     .send(shuvarie_core::Command::FetchRegistry { registry });
                             }
+                        }
+                        AddProviderOutcome::ScanEnv => {
+                            // The form stays up under the offer, so declining it
+                            // lands back on the list the scan was picked from.
+                            let detected = shuvarie_core::provider_env::scan(&self.ctx.connections);
+                            self.open_provider_scan(detected);
                         }
                         AddProviderOutcome::Submit {
                             kind,
@@ -3413,15 +3424,7 @@ impl App {
                 // until onboarding finishes.
                 if !self.welcome.open {
                     let detected = shuvarie_core::provider_env::scan(&self.ctx.connections);
-                    if detected.is_empty() {
-                        self.session.update(SessionMessage::ShowStatus {
-                            status: "every provider key in the environment is already registered"
-                                .into(),
-                        });
-                    } else {
-                        self.provider_scan.open(detected);
-                        self.overlay = Overlay::ProviderScan;
-                    }
+                    self.open_provider_scan(detected);
                 }
             }
             CommandAction::AddDecisionProvider => {
@@ -3648,7 +3651,34 @@ impl App {
         self.overlay = Overlay::ConfirmQuit;
     }
 
-    /// Registers the providers a `/scan-providers` scan found: one
+    /// Offers what an environment scan found: the confirmation dialog, or —
+    /// when nothing is left to register — the reason there is nothing to
+    /// confirm. Called by `/scan-providers` and by the provider dialog's scan
+    /// row, so both explain an empty scan the same way.
+    fn open_provider_scan(&mut self, detected: Vec<DetectedProvider>) {
+        if detected.is_empty() {
+            let message = "no unregistered provider API key is set in the environment".to_string();
+            match &mut self.add_provider_form {
+                // The dialog that asked is still up: its error row is where the
+                // answer belongs.
+                Some(form) => form.error = Some(message),
+                None => {
+                    self.session
+                        .update(SessionMessage::ShowStatus { status: message });
+                }
+            }
+            return;
+        }
+        // A scan that found something is the answer to whatever the form was
+        // last complaining about.
+        if let Some(form) = &mut self.add_provider_form {
+            form.error = None;
+        }
+        self.provider_scan.open(detected);
+        self.overlay = Overlay::ProviderScan;
+    }
+
+    /// Registers the providers a scan found: one
     /// [`shuvarie_core::Command::AddProvider`] per detection, each of which
     /// persists `connections.kdl`, plus the active-provider hand-off the
     /// add-provider dialog makes. The scan already skipped every provider a
@@ -3670,20 +3700,38 @@ impl App {
         for (id, config) in rows {
             self.send_all(shuvarie_core::Command::AddProvider { id, config });
         }
-        if let Some(provider_name) = activate {
-            self.send_all(shuvarie_core::Command::SetActiveProvider {
-                name: provider_name.clone(),
-            });
-            self.ctx
-                .send(shuvarie_core::Command::ListModels { provider_name });
-        }
         self.session.update(SessionMessage::ShowStatus {
             status: format!(
                 "registered {count} provider{} from the environment",
                 if count == 1 { "" } else { "s" }
             ),
         });
-        self.close_overlay();
+        let Some(provider_name) = activate else {
+            // A provider was already active, so the scan answered the whole
+            // question: nothing needs a model chosen for it.
+            self.close_overlay();
+            return;
+        };
+        // A provider with no model cannot send, so the turn the dialog would
+        // have taken next is taken here too: `ModelsLoaded` pages on to the
+        // picker (onboarding included), or to the closing page when the
+        // provider lists nothing.
+        self.send_all(shuvarie_core::Command::SetActiveProvider {
+            name: provider_name.clone(),
+        });
+        self.pending_model_pick = Some(provider_name.clone());
+        self.ctx
+            .send(shuvarie_core::Command::ListModels { provider_name });
+        // The page underneath stays as it is: the picker is about to open over
+        // it, exactly as an add-provider submit does. Only the scan dialog goes.
+        self.provider_scan.close();
+        self.overlay = if self.add_provider_form.is_some() {
+            Overlay::AddProvider
+        } else if self.welcome.open {
+            welcome_overlay(self.welcome.stage)
+        } else {
+            Overlay::None
+        };
     }
 
     /// Route a session effect into the core (`ctx.send`) or the app
@@ -3903,12 +3951,14 @@ impl App {
             match self.welcome.stage {
                 WelcomeStage::AddProvider => {
                     if let Some(form) = &self.add_provider_form {
-                        form.view(frame, area, stacked, true);
+                        // The scan offer can sit over the form.
+                        form.view(frame, area, stacked || self.provider_scan.open, true);
                     }
                 }
                 WelcomeStage::ModelPicker => self.model_picker.view(frame, area, stacked, true),
                 WelcomeStage::Intro | WelcomeStage::AllSet => {}
             }
+            self.provider_scan.view(frame, area, stacked);
             self.view_popups(frame, area, stacked);
             return;
         }
@@ -3948,7 +3998,8 @@ impl App {
         };
         self.session.view(frame, page);
         if let Some(form) = &self.add_provider_form {
-            form.view(frame, area, stacked, false);
+            // The scan offer can sit over the form.
+            form.view(frame, area, stacked || self.provider_scan.open, false);
         }
         if let Some(form) = &self.add_decision_provider_form {
             form.view(frame, area, stacked);
@@ -4532,6 +4583,92 @@ mod tests {
         assert!(app.ctx.connections.providers.is_empty());
         assert!(!app.provider_scan.open);
         assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    /// The provider dialog's scan row hands back every detection as an offer
+    /// over the form, which stays up to be returned to.
+    #[tokio::test]
+    async fn the_provider_dialog_offers_a_scan_over_its_form() {
+        let (mut app, mut rx) = app_with_rx(Connections::default());
+        active_session(&mut app);
+        app.open_add_provider();
+        let _ = take_commands(&mut rx);
+
+        app.open_provider_scan(vec![detected("Acme", "ACME_API_KEY")]);
+
+        assert!(app.provider_scan.open);
+        assert!(matches!(app.overlay, Overlay::ProviderScan));
+        assert!(
+            app.add_provider_form.is_some(),
+            "the form stays up under the offer"
+        );
+
+        // Declining puts the list back rather than closing it.
+        app.update(AppMessage::ProviderScan(ProviderScanMessage::Cancel));
+        assert!(!app.provider_scan.open);
+        assert!(matches!(app.overlay, Overlay::AddProvider));
+        assert!(app.add_provider_form.is_some());
+        assert!(app.ctx.connections.providers.is_empty());
+    }
+
+    /// An empty scan says so on the form that asked, instead of opening an
+    /// offer with nothing in it.
+    #[tokio::test]
+    async fn an_empty_scan_from_the_dialog_reports_on_the_form() {
+        let (mut app, mut rx) = app_with_rx(Connections::default());
+        active_session(&mut app);
+        app.open_add_provider();
+        let _ = take_commands(&mut rx);
+
+        app.open_provider_scan(Vec::new());
+
+        assert!(!app.provider_scan.open);
+        assert!(matches!(app.overlay, Overlay::AddProvider));
+        let error = app
+            .add_provider_form
+            .as_ref()
+            .and_then(|form| form.error.clone())
+            .expect("the form explains why there was nothing to add");
+        assert!(error.contains("no unregistered provider"), "{error}");
+    }
+
+    /// Confirming a scan opened from the dialog registers the providers and
+    /// pages on to the model picker, exactly as submitting the form does: a
+    /// provider with no model cannot send.
+    #[tokio::test]
+    async fn confirming_a_scan_from_the_dialog_pages_on_to_the_model_picker() {
+        let (mut app, mut rx) = app_with_rx(Connections::default());
+        active_session(&mut app);
+        app.open_add_provider();
+        let _ = take_commands(&mut rx);
+        app.open_provider_scan(vec![detected("Acme", "ACME_API_KEY")]);
+
+        app.update(AppMessage::ProviderScan(ProviderScanMessage::Confirm));
+
+        let active = app
+            .ctx
+            .connections
+            .active
+            .as_ref()
+            .map(|active| active.provider.clone())
+            .expect("the scan activates the provider it registered");
+        assert_eq!(
+            app.pending_model_pick.as_deref(),
+            Some(active.as_str()),
+            "its model list is what the picker waits for"
+        );
+        assert!(
+            matches!(app.overlay, Overlay::AddProvider),
+            "the page stays up while the models load"
+        );
+
+        // The models arriving pages on to the picker over that page.
+        app.update(AppMessage::ModelsLoaded {
+            provider_name: active,
+            models: vec![named_live_model("acme-1", "Acme One")],
+        });
+        assert!(app.model_picker.open);
+        assert!(matches!(app.overlay, Overlay::ModelPicker));
     }
 
     #[test]

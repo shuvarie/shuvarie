@@ -82,7 +82,7 @@ providers {
 
 A pact can keep its secret out of the scroll instead: write `api-key-env "ANTHROPIC_API_KEY"` where `api-key` would go, and the key is read from the environment when the knight rides out. The provider dialog offers the same bargain — press `Alt+E` over the API key row and it fills in the variable Selune names for that provider. That option appears only while the variable actually holds a value; an unset one is never offered.
 
-The whole hall can be sworn at once: `/scan-providers` reads every variable the catalog names, offers the providers whose keys already wait there, and writes only what you confirm. `shuvarie provider scan` keeps the same watch from the shell, listing what it found and asking before it writes (`-y`/`--yes` adds without the asking); nothing is ever copied out of your environment — the pact holds the variable's name, not its secret.
+The whole hall can be sworn at once: `/scan-providers` reads every variable the catalog names, offers the providers whose keys already wait there, and writes only what you confirm — and the provider dialog's own **Scan environment for keys…** row asks the same question, which is the quickest way through the Welcome overlay when your keys are already exported. `shuvarie provider scan` keeps the same watch from the shell, listing what it found and asking before it writes (`-y`/`--yes` adds without the asking); nothing is ever copied out of your environment — the pact holds the variable's name, not its secret.
 
 > Then launch `shuvarie` and choose your steed — provider and model — from the selectors. A hall without pacts greets you with the Welcome overlay: the knight waits at the gate.
 

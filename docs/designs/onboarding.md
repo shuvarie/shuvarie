@@ -71,6 +71,13 @@ a configured provider.
   form's first page walks back to the title. Cancelling the quit prompt calls `close_overlay`,
   which re-points the overlay at the stage still showing, so it lands back on the page it was
   asked from.
+- `src/tui/provider_scan.rs`: the form's `Scan` row (pinned above the custom row, and never
+  filtered out) is the onboarding shortcut for a machine whose keys are already exported: the app
+  runs `shuvarie_core::provider_env::scan`, offers what it found in this dialog over the form, and
+  registers the batch on confirm — the form stays up underneath, so declining lands back on the
+  list. Registration takes the same turn a form submit does (first detection active,
+  `ListModels`, then the picker), which is also how `AllSet` is reached from a scan. `/scan-providers`
+  and `shuvarie provider scan` share the scan, the plan, and the write.
 - `src/tui/welcome.rs`: the two interstitial pages. `WelcomeStage` selects the page and `Welcome::show`
   is how it changes — it restarts the title's entrance clock, so stepping back to the title from the
   form sweeps it in again rather than showing a scene already drawn. That clock is the one piece of
