@@ -67,6 +67,9 @@ mod paste_path;
 mod peak_table;
 mod permission;
 mod popup;
+/// The `/scan-providers` confirmation dialog: the providers whose key
+/// variables the environment holds, offered as one batch to register.
+mod provider_scan;
 mod question;
 mod registry;
 mod scene;

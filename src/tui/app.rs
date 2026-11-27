@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use ratatui::prelude::*;
 use shuvarie_core::{
-    Connections, DEFAULT_NOTIFY_ERROR_SOUNDS, DEFAULT_NOTIFY_SOUNDS, Event as CoreEvent, Model,
-    NotifyPrefs, RegistriesConfig, UiPrefs,
+    Connections, DEFAULT_NOTIFY_ERROR_SOUNDS, DEFAULT_NOTIFY_SOUNDS, DetectedProvider,
+    Event as CoreEvent, Model, NotifyPrefs, RegistriesConfig, UiPrefs,
 };
 use termina::event::{KeyCode, KeyEventKind, Modifiers, MouseButton, MouseEventKind};
 use termina::{Event as TermEvent, PlatformTerminal};
@@ -39,6 +39,7 @@ use super::manage_attachments::{
 use super::model_picker::{ModelPicker, ModelPickerEffect, ModelPickerMessage};
 use super::notify;
 use super::peak_table::{PeakTableEffect, PeakTableMessage, PeakTablePopup};
+use super::provider_scan::{ProviderScanEffect, ProviderScanMessage, ProviderScanPrompt};
 use super::scene;
 use super::screensaver::{Screensaver, ScreensaverEffect, ScreensaverMessage};
 use super::search::SearchMessage;
@@ -82,6 +83,9 @@ pub enum Overlay {
     ModelPicker,
     CommandMenu,
     ConfirmQuit,
+    /// The `/scan-providers` confirmation dialog: the providers whose key
+    /// variables the environment holds, offered as one batch to register.
+    ProviderScan,
     SessionPicker,
     HistorySearch,
     TitleEdit,
@@ -141,6 +145,9 @@ pub enum AppMessage {
     CommandMenu(CommandMenuMessage),
     Welcome(WelcomeMessage),
     SessionPicker(SessionPickerMessage),
+    /// The `/scan-providers` dialog: register the detected providers, or walk
+    /// away from them.
+    ProviderScan(ProviderScanMessage),
     /// A tab's core was spawned (reply to [`AppEffect::SpawnTab`]): open the tab
     /// and show it. The sender is the new core's, cloned from its handle.
     TabOpened {
@@ -352,6 +359,7 @@ pub struct App {
     pub command_menu: CommandMenu,
     pub welcome: Welcome,
     pub confirm_quit: ConfirmQuit,
+    pub provider_scan: ProviderScanPrompt,
     pub add_provider_form: Option<AddProviderForm>,
     /// The decision-provider dialog. Its fields are plain strings, so the form
     /// exists only while the overlay is open.
@@ -730,6 +738,7 @@ impl App {
             command_menu: CommandMenu::new(),
             welcome,
             confirm_quit: ConfirmQuit::new(),
+            provider_scan: ProviderScanPrompt::new(),
             add_provider_form: None,
             add_decision_provider_form: None,
             model_picker: ModelPicker::new(),
@@ -1227,6 +1236,7 @@ impl App {
             | Overlay::AddDecisionProvider
             | Overlay::AttachDir
             | Overlay::ConfirmQuit
+            | Overlay::ProviderScan
             | Overlay::TitleEdit
             | Overlay::Tree
             | Overlay::Scene
@@ -1398,6 +1408,12 @@ impl App {
                                 ConfirmQuitMessage::Confirm => AppMessage::ConfirmQuit,
                                 ConfirmQuitMessage::Cancel => AppMessage::CancelQuit,
                             });
+                        }
+                        Overlay::ProviderScan => {
+                            return self
+                                .provider_scan
+                                .map_event(&key)
+                                .map(AppMessage::ProviderScan);
                         }
                         Overlay::SessionPicker => {
                             return self
@@ -1959,6 +1975,7 @@ impl App {
             Overlay::Welcome
             | Overlay::CommandMenu
             | Overlay::ConfirmQuit
+            | Overlay::ProviderScan
             | Overlay::SessionPicker
             | Overlay::Tree
             | Overlay::Scene
@@ -2057,6 +2074,16 @@ impl App {
                 } else {
                     Overlay::None
                 };
+            }
+            AppMessage::ProviderScan(m) => {
+                if let Some(effect) = self.provider_scan.update(m) {
+                    match effect {
+                        ProviderScanEffect::Confirm { detected } => {
+                            self.register_detected_providers(detected)
+                        }
+                        ProviderScanEffect::Cancel => self.close_overlay(),
+                    }
+                }
             }
             AppMessage::Session(m) => {
                 // Detected before the session applies it: the notice only reads
@@ -3379,6 +3406,24 @@ impl App {
             CommandAction::AddProvider => {
                 self.open_add_provider();
             }
+            CommandAction::ScanProviders => {
+                // Onboarding owns the whole screen and paints nothing beside its
+                // own page, so the dialog would never reach the terminal. The
+                // command is unreachable there anyway — the composer is not live
+                // until onboarding finishes.
+                if !self.welcome.open {
+                    let detected = shuvarie_core::provider_env::scan(&self.ctx.connections);
+                    if detected.is_empty() {
+                        self.session.update(SessionMessage::ShowStatus {
+                            status: "every provider key in the environment is already registered"
+                                .into(),
+                        });
+                    } else {
+                        self.provider_scan.open(detected);
+                        self.overlay = Overlay::ProviderScan;
+                    }
+                }
+            }
             CommandAction::AddDecisionProvider => {
                 self.open_add_decision_provider();
             }
@@ -3603,6 +3648,44 @@ impl App {
         self.overlay = Overlay::ConfirmQuit;
     }
 
+    /// Registers the providers a `/scan-providers` scan found: one
+    /// [`shuvarie_core::Command::AddProvider`] per detection, each of which
+    /// persists `connections.kdl`, plus the active-provider hand-off the
+    /// add-provider dialog makes. The scan already skipped every provider a
+    /// connection covers, so nothing the user configured is overwritten.
+    fn register_detected_providers(&mut self, detected: Vec<DetectedProvider>) {
+        let count = detected.len();
+        let rows = shuvarie_core::provider_env::plan(&detected);
+        // Decided before the local mirror below applies the rows: the first
+        // detection becomes active only where nothing was active yet, and its
+        // model list is what makes that provider usable.
+        let activate = match (self.ctx.connections.active.is_none(), rows.first()) {
+            (true, Some((id, _))) => Some(id.clone()),
+            _ => None,
+        };
+        // The app's copy of the connections mirrors what the cores are about to
+        // write, so the status row and the next scan agree before the file
+        // lands (`ConfigSaved` reloads it either way).
+        shuvarie_core::provider_env::apply(&mut self.ctx.connections, &rows);
+        for (id, config) in rows {
+            self.send_all(shuvarie_core::Command::AddProvider { id, config });
+        }
+        if let Some(provider_name) = activate {
+            self.send_all(shuvarie_core::Command::SetActiveProvider {
+                name: provider_name.clone(),
+            });
+            self.ctx
+                .send(shuvarie_core::Command::ListModels { provider_name });
+        }
+        self.session.update(SessionMessage::ShowStatus {
+            status: format!(
+                "registered {count} provider{} from the environment",
+                if count == 1 { "" } else { "s" }
+            ),
+        });
+        self.close_overlay();
+    }
+
     /// Route a session effect into the core (`ctx.send`) or the app
     /// (an `AppEffect`). Extracted from the `AppMessage::Session` arm so the
     /// deferred compose-request effects (attachment probe, attachment finder
@@ -3702,6 +3785,7 @@ impl App {
         self.tree_popup.close();
         self.history_search.close();
         self.confirm_quit.close();
+        self.provider_scan.close();
         self.title_popup.close();
         self.assisted_by.close();
         self.variant_picker.close();
@@ -3891,6 +3975,7 @@ impl App {
         self.command_menu.view(frame, area, stacked);
         self.title_popup.view(frame, area, stacked);
         self.assisted_by.view(frame, area, stacked);
+        self.provider_scan.view(frame, area, stacked);
         self.todo_popup.view(frame, area, stacked);
         self.peak_table.view(frame, area, stacked);
         self.view_popups(frame, area, stacked);
@@ -4334,6 +4419,119 @@ mod tests {
         let mut connections = connected();
         connections.active.as_mut().unwrap().model = None;
         assert_eq!(catalog_context_length(&connections), None);
+    }
+
+    fn detected(name: &str, env: &str) -> DetectedProvider {
+        DetectedProvider {
+            catalog_id: name.to_lowercase(),
+            name: name.to_string(),
+            env: env.to_string(),
+            kind: "openai-compat".to_string(),
+            base_url: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn confirming_a_provider_scan_registers_every_detection() {
+        let (mut app, mut rx) = app_with_rx(Connections::default());
+        active_session(&mut app);
+        app.provider_scan.open(vec![
+            detected("Acme", "ACME_API_KEY"),
+            detected("Beta", "BETA_API_KEY"),
+        ]);
+        app.overlay = Overlay::ProviderScan;
+
+        app.update(AppMessage::ProviderScan(ProviderScanMessage::Confirm));
+
+        let commands = take_commands(&mut rx);
+        let added: Vec<_> = commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                shuvarie_core::Command::AddProvider { config, .. } => Some(config.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            added.len(),
+            2,
+            "one AddProvider per detection: {commands:?}"
+        );
+        assert_eq!(
+            added[0].api_key_env.as_deref(),
+            Some("ACME_API_KEY"),
+            "the connection points at the variable instead of copying the key"
+        );
+        assert!(added[0].api_key.is_none());
+        assert_eq!(added[0].catalog.as_deref(), Some("acme"));
+
+        // Nothing was active, so the first detection takes over and its models
+        // are asked for: the user is left ready to send.
+        let active = app
+            .ctx
+            .connections
+            .active
+            .as_ref()
+            .map(|active| active.provider.clone())
+            .expect("a scan with nothing active picks one");
+        assert!(
+            commands.iter().any(|cmd| matches!(
+                cmd,
+                shuvarie_core::Command::SetActiveProvider { name } if name == &active
+            )),
+            "the first detection becomes active: {commands:?}"
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|cmd| matches!(cmd, shuvarie_core::Command::ListModels { .. })),
+            "the active provider's models are listed: {commands:?}"
+        );
+        assert_eq!(app.ctx.connections.providers.len(), 2);
+        assert!(!app.provider_scan.open, "confirming closes the dialog");
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[tokio::test]
+    async fn a_provider_scan_keeps_the_active_provider() {
+        let (mut app, mut rx) = app_with_rx(connected());
+        active_session(&mut app);
+        app.provider_scan
+            .open(vec![detected("Acme", "ACME_API_KEY")]);
+        app.overlay = Overlay::ProviderScan;
+
+        app.update(AppMessage::ProviderScan(ProviderScanMessage::Confirm));
+
+        let commands = take_commands(&mut rx);
+        assert!(
+            commands
+                .iter()
+                .all(|cmd| !matches!(cmd, shuvarie_core::Command::SetActiveProvider { .. })),
+            "a configured machine keeps its provider: {commands:?}"
+        );
+        assert_eq!(
+            app.ctx
+                .connections
+                .active
+                .as_ref()
+                .map(|a| a.provider.as_str()),
+            Some("anthropic")
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_provider_scan_adds_nothing() {
+        let (mut app, mut rx) = app_with_rx(Connections::default());
+        active_session(&mut app);
+        app.provider_scan
+            .open(vec![detected("Acme", "ACME_API_KEY")]);
+        app.overlay = Overlay::ProviderScan;
+
+        app.update(AppMessage::ProviderScan(ProviderScanMessage::Cancel));
+
+        assert!(take_commands(&mut rx).is_empty());
+        assert!(app.ctx.connections.providers.is_empty());
+        assert!(!app.provider_scan.open);
+        assert!(matches!(app.overlay, Overlay::None));
     }
 
     #[test]

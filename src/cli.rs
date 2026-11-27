@@ -10,9 +10,12 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 mod mcp;
+mod provider;
 
 pub use self::mcp::run as run_mcp;
 pub use self::mcp::*;
+pub use self::provider::ProviderArgs;
+pub use self::provider::run as run_provider;
 
 const STYLES: Styles = Styles::styled()
     .header(AnsiColor::BrightGreen.on_default().bold())
@@ -60,6 +63,8 @@ pub enum CliSubcommand {
     Run(RunArgs),
     /// Manage the MCP servers a config file declares
     Mcp(McpArgs),
+    /// Register the LLM providers this environment holds API keys for
+    Provider(ProviderArgs),
 }
 
 /// Arguments for the headless `run` subcommand.

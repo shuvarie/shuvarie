@@ -4,6 +4,9 @@ pub const TRIGGER_CHARS: [char; 2] = ['/', ':'];
 pub enum CommandAction {
     OpenModelSelect,
     AddProvider,
+    /// Find the providers whose API-key variable is exported and offer to
+    /// register them (`/scan-providers`).
+    ScanProviders,
     AddDecisionProvider,
     /// Attach files to the next prompt through a fuzzy finder over the current
     /// directory: `/attach [path]` searches `path` instead.
@@ -45,9 +48,10 @@ pub enum CommandAction {
 }
 
 impl CommandAction {
-    pub const ALL: [CommandAction; 32] = [
+    pub const ALL: [CommandAction; 33] = [
         CommandAction::OpenModelSelect,
         CommandAction::AddProvider,
+        CommandAction::ScanProviders,
         CommandAction::AddDecisionProvider,
         CommandAction::Attach,
         CommandAction::ManageAttachments,
@@ -84,6 +88,7 @@ impl CommandAction {
         match self {
             CommandAction::OpenModelSelect => "model",
             CommandAction::AddProvider => "provider",
+            CommandAction::ScanProviders => "scan-providers",
             CommandAction::AddDecisionProvider => "decision-provider",
             CommandAction::Attach => "attach",
             CommandAction::ManageAttachments => "manage-attachments",
@@ -211,6 +216,11 @@ pub fn default_commands() -> Vec<CommandEntry> {
             "Add provider",
             "Add a new LLM provider",
             CommandAction::AddProvider,
+        ),
+        CommandEntry::builtin(
+            "Scan providers",
+            "Register every provider whose API-key variable is set",
+            CommandAction::ScanProviders,
         ),
         CommandEntry::builtin(
             "Decision provider",
@@ -659,6 +669,15 @@ mod tests {
             })
         );
         assert_eq!(parse_command("/clearerr now"), None);
+        // The scan takes no arguments: it works on the process environment.
+        assert_eq!(
+            parse_command("/scan-providers"),
+            Some(ParsedCommand {
+                action: CommandAction::ScanProviders,
+                args: None
+            })
+        );
+        assert_eq!(parse_command("/scan-providers now"), None);
     }
 
     /// Every built-in is reachable from the Ctrl+M menu and the inline slash

@@ -16,6 +16,7 @@ pub mod mcp_manager;
 pub(crate) mod office_convert;
 pub mod peaks;
 pub mod permissions;
+pub mod provider_env;
 pub mod question;
 pub mod scenes;
 pub mod session;
@@ -37,6 +38,7 @@ pub use permissions::{
     Access, AskScope, Decision, PathKind, PermissionAnswer, PermissionGate, PermissionRequest,
     Permissions,
 };
+pub use provider_env::DetectedProvider;
 pub use question::{QuestionPrompt, QuestionRequest};
 pub use session::{MessageMeta, ModelUsage, Session};
 pub use shuvarie_config::*;
