@@ -125,7 +125,7 @@ pub enum Command {
     /// [`crate::Event::AttachmentCandidates`], matched by `token`). `dir` is
     /// the directory to search — the command's argument, resolved like an
     /// attachment path (workspace-relative, absolute, or `~`-prefixed);
-    /// `None`/empty searches the workspace root. The core keeps one FFF index
+    /// `None`/empty searches the workspace root. The core keeps one file list
     /// per searched directory, so only the first request for a directory (or
     /// one pointing elsewhere) pays for the tree walk; the rest re-rank it.
     /// The walk runs on the blocking pool. Read-only.

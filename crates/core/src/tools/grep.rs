@@ -1,18 +1,136 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use fff_search::{
-    Constraint, ContentCacheBudget, FFFMode, FFFQuery, FuzzyQuery, GitRecencyConfig,
-    file_picker::{FilePicker, FilePickerOptions},
-    grep::{Casing, GrepMode, GrepSearchOptions},
-};
 use serde_json::{Value, json};
 use shuvarie_llm::{Tool, ToolContext, ToolExecutionError, ToolOutput};
 
 use crate::permissions::{Access, PathKind};
+use crate::walk;
 
-use super::{arg_value, display_path, is_hidden_path};
+use super::{arg_value, display_path};
 
 const DEFAULT_MAX_RESULTS: usize = 200;
+
+/// Bytes of a matching line to keep. A minified bundle is a single line of
+/// megabytes, and one such line must not fill the whole answer.
+const MAX_LINE_BYTES: usize = 512;
+
+/// How much of a file is sniffed for NUL bytes before it is called binary.
+const BINARY_SNIFF_BYTES: usize = 8 * 1024;
+
+/// Extensions that are binary whatever their content happens to hold, so a
+/// binary file is skipped without being read at all.
+const BINARY_EXTENSIONS: &[&str] = &[
+    // Images
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "bmp",
+    "ico",
+    "webp",
+    "tiff",
+    "tif",
+    "avif",
+    "heic",
+    "heif",
+    "jxl",
+    "jp2",
+    "psd",
+    "icns",
+    "tga",
+    // GPU / VFX textures
+    "hdr",
+    "exr",
+    "dds",
+    "ktx",
+    "ktx2",
+    "pvr",
+    "astc",
+    // Audio / video
+    "mp4",
+    "avi",
+    "mov",
+    "wmv",
+    "mkv",
+    "mp3",
+    "wav",
+    "flac",
+    "ogg",
+    "m4a",
+    "aac",
+    "webm",
+    "mpg",
+    "mpeg",
+    "opus",
+    // Archives / packages
+    "zip",
+    "tar",
+    "gz",
+    "bz2",
+    "xz",
+    "7z",
+    "rar",
+    "zst",
+    "lz4",
+    "cab",
+    "deb",
+    "rpm",
+    "dmg",
+    "msi",
+    "iso",
+    "whl",
+    // Executables / libraries / runtime images
+    "exe",
+    "dll",
+    "so",
+    "dylib",
+    "o",
+    "a",
+    "lib",
+    "bin",
+    "class",
+    "pyc",
+    "pyo",
+    "wasm",
+    "jar",
+    // Documents
+    "pdf",
+    "doc",
+    "docx",
+    "xls",
+    "xlsx",
+    "ppt",
+    "pptx",
+    // Databases
+    "db",
+    "sqlite",
+    "sqlite3",
+    "mdb",
+    "sqlite-wal",
+    "sqlite-shm",
+    "ldb",
+    // Fonts
+    "ttf",
+    "otf",
+    "woff",
+    "woff2",
+    "eot",
+    // Serialized data and ML artefacts
+    "npy",
+    "npz",
+    "h5",
+    "hdf5",
+    "pt",
+    "onnx",
+    "safetensors",
+    "tflite",
+    "gguf",
+    "parquet",
+    "arrow",
+    "pb",
+    "glb",
+    "blend",
+];
 
 pub(crate) struct Grep {
     access: Access,
@@ -32,7 +150,7 @@ impl Tool for Grep {
     type Error = ToolExecutionError;
 
     fn description(&self) -> String {
-        "Fast content search (fff-search grep engine): matches a case-sensitive regular expression against text files under `path`, honouring .gitignore inside git repositories and skipping binary files by extension and hidden files/directories (unless `path` names one explicitly). Prints `path:line: content` sorted by path then line, with lines truncated past 512 bytes; results are capped (default 200)."
+        "Fast content search: matches a case-sensitive regular expression against text files under `path`, honouring .gitignore inside git repositories and skipping binary files and hidden entries (a hidden `path` itself is still searched). Prints `path:line: content` sorted by path then line, with lines truncated past 512 bytes; results are capped (default 200)."
             .to_string()
     }
 
@@ -87,13 +205,12 @@ impl Tool for Grep {
     }
 }
 
-/// One grep call, driven by a fresh fff index of the search root.
+/// One grep call: the shared walk ([`crate::walk`]) lists the files, a
+/// `regex::bytes` matcher reads them.
 ///
-/// fff greps its index rather than walking the tree itself, so every call
-/// builds a picker: [`FilePicker::collect_files`] is the synchronous scan (no
-/// background watcher, no frecency database) and the picker is dropped with the
-/// call. That keeps results current for a tool that edits files between calls;
-/// a cached index would serve stale matches for anything written after the scan.
+/// Nothing is cached between calls — the walk runs per call and the files are
+/// read as they are found — so a file the agent edited since the previous call
+/// is searched in its current state, not the state the last scan saw.
 fn search(
     abs: &Path,
     display_root: &str,
@@ -101,183 +218,90 @@ fn search(
     include: Option<&str>,
     max: usize,
 ) -> Result<String, String> {
-    // fff indexes directories, so a single-file `path` searches its parent and
-    // is narrowed to that exact file afterwards (see `only_file` below).
-    let (root, only_file) = if abs.is_file() {
-        let parent = abs
-            .parent()
-            .ok_or_else(|| format!("grep: {display_root} has no parent directory"))?;
-        (parent.to_path_buf(), Some(abs.to_path_buf()))
-    } else {
-        (abs.to_path_buf(), None)
-    };
+    // The tool's contract is a case-sensitive regular expression over lines, so
+    // the pattern reaches the matcher as written: `multi_line` makes `^`/`$`
+    // anchors line-relative, and byte mode keeps a non-UTF-8 file searchable.
+    let regex = regex::bytes::RegexBuilder::new(pattern)
+        .multi_line(true)
+        .unicode(false)
+        .build()
+        .map_err(|e| format!("bad pattern: {e}"))?;
 
-    let include_glob = include.map(include_to_glob);
-    let file_name = only_file
-        .as_ref()
-        .and_then(|path| path.file_name())
-        .and_then(|name| name.to_str())
-        .map(ToOwned::to_owned);
-    // fff gets the same glob as a prefilter constraint, but it is re-checked
-    // per hit below. `grep_search` retries a constrained query that found
-    // nothing as literal text with the constraints dropped -- sensible for an
-    // interactive picker, wrong here: `include: "*.kdl"` over a repo with no
-    // `.kdl` match would otherwise report hits from every other file.
-    let include_matcher = match include_glob.as_deref() {
+    // The include glob is matched against the path the result prints, so
+    // `include: "src/**/*.rs"` says the same whether `path` is the workspace
+    // root or `src`. It stays authoritative: a call that narrows to nothing
+    // reports "no matches" rather than falling back to every file.
+    let include_matcher = match include.map(include_to_glob) {
         Some(glob) => Some(
-            globset::Glob::new(glob)
+            globset::Glob::new(&glob)
                 .map_err(|e| format!("bad include glob '{glob}': {e}"))?
                 .compile_matcher(),
         ),
         None => None,
     };
 
-    let mut constraints: Vec<Constraint<'_>> = Vec::new();
-    if let Some(glob) = include_glob.as_deref() {
-        constraints.push(Constraint::Glob(glob));
-    }
-    if let Some(name) = file_name.as_deref() {
-        constraints.push(Constraint::FilePath(name));
-    }
-
-    // fff's regex mode silently degrades an unparsable pattern to a literal
-    // search, which would quietly change what the caller asked for. Validate
-    // with the same `regex::bytes` configuration fff builds (multi-line
-    // anchors, Unicode disabled) before paying for the index.
-    regex::bytes::RegexBuilder::new(pattern)
-        .multi_line(true)
-        .unicode(false)
-        .build()
-        .map_err(|e| format!("bad pattern: {e}"))?;
-
-    // fff reads the pattern out of its parsed query, and that parser strips a
-    // leading `\` when it precedes `*`, `/` or `!` (its "this is a literal
-    // constraint token" rule). `\*ptr` would reach the matcher as `*ptr` and
-    // fail to compile, so an empty group keeps the text opaque to that rule --
-    // `(?:)\*ptr` matches exactly what `\*ptr` does.
-    let needle = match pattern.as_bytes() {
-        [b'\\', b'*' | b'/' | b'!', ..] => format!("(?:){pattern}"),
-        _ => pattern.to_string(),
+    // A single-file `path` searches exactly that file; a directory searches
+    // what the walk finds under it. The walk answers sorted by path, so the
+    // answer below is a stable prefix of it.
+    let candidates: Vec<(String, PathBuf)> = if abs.is_file() {
+        vec![(display_root.to_string(), abs.to_path_buf())]
+    } else {
+        walk::files(abs)
+            .into_iter()
+            .map(|file| (display_path(&file.rel, display_root), file.abs))
+            .collect()
     };
 
-    let options = GrepSearchOptions {
-        // The tool's contract is a case-sensitive regex, which is fff's regex
-        // mode with `Casing::Sensitive` (its default is smart-case).
-        mode: GrepMode::Regex,
-        casing: Some(Casing::Sensitive),
-        smart_case: false,
-        page_limit: max,
-        max_matches_per_file: max,
-        // fff refuses files past `max_file_size` outright rather than streaming
-        // them, and its default cap is 10 MiB, so a larger file would answer
-        // "no matches" instead of being searched. Lift the cap: fff mmaps
-        // anything past 1 MiB, which keeps the cost virtual, not resident.
-        max_file_size: u64::MAX,
-        ..Default::default()
-    };
-
-    let mut picker = FilePicker::new(FilePickerOptions {
-        base_path: root.to_string_lossy().into_owned(),
-        mode: FFFMode::Ai,
-        // Nothing here outlives the call, so a watcher would only burn threads.
-        watch: false,
-        // The content cache carries its own per-file gate, which would keep the
-        // 10 MiB limit alive for the actual read. `max_files: 0` also stops the
-        // cache from mapping content a one-shot picker would never reuse.
-        cache_budget: Some(ContentCacheBudget {
-            max_file_size: u64::MAX,
-            ..ContentCacheBudget::with_max_files(0)
-        }),
-        // Recency ranking is irrelevant to a content search; skip the commit
-        // walk (`git status` is still read, as the walker needs it).
-        git_recency: GitRecencyConfig {
-            enabled: false,
-            ..Default::default()
-        },
-        ..Default::default()
-    })
-    .map_err(|e| format!("grep: {e}"))?;
-    picker.collect_files().map_err(|e| format!("grep: {e}"))?;
-
-    let query = FFFQuery {
-        raw_query: &needle,
-        constraints,
-        fuzzy_query: FuzzyQuery::Text(&needle),
-        location: None,
-    };
-
-    // fff greps its index in parallel chunks, so its match order varies between
-    // runs. Sort by path then line to give a stable answer that can be diffed.
-    let mut hits: Vec<(String, u64, String)> = Vec::new();
-    let mut file_offset = 0usize;
+    let mut hits: Vec<(String, usize, String)> = Vec::new();
     let mut truncated = false;
-    loop {
-        let page = GrepSearchOptions {
-            file_offset,
-            ..options.clone()
+    for (index, (display, path)) in candidates.iter().enumerate() {
+        if include_matcher
+            .as_ref()
+            .is_some_and(|matcher| !matcher.is_match(display))
+        {
+            continue;
+        }
+        // A file that vanished between the walk and the read, or one this
+        // process may not open, is skipped: the rest of the tree is still worth
+        // searching.
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
         };
-        let result = picker.grep(&query, &page);
-
-        // fff degrades an unparsable regex to a literal search; the tool reports
-        // it as an error instead, because a silently literal search quietly
-        // changes what the caller asked for.
-        if let Some(err) = &result.regex_fallback_error {
-            return Err(format!("bad pattern: {err}"));
+        if is_binary(path, &bytes) {
+            continue;
         }
-
-        // `literal_fallback` means the constrained scan came back empty across
-        // the whole tree and fff retried without the constraints. Nothing it
-        // found can survive the filters below, so stop rather than page through
-        // the retry's results.
-        if result.literal_fallback {
-            break;
-        }
-
-        for hit in &result.matches {
-            let Some(file) = result.files.get(hit.file_index) else {
+        // The closing line terminator belongs to the last line, not to a line of
+        // its own: without this the empty tail would make a complete answer look
+        // like a truncation.
+        let body = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+        let mut lines = body.split(|&byte| byte == b'\n').peekable();
+        let mut line_number = 0;
+        while let Some(line) = lines.next() {
+            line_number += 1;
+            if !regex.is_match(line) {
                 continue;
-            };
-            let display = match &only_file {
-                Some(target) => {
-                    if file.absolute_path(&picker, picker.base_path()) != *target {
-                        continue;
-                    }
-                    display_root.to_string()
-                }
-                None => {
-                    let rel = file.relative_path(&picker);
-                    if is_hidden_path(&rel)
-                        || include_matcher
-                            .as_ref()
-                            .is_some_and(|matcher| !matcher.is_match(&rel))
-                    {
-                        continue;
-                    }
-                    display_path(&rel, display_root)
-                }
-            };
-            hits.push((display, hit.line_number, hit.line_content.clone()));
+            }
+            hits.push((display.clone(), line_number, line_content(line)));
+            if hits.len() >= max {
+                // The cap stops the scan, so whatever is left unread could hold
+                // more matches: report the truncation. Reaching the cap on the
+                // very last line of the very last file is the one case that is
+                // a complete answer.
+                truncated = index + 1 < candidates.len() || lines.peek().is_some();
+                break;
+            }
         }
-
-        if hits.len() >= max {
-            truncated = true;
+        if truncated {
             break;
-        }
-        // Everything searched, or the cursor stopped advancing.
-        match result.next_file_offset {
-            0 => break,
-            next if next <= file_offset => break,
-            next => file_offset = next,
         }
     }
-    hits.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
 
     if hits.is_empty() {
         return Ok(format!("no matches for /{pattern}/ in {display_root}"));
     }
 
     let mut lines = String::new();
-    for (display, line_number, content) in hits.iter().take(max) {
+    for (display, line_number, content) in &hits {
         lines.push_str(&format!("{display}:{line_number}:{content}\n"));
     }
     if truncated {
@@ -286,6 +310,8 @@ fn search(
     Ok(lines)
 }
 
+/// The include filter as a glob: a bare fragment such as `test` or `.rs` is a
+/// name substring, anything that already looks like a pattern is left alone.
 fn include_to_glob(include: &str) -> String {
     if include.contains('/') || include.contains(['*', '?', '[', '{']) {
         include.to_string()
@@ -294,21 +320,58 @@ fn include_to_glob(include: &str) -> String {
     }
 }
 
+/// Whether the file is binary. The extension is a cheap first guess; content is
+/// the check that catches everything the list does not name.
+fn is_binary(path: &Path, bytes: &[u8]) -> bool {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    if extension.is_some_and(|extension| BINARY_EXTENSIONS.contains(&extension.as_str())) {
+        return true;
+    }
+    bytes.iter().take(BINARY_SNIFF_BYTES).any(|&byte| byte == 0)
+}
+
+/// One matched line, ready to print: no line terminator, at most
+/// [`MAX_LINE_BYTES`] bytes, cut on a character boundary.
+fn line_content(line: &[u8]) -> String {
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    let end = if line.len() <= MAX_LINE_BYTES {
+        line.len()
+    } else {
+        let mut end = MAX_LINE_BYTES;
+        // A UTF-8 continuation byte starts with `10…`, i.e. a signed byte below
+        // -0x40; stepping back over them lands on a character boundary.
+        while end > 0 && (line[end] as i8) < -0x40 {
+            end -= 1;
+        }
+        end
+    };
+    String::from_utf8_lossy(&line[..end]).into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_util::{new_ctx, tempdir};
+
+    async fn grep(args: Value) -> Result<String, String> {
+        Grep::new(crate::test_util::access())
+            .call(&mut new_ctx(), args)
+            .await
+            .map(|out| out.as_text().unwrap().to_string())
+            .map_err(|err| err.to_string())
+    }
 
     #[tokio::test]
     async fn grep_finds_with_substring_include() {
         let (dir, _guard) = tempdir();
         std::fs::write("r.rs", "fn main() {}\n").unwrap();
         std::fs::write("r.txt", "hello fn world\n").unwrap();
-        let out = Grep::new(crate::test_util::access())
-            .call(&mut new_ctx(), json!({ "pattern": "fn", "include": ".rs" }))
+        let text = grep(json!({ "pattern": "fn", "include": ".rs" }))
             .await
             .unwrap();
-        let text = out.as_text().unwrap();
         assert!(text.contains("r.rs:1"), "{text}");
         assert!(!text.contains("r.txt"), "{text}");
         drop(dir);
@@ -319,11 +382,9 @@ mod tests {
         let (dir, _guard) = tempdir();
         let content: String = (0..10).map(|i| format!("line {i} fn\n")).collect();
         std::fs::write("lines.rs", content).unwrap();
-        let out = Grep::new(crate::test_util::access())
-            .call(&mut new_ctx(), json!({ "pattern": "fn", "max_results": 3 }))
+        let text = grep(json!({ "pattern": "fn", "max_results": 3 }))
             .await
             .unwrap();
-        let text = out.as_text().unwrap();
         assert!(text.contains("lines.rs:1"), "{text}");
         assert!(text.contains("lines.rs:3"), "{text}");
         assert!(!text.contains("lines.rs:4"), "{text}");
@@ -331,20 +392,30 @@ mod tests {
         drop(dir);
     }
 
+    /// The cap is a truncation only when it actually leaves matches behind; an
+    /// answer that ends exactly at the cap is complete and says so.
+    #[tokio::test]
+    async fn grep_does_not_call_an_exact_cap_a_truncation() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("a.txt", "fn 1\nfn 2\n").unwrap();
+        let text = grep(json!({ "pattern": "fn", "max_results": 2 }))
+            .await
+            .unwrap();
+        assert!(text.contains("a.txt:2"), "{text}");
+        assert!(!text.contains("truncated"), "{text}");
+        drop(dir);
+    }
+
     #[tokio::test]
     async fn grep_respects_gitignore_inside_a_repository() {
         let (dir, _guard) = tempdir();
-        // The walker only applies `.gitignore` inside a repository; for the
-        // `ignore` machinery an existing `.git` is what marks one.
+        // A `.gitignore` only applies inside a repository; for the walk an
+        // existing `.git` is what marks one.
         std::fs::create_dir(".git").unwrap();
         std::fs::write(".gitignore", "ignored.txt\n").unwrap();
         std::fs::write("ignored.txt", "needle\n").unwrap();
         std::fs::write("kept.txt", "needle\n").unwrap();
-        let out = Grep::new(crate::test_util::access())
-            .call(&mut new_ctx(), json!({ "pattern": "needle" }))
-            .await
-            .unwrap();
-        let text = out.as_text().unwrap();
+        let text = grep(json!({ "pattern": "needle" })).await.unwrap();
         assert!(text.contains("kept.txt"), "{text}");
         assert!(!text.contains("ignored.txt"), "{text}");
         drop(dir);
@@ -356,42 +427,32 @@ mod tests {
         std::fs::create_dir(".hidden").unwrap();
         std::fs::write(".hidden/secret.txt", "needle\n").unwrap();
         std::fs::write("kept.txt", "needle\n").unwrap();
-        let out = Grep::new(crate::test_util::access())
-            .call(&mut new_ctx(), json!({ "pattern": "needle" }))
-            .await
-            .unwrap();
-        let text = out.as_text().unwrap();
+        let text = grep(json!({ "pattern": "needle" })).await.unwrap();
         assert!(text.contains("kept.txt"), "{text}");
         assert!(!text.contains("secret.txt"), "{text}");
         drop(dir);
     }
 
-    /// fff's walker only hides dot entries outside a git repository, so this
-    /// guards the tool's own filter: a repository must not leak `.env` or
-    /// `.shuvarie/` into results just because fff indexed them.
+    /// A dot entry is hidden inside a repository too: `.env` and `.shuvarie/`
+    /// never reach the model implicitly.
     #[tokio::test]
     async fn grep_skips_hidden_inside_a_repository() {
         let (dir, _guard) = tempdir();
-        // An empty `.git` is enough for the walker to treat the root as a repo.
+        // An empty `.git` is enough for the walk to treat the root as a repo.
         std::fs::create_dir(".git").unwrap();
         std::fs::write(".env", "needle=1\n").unwrap();
         std::fs::create_dir(".shuvarie").unwrap();
         std::fs::write(".shuvarie/session.txt", "needle\n").unwrap();
         std::fs::write("kept.txt", "needle\n").unwrap();
-        let out = Grep::new(crate::test_util::access())
-            .call(&mut new_ctx(), json!({ "pattern": "needle" }))
-            .await
-            .unwrap();
-        let text = out.as_text().unwrap();
+        let text = grep(json!({ "pattern": "needle" })).await.unwrap();
         assert!(text.contains("kept.txt"), "{text}");
         assert!(!text.contains(".env"), "{text}");
         assert!(!text.contains("session.txt"), "{text}");
         drop(dir);
     }
 
-    /// A `path` that names a hidden entry is explicit, so the tool's own hidden
-    /// filter must not drop it (the permission layer still asks, as it should:
-    /// dot directories are gated).
+    /// A `path` that names a hidden entry is explicit, so it is searched (the
+    /// permission layer still asks, as it should: dot directories are gated).
     #[tokio::test]
     async fn grep_searches_an_explicit_hidden_path() {
         use crate::test_util::access_with_answering_gate;
@@ -427,10 +488,10 @@ mod tests {
         drop(dir);
     }
 
-    /// fff skips files past its 10 MiB default; the tool lifts that cap so a
-    /// large file answers with its matches instead of "no matches".
+    /// There is no size cap: a file past any "reasonable" limit answers with its
+    /// matches instead of being skipped.
     #[tokio::test]
-    async fn grep_searches_files_larger_than_the_fff_default_cap() {
+    async fn grep_searches_a_file_past_the_usual_caps() {
         let (dir, _guard) = tempdir();
         let mut content = String::with_capacity(11 * 1024 * 1024);
         for _ in 0..(11 * 1024) {
@@ -439,27 +500,19 @@ mod tests {
         }
         content.push_str("needle\n");
         std::fs::write("big.txt", content).unwrap();
-        let out = Grep::new(crate::test_util::access())
-            .call(&mut new_ctx(), json!({ "pattern": "needle" }))
-            .await
-            .unwrap();
-        let text = out.as_text().unwrap();
+        let text = grep(json!({ "pattern": "needle" })).await.unwrap();
         assert!(text.contains("big.txt:11265"), "{text}");
         drop(dir);
     }
 
-    /// fff returns matches in parallel-chunk order; the tool sorts them so
-    /// repeated calls over unchanged files agree.
+    /// The answer is sorted by path then line, not walk order, so repeated calls
+    /// over unchanged files agree.
     #[tokio::test]
     async fn grep_output_is_sorted_by_path_and_line() {
         let (dir, _guard) = tempdir();
         std::fs::write("b.txt", "needle 1\nneedle 2\n").unwrap();
         std::fs::write("a.txt", "needle 3\n").unwrap();
-        let out = Grep::new(crate::test_util::access())
-            .call(&mut new_ctx(), json!({ "pattern": "needle" }))
-            .await
-            .unwrap();
-        let text = out.as_text().unwrap();
+        let text = grep(json!({ "pattern": "needle" })).await.unwrap();
         let order: Vec<&str> = text
             .lines()
             .filter(|line| line.contains("needle"))
@@ -478,31 +531,33 @@ mod tests {
         std::fs::create_dir("src").unwrap();
         std::fs::write("src/a.rs", "needle\n").unwrap();
         std::fs::write("src/b.txt", "needle\n").unwrap();
-        let out = Grep::new(crate::test_util::access())
-            .call(
-                &mut new_ctx(),
-                json!({ "pattern": "needle", "include": "*.rs" }),
-            )
+        let text = grep(json!({ "pattern": "needle", "include": "*.rs" }))
             .await
             .unwrap();
-        let text = out.as_text().unwrap();
         assert!(text.contains("src/a.rs:1"), "{text}");
         assert!(!text.contains("b.txt"), "{text}");
         drop(dir);
     }
 
     #[tokio::test]
-    async fn grep_skips_binary_extensions() {
+    async fn grep_skips_binary_files() {
         let (dir, _guard) = tempdir();
         std::fs::write("bin.png", "needle\n").unwrap();
         std::fs::write("text.dat", "needle\n").unwrap();
-        let out = Grep::new(crate::test_util::access())
-            .call(&mut new_ctx(), json!({ "pattern": "needle" }))
-            .await
-            .unwrap();
-        let text = out.as_text().unwrap();
+        let text = grep(json!({ "pattern": "needle" })).await.unwrap();
         assert!(text.contains("text.dat:1"), "{text}");
         assert!(!text.contains("bin.png"), "{text}");
+        drop(dir);
+    }
+
+    /// A file whose extension says nothing but whose bytes hold a NUL is binary
+    /// too: the answer must not carry raw bytes into the transcript.
+    #[tokio::test]
+    async fn grep_skips_binary_content_without_a_known_extension() {
+        let (dir, _guard) = tempdir();
+        std::fs::write("blob", b"needle\x00\x01\x02\n").unwrap();
+        let text = grep(json!({ "pattern": "needle" })).await.unwrap();
+        assert!(text.contains("no matches"), "{text}");
         drop(dir);
     }
 
@@ -511,14 +566,9 @@ mod tests {
         let (dir, _guard) = tempdir();
         std::fs::write("a.txt", "needle\nother\n").unwrap();
         std::fs::write("b.txt", "needle\n").unwrap();
-        let out = Grep::new(crate::test_util::access())
-            .call(
-                &mut new_ctx(),
-                json!({ "pattern": "needle", "path": "a.txt" }),
-            )
+        let text = grep(json!({ "pattern": "needle", "path": "a.txt" }))
             .await
             .unwrap();
-        let text = out.as_text().unwrap();
         assert!(text.contains("a.txt:1"), "{text}");
         assert!(!text.contains("b.txt"), "{text}");
         drop(dir);
@@ -528,59 +578,57 @@ mod tests {
     async fn grep_is_case_sensitive() {
         let (dir, _guard) = tempdir();
         std::fs::write("c.txt", "Needle\n").unwrap();
-        let none = Grep::new(crate::test_util::access())
-            .call(&mut new_ctx(), json!({ "pattern": "needle" }))
-            .await
-            .unwrap();
-        assert!(none.as_text().unwrap().contains("no matches"));
+        let text = grep(json!({ "pattern": "needle" })).await.unwrap();
+        assert!(text.contains("no matches"), "{text}");
         drop(dir);
     }
 
     #[tokio::test]
     async fn grep_reports_bad_pattern() {
         let (dir, _guard) = tempdir();
-        let err = Grep::new(crate::test_util::access())
-            .call(&mut new_ctx(), json!({ "pattern": "([" }))
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("bad pattern"));
+        let err = grep(json!({ "pattern": "([" })).await.unwrap_err();
+        assert!(err.contains("bad pattern"), "{err}");
         drop(dir);
     }
 
-    /// fff retries a constrained query that found nothing with the constraints
-    /// dropped; `include` must stay authoritative regardless.
+    /// A `path` or `include` that matches nothing reports exactly that: the
+    /// filter is authoritative instead of falling back to every file.
     #[tokio::test]
     async fn grep_include_stays_authoritative_on_a_zero_match_glob() {
         let (dir, _guard) = tempdir();
         std::fs::write("a.txt", "needle\n").unwrap();
         std::fs::write("b.rs", "needle\n").unwrap();
-        let out = Grep::new(crate::test_util::access())
-            .call(
-                &mut new_ctx(),
-                json!({ "pattern": "needle", "include": "*.kdl" }),
-            )
+        let text = grep(json!({ "pattern": "needle", "include": "*.kdl" }))
             .await
             .unwrap();
-        let text = out.as_text().unwrap();
         assert!(text.contains("no matches"), "{text}");
         assert!(!text.contains("a.txt"), "{text}");
         assert!(!text.contains("b.rs"), "{text}");
         drop(dir);
     }
 
-    /// fff's query parser strips a leading `\` before `*`, `/` and `!`, which
-    /// would turn this valid regex into the compile error `*ptr`.
+    /// The pattern reaches the regex engine as written: no query layer rewrites
+    /// a leading `\`, so `\*ptr` stays a literal asterisk.
     #[tokio::test]
     async fn grep_keeps_an_escaped_leading_metacharacter() {
         let (dir, _guard) = tempdir();
         std::fs::write("c.txt", "a *ptr deref\nplain ptr\n").unwrap();
-        let out = Grep::new(crate::test_util::access())
-            .call(&mut new_ctx(), json!({ "pattern": "\\*ptr" }))
-            .await
-            .unwrap();
-        let text = out.as_text().unwrap();
+        let text = grep(json!({ "pattern": "\\*ptr" })).await.unwrap();
         assert!(text.contains("c.txt:1:a *ptr deref"), "{text}");
         assert!(!text.contains("plain ptr"), "{text}");
+        drop(dir);
+    }
+
+    /// A minified file is one enormous line; the answer keeps a readable prefix
+    /// of it instead of the whole thing.
+    #[tokio::test]
+    async fn grep_truncates_a_long_line() {
+        let (dir, _guard) = tempdir();
+        let line = format!("needle{}\n", "x".repeat(2000));
+        std::fs::write("min.js", line).unwrap();
+        let text = grep(json!({ "pattern": "needle" })).await.unwrap();
+        let content = text.lines().next().unwrap();
+        assert_eq!(content.len(), "min.js:1:".len() + MAX_LINE_BYTES, "{text}");
         drop(dir);
     }
 }

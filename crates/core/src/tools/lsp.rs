@@ -1,14 +1,12 @@
 use std::path::{Path, PathBuf};
 
-use fff_search::{ContentCacheBudget, FFFMode, FilePickerOptions, file_picker::FilePicker};
 use serde_json::{Value, json};
 use shuvarie_llm::{Tool, ToolContext, ToolExecutionError, ToolOutput};
 
 use crate::lsp_manager::SharedManager;
 
 use crate::permissions::Access;
-
-use super::is_hidden_path;
+use crate::walk;
 
 pub(crate) struct Lsp {
     lsp: SharedManager,
@@ -140,7 +138,7 @@ async fn analyze_paths(
     let abs = resolve(root, target)?;
     let files = tokio::task::spawn_blocking(move || analyze_targets(abs))
         .await
-        .map_err(|e| format!("lsp: {e}"))??;
+        .map_err(|e| format!("lsp: {e}"))?;
     if files.is_empty() {
         return Ok(ToolOutput::text("no files to analyze"));
     }
@@ -206,45 +204,20 @@ fn resolve(root: &Path, path: &str) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-/// The files `lsp analyze` opens: the target itself, or everything the fff
-/// index found under it, capped at [`ANALYZE_MAX_FILES`].
+/// The files `lsp analyze` opens: the target itself, or every file the shared
+/// walk ([`crate::walk`]) found under it, capped at [`ANALYZE_MAX_FILES`].
 ///
-/// The walk is the one `glob` and `grep` index with, so a
-/// repository's `.gitignore` keeps build output out of the budget and `.git/`
-/// and `node_modules/` are never descended into. The `ignore` walk this
-/// replaces kept hidden entries, walked `.git/objects` and spent most of the
-/// cap on object files; and because the cap trims the set before the manager
-/// filters by server, which files got analyzed followed directory order. The
-/// sort makes the kept files a stable prefix instead.
-fn analyze_targets(abs: PathBuf) -> Result<Vec<PathBuf>, String> {
+/// That walk is the one `glob` and `grep` use, so a repository's `.gitignore`
+/// keeps build output out of the budget. The cap trims the set before the
+/// manager filters by server, so the sort matters: it makes the kept files a
+/// stable prefix rather than whatever directory order the scan produced.
+fn analyze_targets(abs: PathBuf) -> Vec<PathBuf> {
     if !abs.is_dir() {
-        return Ok(vec![abs]);
+        return vec![abs];
     }
-    let mut picker = FilePicker::new(FilePickerOptions {
-        base_path: abs.to_string_lossy().into_owned(),
-        mode: FFFMode::Ai,
-        // Nothing here outlives the call, so a watcher would only burn threads.
-        watch: false,
-        // Discovery reads paths, never contents.
-        cache_budget: Some(ContentCacheBudget::with_max_files(0)),
-        ..Default::default()
-    })
-    .map_err(|e| format!("lsp: {e}"))?;
-    picker.collect_files().map_err(|e| format!("lsp: {e}"))?;
-
-    let mut targets: Vec<(String, PathBuf)> = Vec::new();
-    for file in picker.get_files() {
-        let rel = file.relative_path(&picker);
-        // fff indexes dot entries inside a git repository; no server is wanted
-        // for `.env` or `.git/` metadata.
-        if is_hidden_path(&rel) {
-            continue;
-        }
-        targets.push((rel, file.absolute_path(&picker, picker.base_path())));
-    }
-    targets.sort();
+    let mut targets = walk::files(&abs);
     targets.truncate(ANALYZE_MAX_FILES);
-    Ok(targets.into_iter().map(|(_, path)| path).collect())
+    targets.into_iter().map(|found| found.abs).collect()
 }
 
 #[cfg(test)]
@@ -255,9 +228,9 @@ mod tests {
     #[test]
     fn analyze_targets_skips_hidden_and_ignored_files() {
         let (dir, _guard) = tempdir();
-        // fff only reads .gitignore inside a repository, so the rule needs a
-        // `.git` next to it -- the same one that makes `.git/` internals
-        // indexable and therefore something to filter.
+        // A `.gitignore` only applies inside a repository, so the rule needs a
+        // `.git` next to it -- the same one that would otherwise make `.git/`
+        // internals worth filtering out.
         std::fs::create_dir(".git").unwrap();
         std::fs::write(".git/config", "").unwrap();
         std::fs::write(".gitignore", "target/\n*.log\n").unwrap();
@@ -269,7 +242,7 @@ mod tests {
         std::fs::write("src/lib.rs", "").unwrap();
 
         let root = std::env::current_dir().unwrap().canonicalize().unwrap();
-        let targets = analyze_targets(root.clone()).unwrap();
+        let targets = analyze_targets(root.clone());
         let rel: Vec<String> = targets
             .iter()
             .map(|path| {
@@ -292,7 +265,7 @@ mod tests {
             std::fs::write(format!("f{i:03}.txt", i = i), "").unwrap();
         }
         let root = std::env::current_dir().unwrap().canonicalize().unwrap();
-        let targets = analyze_targets(root.clone()).unwrap();
+        let targets = analyze_targets(root.clone());
         assert_eq!(targets.len(), ANALYZE_MAX_FILES);
         let names: Vec<String> = targets
             .iter()

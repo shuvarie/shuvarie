@@ -185,16 +185,6 @@ pub(crate) fn arg_value(args: &Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("missing string argument '{key}'"))
 }
 
-/// Whether a search-root-relative path lies under a dot entry.
-///
-/// fff's own walker only hides dot entries outside a git repository, so inside
-/// one it indexes `.env` and `.shuvarie/` as well -- which the tools must not
-/// return implicitly. A `path` naming a hidden entry still searches it: the
-/// root never counts as a hidden component of its own results.
-pub(crate) fn is_hidden_path(rel: &str) -> bool {
-    rel.split('/').any(|segment| segment.starts_with('.'))
-}
-
 /// A search hit's path as the caller sees it: prefixed with the search root as
 /// it was given (`"."` keeps workspace-relative paths), so a returned path can
 /// be handed straight back to `read_file` or `edit_file`.

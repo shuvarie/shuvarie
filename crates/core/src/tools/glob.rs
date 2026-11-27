@@ -1,15 +1,12 @@
 use std::path::Path;
 
-use fff_search::{
-    ContentCacheBudget, FFFMode, FilePickerOptions, FuzzySearchOptions, PaginationArgs,
-    file_picker::FilePicker,
-};
 use serde_json::{Value, json};
 use shuvarie_llm::{Tool, ToolContext, ToolExecutionError, ToolOutput};
 
 use crate::permissions::{Access, PathKind};
+use crate::walk;
 
-use super::{arg_value, display_path, is_hidden_path};
+use super::{arg_value, display_path};
 
 const GLOB_MAX_RESULTS: usize = 100;
 
@@ -31,7 +28,7 @@ impl Tool for Glob {
     type Error = ToolExecutionError;
 
     fn description(&self) -> String {
-        "Fast file pattern matching tool that works with any codebase size. Matches file paths against a single glob (fff-search engine): `*.rs` also reaches nested files, `src/**/*.ts` narrows to a subtree, and `?`, `[abc]` and `{a,b}` work as usual. Honours .gitignore inside git repositories and skips hidden files/directories (unless `path` names one explicitly). Returns file paths -- never directories -- prefixed with `path` as given, sorted, and capped at 100; use it when you already know the pattern, or the shape of a half-remembered path (`**/*search*`)."
+        "Fast file pattern matching tool that works with any codebase size. Matches file paths against a single glob: `*.rs` also reaches nested files, `src/**/*.ts` narrows to a subtree, and `?`, `[abc]` and `{a,b}` work as usual. Honours .gitignore inside git repositories and skips hidden files/directories (unless `path` names one explicitly). Returns file paths -- never directories -- prefixed with `path` as given, sorted, and capped at 100; use it when you already know the pattern, or the shape of a half-remembered path (`**/*search*`)."
             .to_string()
     }
 
@@ -76,68 +73,40 @@ impl Tool for Glob {
     }
 }
 
-/// One glob call, driven by a fresh fff index of the search root.
+/// One glob call: the shared walk ([`crate::walk`]), filtered by a compiled
+/// glob and truncated to a sorted prefix.
 ///
-/// Like `grep`, every call builds its own picker:
-/// [`FilePicker::collect_files`] is the synchronous scan (no background
-/// watcher, no frecency database) and the picker is dropped with the call, so a
-/// file created or deleted between two calls is seen by the second one.
+/// The pattern is compiled with `globset`'s defaults, which is the behaviour
+/// the tool documents: `literal_separator` is off, so a bare `*` crosses
+/// directories and `*.rs` is the recursive "every Rust file" query. Nothing is
+/// cached between calls, so a file created after the previous one is seen by
+/// this call.
 fn search(root: &Path, display_root: &str, pattern: &str) -> Result<String, String> {
-    // fff compiles a `Constraint::Glob` with globset and lets a pattern that
-    // fails to compile never match anything, which would answer "No files
-    // found" for a typo the caller could have fixed. Compile it here first so
-    // the bad pattern is reported as the error it is.
-    globset::Glob::new(pattern).map_err(|e| format!("bad glob pattern '{pattern}': {e}"))?;
+    // A pattern that fails to compile has to be reported as the error it is:
+    // silently matching nothing would answer "No files found" for a typo the
+    // caller could have fixed.
+    let matcher = globset::Glob::new(pattern)
+        .map_err(|e| format!("bad glob pattern '{pattern}': {e}"))?
+        .compile_matcher();
 
-    let mut picker = FilePicker::new(FilePickerOptions {
-        base_path: root.to_string_lossy().into_owned(),
-        mode: FFFMode::Ai,
-        // Nothing here outlives the call, so a watcher would only burn threads.
-        watch: false,
-        // The glob filter reads paths, never contents: `max_files: 0` keeps the
-        // cache from mapping any file on the off chance something asks.
-        cache_budget: Some(ContentCacheBudget::with_max_files(0)),
-        ..Default::default()
-    })
-    .map_err(|e| format!("glob: {e}"))?;
-    picker.collect_files().map_err(|e| format!("glob: {e}"))?;
-
-    // `limit: 0` asks fff for the whole match set rather than one page. The
-    // ranking is frecency-based (nothing here ever records frecency, so it
-    // mostly reflects modification times), while this tool's contract is
-    // "sorted paths, first N"; truncating a frecency-ranked page would make the
-    // cap drop arbitrary entries, and any count a script derives from the
-    // answer would change between two identical queries.
-    let result = picker.glob(
-        pattern,
-        FuzzySearchOptions {
-            pagination: PaginationArgs {
-                offset: 0,
-                limit: 0,
-            },
-            ..Default::default()
-        },
-    );
-
-    let mut found: Vec<String> = Vec::with_capacity(result.items.len());
-    for item in &result.items {
-        let rel = item.relative_path(&picker);
-        // fff indexes dot entries inside a git repository; the tool's own filter
-        // must not hand `.env` or `.shuvarie/` back to the model.
-        if is_hidden_path(&rel) {
-            continue;
-        }
-        found.push(display_path(&rel, display_root));
-    }
-    found.sort_unstable();
+    // The walk answers in sorted order, so the kept set below is a stable
+    // prefix of it: two identical queries over unchanged files agree.
+    let found: Vec<String> = walk::files(root)
+        .into_iter()
+        .filter(|file| matcher.is_match(&file.rel))
+        .map(|file| display_path(&file.rel, display_root))
+        .collect();
 
     let total = found.len();
-    found.truncate(GLOB_MAX_RESULTS);
-    if found.is_empty() {
+    if total == 0 {
         return Ok("No files found".to_string());
     }
 
-    let mut out = found.join("\n");
+    let mut out = found
+        .into_iter()
+        .take(GLOB_MAX_RESULTS)
+        .collect::<Vec<_>>()
+        .join("\n");
     if total > GLOB_MAX_RESULTS {
         out.push_str(&format!(
             "\n\n(Results are truncated: showing first {GLOB_MAX_RESULTS} results. Consider using a more specific path or pattern.)"
@@ -173,9 +142,9 @@ mod tests {
         drop(dir);
     }
 
-    /// fff compiles globs with `literal_separator` off, so a bare `*` crosses
-    /// directory boundaries: `*.rs` is the recursive "every Rust file" query,
-    /// not just the top level.
+    /// The pattern is compiled with `literal_separator` off, so a bare `*`
+    /// crosses directory boundaries: `*.rs` is the recursive "every Rust file"
+    /// query, not just the top level.
     #[tokio::test]
     async fn a_bare_star_reaches_nested_files() {
         let (dir, _guard) = tempdir();
@@ -188,8 +157,8 @@ mod tests {
         drop(dir);
     }
 
-    /// The picker indexes directories beside files; a glob query answers with
-    /// files only, so a directory that spells a pattern is not a hit.
+    /// The walk yields files only, so a directory whose name spells a pattern
+    /// is not a hit.
     #[tokio::test]
     async fn directories_are_not_results() {
         let (dir, _guard) = tempdir();
@@ -204,8 +173,8 @@ mod tests {
     #[tokio::test]
     async fn glob_honors_gitignore_and_hidden() {
         let (dir, _guard) = tempdir();
-        // fff only reads .gitignore inside a repository, so the ignore rule has
-        // to sit next to a `.git` for the walk to apply it.
+        // A `.gitignore` only applies inside a repository, so the ignore rule
+        // has to sit next to a `.git` for the walk to apply it.
         std::fs::create_dir(".git").unwrap();
         std::fs::write(".gitignore", "ignored.txt\n").unwrap();
         std::fs::write("ignored.txt", "").unwrap();

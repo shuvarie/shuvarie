@@ -378,7 +378,7 @@ pub async fn run(
     // Bash-mode (`!`) runs, routed back to the TUI by id.
     let mut next_bash_id: u64 = 0;
 
-    // The `/attach` fuzzy finder's index: one cached FFF index per searched
+    // The `/attach` fuzzy finder's file list: one cached walk per searched
     // directory. The popup asks per keystroke, so the tree walk must happen
     // once per directory rather than once per query, and moving the finder to
     // another directory rebuilds it.
@@ -1078,7 +1078,7 @@ pub async fn run(
                             &ctx.workspace_root,
                             dir.as_deref(),
                         );
-                        // One index per searched directory: reuse it while the
+                        // One list per searched directory: reuse it while the
                         // finder stays put, rebuild when it moves (or on the
                         // first request).
                         let reusable = attach_index

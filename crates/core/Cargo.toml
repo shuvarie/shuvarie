@@ -11,11 +11,13 @@ categories.workspace = true
 
 [dependencies]
 dirs.workspace = true
-fff-search.workspace = true
+# The fuzzy ranking behind the `/attach` finder (`attachments/picker.rs`).
+frizbee.workspace = true
 futures-util.workspace = true
 unicode-normalization = "0.1"
-globset = "0.4"
+globset.workspace = true
 html-to-markdown-rs = { version = "3", default-features = false }
+ignore.workspace = true
 image.workspace = true
 sha2.workspace = true
 regex.workspace = true

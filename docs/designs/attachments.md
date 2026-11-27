@@ -12,11 +12,15 @@ The attachment feature spans the stack around one currency type: `shuvarie-llm`'
   image downscale/re-encode, document conversion) and request shaping (`prepare_for_send`
   — capability gate, text-only degradation, newest-first image budget), limits from the
   `attachments { … }` config via `AttachmentSettings`.
-- `crates/core/src/attachments/picker.rs`: the `/attach` dialog's FFF index (one per
-  searched directory, cached by the core task) and the ranking query; the walk runs on the
-  blocking pool, each keystroke only re-ranks the in-memory snapshot. FFF's matcher drops
-  fuzzy text below two bytes, so one-character queries are filtered by a substring scan
-  here instead — the search starts at the first keystroke either way.
+- `crates/core/src/walk.rs`: the one directory walk behind every search surface — the
+  `glob` and `grep` tools, `lsp analyze`'s target list and the `/attach` finder. It is
+  `ignore`'s walker: hidden entries skipped, `.gitignore`/`.git/info/exclude`/the global
+  ignore honoured inside a repository, links not followed, answer sorted by path.
+- `crates/core/src/attachments/picker.rs`: the `/attach` dialog's file list (one per
+  searched directory, cached by the core task) and the `frizbee` ranking query; the walk
+  runs on the blocking pool, each keystroke only re-ranks the in-memory snapshot. Ranking
+  needs no minimum query length, so the search starts at the first keystroke; an empty
+  query lists the snapshot alphabetically.
 - `crates/core/src/attachments/compose.rs`: the shallow compose-side helpers — the strip's
   metadata-only probe and `directory_candidates`, the directory prompt's hints (one
   `read_dir`, subdirectories only, completed in the form being typed so `~`/relative/

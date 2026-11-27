@@ -5,7 +5,7 @@
 //! - **Compose** ([`compose`]): the composer's preview surface — a metadata-
 //!   only probe of the pending attachment paths ([`AttachmentProbe`]).
 //!   Deliberately shallow: no reads of file content. The `/attach` finder's
-//!   index lives beside it ([`picker`]): FFF ranks paths, nothing is read.
+//!   file list lives beside it ([`picker`]): paths are ranked, nothing is read.
 //! - **Ingest** ([`ingest`]): a turn's attachment paths become [`Prepared`]
 //!   attachments — bytes sniffed by magic, images bounded to provider limits
 //!   (dimension cap + re-encode), documents converted to GFM markdown by

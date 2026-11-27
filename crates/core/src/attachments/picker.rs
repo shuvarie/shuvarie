@@ -1,21 +1,19 @@
-//! The composer's attachment fuzzy finder (`/attach [dir]`): one cached FFF
-//! index per searched directory, plus the ranking query the popup sends on
-//! every keystroke.
+//! The composer's attachment fuzzy finder (`/attach [dir]`): one cached file
+//! list per searched directory, plus the ranking query the popup sends on every
+//! keystroke.
 //!
-//! The index is what makes the popup live: walking a tree is the expensive
-//! part, so it happens once when the finder opens (or when it is pointed at
-//! another directory) and each keystroke then re-ranks the same in-memory
-//! snapshot. FFF ranks match quality first with a recency tiebreak, so an empty
-//! query is a useful default listing rather than an empty popup.
+//! The walk is what makes the popup live: listing a tree is the expensive part,
+//! so it happens once when the finder opens (or when it is pointed at another
+//! directory) and each keystroke then only re-ranks the same in-memory snapshot.
+//! An empty query lists the snapshot alphabetically, which is a useful default
+//! listing rather than an empty popup.
 
 use std::path::{Path, PathBuf};
 
-use fff_search::{
-    ContentCacheBudget, FFFMode, FFFQuery, FilePickerOptions, FuzzyQuery, FuzzySearchOptions,
-    PaginationArgs, QueryParser, file_picker::FilePicker,
-};
+use frizbee::{Config, Matcher};
 
 use super::normalize_path;
+use crate::walk;
 
 /// How many paths one ranking reply carries; the popup scrolls through them.
 pub const MAX_CANDIDATES: usize = 200;
@@ -30,39 +28,32 @@ pub fn resolve_dir(workspace_root: &Path, dir: Option<&str>) -> PathBuf {
     }
 }
 
-/// A cached FFF index over one directory, alive for as long as the finder
-/// stays open on it. Rebuilt by [`AttachmentIndex::build`] on the blocking
-/// pool (a scan of a large tree is not an async task's work).
+/// A cached file list over one directory, alive for as long as the finder stays
+/// open on it. Rebuilt by [`AttachmentIndex::build`] on the blocking pool (a
+/// scan of a large tree is not an async task's work).
 pub struct AttachmentIndex {
-    /// The indexed directory, already resolved.
+    /// The searched directory, already resolved.
     base: PathBuf,
-    picker: FilePicker,
+    /// Every file under it, `/`-joined and relative to `base`, sorted.
+    files: Vec<String>,
 }
 
 impl AttachmentIndex {
-    /// Scan `base` into a fresh index. No watcher, no content cache: the index
-    /// answers path rankings only and outlives no longer than the popup.
+    /// Scan `base` into a fresh index. The walk is the same one `glob`, `grep`
+    /// and `lsp analyze` use ([`crate::walk`]), so the finder offers exactly the
+    /// files those tools would search: gitignore rules apply, dot entries do
+    /// not. Nothing is watched and no content is read — the popup ranks paths
+    /// only and outlives nothing.
     pub fn build(base: &Path) -> Result<Self, String> {
         if !base.is_dir() {
             return Err(format!("not a directory: {}", base.display()));
         }
-        let mut picker = FilePicker::new(FilePickerOptions {
-            base_path: base.to_string_lossy().into_owned(),
-            mode: FFFMode::Ai,
-            // Nothing outlives the popup, so a watcher thread would only idle.
-            watch: false,
-            // Ranking reads no file contents; `max_files: 0` keeps the cache
-            // from mapping any of them.
-            cache_budget: Some(ContentCacheBudget::with_max_files(0)),
-            ..Default::default()
-        })
-        .map_err(|error| format!("cannot index {}: {error}", base.display()))?;
-        picker
-            .collect_files()
-            .map_err(|error| format!("cannot index {}: {error}", base.display()))?;
         Ok(Self {
             base: base.to_path_buf(),
-            picker,
+            files: walk::files(base)
+                .into_iter()
+                .map(|found| found.rel)
+                .collect(),
         })
     }
 
@@ -72,10 +63,10 @@ impl AttachmentIndex {
         &self.base
     }
 
-    /// Rank the indexed files against `query`, best match first. Paths come
-    /// back in attachment form — relative to the workspace root when the
-    /// searched directory sits inside it, absolute otherwise — so the caller
-    /// can hand them straight back as an attachment path.
+    /// Rank the indexed files against `query`, best match first. Paths come back
+    /// in attachment form — relative to the workspace root when the searched
+    /// directory sits inside it, absolute otherwise — so the caller can hand them
+    /// straight back as an attachment path.
     pub fn candidates(&self, query: &str, workspace_root: &Path, limit: usize) -> Vec<String> {
         // An index built for a directory inside the workspace (its root
         // included) reports workspace-relative paths; one pointing elsewhere
@@ -84,114 +75,21 @@ impl AttachmentIndex {
             Ok(rel) => rel.to_string_lossy().into_owned(),
             Err(_) => self.base.to_string_lossy().into_owned(),
         };
-        let parsed = QueryParser::default().parse(query);
-        // FFF's matcher drops fuzzy parts shorter than two bytes, so a
-        // single-character query would answer with the whole index ranked by
-        // recency instead of narrowing it. Filter those queries here, so the
-        // search starts at the first keystroke.
-        if let Some(needle) = below_fff_threshold(&parsed) {
-            return self.short_query_candidates(&needle, &display_root, limit);
-        }
-        // FFF paginates the ranked list; page through it until enough hits
-        // survive the hidden filter, since that filter runs after ranking and
-        // dropping a page's worth would otherwise shorten the answer.
-        let mut found: Vec<(i32, String)> = Vec::new();
-        let mut offset = 0usize;
-        loop {
-            let result = self.picker.fuzzy_search(
-                &parsed,
-                None,
-                FuzzySearchOptions {
-                    pagination: PaginationArgs { offset, limit },
-                    ..Default::default()
-                },
-            );
-            let page = result.items.len();
-            for (item, score) in result.items.iter().zip(&result.scores) {
-                let rel = item.relative_path(&self.picker);
-                if is_hidden(&rel) {
-                    continue;
-                }
-                found.push((score.total, join(&display_root, &rel)));
-            }
-            offset += page;
-            // Everything ranked was looked at, or the answer is already full.
-            if page == 0 || found.len() >= limit || offset >= result.total_matched {
-                break;
-            }
-        }
-        // FFF ranks by score with a modification-time tiebreak, and the ranking
-        // of equally-scored files depends on the order its parallel scan
-        // produced — so order ties by path: the same query over unchanged files
-        // has to answer the same way.
-        found.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        found.truncate(limit);
-        found.into_iter().map(|(_, path)| path).collect()
+        // The query language is frizbee's: whitespace-separated atoms, every one
+        // of which must match, with `'sub`, `^pre`, `suf$`, `^exact$` and `!neg`
+        // available for the cases a plain fuzzy needle gets wrong. Defaults do
+        // the rest — smart casing (a lowercase query ignores case), no typo
+        // tolerance, and `ScoreThenIndexAsc`, which keeps equal scores in the
+        // alphabetical order the snapshot is already in, so the same query over
+        // unchanged files answers the same way.
+        let mut matcher = Matcher::from_query(query, &Config::default());
+        let mut matches = matcher.match_list(&self.files);
+        matches.truncate(limit);
+        matches
+            .into_iter()
+            .map(|hit| join(&display_root, &self.files[hit.index as usize]))
+            .collect()
     }
-
-    /// Ranking for a query FFF will not fuzzy-match (see
-    /// [`below_fff_threshold`]): a plain case-insensitive substring scan over
-    /// the index, narrowed by every needle. File-name hits rank above paths
-    /// that only match through a parent directory, each group alphabetical —
-    /// the same preference FFF scores, without the two-byte floor.
-    fn short_query_candidates(
-        &self,
-        needles: &[String],
-        display_root: &str,
-        limit: usize,
-    ) -> Vec<String> {
-        let mut named: Vec<String> = Vec::new();
-        let mut elsewhere: Vec<String> = Vec::new();
-        for file in self.picker.get_files() {
-            if file.is_deleted() {
-                continue;
-            }
-            let rel = file.relative_path(&self.picker);
-            if is_hidden(&rel) {
-                continue;
-            }
-            let lower = rel.to_ascii_lowercase();
-            if !needles.iter().all(|needle| lower.contains(needle.as_str())) {
-                continue;
-            }
-            let name_start = lower.rfind('/').map_or(0, |slash| slash + 1);
-            let path = join(display_root, &rel);
-            if needles
-                .iter()
-                .all(|needle| lower[name_start..].contains(needle.as_str()))
-            {
-                named.push(path);
-            } else {
-                elsewhere.push(path);
-            }
-        }
-        named.sort_unstable();
-        elsewhere.sort_unstable();
-        named.extend(elsewhere);
-        named.truncate(limit);
-        named
-    }
-}
-
-/// The query's needles, lowercased, when FFF cannot match them: its matcher
-/// filters fuzzy parts below two bytes, so a one-character token (or several of
-/// them) would be dropped and the answer would degrade to a recency listing.
-/// `None` when the query is empty (an unfiltered listing is exactly right
-/// there), when some part is long enough for FFF, or when constraints such as
-/// `*.rs` narrow the index first — those are left to FFF.
-fn below_fff_threshold(parsed: &FFFQuery<'_>) -> Option<Vec<String>> {
-    if !parsed.constraints.is_empty() {
-        return None;
-    }
-    let parts: Vec<&str> = match &parsed.fuzzy_query {
-        FuzzyQuery::Text(text) => vec![*text],
-        FuzzyQuery::Parts(parts) => parts.clone(),
-        FuzzyQuery::Empty => return None,
-    };
-    if parts.is_empty() || parts.iter().any(|part| part.len() >= 2) {
-        return None;
-    }
-    Some(parts.iter().map(|part| part.to_lowercase()).collect())
 }
 
 /// Join a search root (as the caller sees it) with an index-relative path.
@@ -201,13 +99,6 @@ fn join(display_root: &str, rel: &str) -> String {
     } else {
         format!("{}/{}", display_root.trim_end_matches('/'), rel)
     }
-}
-
-/// Whether a path has a dot-led segment. The finder offers attachments, so the
-/// dot-directories (`.git`, `.shuvarie`) and dotfiles that FFF indexes inside a
-/// repository stay out of the list.
-fn is_hidden(rel: &str) -> bool {
-    rel.split('/').any(|segment| segment.starts_with('.'))
 }
 
 #[cfg(test)]
@@ -243,11 +134,13 @@ mod tests {
         let index = index(root);
         let found = index.candidates("plan", root, MAX_CANDIDATES);
         assert_eq!(found, vec!["assets/plan.pdf"], "{found:?}");
-        // A dotfile never surfaces, whatever the query.
+        // A dot entry is not in the snapshot at all, whatever the query.
         for query in ["env", "config", ""] {
             let found = index.candidates(query, root, MAX_CANDIDATES);
             assert!(
-                !found.iter().any(|path| is_hidden(path)),
+                !found
+                    .iter()
+                    .any(|path| path.split('/').any(|segment| segment.starts_with('.'))),
                 "hidden entry leaked for {query:?}: {found:?}"
             );
         }
@@ -279,11 +172,11 @@ mod tests {
         }
         let index = index(root);
         let found = index.candidates("", root, 2);
-        assert_eq!(found.len(), 2, "the limit is honoured: {found:?}");
+        assert_eq!(found, vec!["a.txt", "b.txt"], "the limit is honoured");
     }
 
-    /// FFF's matcher needs two bytes of fuzzy text; a single character must
-    /// still narrow the list (the popup starts filtering at the first keystroke).
+    /// The ranking needs no minimum query length: the first keystroke already
+    /// narrows the list, which is what makes the popup feel live.
     #[test]
     fn a_single_character_query_filters() {
         let dir = tempfile::tempdir().unwrap();
@@ -296,15 +189,15 @@ mod tests {
         assert_eq!(
             index.candidates("z", root, MAX_CANDIDATES),
             vec!["zeta.md", "Zeta/plan.md"],
-            "one character is a real query: the file-name hit first, then the \
-             hit that only matches through its parent directory"
+            "one character is a real query; the hit that also matches the case \
+             earns the case bonus and outranks the capitalised one"
         );
-        // Case is ignored: the fallback lowercases its needles, so a capital
-        // still matches the lower-case path.
+        // Smart casing: a lowercase needle ignores case, so the capitalised path
+        // is a hit too, and an uppercase one is taken at its word.
         assert_eq!(
             index.candidates("Z", root, MAX_CANDIDATES),
-            vec!["zeta.md", "Zeta/plan.md"],
-            "a capital needle matches case-insensitively"
+            vec!["Zeta/plan.md"],
+            "a capital needle is case-sensitive"
         );
         assert!(
             index.candidates("q", root, MAX_CANDIDATES).is_empty(),
@@ -312,24 +205,9 @@ mod tests {
         );
     }
 
+    /// Every atom narrows the list: a path has to carry all of them.
     #[test]
-    fn a_short_query_prefers_file_names_over_parent_directories() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        std::fs::create_dir_all(root.join("cat-src")).unwrap();
-        std::fs::write(root.join("cat-src/main.rs"), "").unwrap();
-        std::fs::write(root.join("cat.txt"), "").unwrap();
-        let index = index(root);
-        assert_eq!(
-            index.candidates("c", root, MAX_CANDIDATES),
-            vec!["cat.txt", "cat-src/main.rs"],
-            "the name hit ranks first, both groups alphabetical"
-        );
-    }
-
-    /// Every needle narrows the list, even when they are all one character.
-    #[test]
-    fn short_multi_part_queries_are_all_applied() {
+    fn a_multi_atom_query_applies_every_atom() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(root.join("ab.md"), "").unwrap();
@@ -339,14 +217,20 @@ mod tests {
         assert_eq!(
             index.candidates("a b", root, MAX_CANDIDATES),
             vec!["ab.md"],
-            "a path must carry every token"
+            "a path must carry every atom"
+        );
+        // The atom syntax reaches the matcher intact: a `!` atom excludes.
+        assert_eq!(
+            index.candidates("md !^a", root, MAX_CANDIDATES),
+            vec!["b.md"],
+            "a negated atom drops the paths it matches"
         );
     }
 
-    /// Two characters or more go through FFF's ranking as before; this pins that
-    /// the fallback did not take the whole search over.
+    /// A query spelled with a gap is still a fuzzy hit: the matcher aligns the
+    /// needle in order, best alignment first.
     #[test]
-    fn longer_queries_keep_using_the_fuzzy_engine() {
+    fn a_gapped_query_takes_the_fuzzy_engine() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(root.join("plan.pdf"), "").unwrap();
@@ -355,7 +239,7 @@ mod tests {
         assert_eq!(
             index.candidates("pln", root, MAX_CANDIDATES),
             vec!["plan.pdf", "plain.txt"],
-            "a typo-tolerant fuzzy hit, best match first"
+            "a fuzzy hit, best match first"
         );
     }
 

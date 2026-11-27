@@ -36,7 +36,7 @@ where
     // already relied on -- ranking ties stay in list order instead of shuffling
     // as the query is typed.
     let haystacks: Vec<String> = (0..count).map(key).collect();
-    let mut matcher = neo_frizbee::Matcher::new(query, &neo_frizbee::Config::default());
+    let mut matcher = frizbee::Matcher::new(query, &frizbee::Config::default());
     matcher
         .match_list(&haystacks)
         .into_iter()
@@ -175,8 +175,8 @@ mod tests {
 
     #[test]
     fn a_one_char_query_matches() {
-        // `fff-search`'s own query layer drops needles under 2 bytes; matching
-        // through its matcher directly does not, so the first keystroke narrows.
+        // The matcher has no minimum needle length, so the first keystroke
+        // narrows the list instead of listing everything.
         let res = matches("s", &["gpt-4", "session cleanup"]);
         assert_eq!(res, vec![1]);
     }

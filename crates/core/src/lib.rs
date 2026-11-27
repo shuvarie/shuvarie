@@ -28,6 +28,7 @@ pub mod title;
 pub mod tool_record;
 pub mod tools;
 pub mod truncate;
+pub(crate) mod walk;
 
 pub use command::Command;
 pub use core_task::{StartupSession, run};

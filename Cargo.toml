@@ -40,10 +40,8 @@ futures-util.workspace = true
 # transports, credentials and mailmap for a library that is only ever pointed
 # at the repository the TUI is standing in.
 gix = { version = "0.91", default-features = false, features = ["sha1", "status"] }
-# The fuzzy matcher behind every popup's query row (`tui/search.rs`). Named
-# directly because it is the only place nucleo was used; it already arrives in
-# the tree through `fff-search`, so this is a swap rather than an addition.
-neo_frizbee = "0.13"
+# The fuzzy matcher behind every popup's query row (`tui/search.rs`).
+frizbee.workspace = true
 notify = "=9.0.0-rc.8"
 image.workspace = true
 # The global allocator (`main.rs`). `optional` here so that nothing but the
@@ -137,8 +135,15 @@ categories = [
 base64 = "0.23"
 chrono = "0.4"
 dirs = "7"
-fff-search = "0.11"
+# The fuzzy matcher behind every popup's query row (`tui/search.rs`) and the
+# `/attach` finder's ranking (`crates/core/src/attachments/picker.rs`).
+frizbee = "0.13"
 futures-util = { version = "0.3", default-features = false, features = ["std", "alloc"] }
+# `globset` compiles the `glob` tool's patterns and the `grep` tool's `include`
+# filter; `ignore` is the gitignore-aware walk behind every search surface
+# (`crates/core/src/walk.rs`).
+globset = "0.4"
+ignore = "0.4"
 http = "1"
 image = "0.25"
 jiff = "0.2"

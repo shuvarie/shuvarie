@@ -1,16 +1,16 @@
 //! The attachment picker dialog (`/attach [dir]`): a centred popup that fuzzy
-//! finds the files under its search root with the core's FFF index. Typing
-//! refines the query, Enter/Tab attach the highlighted file to the composer's
-//! pending strip, Escape closes.
+//! finds the files under its search root with the core's attachment index.
+//! Typing refines the query, Enter/Tab attach the highlighted file to the
+//! composer's pending strip, Escape closes.
 //!
 //! `Ctrl+D` opens [`DirPrompt`], a small popup that edits the search root — the
 //! picker's own version of the `/attach <dir>` argument, so browsing somewhere
 //! else never means closing the dialog and retyping the command.
 //!
-//! The ranking round-trips through the core (the index lives there, built once
-//! per directory), so the dialog follows the same token discipline as the other
-//! searchable popups: one request carries the query, a reply for an older token
-//! is dropped, and an answered query is never asked again.
+//! The ranking round-trips through the core (the file list lives there, built
+//! once per directory), so the dialog follows the same token discipline as the
+//! other searchable popups: one request carries the query, a reply for an older
+//! token is dropped, and an answered query is never asked again.
 
 use ratatui::layout::Constraint::{Length, Min};
 use ratatui::prelude::*;
