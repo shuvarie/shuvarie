@@ -53,6 +53,21 @@ nix profile install .  # keep it
 nix develop          # toolchain shell (rustc, cargo, clippy, rustfmt, rust-analyzer, just)
 ```
 
+With the install script (Linux and macOS, x86_64 and aarch64 — it picks the right
+tarball, verifies its SHA-256, and puts the binary in `~/.local/bin`, or
+`/usr/local/bin` when run as root):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/shuvarie/shuvarie/main/scripts/install.sh | sh
+```
+
+Or straight from the tree, with options — `--version <ver>`, `--dir <path>`,
+`--libc gnu|musl` (Linux; musl is fully static), `--no-verify`:
+
+```sh
+./scripts/install.sh --help
+```
+
 Or with a Rust toolchain:
 
 ```sh
