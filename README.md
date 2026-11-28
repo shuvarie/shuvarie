@@ -58,7 +58,7 @@ tarball, verifies its SHA-256, and puts the binary in `~/.local/bin`, or
 `/usr/local/bin` when run as root):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/shuvarie/shuvarie/main/scripts/install.sh | sh
+curl -fsSL https://shuvarie.org/install.sh | sh
 ```
 
 Or straight from the tree, with options — `--version <ver>`, `--dir <path>`,

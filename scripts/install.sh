@@ -12,7 +12,7 @@
 #
 # Usage:
 #   ./scripts/install.sh [options]
-#   curl -fsSL https://raw.githubusercontent.com/shuvarie/shuvarie/main/scripts/install.sh | sh
+#   curl -fsSL https://shuvarie.org/install.sh | sh
 #
 # Options:
 #   -h, --help          Show this help and exit
