@@ -45,17 +45,7 @@
 
 > *In order to introduce the knights into our barracks, we should:*
 
-With [Nix](https://nixos.org) (flakes enabled), from a checkout:
-
-```sh
-nix run .            # try it
-nix profile install .  # keep it
-nix develop          # toolchain shell (rustc, cargo, clippy, rustfmt, rust-analyzer, just)
-```
-
-With the install script (Linux and macOS, x86_64 and aarch64 — it picks the right
-tarball, verifies its SHA-256, and puts the binary in `~/.local/bin`, or
-`/usr/local/bin` when run as root):
+### YOLO
 
 ```sh
 curl -fsSL https://shuvarie.org/install.sh | sh
@@ -68,7 +58,15 @@ Or straight from the tree, with options — `--version <ver>`, `--dir <path>`,
 ./scripts/install.sh --help
 ```
 
-Or with a Rust toolchain:
+### Nix (Flake)
+
+```sh
+nix run .            # try it
+nix profile install .  # keep it
+nix develop          # toolchain shell (rustc, cargo, clippy, rustfmt, rust-analyzer, just)
+```
+
+### Cargo
 
 ```sh
 cargo install --path .
