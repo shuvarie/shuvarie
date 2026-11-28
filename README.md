@@ -58,6 +58,24 @@ Or straight from the tree, with options — `--version <ver>`, `--dir <path>`,
 ./scripts/install.sh --help
 ```
 
+### Arch Linux (btw)
+
+#### Binary AUR
+
+```sh
+yay -S shuvarie-bin
+# OR
+paru -S shuvarie-bin
+```
+
+#### Source build AUR
+
+```sh
+yay -S shuvarie
+# OR
+paru -S shuvarie
+```
+
 ### Nix (Flake)
 
 ```sh
